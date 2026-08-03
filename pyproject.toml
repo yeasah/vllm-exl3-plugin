@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-exl3-plugin"
+version = "0.0.1"
+description = "Out-of-tree EXL3 (exllamav3) quantization plugin for vLLM"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+# NOTE: neither vllm nor exllamav3 is a hard install dependency yet. Both ship
+# CUDA-specific wheels and pinning either here would force a specific pairing on
+# a project whose whole point is to track vllm main. Phase 4 revisits packaging.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.entry-points."vllm.general_plugins"]
+exl3 = "vllm_exl3_plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vllm_exl3_plugin*"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
