@@ -195,15 +195,15 @@ class EXL3LinearMethod(LinearMethodBase):
                 )
 
         global _TP_WARNED
-        if not _TP_WARNED:
+        if tp_size > 2 and not _TP_WARNED:
             _TP_WARNED = True
             logger.warning(
-                "vllm-exl3-plugin tensor parallelism has NOT been validated on "
-                "multi-GPU hardware. The sharding arithmetic is proven against "
-                "unsharded execution in tests/test_tp.py, but vLLM's loader at "
-                "TP>1, the collectives, and exllamav3's autotune cache under "
-                "several worker processes are all unexercised. Treat TP>1 "
-                "results as suspect until checked against TP=1."
+                "vllm-exl3-plugin tensor parallelism has only been validated at "
+                "TP=2 (2x RTX 3060, vLLM 0.26.0), where it reproduces TP=1 "
+                "token for token. TP=%d is unexercised: the sharding arithmetic "
+                "is proven for any degree in tests/test_tp.py, but nothing has "
+                "run it. Compare against TP=1 before trusting the output.",
+                tp_size,
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
