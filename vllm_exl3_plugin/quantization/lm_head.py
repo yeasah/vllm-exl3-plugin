@@ -29,13 +29,20 @@ from __future__ import annotations
 import torch
 from torch.nn import Parameter
 
-from .. import format, ops
+from .. import format, ops, tp
 from .linear import EXL3LinearMethod, EXL3Parameter
 
 
 def _lm_head_weight_loader(param: EXL3Parameter, loaded_weight: torch.Tensor) -> None:
-    """`VocabParallelEmbedding` calls weight loaders with two positional args."""
-    param.store(loaded_weight)
+    """`VocabParallelEmbedding` calls weight loaders with two positional args.
+
+    Under tensor parallelism this also takes the rank's slice of the vocabulary,
+    which is an output-dimension (column) split like any other -- `svh` and the
+    trellis sliced, `suh` replicated.
+    """
+    param.store(
+        param._take_column(loaded_weight, param.column_shard_size, param.tp_rank)
+    )
 
 
 class EXL3LMHeadMethod(EXL3LinearMethod):
@@ -53,15 +60,18 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
     ) -> None:
         del input_size, output_size
 
-        if getattr(layer, "tp_size", 1) > 1:
-            raise NotImplementedError(
-                "A quantized lm_head cannot be tensor-parallel yet. Linear "
-                "layers shard (see tp.py), but the head has to combine a "
-                f"vocab-dimension split on {format.HAD_BLOCK}-channel "
-                "boundaries with vLLM's own vocab padding and the trim in "
-                "apply(), and that interaction is unverified. Models with "
-                "tied embeddings are unaffected -- vLLM skips lm_head there."
-            )
+        # The rank's slice of the vocabulary. vLLM has already worked out the
+        # boundaries; `padded_*` are the ones to cut the stored tensor on, since
+        # the checkpoint covers the padded vocabulary.
+        indices = layer.shard_indices
+        first = indices.padded_org_vocab_start_index
+        last = indices.padded_org_vocab_end_index
+        tp_size = getattr(layer, "tp_size", 1)
+        if tp_size > 1:
+            # Same rule as every other output split: a slice that is not a whole
+            # number of Hadamard blocks is silently wrong, not an error.
+            format.check_tp_split((last - first) * tp_size, tp_size, "lm_head vocab")
+
         # The layer's own weight_loader cannot drive EXL3's layout; see module
         # docstring. Deliberately dropped rather than wrapped.
         extra_weight_attrs.pop("weight_loader", None)
@@ -74,12 +84,20 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
                     num_shards=1,
                     device=device,
                     weight_loader=_lm_head_weight_loader,
+                    role=tp.role_of(name),
+                    column_shard_size=last - first,
                 ),
             )
 
         layer.exl3_input_size = input_size_per_partition
         layer.exl3_output_sizes = list(output_partition_sizes)
         layer.exl3_params_dtype = params_dtype
+        # Rows of this rank's slice that are real vocabulary rather than
+        # padding. At TP=1 this is just the whole vocabulary.
+        layer.exl3_real_rows = (
+            indices.org_vocab_end_index - indices.org_vocab_start_index
+        )
+        layer.exl3_vocab_slice = last - first
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         names = self.quant_config.stored_tensor_names()
@@ -91,24 +109,27 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
 
         bits = format.bits_from_trellis_shape(trellis.shape)
         stored_in, stored_out = format.dims_from_trellis_shape(trellis.shape)
-        # The checkpoint is sized against the real vocabulary, not against
-        # whatever vLLM padded it to.
-        self._check_shapes(
-            layer, 0, stored_in, stored_out, layer.org_vocab_size, suh, svh
+        # At TP=1 nothing was sliced and the checkpoint is sized against the
+        # real vocabulary; at TP>1 the loader already cut this rank's slice.
+        expected = (
+            layer.org_vocab_size
+            if getattr(layer, "tp_size", 1) == 1
+            else layer.exl3_vocab_slice
         )
+        self._check_shapes(layer, 0, stored_in, stored_out, expected, suh, svh)
 
         target = layer.num_embeddings_per_partition
-        if layer.org_vocab_size > target:
+        if layer.exl3_real_rows > target:
             raise format.EXL3FormatError(
-                f"lm_head has {layer.org_vocab_size} real vocabulary rows but "
-                f"vLLM allocated only {target}"
+                f"lm_head slice has {layer.exl3_real_rows} real vocabulary rows "
+                f"but vLLM allocated only {target}"
             )
 
         if self.quant_config.dequantize:
             weight = ops.dense_weight(
                 trellis, suh, svh, bits, "mcg" in params, "mul1" in params
             )
-            weight = weight[: layer.org_vocab_size, : layer.exl3_input_size]
+            weight = weight[: layer.exl3_real_rows, : layer.exl3_input_size]
             if weight.shape[0] < target:
                 # Zero rows produce zero logits, which `_get_logits` then slices
                 # off at org_vocab_size anyway.
@@ -151,7 +172,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
         # rows beyond the real vocabulary at zero rather than leaving EXL3's
         # padding noise in place.
         target = layer.num_embeddings_per_partition
-        real = layer.org_vocab_size
+        real = layer.exl3_real_rows
         if logits.shape[-1] != target or real < target:
             logits = logits[..., :real]
             if real < target:

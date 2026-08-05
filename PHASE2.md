@@ -3,10 +3,10 @@
 Goal from the feasibility report: **resolve the Hadamard-block-128 sharding
 question, then add tensor parallelism.**
 
-**Status: validated at TP=2.** On a rented 2x RTX 3060 box, TP=2 reproduces
-TP=1 **token for token** on every prompt tried, and the autotune cache survives
-two worker processes writing it concurrently. TP>2 remains unexercised for want
-of hardware, and a quantized `lm_head` at TP>1 still raises. See "What is
+**Status: validated at TP=2**, across three models, eager and with CUDA graphs.
+TP=2 reproduces TP=1 **token for token** every time; the autotune cache survives
+two worker processes writing it concurrently; and vocab-parallel quantized
+`lm_head` now works. TP>2 remains unexercised for want of hardware. See "What is
 validated" for the exact boundary.
 
 ## The rule
@@ -70,10 +70,20 @@ Run on a rented Vast.ai instance: 2x RTX 3060 (sm_86), torch 2.11.0+cu130,
 **vLLM 0.26.0 — the release, not main** — exllamav3 v1.3.0 built from the
 pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
 
-1. **TP=2 is token-identical to TP=1.** Three prompts, greedy, compared on
-   token ids rather than text. Not "close" -- identical. Since the row-parallel
-   split reaches the same answer by a different summation order, exact agreement
-   is a stronger result than it had to be.
+1. **TP=2 is token-identical to TP=1**, on three models chosen to exercise
+   different paths, compared on token ids rather than text. Not "close" --
+   identical. Since the row-parallel split reaches the same answer by a
+   different summation order, exact agreement is stronger than it had to be.
+
+   | model | what it adds |
+   |---|---|
+   | `Llama-3.2-1B-Instruct-exl3` @3.0bpw | baseline; tied head |
+   | `Llama-3.2-1B-Instruct-exl3` @3.5bpw | **mixed bit widths inside a merged QKV** (q=4, k=5, v=5) sharded per output partition |
+   | `MiniCPM5-1B-exl3` @3.00bpw | **untied, EXL3-quantized `lm_head`** at 6 bits, plus the `mcg` codebook |
+
+   Also identical with **CUDA graphs enabled** rather than eager: each worker
+   captures its own 35 graph shapes independently, so cooperative-kernel capture
+   is fine in a multi-process TP group.
 2. **vLLM's loader drives the slicing correctly.** This was the part the offline
    proof could not reach: the tests showed *"given correctly sliced tensors the
    math is right"*, not *"we produce correctly sliced tensors"*. It needed no
@@ -94,21 +104,34 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
 1. **TP=4 and above.** Two GPUs is what was rented. The arithmetic is proven for
    any degree in `tests/test_tp.py`, but only TP=2 has run. `create_weights`
    warns once above TP=2 rather than at every degree.
-2. **Quantized `lm_head` at TP>1**, which still raises `NotImplementedError`.
-   The test model ties embeddings, so vLLM skips `lm_head` entirely and this
-   path was never even reached. Vocab-dimension sharding has to compose a
-   128-boundary split with vLLM's own vocab padding and the trim in `apply()`.
-3. **MoE at TP>1**, which also raises (Phase 3 is itself unfinished).
-4. **The alignment guard in a live engine.** `format.check_tp_split` is
+2. **MoE at TP>1**, which raises (Phase 3 is itself unfinished).
+3. **The alignment guard in a live engine.** `format.check_tp_split` is
    thoroughly unit-tested, but no TP degree available here misaligns
    Llama-3.2-1B: 512 KV channels need TP=8 to break, and the box has two cards.
 
+## Vocab-parallel `lm_head`
+
+Implemented during the same session, since the box was the only place it could
+be validated. A quantized head shards exactly like any other output split --
+trellis and `svh` sliced, `suh` replicated -- but it has to compose that with
+*two* other vocabulary paddings, so the boundaries come from vLLM's own
+`shard_indices` rather than being recomputed:
+
+- `padded_org_vocab_start/end_index` cut the stored tensor, because the
+  checkpoint covers the padded vocabulary;
+- `org_vocab_start/end_index` give how many rows of that slice are *real*
+  vocabulary, which is what `apply()` trims to before zero-padding out to
+  `num_embeddings_per_partition`.
+
+At TP=1 these collapse to the previous behaviour, which is why the existing
+TP=1 test still passes unchanged. `MiniCPM5-1B` (vocab 130560, so 65280 per rank
+-- a clean 510 Hadamard blocks) is token-identical at TP=2.
+
 ## Finishing this
 
-TP=2 and the autotune-cache question are done. What remains, in order: TP=4 on a
-four-card box; a model with untied embeddings to force the quantized `lm_head`
-path (and then implement vocab sharding); MoE once Phase 3 works. The arithmetic
-has not needed revisiting and should not.
+TP=2, the autotune-cache question and the quantized `lm_head` are done. What
+remains: TP=4 on a four-card box, and MoE once Phase 3 works. The sharding
+arithmetic has not needed revisiting and should not.
 
 One environment note worth keeping, because it cost more than the test did. The
 rented box advertised CUDA 12.9 but carried torch built against 13.0, and

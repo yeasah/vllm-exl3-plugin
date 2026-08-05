@@ -14,8 +14,10 @@ exllamav3 kernels do the multiply, under torch.compile and CUDA graphs. On
 Llama-3.2-1B @3bpw that is 2.35 GiB -> 0.86 GiB with decode 22% *faster* than
 the dense path; gemma-4-12B at 3bpw runs in 6.32 GiB on a 16 GB card.
 
-Phase 2 (tensor parallelism) is **validated at TP=2**, where it reproduces TP=1
-token for token — see [PHASE2.md](PHASE2.md). TP>2 is unexercised.
+Phase 2 (tensor parallelism) is **validated at TP=2** across three models, eager
+and with CUDA graphs, reproducing TP=1 token for token — including a
+vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
+unexercised.
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
