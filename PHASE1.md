@@ -5,9 +5,9 @@ behind a `direct_register_custom_op`, and validate under vLLM's actual serving
 loop (continuous batching, CUDA graph capture, prefix caching).**
 
 **Status: done and verified**, on `Llama-3.2-1B-Instruct-exl3` (3.0bpw and
-3.5bpw) and `MiniCPM5-1B-exl3` (3.00bpw, mcg codebook, quantized head). 34 tests
-pass. One model — `gemma-4-12B-it-exl3` — loads and runs but produces garbage;
-see "The gemma-4 failure" below, which is unresolved.
+3.5bpw), `MiniCPM5-1B-exl3` (3.00bpw, mcg codebook, quantized head) and
+`gemma-4-12B-it-exl3` (3.00bpw, mul1 codebook, multimodal) — a 12B model in
+6.32 GiB on a 16 GB card. 34 tests pass.
 
 ## What changed
 
@@ -116,41 +116,62 @@ looked unquantized, and vLLM allocated dense fp16 weights for a 12B model — an
 out-of-memory error that points nowhere near the cause. vLLM provides
 `apply_vllm_mapper` for exactly this; we now implement it.
 
-## The gemma-4 failure (unresolved)
+## The gemma-4 "failure" — resolved, and it was the test harness
 
-`turboderp/gemma-4-12B-it-exl3@3.00bpw_mul1` loads cleanly in 6.32 GiB — Phase 0
-could never have run it, since dequantized it needs ~24 GiB — and then generates
-garbage (`'...........'`).
+`turboderp/gemma-4-12B-it-exl3@3.00bpw_mul1` loads in **6.32 GiB** — a 12B model
+on a 16 GB card, which Phase 0 could never have run — and works correctly:
 
-Ruled out, each by direct measurement rather than inspection:
+    USER:  What is the capital of France? Answer in one sentence.
+    MODEL: The capital of France is Paris.
+    USER:  What is 2 + 2?
+    MODEL: 2 + 2 = 4
 
-- **Not the kernel.** `exl3_mm` matches the dequantized reference to ~1e-3 on
-  gemma's own layer shapes and `mul1` tensors, at every batch size.
-- **Not the weights.** exllamav3 itself, on the same checkpoint files, answers
-  correctly ("The capital of France is **Paris**", "2 + 2 = 4").
-- **Not fp16 overflow.** Instrumenting every `exl3_mm` call over a full forward
-  pass found zero non-finite values in or out; max |activation| was 3694 against
-  a 65504 ceiling.
-- **Not the residual dtype.** bfloat16 produces the same garbage. (This was the
-  leading hypothesis: vLLM refuses fp16 for gemma2/gemma3 as "numerically
-  unstable", and exllamav3 carries fp32 residuals through its own gemma4
-  architecture. It is still true, just not the cause here.)
-- **Not layer classification.** The mapper is lossless — 667 keys in, 667 out,
-  all 329 exl3 modules preserved — and the shape checks in
-  `process_weights_after_loading` pass for every layer.
-- **Not the unusual layer geometry.** Every sixth layer is a "k_eq_v"
-  full-attention layer with head_dim 512 instead of 256, q out 8192, k out 512,
-  and *no* `v_proj` in the checkpoint. vLLM handles this by duplicating
-  `k_proj` into the V slot in `_weight_iterator`, and because that rule matches
-  on `"self_attn.k_proj" in name` rather than on a `.weight` suffix, it
-  duplicates our `trellis`/`suh`/`svh` correctly too.
+It produced garbage only because **every prompt in this project's manual testing
+was a raw completion string**, and this checkpoint does not prepend a BOS token
+to those. Gemma collapses without BOS.
 
-So the weights are right, the kernel is right, the classification is right, and
-the dtype is not the issue. The next step is a layer-by-layer comparison of
-hidden states against exllamav3 running the same checkpoint, which is the only
-remaining way to localize it. Until then this should be treated as one model
-that does not work, not as a general Phase 1 limitation — the models that do
-work are verified thoroughly.
+Concretely: `tokenizer_config.json` sets no `add_bos_token`, and the tokenizer's
+post-processor does not add one either, so
+`hf("The capital of France is")["input_ids"]` returns `[818, 5279, 529, 7001,
+563]` — no `2` — *even with* `add_special_tokens=True`. The `<bos>` lives in
+`chat_template.jinja` instead. Anything going through the chat template is fine;
+raw completions are not.
+
+    prompt_token_ids=[818, 5279, ...]     -> '..-.........'
+    prompt_token_ids=[2, 818, 5279, ...]  -> ' capital of France.\nthought\n...'
+
+Llama-3.2-1B and MiniCPM5-1B hid this because their tokenizers do add BOS, so
+the same harness worked on them.
+
+### How it was localized
+
+Worth recording, because four plausible hypotheses were wrong and only
+measurement distinguished them.
+
+1. **Every quantized linear was verified in situ.** Running the real model with
+   forward hooks on all 20 quantized linears across layers 0/4/5/6/11 and
+   recomputing each one's output from dequantized weights gave agreement to
+   ~5e-4 everywhere — including the k_eq_v layers, whose `[8192, 512, 512]`
+   shard layout was the leading suspect. This is the seam the tensor-level
+   tests do not cover: shard ordering, trimming and concatenation inside
+   `apply()`.
+2. **Then the whole forward was compared against exllamav3.** Feeding both
+   runtimes the *same token ids* and comparing the hidden state entering each of
+   the 48 layers gave cosine similarity >= 0.99999 at every layer, and both
+   produced identical top-5 logits (` Berlin` for "...the capital of Germany
+   is"). At that point the model was demonstrably correct and the only remaining
+   difference was how the prompt became token ids.
+
+Hypotheses ruled out by measurement along the way: fp16 overflow (zero
+non-finite values in a full forward; max |activation| 3694 against a 65504
+ceiling), residual dtype (bfloat16 produced identical garbage), layer
+classification (mapper lossless, 667 keys in and out), and the unusual k_eq_v
+geometry.
+
+**Nothing in the plugin, the kernels, or vLLM's Gemma4 implementation was at
+fault.** The lesson for the test suite is that raw completion prompts are not a
+safe default across model families; the packaging layer should drive models
+through their chat templates.
 
 ## Development note
 

@@ -12,8 +12,9 @@ interfaces — it does not build kernels.
 **Status: Phase 1 complete and verified.** Weights stay quantized and the fused
 exllamav3 kernels do the multiply, under torch.compile and CUDA graphs. On
 Llama-3.2-1B @3bpw that is 2.35 GiB -> 0.86 GiB with decode 22% *faster* than
-the dense path. See [PHASE1.md](PHASE1.md) for benchmarks and the one model
-that does not yet work, [PHASE0.md](PHASE0.md) for the format groundwork, and
+the dense path; gemma-4-12B at 3bpw runs in 6.32 GiB on a 16 GB card. See
+[PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
+groundwork, and
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
 research and the phased plan.
 
@@ -44,6 +45,13 @@ The oracle tests import the `exllamav3` package (not just its extension), which
 needs a few small extras the plugin itself does not:
 
     pip install --no-deps kbnf formatron frozendict general-sam
+
+## Gotcha: BOS tokens
+
+Some checkpoints (gemma-4 among them) put `<bos>` in `chat_template.jinja` and
+do *not* add it in the tokenizer, even with `add_special_tokens=True`. Gemma
+produces garbage without it. Drive models through their chat template
+(`llm.chat`, or the server's chat endpoint) rather than raw completion prompts.
 
 ## Requirements
 

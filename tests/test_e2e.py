@@ -122,5 +122,49 @@ class TestEndToEnd(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    HAVE_CUDA and HAVE_EXT and HAVE_VLLM and os.environ.get("EXL3_TEST_LARGE") == "1",
+    "set EXL3_TEST_LARGE=1 (needs a ~7GB checkpoint and ~10GB VRAM)",
+)
+class TestLargeModel(unittest.TestCase):
+    """gemma-4-12B at 3bpw: 12B parameters in 6.32 GiB.
+
+    Opt-in because of the download size, but this is the case that justifies
+    Phase 1 -- dequantized it needs ~24 GiB and will not fit on a 16 GB card at
+    all. It also covers the `mul1` codebook and a multimodal checkpoint whose
+    vision/audio towers are *not* quantized, which is what exercises
+    `apply_vllm_mapper` and the revision-resolution fix.
+
+    Driven through the chat template deliberately. This checkpoint keeps `<bos>`
+    in `chat_template.jinja` and does not add it in the tokenizer, even with
+    `add_special_tokens=True`; Gemma emits garbage without it. A raw completion
+    prompt here would fail, and did, for an entire debugging session.
+    """
+
+    def test_chat(self):
+        from vllm import LLM, SamplingParams
+
+        llm = LLM(
+            model="turboderp/gemma-4-12B-it-exl3",
+            revision="3.00bpw_mul1",
+            dtype="float16",
+            enforce_eager=True,
+            gpu_memory_utilization=0.92,
+            max_model_len=2048,
+        )
+        try:
+            convs = [
+                [{"role": "user", "content": "What is the capital of France? "
+                                             "Answer in one sentence."}],
+                [{"role": "user", "content": "What is 2 + 2?"}],
+            ]
+            outs = llm.chat(convs, SamplingParams(temperature=0.0, max_tokens=48))
+            texts = [o.outputs[0].text for o in outs]
+        finally:
+            del llm
+        self.assertIn("Paris", texts[0])
+        self.assertIn("4", texts[1])
+
+
 if __name__ == "__main__":
     unittest.main()
