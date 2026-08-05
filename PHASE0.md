@@ -6,7 +6,7 @@ forward pass**, single GPU, TP=1, no CUDA graphs, no fused kernels.
 
 **Status: done and verified on hardware.** An EXL3 checkpoint loads through
 vLLM and generates coherent tokens, at both a uniform and a mixed bit width, and
-the dequantization is bit-for-bit identical to exllamav3's own. 19 tests pass.
+the dequantization is bit-for-bit identical to exllamav3's own. 28 tests pass.
 See "Verified" below for what was actually run and "Remaining gaps" for what
 Phase 0 deliberately does not cover.
 
@@ -36,8 +36,8 @@ the Hub.
     <key>.suh       fp16    [in_features]
     <key>.svh       fp16    [out_features]
     <key>.bias      fp16    [out_features]      optional
-    <key>.mcg       uint32  [1]                 codebook selector, optional
-    <key>.mul1      uint32  [1]                 codebook selector, optional
+    <key>.mcg       int32   []  (0-dim)        codebook selector, optional
+    <key>.mul1      int32   []  (0-dim)        codebook selector, optional
     <key>.su/.sv    int16   packed signs        legacy, pre-v0.0.2
 
 Verified against `turboderp/Llama-3.2-1B-Instruct-exl3` @ 3.0bpw: `q_proj`
@@ -140,7 +140,9 @@ concatenated `suh` is meaningless.
     tests/
       test_format.py       14 tests — no GPU, torch or vLLM needed
       test_kernels.py      3 oracles against exllamav3 itself
+      test_codebooks.py    9 tests — mcg/mul1 + quantization_config.json
       test_e2e.py          2 full vLLM generations
+      remote_tensors.py    ranged reads of one layer from a remote checkpoint
 
 `format.py` deliberately has no torch dependency so the shape rules — where a
 format misunderstanding turns into silently wrong output — stay testable
@@ -185,7 +187,7 @@ editable vLLM `edbc4969a`, exllamav3 v1.3.0 built from the submodule.
    has no such file; `maybe_update_config` swallows the miss and falls back to
    treating every linear as quantized, which is correct for it.
 
-Reproduce with `python -m unittest discover -s tests` (19 tests, ~30s on the
+Reproduce with `python -m unittest discover -s tests` (28 tests, ~30s on the
 above machine once the checkpoints are cached).
 
 ## Remaining gaps
@@ -199,16 +201,63 @@ Phase 0 scope, deliberately:
 
 Not yet exercised, and worth knowing before they bite:
 
-- **A checkpoint with `mcg`/`mul1`.** The test model predates the newer
-  codebooks, so `stored_tensor_names()` has only ever been run in its
-  three-tensor form. A `codebook: "mul1"` repo would register a fourth parameter
-  and is the obvious next thing to try.
-- **A repo that *has* `quantization_config.json`**, which would turn on the
-  `tensor_storage` path — including the quantized-`lm_head` rejection, which has
-  therefore never fired.
 - **Bias.** Llama has none on these projections, so padded-output bias handling
   is still theoretical.
 - **`get_min_capability` / `get_supported_act_dtypes` rejection messages.**
+- **The `mcg`/`mul1` *load* path.** The decode math is verified (below), but no
+  model with a fourth registered parameter has been loaded through vLLM,
+  because no such checkpoint currently can be — see "The lm_head problem".
+
+## Codebooks, and testing against models that do not fit
+
+EXL3's newer procedural codebooks (`mcg`, then `mul1`) only appear in repos from
+~v0.0.12 on, which are large. Under Phase 0's dequantize-at-load, gemma-4-12B at
+3bpw is ~5 GB on disk but ~24 GB resident — untestable on a 16 GB card.
+
+Validating the *format* does not need the model, though. `tests/remote_tensors.py`
+reads one module's tensors straight out of a remote safetensors shard using HTTP
+range requests, which is a few MB regardless of repo size. On that basis:
+
+- `ops.dense_weight` is bit-exact against exllamav3 under **`mcg`**
+  (`MiniCPM5-1B-exl3@3.00bpw`) and **`mul1`**
+  (`gemma-4-12B-it-exl3@3.00bpw_mul1`), `rtol=0, atol=0`.
+- A guard test confirms decoding the same trellis with and without `mcg`
+  produces *different* weights, so the above is not vacuously passing. The flags
+  are booleans selecting a compiled-in multiplier; passing the wrong one is not
+  an error, just silently wrong numbers.
+- `mcg`/`mul1` are stored as **0-dim** int32 scalars, not `[1]` tensors.
+- The `tensor_storage` path and the quantized-`lm_head` rejection both fire
+  correctly, and the no-`quantization_config.json` fallback still works.
+
+This technique generalizes: any format question about any repo, however large,
+can be answered without downloading it.
+
+## The lm_head problem
+
+There is currently **no checkpoint that can exercise the new codebooks end to
+end**, and the reason is structural rather than incidental.
+
+Every EXL3 repo from ~v0.0.12 onward sets `head_bits`, i.e. quantizes `lm_head`.
+That is only harmless when the model ties word embeddings, because vLLM then
+skips `lm_head.*` entirely. Of the small models available:
+
+| candidate | size | codebook | blocker |
+|---|---|---|---|
+| `Llama-3.2-1B-Instruct-exl3` | 1B | none (3inst) | — works today, but old format |
+| `Qwen3-0.6B-exl3` | 0.6B | none (3inst) | same |
+| `MiniCPM5-1B-exl3` | 1B | mcg | untied, `lm_head` quantized at 6bpw |
+| `nanochat-d34-exl3` | 0.5B | mcg | `NanoChatForCausalLM` not in vLLM |
+| `gemma-4-12B-it-exl3` | 12B | mul1 | 24 GB once dequantized |
+
+So quantized `lm_head` support is not a Phase 1+ nicety — it is a prerequisite
+for testing anything modern, and for serving essentially any model above ~3B
+(large models rarely tie embeddings). It needs a method for
+`VocabParallelEmbedding`/`ParallelLMHead` rather than `LinearBase`; vLLM's GGUF
+plugin has a `GGUFEmbeddingMethod` that shows the shape of it.
+
+Phase 1 (keep weights quantized, call `exl3_gemm`) independently removes the
+memory ceiling that makes gemma-4-12B untestable. The two together open up the
+whole modern checkpoint ecosystem; either alone leaves a gap.
 
 ## Phase 1 preview
 

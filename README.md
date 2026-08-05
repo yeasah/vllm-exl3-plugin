@@ -37,7 +37,7 @@ research and the phased plan.
 
     python -m unittest discover -s tests
 
-19 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
+28 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
 oracles and the end-to-end generations skip themselves without CUDA and
 exllamav3.
 
