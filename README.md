@@ -9,10 +9,21 @@ with working CUDA kernels already shipped as a Python-callable extension. The
 plugin is an adapter onto vLLM's `QuantizationConfig` / `LinearMethodBase`
 interfaces — it does not build kernels.
 
-**Status: Phase 0, nothing has run yet.** See [PHASE0.md](PHASE0.md) for what is
-built, what is verified, and what is next; see
+**Status: Phase 0 complete and verified.** EXL3 checkpoints load through vLLM
+and generate correct tokens, at uniform and mixed bit widths, with
+dequantization bit-identical to exllamav3's own. Phase 0 dequantizes at load
+time, so there is no memory saving yet — that is Phase 1. See
+[PHASE0.md](PHASE0.md) for what was verified and what is next; see
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
 research and the phased plan.
+
+## Quick start
+
+    pip install --no-deps --no-build-isolation -e deps/exllamav3   # builds the CUDA ext
+    pip install --no-deps -e .
+
+    vllm serve turboderp/Llama-3.2-1B-Instruct-exl3 \
+        --revision 3.0bpw --dtype float16 --enforce-eager
 
 ## Layout
 
@@ -26,7 +37,14 @@ research and the phased plan.
 
     python -m unittest discover -s tests
 
-The format tests need neither torch, vLLM, nor a GPU.
+19 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
+oracles and the end-to-end generations skip themselves without CUDA and
+exllamav3.
+
+The oracle tests import the `exllamav3` package (not just its extension), which
+needs a few small extras the plugin itself does not:
+
+    pip install --no-deps kbnf formatron frozendict general-sam
 
 ## Requirements
 

@@ -4,9 +4,11 @@ Goal, unchanged from the feasibility report: **prove the registration path and
 confirm an EXL3 checkpoint loads and generates correct tokens through vLLM's
 forward pass**, single GPU, TP=1, no CUDA graphs, no fused kernels.
 
-Status: the plugin is written and the format arithmetic is under test. Nothing
-has been executed against a GPU — this environment has no CUDA device, no torch
-and no vLLM installed. Everything below marked "unverified" is exactly that.
+**Status: done and verified on hardware.** An EXL3 checkpoint loads through
+vLLM and generates coherent tokens, at both a uniform and a mixed bit width, and
+the dequantization is bit-for-bit identical to exllamav3's own. 19 tests pass.
+See "Verified" below for what was actually run and "Remaining gaps" for what
+Phase 0 deliberately does not cover.
 
 ## What Phase 0 does at runtime
 
@@ -136,45 +138,77 @@ concatenated `suh` is meaningless.
         config.py          EXL3Config
         linear.py          EXL3LinearMethod, weight_loader_v2-native
     tests/
-      test_format.py       14 tests, runnable with no GPU/torch/vLLM
+      test_format.py       14 tests — no GPU, torch or vLLM needed
+      test_kernels.py      3 oracles against exllamav3 itself
+      test_e2e.py          2 full vLLM generations
 
 `format.py` deliberately has no torch dependency so the shape rules — where a
-format misunderstanding turns into silently wrong output — are testable now
-rather than after hardware arrives.
+format misunderstanding turns into silently wrong output — stay testable
+anywhere.
 
-## Not yet done / unverified
+`ops.py` depends on the compiled extension (`exllamav3_ext`, a *top-level*
+module) and not on the `exllamav3` Python package. Importing the package runs an
+`__init__.py` that drags in the model, tokenizer, cache and generator stack plus
+formatron, kbnf, marisa_trie and flash-linear-attention — dependency-resolution
+risk against vLLM's own pins, for code a worker never uses. Note the extension
+requires `import torch` first in the process (it links `libc10.so`); `ops.py`
+imports torch at module scope, so `ext()` is always safe.
 
-Nothing here has run. In rough order of risk:
+## Verified
 
-1. **The whole load path.** `EXL3Parameter` opts out of vLLM's preallocated
-   parameter protocol (it has to: trellis shape depends on a bit width not known
-   until the tensor is seen) by implementing the four `load_*` methods as pure
-   stores. Whether vLLM's `AutoWeightsLoader` drives that cleanly for
-   `QKVParallelLinear` and `MergedColumnParallelLinear` is unverified.
-2. **Device placement.** `create_weights` picks the device up from
-   `torch.empty(0).device`, relying on vLLM building the model inside a device
-   context. Plausible, unverified.
-3. **The dequantization math.** Should equal `LinearEXL3.get_weight_tensor()`
-   exactly. Untested — this is the first thing to run.
-4. **`quantization_config.json` fetch.** `maybe_update_config` pulls it via
-   `get_hf_file_to_dict`; failure is swallowed and falls back to "everything is
-   quantized". Untested against both a repo that has it and one that does not.
-5. Bias handling on padded output dimensions.
-6. Whether `get_min_capability` / `get_supported_act_dtypes` rejections produce
-   the intended messages.
+Environment: RTX 5070 Ti (sm_120, 16 GiB), torch 2.13.0+cu130, CUDA 13.3,
+editable vLLM `edbc4969a`, exllamav3 v1.3.0 built from the submodule.
 
-## First runs, once there is a GPU
+1. **The vLLM API surface still matches.** Re-checked on `edbc4969a`:
+   `register_quantization_config`, the four `BasevLLMParameter.load_*` methods,
+   `register_weight_loader_v2_supported_method`, `maybe_update_config` and
+   `get_hf_file_to_dict` all have the signatures the plugin codes against.
+2. **Registration works through the entry point.** `load_general_plugins()` →
+   `get_quantization_config("exl3")` resolves to `EXL3Config`, and `"exl3"`
+   lands in `QUANTIZATION_METHODS`.
+3. **The dequantization is bit-exact.** `ops.dense_weight` equals
+   `LinearEXL3.get_weight_tensor()` with `rtol=0, atol=0` on `q_proj`, `k_proj`
+   and `down_proj` of a real checkpoint, and agrees with the actual fused
+   `exl3_gemm` forward path within fp16 tolerance. The locally constructed
+   Sylvester-Hadamard matches `exllamav3.util.hadamard.get_hadamard` exactly at
+   orders 16/32/64/128.
+4. **The load path works.** `EXL3Parameter`'s opt-out of vLLM's preallocated
+   parameter protocol drives cleanly through `QKVParallelLinear`,
+   `MergedColumnParallelLinear` and `RowParallelLinear`; picking the device up
+   from `torch.empty(0).device` in `create_weights` lands correctly.
+5. **End to end.** `turboderp/Llama-3.2-1B-Instruct-exl3` generates coherent
+   text at 3.0bpw *and* at 3.5bpw. The 3.5bpw case is the one that matters: it
+   has q=4, k=5, v=5 bits inside a single merged QKV linear, so it exercises the
+   per-shard design directly. Model loading reports 2.35 GiB — i.e. the full
+   fp16 model, exactly as the dequantize-at-load strategy predicts.
+6. **The "no quantization_config.json" fallback works.** The 0.0.0-era test repo
+   has no such file; `maybe_update_config` swallows the miss and falls back to
+   treating every linear as quantized, which is correct for it.
 
-1. `python -c "import vllm_exl3_plugin; vllm_exl3_plugin.register()"` — then
-   check `get_quantization_config("exl3")` resolves.
-2. Dequantization oracle: load one tensor from a real checkpoint with
-   exllamav3's own `LinearEXL3`, call `get_weight_tensor()`, and compare against
-   `ops.dense_weight` on the same tensors. Expect exact equality.
-3. `vllm serve turboderp/Llama-3.2-1B-Instruct-exl3 --revision 3.0bpw
-   --dtype float16 --enforce-eager` and generate. Tied embeddings, all dims
-   multiples of 128, uniform K=3, no `mcg`/`mul1`, no bias — the easiest
-   possible target.
-4. Then the same at 3.5bpw, which exercises mixed K inside a merged linear.
+Reproduce with `python -m unittest discover -s tests` (19 tests, ~30s on the
+above machine once the checkpoints are cached).
+
+## Remaining gaps
+
+Phase 0 scope, deliberately:
+
+- Dequantize-at-load means no memory saving at all. That is Phase 1's job.
+- TP > 1 raises `NotImplementedError`. The rule is known and encoded
+  (`format.check_tp_split`) but no sharded path exists yet.
+- MoE is untouched (Phase 3).
+
+Not yet exercised, and worth knowing before they bite:
+
+- **A checkpoint with `mcg`/`mul1`.** The test model predates the newer
+  codebooks, so `stored_tensor_names()` has only ever been run in its
+  three-tensor form. A `codebook: "mul1"` repo would register a fourth parameter
+  and is the obvious next thing to try.
+- **A repo that *has* `quantization_config.json`**, which would turn on the
+  `tensor_storage` path — including the quantized-`lm_head` rejection, which has
+  therefore never fired.
+- **Bias.** Llama has none on these projections, so padded-output bias handling
+  is still theoretical.
+- **`get_min_capability` / `get_supported_act_dtypes` rejection messages.**
 
 ## Phase 1 preview
 
