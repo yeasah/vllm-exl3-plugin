@@ -53,11 +53,11 @@ MODEL = os.environ.get("EXL3_TEST_MODEL", "turboderp/Llama-3.2-1B-Instruct-exl3"
     HAVE_CUDA and HAVE_EXT and HAVE_VLLM, "needs CUDA, exllamav3 and vLLM"
 )
 class TestEndToEnd(unittest.TestCase):
-    def _generate(self, revision: str):
+    def _generate(self, revision: str, model: str | None = None):
         from vllm import LLM, SamplingParams
 
         llm = LLM(
-            model=MODEL,
+            model=model or MODEL,
             revision=revision,
             # exllamav3's kernels are fp16; EXL3 repos usually declare bfloat16.
             dtype="float16",
@@ -89,6 +89,17 @@ class TestEndToEnd(unittest.TestCase):
     def test_mixed_bit_width(self):
         """3.5bpw has q=4, k=5, v=5 bits in the same merged QKV linear."""
         self._assert_coherent(self._generate("3.5bpw"))
+
+    def test_quantized_lm_head(self):
+        """MiniCPM5-1B exercises everything Llama-3.2-1B cannot.
+
+        Untied word embeddings with an EXL3-quantized `lm_head` at 6 bits, plus
+        the `mcg` codebook (a fourth registered parameter per layer) and a
+        `quantization_config.json` that turns on the `tensor_storage` path.
+        """
+        self._assert_coherent(
+            self._generate("3.00bpw", model="turboderp/MiniCPM5-1B-exl3")
+        )
 
 
 if __name__ == "__main__":

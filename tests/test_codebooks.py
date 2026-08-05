@@ -150,44 +150,54 @@ class TestStoredTensorNames(unittest.TestCase):
             self._config(bits=3.0, codebook="something-new")
 
 
-class TestQuantizedHeadRejection(unittest.TestCase):
-    """A quantized, untied lm_head must fail at startup, not at token zero.
+class TestQuantizedHeadDetection(unittest.TestCase):
+    """Whether `lm_head` gets the EXL3 method.
 
-    Every EXL3 repo from ~v0.0.12 on sets `head_bits`, so this is the common
-    case rather than an edge case -- see PHASE0.md.
+    Wrong in either direction is fatal rather than degraded: registering
+    parameters the checkpoint never fills makes vLLM's loader reject the model,
+    and failing to register them leaves `lm_head.trellis` unclaimed.
     """
 
-    def _config_for(self, repo, revision):
+    def _config_for(self, repo, revision, **kw):
         from vllm_exl3_plugin.quantization.config import EXL3Config
 
-        cfg = EXL3Config.from_config({"quant_method": "exl3", "bits": 3.0})
+        cfg = EXL3Config.from_config({"quant_method": "exl3", "bits": 3.0, **kw})
         try:
             cfg._load_tensor_storage(repo, revision)
         except Exception as e:  # pragma: no cover - network
             self.skipTest(f"could not fetch config for {repo}: {e}")
         return cfg
 
-    def test_untied_quantized_head_raises(self):
+    def test_untied_quantized_head_detected(self):
         cfg = self._config_for("turboderp/MiniCPM5-1B-exl3", "3.00bpw")
         if cfg.tensor_storage is None:
             self.skipTest("quantization_config.json unavailable")
         self.assertEqual(cfg.codebook, "mcg")
+        cfg.tie_word_embeddings = False
+        self.assertTrue(cfg.head_is_quantized())
 
-        class HF:
-            tie_word_embeddings = False
-
-        with self.assertRaises(NotImplementedError):
-            cfg._reject_unsupported_head(HF())
-
-    def test_tied_head_is_fine(self):
+    def test_tied_head_is_never_quantized(self):
+        """vLLM constructs a ParallelLMHead for tied models and then skips
+        every lm_head.* weight, so claiming it would strand our parameters."""
         cfg = self._config_for("turboderp/MiniCPM5-1B-exl3", "3.00bpw")
         if cfg.tensor_storage is None:
             self.skipTest("quantization_config.json unavailable")
+        cfg.tie_word_embeddings = True
+        self.assertFalse(cfg.head_is_quantized())
 
-        class HF:
-            tie_word_embeddings = True
+    def test_head_bits_is_the_fallback_signal(self):
+        """Repos with no quantization_config.json still declare head_bits."""
+        from vllm_exl3_plugin.quantization.config import EXL3Config
 
-        cfg._reject_unsupported_head(HF())  # must not raise
+        untied = EXL3Config.from_config(
+            {"quant_method": "exl3", "bits": 3.0, "head_bits": 6}
+        )
+        untied.tie_word_embeddings = False
+        self.assertTrue(untied.head_is_quantized())
+
+        no_head = EXL3Config.from_config({"quant_method": "exl3", "bits": 3.0})
+        no_head.tie_word_embeddings = False
+        self.assertFalse(no_head.head_is_quantized())
 
     def test_missing_file_falls_back(self):
         """The 0.0.0-era repos have no quantization_config.json at all."""

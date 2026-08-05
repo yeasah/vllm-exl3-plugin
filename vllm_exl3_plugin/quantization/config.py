@@ -59,6 +59,9 @@ class EXL3Config(QuantizationConfig):
         self.out_scales = out_scales
         # Populated by maybe_update_config when quantization_config.json exists.
         self.tensor_storage: dict[str, Any] | None = None
+        # Also from maybe_update_config, which is the only hook that sees
+        # hf_config. None means "not yet known".
+        self.tie_word_embeddings: bool | None = None
 
         if self.codebook not in _CODEBOOK_TENSORS:
             raise EXL3FormatError(
@@ -127,7 +130,10 @@ class EXL3Config(QuantizationConfig):
         revision: str | None = None,
     ) -> None:
         self._load_tensor_storage(model_name, revision)
-        self._reject_unsupported_head(hf_config)
+        if hf_config is not None:
+            self.tie_word_embeddings = bool(
+                getattr(hf_config, "tie_word_embeddings", False)
+            )
 
     def _load_tensor_storage(self, model_name: str, revision: str | None) -> None:
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
@@ -145,28 +151,28 @@ class EXL3Config(QuantizationConfig):
             self.tensor_storage = extra.get("tensor_storage")
             self.codebook = extra.get("codebook", self.codebook)
 
-    def _reject_unsupported_head(self, hf_config: Any) -> None:
-        """Fail at startup rather than at the first wrong token.
+    def head_is_quantized(self) -> bool:
+        """Whether `lm_head` needs the EXL3 method rather than vLLM's default.
 
-        EXL3 quantizes `lm_head` too (at `head_bits`). vLLM's `ParallelLMHead` is
-        a `VocabParallelEmbedding`, not a `LinearBase`, so this plugin does not
-        yet provide a method for it. Models with tied embeddings are fine --
-        vLLM skips `lm_head.*` entirely -- which is why the Phase 0 test target
-        is a tied model.
+        Getting this wrong in either direction is fatal, not degraded:
+        registering parameters the checkpoint never fills makes
+        `default_loader` reject the model, and failing to register them leaves
+        `lm_head.trellis` unclaimed.
+
+        Tied embeddings settle it immediately. vLLM still *constructs* a
+        `ParallelLMHead` for a tied model and only then ties it, but it skips
+        every `lm_head.*` weight, so any parameter registered here would never
+        be loaded.
         """
-        if self.tensor_storage is None or hf_config is None:
-            return
-        head = self.tensor_storage.get("lm_head")
-        if head is None or head.get("quant_format") != "exl3":
-            return
-        tied = getattr(hf_config, "tie_word_embeddings", False)
-        if not tied:
-            raise NotImplementedError(
-                "This EXL3 checkpoint has a quantized lm_head and untied word "
-                "embeddings. vllm-exl3-plugin cannot load a quantized lm_head "
-                "yet (it needs a VocabParallelEmbedding method, not a linear "
-                "one). Use a checkpoint with tied embeddings for now."
-            )
+        if self.tie_word_embeddings:
+            return False
+        if self.tensor_storage is not None:
+            head = self.tensor_storage.get("lm_head")
+            return bool(head) and head.get("quant_format") == "exl3"
+        # No storage map (pre-v0.0.2-era repos): `head_bits` in config.json's
+        # quantization_config is the remaining signal. Checkpoints that quantize
+        # the head always set it; the ones that do not, omit it entirely.
+        return self.head_bits is not None
 
     def is_quantized(self, prefix: str) -> bool:
         """Whether the module at `prefix` has EXL3 storage in the checkpoint."""
@@ -194,12 +200,25 @@ class EXL3Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            ParallelLMHead,
+            VocabParallelEmbedding,
+        )
+
         from .linear import EXL3LinearMethod
+        from .lm_head import EXL3LMHeadMethod
 
         if isinstance(layer, LinearBase):
             if not self.is_quantized(prefix):
                 return UnquantizedLinearMethod()
             return EXL3LinearMethod(self)
-        # Embeddings, LM heads and MoE layers fall through to vLLM's defaults.
-        # Quantized MoE is Phase 3; a quantized lm_head is rejected above.
+        # ParallelLMHead subclasses VocabParallelEmbedding, so it must be
+        # tested first.
+        if isinstance(layer, ParallelLMHead):
+            return EXL3LMHeadMethod(self) if self.head_is_quantized() else None
+        if isinstance(layer, VocabParallelEmbedding):
+            # EXL3 never quantizes the input embedding: `embed_tokens.weight`
+            # is stored dense in every checkpoint inspected.
+            return None
+        # MoE layers fall through to vLLM's defaults for now (Phase 3).
         return None

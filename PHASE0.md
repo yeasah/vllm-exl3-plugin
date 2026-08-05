@@ -6,7 +6,8 @@ forward pass**, single GPU, TP=1, no CUDA graphs, no fused kernels.
 
 **Status: done and verified on hardware.** An EXL3 checkpoint loads through
 vLLM and generates coherent tokens, at both a uniform and a mixed bit width, and
-the dequantization is bit-for-bit identical to exllamav3's own. 28 tests pass.
+the dequantization is bit-for-bit identical to exllamav3's own, including
+models with a quantized `lm_head`. 30 tests pass.
 See "Verified" below for what was actually run and "Remaining gaps" for what
 Phase 0 deliberately does not cover.
 
@@ -26,9 +27,9 @@ thing to check on real hardware.
 
 ## Ground truth established
 
-Read out of exllamav3 v1.3.0 (`0b9745c5`), vLLM `main` @ `4a3447d2` (2026-08-03),
-`vllm-gguf-plugin` @ `main`, and the safetensors headers of real EXL3 repos on
-the Hub.
+Read out of exllamav3 v1.3.0 (`0b9745c5`), vLLM `main` @ `4a3447d2` (2026-08-03,
+re-verified unchanged on `edbc4969a`), `vllm-gguf-plugin` @ `main`, and the
+safetensors headers of real EXL3 repos on the Hub.
 
 ### On-disk layout, per quantized linear
 
@@ -111,11 +112,9 @@ concatenated `suh` is meaningless.
   dims (gpt-oss: 2880 → 2944). Padded output columns hold quantization noise and
   padded input rows only ever multiply zeros, so trimming both is exact —
   `process_weights_after_loading` does that trim.
-- **Quantized `lm_head` is not supported yet.** EXL3 quantizes it at
+- **Quantized `lm_head` needs its own method class.** EXL3 quantizes it at
   `head_bits`; vLLM's `ParallelLMHead` is a `VocabParallelEmbedding`, not a
-  `LinearBase`, so it needs a different method class. Tied-embedding models are
-  unaffected — vLLM skips `lm_head.*` outright (`llama.py:538`) — which is why
-  the Phase 0 target is a tied model.
+  `LinearBase`. Supported — see "The lm_head problem" below.
 - **No loader or config-parser patching is needed.** `quant_method: "exl3"` in
   `config.json` is picked up by vLLM's normal detection
   (`vllm/config/model.py:1128`), and `register_quantization_config` appends to
@@ -137,11 +136,12 @@ concatenated `suh` is meaningless.
       quantization/
         config.py          EXL3Config
         linear.py          EXL3LinearMethod, weight_loader_v2-native
+        lm_head.py         EXL3LMHeadMethod for quantized output projections
     tests/
       test_format.py       14 tests — no GPU, torch or vLLM needed
       test_kernels.py      3 oracles against exllamav3 itself
-      test_codebooks.py    9 tests — mcg/mul1 + quantization_config.json
-      test_e2e.py          2 full vLLM generations
+      test_codebooks.py    10 tests — mcg/mul1 + head detection
+      test_e2e.py          3 full vLLM generations
       remote_tensors.py    ranged reads of one layer from a remote checkpoint
 
 `format.py` deliberately has no torch dependency so the shape rules — where a
@@ -187,7 +187,7 @@ editable vLLM `edbc4969a`, exllamav3 v1.3.0 built from the submodule.
    has no such file; `maybe_update_config` swallows the miss and falls back to
    treating every linear as quantized, which is correct for it.
 
-Reproduce with `python -m unittest discover -s tests` (28 tests, ~30s on the
+Reproduce with `python -m unittest discover -s tests` (30 tests, ~45s on the
 above machine once the checkpoints are cached).
 
 ## Remaining gaps
@@ -204,9 +204,9 @@ Not yet exercised, and worth knowing before they bite:
 - **Bias.** Llama has none on these projections, so padded-output bias handling
   is still theoretical.
 - **`get_min_capability` / `get_supported_act_dtypes` rejection messages.**
-- **The `mcg`/`mul1` *load* path.** The decode math is verified (below), but no
-  model with a fourth registered parameter has been loaded through vLLM,
-  because no such checkpoint currently can be — see "The lm_head problem".
+- **A `mul1` checkpoint end to end.** `mcg` is now covered by MiniCPM5-1B; the
+  only `mul1` repos are 12B+, which Phase 0's dequantize-at-load cannot fit.
+  The decode math is verified either way.
 
 ## Codebooks, and testing against models that do not fit
 
@@ -232,32 +232,52 @@ range requests, which is a few MB regardless of repo size. On that basis:
 This technique generalizes: any format question about any repo, however large,
 can be answered without downloading it.
 
-## The lm_head problem
-
-There is currently **no checkpoint that can exercise the new codebooks end to
-end**, and the reason is structural rather than incidental.
+## The lm_head problem (solved)
 
 Every EXL3 repo from ~v0.0.12 onward sets `head_bits`, i.e. quantizes `lm_head`.
-That is only harmless when the model ties word embeddings, because vLLM then
-skips `lm_head.*` entirely. Of the small models available:
+That is invisible on tied-embedding models, because vLLM skips `lm_head.*`
+entirely — which is exactly why the original Phase 0 target worked. But of the
+small models available, every one with a modern codebook is untied:
 
-| candidate | size | codebook | blocker |
+| candidate | size | codebook | head |
 |---|---|---|---|
-| `Llama-3.2-1B-Instruct-exl3` | 1B | none (3inst) | — works today, but old format |
-| `Qwen3-0.6B-exl3` | 0.6B | none (3inst) | same |
-| `MiniCPM5-1B-exl3` | 1B | mcg | untied, `lm_head` quantized at 6bpw |
-| `nanochat-d34-exl3` | 0.5B | mcg | `NanoChatForCausalLM` not in vLLM |
-| `gemma-4-12B-it-exl3` | 12B | mul1 | 24 GB once dequantized |
+| `Llama-3.2-1B-Instruct-exl3` | 1B | none (3inst) | tied — skipped |
+| `Qwen3-0.6B-exl3` | 0.6B | none (3inst) | tied — skipped |
+| `MiniCPM5-1B-exl3` | 1B | mcg | untied, quantized at 6bpw |
+| `nanochat-d34-exl3` | 0.5B | mcg | untied (arch not in vLLM anyway) |
+| `gemma-4-12B-it-exl3` | 12B | mul1 | untied |
 
-So quantized `lm_head` support is not a Phase 1+ nicety — it is a prerequisite
-for testing anything modern, and for serving essentially any model above ~3B
-(large models rarely tie embeddings). It needs a method for
-`VocabParallelEmbedding`/`ParallelLMHead` rather than `LinearBase`; vLLM's GGUF
-plugin has a `GGUFEmbeddingMethod` that shows the shape of it.
+So quantized `lm_head` was not a Phase 1+ nicety: without it there was **no
+checkpoint at all** that could exercise the new codebooks end to end, and no way
+to serve essentially any model above ~3B (large models rarely tie embeddings).
 
-Phase 1 (keep weights quantized, call `exl3_gemm`) independently removes the
-memory ceiling that makes gemma-4-12B untestable. The two together open up the
-whole modern checkpoint ecosystem; either alone leaves a gap.
+`quantization/lm_head.py` implements it. Two things differ from the linear case:
+
+- **The weight loader.** `VocabParallelEmbedding` passes its own v1-style
+  `weight_loader(param, loaded_weight)`, which assumes a preallocated tensor it
+  can `narrow` along a vocab dimension. An EXL3 trellis is tile-granular with
+  its own padding, so that cannot work; we substitute a loader that stores,
+  the same way the GGUF plugin substitutes `_gguf_embedding_weight_loader`.
+- **Two independent vocab paddings.** vLLM pads the vocabulary to a multiple of
+  64; exllamav3 padded the output dimension to a multiple of 128 before
+  quantizing. Both can exceed `org_vocab_size` and they need not agree — 128 is
+  a multiple of 64, so EXL3's padding is always the wider of the two, but the
+  two round differently whenever `org_vocab_size` falls between. EXL3's padded
+  rows hold quantization *noise* rather than zeros, so they are trimmed and the
+  result is zero-padded to whatever vLLM allocated, matching the convention
+  `VocabParallelEmbedding.weight_loader` uses for unquantized heads.
+
+Deciding *whether* a head is quantized has to be exactly right, because being
+wrong either way is fatal rather than degraded: registering parameters the
+checkpoint never fills makes `default_loader` reject the model, and not
+registering them leaves `lm_head.trellis` unclaimed. `head_is_quantized()`
+resolves it as: tied ⇒ no; else `tensor_storage` if present; else the presence
+of `head_bits`. Note that vLLM *constructs* a `ParallelLMHead` even for tied
+models and only ties it afterwards, so "tied" genuinely has to be checked rather
+than inferred from the layer.
+
+Verified end to end on `MiniCPM5-1B-exl3@3.00bpw` — untied 6-bit head, `mcg`
+codebook, `tensor_storage` path — with the tied-head case still passing.
 
 ## Phase 1 preview
 

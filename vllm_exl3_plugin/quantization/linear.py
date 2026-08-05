@@ -55,23 +55,23 @@ class EXL3Parameter(BasevLLMParameter):
         self.exl3_device = device
         self.shards: dict[int, torch.Tensor] = {}
 
-    def _store(self, loaded_weight: torch.Tensor, shard_id=0) -> None:
+    def store(self, loaded_weight: torch.Tensor, shard_id=0) -> None:
         index = self._shard_id_as_int(shard_id)
         # The loader hands us mmapped CPU tensors; nothing else will move these
         # onto the device, because we never allocated a device-resident param.
         self.shards[index] = loaded_weight.to(self.exl3_device).contiguous()
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor) -> None:
-        self._store(loaded_weight)
+        self.store(loaded_weight)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor) -> None:
-        self._store(loaded_weight)
+        self.store(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs) -> None:
-        self._store(loaded_weight, kwargs.get("shard_id", 0))
+        self.store(loaded_weight, kwargs.get("shard_id", 0))
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs) -> None:
-        self._store(loaded_weight, kwargs.get("shard_id", 0))
+        self.store(loaded_weight, kwargs.get("shard_id", 0))
 
     def release(self) -> None:
         self.shards.clear()

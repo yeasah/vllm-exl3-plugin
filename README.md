@@ -10,8 +10,9 @@ plugin is an adapter onto vLLM's `QuantizationConfig` / `LinearMethodBase`
 interfaces — it does not build kernels.
 
 **Status: Phase 0 complete and verified.** EXL3 checkpoints load through vLLM
-and generate correct tokens, at uniform and mixed bit widths, with
-dequantization bit-identical to exllamav3's own. Phase 0 dequantizes at load
+and generate correct tokens — uniform and mixed bit widths, all three
+codebooks, and models with a quantized `lm_head` — with dequantization
+bit-identical to exllamav3's own. Phase 0 dequantizes at load
 time, so there is no memory saving yet — that is Phase 1. See
 [PHASE0.md](PHASE0.md) for what was verified and what is next; see
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
@@ -37,7 +38,7 @@ research and the phased plan.
 
     python -m unittest discover -s tests
 
-28 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
+30 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
 oracles and the end-to-end generations skip themselves without CUDA and
 exllamav3.
 
