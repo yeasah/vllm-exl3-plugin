@@ -9,12 +9,11 @@ with working CUDA kernels already shipped as a Python-callable extension. The
 plugin is an adapter onto vLLM's `QuantizationConfig` / `LinearMethodBase`
 interfaces — it does not build kernels.
 
-**Status: Phase 0 complete and verified.** EXL3 checkpoints load through vLLM
-and generate correct tokens — uniform and mixed bit widths, all three
-codebooks, and models with a quantized `lm_head` — with dequantization
-bit-identical to exllamav3's own. Phase 0 dequantizes at load
-time, so there is no memory saving yet — that is Phase 1. See
-[PHASE0.md](PHASE0.md) for what was verified and what is next; see
+**Status: Phase 1 complete and verified.** Weights stay quantized and the fused
+exllamav3 kernels do the multiply, under torch.compile and CUDA graphs. On
+Llama-3.2-1B @3bpw that is 2.35 GiB -> 0.86 GiB with decode 22% *faster* than
+the dense path. See [PHASE1.md](PHASE1.md) for benchmarks and the one model
+that does not yet work, [PHASE0.md](PHASE0.md) for the format groundwork, and
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
 research and the phased plan.
 
@@ -23,8 +22,7 @@ research and the phased plan.
     pip install --no-deps --no-build-isolation -e deps/exllamav3   # builds the CUDA ext
     pip install --no-deps -e .
 
-    vllm serve turboderp/Llama-3.2-1B-Instruct-exl3 \
-        --revision 3.0bpw --dtype float16 --enforce-eager
+    vllm serve turboderp/Llama-3.2-1B-Instruct-exl3 --revision 3.0bpw
 
 ## Layout
 
@@ -50,6 +48,14 @@ needs a few small extras the plugin itself does not:
 ## Requirements
 
 - CUDA, compute capability 8.0+ (Ampere). No ROCm — exllamav3 has none.
-- `--dtype float16`. exllamav3's kernels are fp16 throughout, and most EXL3
-  repos inherit `bfloat16` from their base model, which vLLM will reject.
-- TP=1 for now.
+- float16 or bfloat16 activations. The kernels are fp16; `exl3_mm` casts at the
+  kernel boundary, so bf16 models keep a bf16 residual stream.
+- TP=1 for now (Phase 2).
+
+## Environment variables
+
+| variable | default | effect |
+|---|---|---|
+| `VLLM_EXL3_RECONSTRUCT_THRESHOLD` | 144 | rows above which to decode to dense fp16 and use cuBLAS; 0 always uses the fused kernel |
+| `VLLM_EXL3_DEQUANTIZE` | 0 | Phase 0 behaviour: dequantize at load. Correctness oracle, no memory saving |
+| `VLLM_DISABLE_COMPILE_CACHE` | 0 | set to 1 while editing this plugin — vLLM's compile cache cannot see plugin code |

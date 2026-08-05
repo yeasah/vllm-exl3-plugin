@@ -51,7 +51,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        del input_size, output_size, params_dtype
+        del input_size, output_size
 
         if getattr(layer, "tp_size", 1) > 1:
             raise NotImplementedError(
@@ -76,6 +76,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
 
         layer.exl3_input_size = input_size_per_partition
         layer.exl3_output_sizes = list(output_partition_sizes)
+        layer.exl3_params_dtype = params_dtype
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         names = self.quant_config.stored_tensor_names()
@@ -93,26 +94,65 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
             layer, 0, stored_in, stored_out, layer.org_vocab_size, suh, svh
         )
 
-        weight = ops.dense_weight(
-            trellis, suh, svh, bits, "mcg" in params, "mul1" in params
-        )
-        weight = weight[: layer.org_vocab_size, : layer.exl3_input_size]
-
         target = layer.num_embeddings_per_partition
-        if weight.shape[0] > target:
+        if layer.org_vocab_size > target:
             raise format.EXL3FormatError(
-                f"lm_head has {weight.shape[0]} real vocabulary rows but vLLM "
-                f"allocated only {target}"
-            )
-        if weight.shape[0] < target:
-            # Zero rows produce zero logits, which `_get_logits` then slices
-            # off at org_vocab_size anyway.
-            weight = torch.nn.functional.pad(
-                weight, (0, 0, 0, target - weight.shape[0])
+                f"lm_head has {layer.org_vocab_size} real vocabulary rows but "
+                f"vLLM allocated only {target}"
             )
 
-        layer.register_parameter(
-            "exl3_weight", Parameter(weight.contiguous(), requires_grad=False)
-        )
+        if self.quant_config.dequantize:
+            weight = ops.dense_weight(
+                trellis, suh, svh, bits, "mcg" in params, "mul1" in params
+            )
+            weight = weight[: layer.org_vocab_size, : layer.exl3_input_size]
+            if weight.shape[0] < target:
+                # Zero rows produce zero logits, which `_get_logits` then slices
+                # off at org_vocab_size anyway.
+                weight = torch.nn.functional.pad(
+                    weight, (0, 0, 0, target - weight.shape[0])
+                )
+            layer.register_parameter(
+                "exl3_weight",
+                Parameter(
+                    weight.to(layer.exl3_params_dtype).contiguous(),
+                    requires_grad=False,
+                ),
+            )
+        else:
+            self._store_quantized(layer, [(trellis, suh, svh, bits)])
+
         for param in params.values():
             param.release()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.quant_config.dequantize:
+            return torch.nn.functional.linear(x, layer.exl3_weight, bias)
+
+        logits = ops.exl3_mm(
+            x,
+            layer.exl3_trellis_0,
+            layer.exl3_suh_0,
+            layer.exl3_svh_0,
+            self.mcg,
+            self.mul1,
+        )
+        # The kernel always writes exllamav3's padded vocabulary width. vLLM
+        # expects its own (`num_embeddings_per_partition`), and the two round
+        # differently: 128 vs 64. Trim or zero-extend to match, keeping the
+        # rows beyond the real vocabulary at zero rather than leaving EXL3's
+        # padding noise in place.
+        target = layer.num_embeddings_per_partition
+        real = layer.org_vocab_size
+        if logits.shape[-1] != target or real < target:
+            logits = logits[..., :real]
+            if real < target:
+                logits = torch.nn.functional.pad(logits, (0, target - real))
+        if bias is not None:
+            logits = logits + bias
+        return logits

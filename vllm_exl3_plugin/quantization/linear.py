@@ -1,15 +1,13 @@
 """EXL3 linear method.
 
-Phase 0 strategy: dequantize once, at load time.
+Weights stay quantized: `process_weights_after_loading` keeps the trellis
+resident and `apply` calls `ops.exl3_mm`, which decodes inside the kernel.
 
-`process_weights_after_loading` turns every EXL3 tensor into a dense fp16
-weight and `apply` is a plain `F.linear`. That costs the entire memory saving of
-the quantization, which is obviously not the point of the project -- but it
-isolates the two things Phase 0 is actually trying to prove (that the plugin
-registers, and that vLLM's loader can be driven to fill EXL3's tensor layout)
-from the things Phase 1 will prove (that the fused kernels work under vLLM's
-serving loop). Swapping `apply` over to `exl3_gemm` behind a custom op is the
-Phase 1 change and touches only this file plus `ops.py`.
+Phase 0's dequantize-at-load strategy is still here behind
+`VLLM_EXL3_DEQUANTIZE=1`. It is a transcription of exllamav3's own
+dequantization, which makes it the reference the fused path is checked against
+-- running the same prompts both ways separates a kernel bug from a plumbing
+bug. It costs the entire memory saving, so it is opt-in.
 
 The one structural decision here that is *not* provisional: merged linears keep
 one sub-tensor per shard instead of a single concatenated tensor. EXL3 assigns
@@ -84,6 +82,11 @@ class EXL3LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config):
         self.quant_config = quant_config
+        names = quant_config.stored_tensor_names()
+        # The kernels take the codebook as two booleans; the multiplier
+        # constants are compiled in.
+        self.mcg = "mcg" in names
+        self.mul1 = "mul1" in names
 
     def create_weights(
         self,
@@ -143,22 +146,62 @@ class EXL3LinearMethod(LinearMethodBase):
                 layer, index, stored_in, stored_out, out_size, suh, svh
             )
 
+            shards.append((trellis, suh, svh, bits))
+
+        if self.quant_config.dequantize:
+            self._store_dense(layer, shards, has_mcg, has_mul1)
+        else:
+            self._store_quantized(layer, shards)
+
+        for param in params.values():
+            param.release()
+
+    def _store_dense(self, layer, shards, has_mcg, has_mul1) -> None:
+        """Phase 0's strategy: one fp16 matrix, no memory saving.
+
+        Retained because it is a transcription of exllamav3's own
+        dequantization, which makes it the reference the fused path is checked
+        against. Selected by `VLLM_EXL3_DEQUANTIZE=1`.
+        """
+        weights = []
+        for (trellis, suh, svh, bits), out_size in zip(
+            shards, layer.exl3_output_sizes
+        ):
             weight = ops.dense_weight(trellis, suh, svh, bits, has_mcg, has_mul1)
             # exllamav3 pads both dimensions up to a multiple of 128 before
             # quantizing. Padded output columns hold quantization noise and
             # padded input rows only ever multiply zeros, so trimming both is
             # exact -- this is the same trim exllamav3's own `Linear.forward`
             # applies via `trim_padded_out`.
-            weight = weight[:out_size, : layer.exl3_input_size]
-            shards.append(weight)
+            weights.append(weight[:out_size, : layer.exl3_input_size])
 
-        weight = torch.cat(shards, dim=0) if len(shards) > 1 else shards[0]
+        weight = torch.cat(weights, dim=0) if len(weights) > 1 else weights[0]
+        # dense_weight is always fp16; F.linear needs it to match the
+        # activations, which may be bfloat16.
+        weight = weight.to(layer.exl3_params_dtype)
         layer.register_parameter(
             "exl3_weight", Parameter(weight.contiguous(), requires_grad=False)
         )
 
-        for param in params.values():
-            param.release()
+    @staticmethod
+    def _store_quantized(layer, shards) -> None:
+        """Keep the trellis resident and let the kernel decode on the fly.
+
+        Registered as parameters rather than kept in a plain list so they are
+        visible to `named_parameters` and stay pinned for CUDA-graph capture.
+        Merged linears keep one set per shard: bit widths differ per tensor, so
+        there is nothing to concatenate (see module docstring).
+        """
+        for index, (trellis, suh, svh, _bits) in enumerate(shards):
+            layer.register_parameter(
+                f"exl3_trellis_{index}", Parameter(trellis, requires_grad=False)
+            )
+            layer.register_parameter(
+                f"exl3_suh_{index}", Parameter(suh, requires_grad=False)
+            )
+            layer.register_parameter(
+                f"exl3_svh_{index}", Parameter(svh, requires_grad=False)
+            )
 
     @staticmethod
     def _shard(params, name, index, layer):
@@ -197,4 +240,24 @@ class EXL3LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.nn.functional.linear(x, layer.exl3_weight, bias)
+        if self.quant_config.dequantize:
+            return torch.nn.functional.linear(x, layer.exl3_weight, bias)
+
+        parts = []
+        for index, out_size in enumerate(layer.exl3_output_sizes):
+            y = ops.exl3_mm(
+                x,
+                getattr(layer, f"exl3_trellis_{index}"),
+                getattr(layer, f"exl3_suh_{index}"),
+                getattr(layer, f"exl3_svh_{index}"),
+                self.mcg,
+                self.mul1,
+            )
+            # Trim exllamav3's output padding, which carries quantization noise
+            # rather than zeros.
+            parts.append(y if y.shape[-1] == out_size else y[..., :out_size])
+
+        out = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        if bias is not None:
+            out = out + bias
+        return out

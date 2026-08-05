@@ -157,5 +157,107 @@ class TestDequantOracle(unittest.TestCase):
                 torch.testing.assert_close(ours, theirs, rtol=2e-2, atol=2e-2)
 
 
+
+@requires_gpu
+class TestFusedKernel(unittest.TestCase):
+    """`exl3_mm` must agree with the dequantized reference.
+
+    This is the Phase 1 correctness claim: the fused kernel never materializes
+    a weight, so its only check is that it produces what multiplying by the
+    dequantized weight would have. `dense_weight` is itself pinned bit-exact
+    against exllamav3 by TestDequantOracle, which makes it a valid reference.
+
+    The batch sizes straddle every dispatch boundary the kernel has: a GEMV
+    path for small m, the autotuned cooperative GEMM above it, and exllamav3's
+    own reconstruct threshold at 144 (which this plugin deliberately does not
+    follow -- reconstructing would defeat the memory saving).
+    """
+
+    BATCHES = (1, 2, 4, 17, 144, 145, 512)
+
+    CASES = [
+        # (repo, revision, key) -- covers the default codebook and mcg
+        (
+            "turboderp/Llama-3.2-1B-Instruct-exl3",
+            "3.0bpw",
+            "model.layers.0.self_attn.q_proj",
+        ),
+        (
+            "turboderp/MiniCPM5-1B-exl3",
+            "3.00bpw",
+            "model.layers.0.mlp.down_proj",
+        ),
+    ]
+
+    def test_matches_dense_reference(self):
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        for repo, revision, key in self.CASES:
+            try:
+                t = fetch_module_tensors(repo, revision, key)
+            except OSError as e:
+                self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+
+            in_f, _ = format.dims_from_trellis_shape(t["trellis"].shape)
+            bits = format.bits_from_trellis_shape(t["trellis"].shape)
+            mcg, mul1 = "mcg" in t, "mul1" in t
+            weight = ops.dense_weight(
+                t["trellis"], t["suh"], t["svh"], bits, mcg, mul1
+            )
+
+            for m in self.BATCHES:
+                with self.subTest(key=key, m=m):
+                    torch.manual_seed(0)
+                    x = torch.randn(
+                        (m, in_f), dtype=torch.half, device="cuda:0"
+                    ) * 0.1
+                    ref = torch.nn.functional.linear(x, weight)
+                    got = ops.exl3_mm(
+                        x, t["trellis"], t["suh"], t["svh"], mcg, mul1
+                    )
+                    self.assertEqual(got.shape, ref.shape)
+                    # fp16 accumulation in a different order, not a different
+                    # computation: differences are last-bit noise.
+                    torch.testing.assert_close(got, ref, rtol=2e-2, atol=5e-3)
+
+    def test_preserves_leading_dims(self):
+        """vLLM hands linears 2D activations, but the op should not assume it."""
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = self.CASES[0]
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+        in_f, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+
+        x = torch.randn((3, 5, in_f), dtype=torch.half, device="cuda:0") * 0.1
+        y = ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], "mcg" in t, "mul1" in t)
+        self.assertEqual(tuple(y.shape), (3, 5, out_f))
+        flat = ops.exl3_mm(
+            x.reshape(15, in_f), t["trellis"], t["suh"], t["svh"],
+            "mcg" in t, "mul1" in t,
+        )
+        torch.testing.assert_close(y.reshape(15, out_f), flat, rtol=0, atol=0)
+
+    def test_empty_batch(self):
+        """Zero-token forwards happen; the kernel must not be launched."""
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = self.CASES[0]
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+        in_f, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+
+        x = torch.empty((0, in_f), dtype=torch.half, device="cuda:0")
+        y = ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], "mcg" in t, "mul1" in t)
+        self.assertEqual(tuple(y.shape), (0, out_f))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,7 +53,9 @@ MODEL = os.environ.get("EXL3_TEST_MODEL", "turboderp/Llama-3.2-1B-Instruct-exl3"
     HAVE_CUDA and HAVE_EXT and HAVE_VLLM, "needs CUDA, exllamav3 and vLLM"
 )
 class TestEndToEnd(unittest.TestCase):
-    def _generate(self, revision: str, model: str | None = None):
+    def _generate(
+        self, revision: str, model: str | None = None, enforce_eager: bool = True
+    ):
         from vllm import LLM, SamplingParams
 
         llm = LLM(
@@ -61,7 +63,7 @@ class TestEndToEnd(unittest.TestCase):
             revision=revision,
             # exllamav3's kernels are fp16; EXL3 repos usually declare bfloat16.
             dtype="float16",
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
             tensor_parallel_size=1,
             gpu_memory_utilization=0.7,
             max_model_len=2048,
@@ -99,6 +101,24 @@ class TestEndToEnd(unittest.TestCase):
         """
         self._assert_coherent(
             self._generate("3.00bpw", model="turboderp/MiniCPM5-1B-exl3")
+        )
+
+    def test_cuda_graphs(self):
+        """The same model with torch.compile and CUDA-graph capture enabled.
+
+        exllamav3's GEMM launches cooperatively via cudaLaunchCooperativeKernel
+        and autotunes its tile shape at runtime, benchmarking candidates on
+        first use. Both were open questions for graph capture: benchmarking
+        inside a capture would be fatal. It works because vLLM runs
+        `cudagraph_num_of_warmups` dummy passes at each captured shape before
+        capturing it, which primes the autotune cache.
+        """
+        self._assert_coherent(
+            self._generate(
+                "3.00bpw",
+                model="turboderp/MiniCPM5-1B-exl3",
+                enforce_eager=False,
+            )
         )
 
 

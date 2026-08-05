@@ -17,6 +17,7 @@ actually does.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -27,7 +28,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 
+from vllm.logger import init_logger
+
 from ..format import EXL3FormatError
+
+logger = init_logger(__name__)
 
 #: Extra per-tensor codebook selector shipped by each codebook variant. The
 #: kernels only read whether the tensor is present, not its value -- the
@@ -62,6 +67,13 @@ class EXL3Config(QuantizationConfig):
         # Also from maybe_update_config, which is the only hook that sees
         # hf_config. None means "not yet known".
         self.tie_word_embeddings: bool | None = None
+        # Phase 0's dequantize-at-load path, kept as a correctness oracle: it
+        # is a transcription of exllamav3's own dequantization, so serving the
+        # same prompts both ways isolates a kernel bug from a plumbing bug.
+        # Costs the entire memory saving, so it is opt-in.
+        self.dequantize = os.environ.get("VLLM_EXL3_DEQUANTIZE", "0") == "1"
+        if self.dequantize:
+            self._disable_stale_compile_cache()
 
         if self.codebook not in _CODEBOOK_TENSORS:
             raise EXL3FormatError(
@@ -75,16 +87,46 @@ class EXL3Config(QuantizationConfig):
             f"codebook={self.codebook!r}, version={self.version!r})"
         )
 
+    @staticmethod
+    def _disable_stale_compile_cache() -> None:
+        """Stop vLLM reusing a compiled graph traced from the *other* path.
+
+        vLLM's compile-cache key is built from its own config objects and its
+        own version. It cannot see out-of-tree plugin code, so switching
+        `VLLM_EXL3_DEQUANTIZE` -- which changes what `apply()` traces to, one
+        `F.linear` versus one `exl3_mm` per shard -- reuses the previously
+        compiled artifact and dies with a bare `KeyError` on a parameter name
+        deep inside an AOT-compiled graph.
+
+        The same hazard applies to *any* edit to this plugin that changes the
+        traced structure, so `VLLM_DISABLE_COMPILE_CACHE=1` is worth setting
+        while developing on it. Here we only force it for the debug flag, where
+        the mismatch is guaranteed rather than merely possible.
+        """
+        import os as _os
+
+        if _os.environ.get("VLLM_DISABLE_COMPILE_CACHE"):
+            return
+        _os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
+        logger.warning(
+            "VLLM_EXL3_DEQUANTIZE is set, so VLLM_DISABLE_COMPILE_CACHE=1 has "
+            "been forced: vLLM's compile cache does not key on plugin code, "
+            "and would otherwise reuse a graph traced from the fused path."
+        )
+
     def get_name(self) -> QuantizationMethods:
         return "exl3"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        # exllamav3's kernels are fp16 throughout; `LinearEXL3` only ever
-        # chooses between an fp16 and an fp32 *output*. Most EXL3 repos inherit
-        # `torch_dtype: bfloat16` from their base model, so vLLM will default to
-        # bfloat16 and reject it here -- serving needs an explicit
-        # `--dtype float16`. Failing loudly beats silently downcasting.
-        return [torch.half]
+        # exllamav3's kernels are fp16 (exl3_gemm hard-checks A for kHalf), but
+        # the model around them does not have to be: `exl3_mm` casts at the
+        # kernel boundary, so the residual stream keeps vLLM's chosen dtype.
+        #
+        # bfloat16 is not a convenience here. The Gemma family is numerically
+        # unstable end-to-end in fp16 -- vLLM refuses fp16 for gemma2/gemma3
+        # outright, and exllamav3 carries fp32 residuals through gemma4 for the
+        # same reason. Running those models at all requires a wider residual.
+        return [torch.half, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -129,6 +171,14 @@ class EXL3Config(QuantizationConfig):
         hf_config: Any = None,
         revision: str | None = None,
     ) -> None:
+        if revision is None and hf_config is not None:
+            # vLLM does not pass `revision` here (there is a TODO about it on
+            # the base class), and defaulting to "main" is actively wrong: EXL3
+            # repos publish one branch per bit rate, and `main` frequently has
+            # no quantization_config.json at all. transformers records the
+            # commit it actually resolved the config from, which is exactly the
+            # revision being served.
+            revision = getattr(hf_config, "_commit_hash", None)
         self._load_tensor_storage(model_name, revision)
         if hf_config is not None:
             self.tie_word_embeddings = bool(
@@ -143,13 +193,22 @@ class EXL3Config(QuantizationConfig):
                 "quantization_config.json", model_name, revision or "main"
             )
         except Exception:
-            # Purely supplementary: a missing or unreachable file leaves us on
-            # the "everything is quantized" fallback, which is correct for every
-            # checkpoint exllamav3's converter produces.
             extra = None
         if extra:
             self.tensor_storage = extra.get("tensor_storage")
             self.codebook = extra.get("codebook", self.codebook)
+        else:
+            # The fallback is "assume every linear is quantized", which holds
+            # for the text-only checkpoints that predate this file but is wrong
+            # for anything with an unquantized vision or audio tower. Worth
+            # saying out loud rather than failing later on a missing parameter.
+            logger.warning(
+                "No quantization_config.json for %s@%s; assuming every linear "
+                "layer is EXL3-quantized. This is correct for older text-only "
+                "checkpoints but will fail on a model with unquantized towers.",
+                model_name,
+                revision or "main",
+            )
 
     def head_is_quantized(self) -> bool:
         """Whether `lm_head` needs the EXL3 method rather than vLLM's default.
@@ -173,6 +232,24 @@ class EXL3Config(QuantizationConfig):
         # quantization_config is the remaining signal. Checkpoints that quantize
         # the head always set it; the ones that do not, omit it entirely.
         return self.head_bits is not None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper) -> None:
+        """Translate `tensor_storage` keys into vLLM's module naming.
+
+        `tensor_storage` is keyed by checkpoint names, but `get_quant_method`
+        is handed vLLM's module prefixes, and multimodal models restructure
+        heavily between the two (Gemma 4 moves `model.language_model.layers.N`
+        under a different parent entirely). Without this, every language-model
+        layer looks unquantized and vLLM allocates dense fp16 weights for the
+        whole model -- which on a 12B checkpoint means an out-of-memory error
+        rather than anything that points at the real cause.
+
+        vLLM calls this from `SupportsQuant.__new__`, before any layer is
+        constructed, and passes the *unstacked* mapper so that constituent
+        names like `q_proj` survive instead of being folded into `qkv_proj`.
+        """
+        if self.tensor_storage is not None:
+            self.tensor_storage = hf_to_vllm_mapper.apply_dict(self.tensor_storage)
 
     def is_quantized(self, prefix: str) -> bool:
         """Whether the module at `prefix` has EXL3 storage in the checkpoint."""
