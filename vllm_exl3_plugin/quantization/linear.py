@@ -29,9 +29,15 @@ from vllm.model_executor.layers.linear import (
     register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.parameter import BasevLLMParameter
+from vllm.logger import init_logger
 from vllm.model_executor.utils import set_weight_attrs
 
-from .. import format, ops
+from .. import format, ops, tp
+
+logger = init_logger(__name__)
+
+#: One warning per process is enough; every layer would otherwise repeat it.
+_TP_WARNED = False
 
 
 class EXL3Parameter(BasevLLMParameter):
@@ -47,11 +53,24 @@ class EXL3Parameter(BasevLLMParameter):
     def __new__(cls, **kwargs):
         return super().__new__(cls, data=None)
 
-    def __init__(self, num_shards: int, device: torch.device, weight_loader):
+    def __init__(
+        self,
+        num_shards: int,
+        device: torch.device,
+        weight_loader,
+        role: str = tp.ROLE_SCALAR,
+        column_shard_size: int | None = None,
+        row_shard_size: int | None = None,
+    ):
         super().__init__(data=None, weight_loader=weight_loader)
         self.num_shards = num_shards
         self.exl3_device = device
         self.shards: dict[int, torch.Tensor] = {}
+        # Which EXL3 sub-tensor this is, which decides how it slices under
+        # tensor parallelism (see tp.py).
+        self.role = role
+        self.column_shard_size = column_shard_size
+        self.row_shard_size = row_shard_size
 
     def store(self, loaded_weight: torch.Tensor, shard_id=0) -> None:
         index = self._shard_id_as_int(shard_id)
@@ -59,17 +78,42 @@ class EXL3Parameter(BasevLLMParameter):
         # onto the device, because we never allocated a device-resident param.
         self.shards[index] = loaded_weight.to(self.exl3_device).contiguous()
 
+    # vLLM hands every loader the *whole* checkpoint tensor and expects the
+    # parameter to take its own rank's slice, at offset `tp_rank * shard_size`
+    # (see `_ColumnvLLMParameter` / `RowvLLMParameter` in vllm/parameter.py).
+    # The sizes vLLM supplies are already per-rank.
+
+    def _take_column(self, t: torch.Tensor, size: int | None, index: int):
+        if self.tp_size == 1 or size is None:
+            return t
+        first = index * size
+        return tp.shard_column(self.role, t, first, first + size)
+
+    def _take_row(self, t: torch.Tensor, size: int | None, index: int):
+        if self.tp_size == 1 or size is None:
+            return t
+        first = index * size
+        return tp.shard_row(self.role, t, first, first + size)
+
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor) -> None:
-        self.store(loaded_weight)
+        self.store(self._take_column(loaded_weight, self.column_shard_size, self.tp_rank))
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor) -> None:
-        self.store(loaded_weight)
+        self.store(self._take_row(loaded_weight, self.row_shard_size, self.tp_rank))
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs) -> None:
-        self.store(loaded_weight, kwargs.get("shard_id", 0))
+        shard_id = kwargs.get("shard_id", 0)
+        size = kwargs.get("shard_size", self.column_shard_size)
+        self.store(self._take_column(loaded_weight, size, self.tp_rank), shard_id)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs) -> None:
-        self.store(loaded_weight, kwargs.get("shard_id", 0))
+        shard_id = kwargs.get("shard_id", 0)
+        size = kwargs.get("shard_size", self.column_shard_size)
+        # KV heads can be replicated across ranks when there are fewer of them
+        # than ranks, in which case several ranks read the same slice.
+        num_heads = kwargs.get("num_heads") or 1
+        index = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
+        self.store(self._take_column(loaded_weight, size, index), shard_id)
 
     def release(self) -> None:
         self.shards.clear()
@@ -102,12 +146,7 @@ class EXL3LinearMethod(LinearMethodBase):
 
         tp_size = getattr(layer, "tp_size", 1)
         if tp_size > 1:
-            raise NotImplementedError(
-                "vllm-exl3-plugin does not support tensor parallelism yet "
-                "(Phase 2). EXL3's Hadamard transform is block-diagonal in "
-                f"blocks of {format.HAD_BLOCK}, so shards are only exact on "
-                "128-channel boundaries; see format.check_tp_split."
-            )
+            self._validate_tp(layer, input_size_per_partition, output_partition_sizes)
 
         weight_loader = extra_weight_attrs.pop("weight_loader", None)
         assert weight_loader is not None
@@ -119,7 +158,12 @@ class EXL3LinearMethod(LinearMethodBase):
 
         for name in self.quant_config.stored_tensor_names():
             param = EXL3Parameter(
-                num_shards=num_shards, device=device, weight_loader=weight_loader
+                num_shards=num_shards,
+                device=device,
+                weight_loader=weight_loader,
+                role=tp.role_of(name),
+                column_shard_size=output_partition_sizes[0],
+                row_shard_size=input_size_per_partition,
             )
             set_weight_attrs(param, extra_weight_attrs)
             layer.register_parameter(name, param)
@@ -127,6 +171,40 @@ class EXL3LinearMethod(LinearMethodBase):
         layer.exl3_input_size = input_size_per_partition
         layer.exl3_output_sizes = list(output_partition_sizes)
         layer.exl3_params_dtype = params_dtype
+
+    @staticmethod
+    def _validate_tp(layer, input_size_per_partition, output_partition_sizes) -> None:
+        """Refuse a split that would cut a Hadamard block, and say so loudly.
+
+        Only the dimension actually being split is constrained: a row-parallel
+        layer splits its input, everything else splits its output. The other
+        dimension can be any width EXL3 stored, including one that is not a
+        multiple of 128 (exllamav3 pads storage, the model dim need not).
+        """
+        from vllm.model_executor.layers.linear import RowParallelLinear
+
+        tp_size = layer.tp_size
+        if isinstance(layer, RowParallelLinear):
+            format.check_tp_split(
+                input_size_per_partition * tp_size, tp_size, "input dimension"
+            )
+        else:
+            for index, out_size in enumerate(output_partition_sizes):
+                format.check_tp_split(
+                    out_size * tp_size, tp_size, f"output shard {index}"
+                )
+
+        global _TP_WARNED
+        if not _TP_WARNED:
+            _TP_WARNED = True
+            logger.warning(
+                "vllm-exl3-plugin tensor parallelism has NOT been validated on "
+                "multi-GPU hardware. The sharding arithmetic is proven against "
+                "unsharded execution in tests/test_tp.py, but vLLM's loader at "
+                "TP>1, the collectives, and exllamav3's autotune cache under "
+                "several worker processes are all unexercised. Treat TP>1 "
+                "results as suspect until checked against TP=1."
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         names = self.quant_config.stored_tensor_names()

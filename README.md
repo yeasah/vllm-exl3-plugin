@@ -12,9 +12,12 @@ interfaces — it does not build kernels.
 **Status: Phase 1 complete and verified.** Weights stay quantized and the fused
 exllamav3 kernels do the multiply, under torch.compile and CUDA graphs. On
 Llama-3.2-1B @3bpw that is 2.35 GiB -> 0.86 GiB with decode 22% *faster* than
-the dense path; gemma-4-12B at 3bpw runs in 6.32 GiB on a 16 GB card. See
-[PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
-groundwork, and
+the dense path; gemma-4-12B at 3bpw runs in 6.32 GiB on a 16 GB card.
+
+Phase 2 (tensor parallelism) is **partial**: the sharding is implemented and its
+arithmetic proven, but it has never run on more than one GPU — see
+[PHASE2.md](PHASE2.md). See [PHASE1.md](PHASE1.md) for benchmarks,
+[PHASE0.md](PHASE0.md) for the format groundwork, and
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
 research and the phased plan.
 
@@ -29,6 +32,7 @@ research and the phased plan.
 
     vllm_exl3_plugin/format.py     on-disk format arithmetic (no torch)
     vllm_exl3_plugin/ops.py        wrappers over exllamav3_ext
+    vllm_exl3_plugin/tp.py         tensor-parallel slicing rules
     vllm_exl3_plugin/quantization/ EXL3Config + EXL3LinearMethod
     deps/exllamav3                 submodule, reference checkout
     tests/                         runnable without a GPU
@@ -58,7 +62,8 @@ produces garbage without it. Drive models through their chat template
 - CUDA, compute capability 8.0+ (Ampere). No ROCm — exllamav3 has none.
 - float16 or bfloat16 activations. The kernels are fp16; `exl3_mm` casts at the
   kernel boundary, so bf16 models keep a bf16 residual stream.
-- TP=1 for now (Phase 2).
+- TP=1. Sharding for TP>1 exists but is unvalidated on multi-GPU hardware
+  and warns at startup; see [PHASE2.md](PHASE2.md).
 
 ## Environment variables
 

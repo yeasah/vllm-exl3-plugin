@@ -55,9 +55,12 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
 
         if getattr(layer, "tp_size", 1) > 1:
             raise NotImplementedError(
-                "vllm-exl3-plugin does not support tensor parallelism yet "
-                "(Phase 2); a quantized lm_head would need vocab-dimension "
-                f"shards on {format.HAD_BLOCK}-channel boundaries."
+                "A quantized lm_head cannot be tensor-parallel yet. Linear "
+                "layers shard (see tp.py), but the head has to combine a "
+                f"vocab-dimension split on {format.HAD_BLOCK}-channel "
+                "boundaries with vLLM's own vocab padding and the trim in "
+                "apply(), and that interaction is unverified. Models with "
+                "tied embeddings are unaffected -- vLLM skips lm_head there."
             )
         # The layer's own weight_loader cannot drive EXL3's layout; see module
         # docstring. Deliberately dropped rather than wrapped.

@@ -129,6 +129,19 @@ def check_tp_split(dim_size: int, tp_size: int, what: str) -> None:
         )
 
 
+def shard_bounds(
+    dim_size: int, tp_rank: int, tp_size: int, what: str = "dimension"
+) -> tuple[int, int]:
+    """Half-open [first, last) of `dim_size` belonging to `tp_rank`.
+
+    Validates the split first, so an unsafe tensor-parallel degree fails here
+    rather than producing quietly wrong numbers.
+    """
+    check_tp_split(dim_size, tp_size, what)
+    per_rank = dim_size // tp_size
+    return tp_rank * per_rank, (tp_rank + 1) * per_rank
+
+
 def module_key_for_tensor(name: str) -> str | None:
     """Map a checkpoint tensor name to its owning module key, or None.
 
