@@ -64,6 +64,7 @@ class EXL3Config(QuantizationConfig):
         self.out_scales = out_scales
         # Populated by maybe_update_config when quantization_config.json exists.
         self.tensor_storage: dict[str, Any] | None = None
+        self._ancestors: set[str] | None = None
         # Also from maybe_update_config, which is the only hook that sees
         # hf_config. None means "not yet known".
         self.tie_word_embeddings: bool | None = None
@@ -196,6 +197,7 @@ class EXL3Config(QuantizationConfig):
             extra = None
         if extra:
             self.tensor_storage = extra.get("tensor_storage")
+            self._ancestors = None
             self.codebook = extra.get("codebook", self.codebook)
         else:
             # The fallback is "assume every linear is quantized", which holds
@@ -250,16 +252,38 @@ class EXL3Config(QuantizationConfig):
         """
         if self.tensor_storage is not None:
             self.tensor_storage = hf_to_vllm_mapper.apply_dict(self.tensor_storage)
+            self._ancestors = None
+
+    def _quantized_ancestors(self) -> set[str]:
+        """Every prefix that has at least one EXL3 module beneath it.
+
+        A routed-experts module is named `...mlp.experts` while the checkpoint
+        only ever mentions `...mlp.experts.{id}.gate_proj`, so an exact lookup
+        finds nothing and the layer looks unquantized. Precomputed once because
+        `tensor_storage` runs to ~30k entries on a 256-expert model.
+        """
+        if self._ancestors is None:
+            ancestors: set[str] = set()
+            for key, entry in (self.tensor_storage or {}).items():
+                if entry.get("quant_format") != "exl3":
+                    continue
+                parts = key.split(".")
+                for i in range(1, len(parts)):
+                    ancestors.add(".".join(parts[:i]))
+            self._ancestors = ancestors
+        return self._ancestors
 
     def is_quantized(self, prefix: str) -> bool:
         """Whether the module at `prefix` has EXL3 storage in the checkpoint."""
         if self.tensor_storage is None:
             return True
         candidates = self._unfuse(prefix)
-        return any(
+        if any(
             self.tensor_storage.get(key, {}).get("quant_format") == "exl3"
             for key in candidates
-        )
+        ):
+            return True
+        return any(key in self._quantized_ancestors() for key in candidates)
 
     def _unfuse(self, prefix: str) -> list[str]:
         """Expand a vLLM merged-module prefix back to its checkpoint keys.
@@ -297,5 +321,13 @@ class EXL3Config(QuantizationConfig):
             # EXL3 never quantizes the input embedding: `embed_tokens.weight`
             # is stored dense in every checkpoint inspected.
             return None
-        # MoE layers fall through to vLLM's defaults for now (Phase 3).
+
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+        if isinstance(layer, RoutedExperts):
+            from .fused_moe import EXL3MoEMethod
+
+            if not self.is_quantized(prefix):
+                return None
+            return EXL3MoEMethod(self, layer.moe_config)
         return None

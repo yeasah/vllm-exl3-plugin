@@ -300,6 +300,12 @@ def _register_ops() -> None:
         fake_impl=_exl3_mm_fake,
         target_lib=_EXL3_LIB,
     )
+    direct_register_custom_op(
+        op_name="exl3_moe_mm",
+        op_func=_exl3_moe_mm,
+        fake_impl=_exl3_moe_mm_fake,
+        target_lib=_EXL3_LIB,
+    )
 
 
 def exl3_mm(
@@ -312,6 +318,129 @@ def exl3_mm(
 ) -> torch.Tensor:
     """x @ dequant(trellis, suh, svh), without ever materializing the weight."""
     return torch.ops.vllm_exl3.exl3_mm(x, trellis, suh, svh, mcg, mul1)
+
+
+
+
+# ---------------------------------------------------------------------------
+# MoE: exl3_mgemm behind a second custom op
+# ---------------------------------------------------------------------------
+#
+# `exl3_mgemm` is built for exactly this shape of problem. From its own docs:
+#
+#   B, suh and svh are int64 tensors of *device addresses*, one per quantized
+#   matrix, rather than the matrix data. A is contiguous fp16 [a_batches, m, k]
+#   and C is [c_batches, m, n]. Slot j selects matrix q = indices[j]. With
+#   `weights` supplied, each result is scaled by weights[j] and all active
+#   slots are summed into C[0] -- a fused weighted MoE reduction.
+#
+# That maps onto vLLM's `apply(layer, x, topk_weights, topk_ids, ...)` almost
+# directly: topk_ids becomes `indices`, topk_weights becomes `weights`.
+#
+# Unlike merged QKV, this kernel is usable here because every expert in a layer
+# shares one bit width -- verified across all 121,212 tensors of Laguna-XS and
+# 47,652 of gemma-4-26B, and re-checked at load time.
+#
+# Note the `mcg`/`mul1` arguments: `exl3_mgemm` declares them `uint32_t`
+# multipliers but forwards them into `exl3_mgemm_gr`, which takes `bool`. The
+# implicit conversion makes any nonzero value `true`, so they are booleans in
+# practice, exactly as for `exl3_gemm`.
+
+
+def _exl3_moe_mm(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_trellis: torch.Tensor,
+    gate_suh: torch.Tensor,
+    gate_svh: torch.Tensor,
+    up_trellis: torch.Tensor,
+    up_suh: torch.Tensor,
+    up_svh: torch.Tensor,
+    down_trellis: torch.Tensor,
+    down_suh: torch.Tensor,
+    down_svh: torch.Tensor,
+    gate_bits: int,
+    down_bits: int,
+    intermediate: int,
+    num_experts: int,
+    mcg: bool,
+    mul1: bool,
+) -> torch.Tensor:
+    e = ext()
+    out_dtype = x.dtype
+    num_tokens, hidden = x.shape
+    top_k = topk_ids.shape[1]
+    bszm = num_tokens * top_k
+
+    if num_tokens == 0:
+        return torch.empty((0, hidden), dtype=out_dtype, device=x.device)
+
+    xh = x if x.dtype == torch.half else x.to(torch.half)
+    # Slot j must hold the activations for (token j // top_k, expert
+    # indices[j]), so each token's row is repeated top_k times. That ordering
+    # matches topk_ids.reshape(1, -1) exactly.
+    gathered = xh.repeat_interleave(top_k, dim=0).unsqueeze(1).contiguous()
+    indices = topk_ids.reshape(1, -1).to(torch.long).contiguous()
+    weights = topk_weights.reshape(1, -1).to(torch.half).contiguous()
+
+    # A_had must not alias A: the kernel stages the rotated input there, and
+    # the autotuner relaunches the kernel on first use.
+    a_had = torch.empty_like(gathered)
+    interm_g = torch.empty((bszm, 1, intermediate), dtype=torch.half, device=x.device)
+    interm_u = torch.empty_like(interm_g)
+
+    # min_index < 0 disables expert-range filtering. That filtering exists for
+    # expert-parallel shards, where a rank owns a contiguous slice of experts,
+    # and the kernel refuses to combine it with the multi-token weighted
+    # reduction we rely on. With no expert parallelism there is nothing to
+    # filter, so it stays off.
+    lo, hi = -1, num_experts - 1
+    e.exl3_mgemm(gathered, gate_trellis, interm_g, gate_suh, a_had, gate_svh,
+                 indices, None, gate_bits, -1, mcg, mul1, lo, hi, 0, num_tokens)
+    e.exl3_mgemm(gathered, up_trellis, interm_u, up_suh, a_had, up_svh,
+                 indices, None, gate_bits, -1, mcg, mul1, lo, hi, 0, num_tokens)
+
+    interm_a = torch.nn.functional.silu(interm_g) * interm_u
+
+    # interm_g is dead once interm_a exists, so it doubles as the down
+    # projection's scratch -- the same reuse exllamav3 makes.
+    out = torch.empty((bszm, 1, hidden), dtype=torch.half, device=x.device)
+    e.exl3_mgemm(interm_a, down_trellis, out, down_suh, interm_g, down_svh,
+                 indices, weights, down_bits, -1, mcg, mul1, lo, hi, 0, num_tokens)
+
+    # With `weights` given, the kernel reduces the top_k partials per token;
+    # rows 0..num_tokens-1 hold the results.
+    y = out[:num_tokens].squeeze(1)
+    return y.to(out_dtype) if out_dtype != torch.half else y
+
+
+def _exl3_moe_mm_fake(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_trellis: torch.Tensor,
+    gate_suh: torch.Tensor,
+    gate_svh: torch.Tensor,
+    up_trellis: torch.Tensor,
+    up_suh: torch.Tensor,
+    up_svh: torch.Tensor,
+    down_trellis: torch.Tensor,
+    down_suh: torch.Tensor,
+    down_svh: torch.Tensor,
+    gate_bits: int,
+    down_bits: int,
+    intermediate: int,
+    num_experts: int,
+    mcg: bool,
+    mul1: bool,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+def exl3_moe_mm(*args) -> torch.Tensor:
+    """Routed-expert MLP over EXL3 weights, without materializing any of them."""
+    return torch.ops.vllm_exl3.exl3_moe_mm(*args)
 
 
 # Registered at import rather than on first use: registering a custom op while
