@@ -50,6 +50,12 @@ class EXL3Parameter(BasevLLMParameter):
     points are the whole weight_loader_v2 protocol; each one just stores.
     """
 
+    # An EXL3 tensor has no single output dimension in consistent units --
+    # trellis tile-granular on dim 1, svh element-granular on dim 0, suh not
+    # splittable at all -- so vLLM cannot narrow one for us. Declared rather
+    # than inherited so the intent survives a change to the base default.
+    handles_fused_shards: bool = True
+
     def __new__(cls, **kwargs):
         return super().__new__(cls, data=None)
 

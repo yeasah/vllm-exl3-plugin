@@ -97,44 +97,42 @@ element-granular on dim 0, and `suh` must not be split at all — it is the shar
 vLLM does have the right escape hatch — a branch that hands the whole tensor to
 `param.load_merged_column_weight` and lets it split itself — but it was gated on
 `type(param) in (RowvLLMParameter, BasevLLMParameter)`, an exact type check that
-excludes subclasses. **`patches/vllm-fused-param-capability-check.patch`**
-changes it to `not hasattr(param, "output_dim")`, which is what the branch
-actually means.
+excludes subclasses.
 
-`isinstance` would have been wrong: `ModelWeightParameter`, `PackedvLLMParameter`
-and the rest all inherit from `BasevLLMParameter` and *do* have `output_dim`, so
-an isinstance check would have diverted AWQ/GPTQ/compressed-tensors into the
-whole-tensor branch.
+**`patches/vllm-fused-param-capability-check.patch`** replaces it with a declared
+capability, `BasevLLMParameter.handles_fused_shards`. Two earlier attempts were
+worse and are worth recording:
 
-Enumerating the class tree programmatically — rather than by hand, which is how
-this was got wrong the first time — **four** in-tree classes lack `output_dim`,
-and the change affects exactly one of them:
+- `isinstance` is a **regression**: `ModelWeightParameter`, `PackedvLLMParameter`
+  and the rest inherit from `BasevLLMParameter` and *do* define `output_dim`, so
+  it would divert AWQ/GPTQ/compressed-tensors into the whole-tensor branch.
+- `not hasattr(param, "output_dim")` is closer, but `output_dim` is a *proxy* for
+  the property the branch cares about, and the logical connection is weak enough
+  that a future parameter class could satisfy the test by accident. It also
+  changes behaviour for `SharedWeightParameter`, which lacks `output_dim` yet
+  cannot handle a fused load either.
 
-| class | before | after |
+The declared flag says exactly what the branch needs. Three declarations
+reproduce current behaviour for **every** in-tree class:
+
+| class | `handles_fused_shards` | why |
 |---|---|---|
-| `BasevLLMParameter` | takes branch | unchanged |
-| `RowvLLMParameter` | takes branch | unchanged |
-| `PerTensorScaleParameter` | never reaches the test | unchanged |
-| `SharedWeightParameter` | falls through, raises | takes branch, raises |
+| `BasevLLMParameter` | `True` (default) | no output dimension to narrow along |
+| `_ColumnvLLMParameter` | `False` | defines `output_dim`; the caller narrows |
+| `SharedWeightParameter` | `False` | supports neither route; keeps today's behaviour rather than trading one exception for another |
 
-`PerTensorScaleParameter` is claimed by an `isinstance` branch above ours, at
-both call sites, so it never arrives.
+Everything else inherits. `ModelWeightParameter` and friends resolve to `False`
+through multiple inheritance because `_ColumnvLLMParameter` precedes
+`RowvLLMParameter` in the MRO — checked, not assumed. `PerTensorScaleParameter`
+inherits `True` but is claimed by an `isinstance` branch above ours at both call
+sites, so it never arrives.
 
-`SharedWeightParameter` is the one that changes, and it **raises on both sides**.
-Before: it falls through to `_load_fused_module_from_checkpoint`, which reads
-`param.output_dim` it does not have — `AttributeError`. After: its own
-`load_merged_column_weight` does `kwargs.pop("shard_id")` and asserts inside
-`_shard_id_as_int`, because a fused shard id is `None` or a tuple rather than
-`"q"`/`"k"`/`"v"` — `AssertionError`. No working path is lost; the exception
-changes, and now originates in the parameter rather than in `linear.py`. It is
-additionally unreachable in current use: `SharedWeightParameter` is constructed
-only by compressed-tensors' `HadamardTransform`, which refuses tensor
-parallelism in its constructor.
+The branch also forwards `loaded_shard_id`, which is load-bearing: without it the
+parameter has the whole tensor but no idea which of the layer's output shards it
+covers — a tuple such as `(0, 1, 2)`, or `None` for all of them.
 
-If a reviewer wants strictly zero behaviour change, the alternative is to keep
-the old tuple and add a disjunct for parameters that opt in
-(`... or getattr(param, "handles_fused_shards", False)`). That is additive and
-risk-free, but leaves the `type()` test in place.
+`EXL3Parameter` declares the flag explicitly rather than inheriting it, so the
+intent survives a change to the base default.
 
 `EXL3Parameter._load_fused` then splits the tensor across the shards it covers,
 which is the same operation as a tensor-parallel column split and carries the
