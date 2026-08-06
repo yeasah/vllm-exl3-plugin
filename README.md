@@ -19,6 +19,10 @@ and with CUDA graphs, reproducing TP=1 token for token — including a
 vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
 unexercised.
 
+Phase 3 (MoE) works on gemma-4-26B-A4B — a 26B mixture-of-experts in 9.46 GiB —
+via exllamav3's pointer-table kernel; one other MoE model is still misbehaving,
+see [PHASE3.md](PHASE3.md).
+
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
@@ -37,7 +41,7 @@ research and the phased plan.
     vllm_exl3_plugin/format.py     on-disk format arithmetic (no torch)
     vllm_exl3_plugin/ops.py        wrappers over exllamav3_ext
     vllm_exl3_plugin/tp.py         tensor-parallel slicing rules
-    vllm_exl3_plugin/quantization/ EXL3Config + EXL3LinearMethod
+    vllm_exl3_plugin/quantization/ EXL3Config, linear, lm_head, fused_moe
     deps/exllamav3                 submodule, reference checkout
     tests/                         runnable without a GPU
 

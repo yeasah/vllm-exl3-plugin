@@ -202,6 +202,16 @@ class EXL3MoEMethod(FusedMoEMethodBase):
 
     # ----------------------------------------------------------------- apply
 
+    @staticmethod
+    def activation_name(layer: torch.nn.Module) -> str:
+        """vLLM's activation for this MoE, as a plain string.
+
+        Not always silu: gemma-4 uses `gelu_tanh`. Getting this wrong produces
+        a plausible-looking but wrong model rather than an error.
+        """
+        act = getattr(layer, "activation", "silu")
+        return getattr(act, "value", act)
+
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         # Only used by vLLM's modular kernel stack, which this method does not
         # route through -- `apply` calls exl3_mgemm directly.
@@ -246,5 +256,6 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             layer.exl3_num_experts,
             self.mcg,
             self.mul1,
+            self.activation_name(layer),
         )
         return out.reshape(orig_shape)

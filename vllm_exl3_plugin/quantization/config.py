@@ -273,6 +273,24 @@ class EXL3Config(QuantizationConfig):
             self._ancestors = ancestors
         return self._ancestors
 
+    @staticmethod
+    def _drop_one_component(prefix: str):
+        """Variants of `prefix` with any one interior component removed.
+
+        Some models insert a wrapper module the checkpoint has no name for.
+        Gemma 4 is the case in point: its MoE block lives at
+        `...layers.N.moe.experts`, but the checkpoint says
+        `...layers.N.experts.{id}.gate_proj` and the `.moe.` is spliced in by
+        the model's own `_weight_iterator` -- which `apply_vllm_mapper` never
+        sees, because it is not part of `hf_to_vllm_mapper`.
+
+        Only used as a fallback, and only accepted when the result names a
+        known quantized ancestor, so a spurious match is not possible.
+        """
+        parts = prefix.split(".")
+        for i in range(len(parts) - 1):
+            yield ".".join(parts[:i] + parts[i + 1 :])
+
     def is_quantized(self, prefix: str) -> bool:
         """Whether the module at `prefix` has EXL3 storage in the checkpoint."""
         if self.tensor_storage is None:
@@ -283,7 +301,14 @@ class EXL3Config(QuantizationConfig):
             for key in candidates
         ):
             return True
-        return any(key in self._quantized_ancestors() for key in candidates)
+        ancestors = self._quantized_ancestors()
+        if any(key in ancestors for key in candidates):
+            return True
+        return any(
+            variant in ancestors
+            for key in candidates
+            for variant in self._drop_one_component(key)
+        )
 
     def _unfuse(self, prefix: str) -> list[str]:
         """Expand a vLLM merged-module prefix back to its checkpoint keys.

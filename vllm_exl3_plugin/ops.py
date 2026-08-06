@@ -366,6 +366,7 @@ def _exl3_moe_mm(
     num_experts: int,
     mcg: bool,
     mul1: bool,
+    activation: str,
 ) -> torch.Tensor:
     e = ext()
     out_dtype = x.dtype
@@ -401,7 +402,7 @@ def _exl3_moe_mm(
     e.exl3_mgemm(gathered, up_trellis, interm_u, up_suh, a_had, up_svh,
                  indices, None, gate_bits, -1, mcg, mul1, lo, hi, 0, num_tokens)
 
-    interm_a = torch.nn.functional.silu(interm_g) * interm_u
+    interm_a = _gated_activation(activation, interm_g, interm_u)
 
     # interm_g is dead once interm_a exists, so it doubles as the down
     # projection's scratch -- the same reuse exllamav3 makes.
@@ -413,6 +414,27 @@ def _exl3_moe_mm(
     # rows 0..num_tokens-1 hold the results.
     y = out[:num_tokens].squeeze(1)
     return y.to(out_dtype) if out_dtype != torch.half else y
+
+
+#: `silu_and_mul` and friends compute `act(x[:d]) * x[d:]` -- the activation
+#: applies to the *gate* half. vLLM's own comment says "gate x activation(up)",
+#: which reads the other way round; `SiluAndMul`'s docstring and the kernels are
+#: the authority.
+_GATED_ACTIVATIONS = {
+    "silu": lambda g: torch.nn.functional.silu(g),
+    "gelu": lambda g: torch.nn.functional.gelu(g),
+    "gelu_tanh": lambda g: torch.nn.functional.gelu(g, approximate="tanh"),
+}
+
+
+def _gated_activation(name: str, gate: torch.Tensor, up: torch.Tensor):
+    fn = _GATED_ACTIVATIONS.get(name)
+    if fn is None:
+        raise NotImplementedError(
+            f"EXL3 MoE does not implement the {name!r} activation; known: "
+            f"{sorted(_GATED_ACTIVATIONS)}"
+        )
+    return fn(gate) * up
 
 
 def _exl3_moe_mm_fake(
@@ -434,6 +456,7 @@ def _exl3_moe_mm_fake(
     num_experts: int,
     mcg: bool,
     mul1: bool,
+    activation: str,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
