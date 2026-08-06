@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Kill leftover GPU processes without killing the shell that runs this.
+#
+# Two traps make the obvious command wrong, and both have bitten repeatedly:
+#
+#   pkill -f vllm_gen       # matches its OWN shell, whose command line
+#                           # contains "vllm_gen" -- kills the caller
+#   pkill -x VLLM::EngineCore
+#                           # never matches: -x compares against comm, which
+#                           # the kernel truncates to 15 chars ("VLLM::EngineCor")
+#
+# So this walks the ancestor chain and refuses to signal anything in it, and
+# matches against the full argv rather than comm. By default it targets whatever
+# actually holds GPU memory, which is the reliable way to find an orphaned
+# EngineCore no matter what it is called.
+#
+# Usage:
+#   tools/reap                 kill every process holding GPU memory
+#   tools/reap PATTERN...      also kill processes whose argv matches PATTERN
+#   tools/reap -d              SIGABRT first, for a stack dump, then kill
+#   tools/reap -n              dry run: list what would be killed
+#
+# -d only produces a Python traceback if the target was started with
+# PYTHONFAULTHANDLER=1. For hang debugging, start runs that way.
+
+set -uo pipefail
+
+dump=0
+dry=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d) dump=1; shift ;;
+        -n) dry=1; shift ;;
+        -h|--help) sed -n '2,27p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) break ;;
+    esac
+done
+
+# Every ancestor of this script, so we never signal the shell that invoked us
+# (or its ssh/agent session).
+protected=" $$ "
+p=$$
+while [ "$p" -gt 1 ]; do
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    [ -z "$p" ] && break
+    protected="$protected$p "
+done
+
+is_protected() { [[ "$protected" == *" $1 "* ]]; }
+
+targets=""
+add() {
+    local pid="$1"
+    [ -z "$pid" ] && return
+    is_protected "$pid" && return
+    [[ " $targets " == *" $pid "* ]] && return
+    # Kernel threads show up as "[name]" and cannot be signalled anyway; a
+    # pattern like "reap" otherwise matches [oom_reaper].
+    case "$(ps -o args= -p "$pid" 2>/dev/null)" in "["*) return ;; esac
+    targets="$targets $pid"
+}
+
+# Processes with memory on the GPU, whatever they are called.
+while read -r pid; do
+    add "$pid"
+done < <(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)
+
+# Anything matching a caller-supplied argv pattern. `ps` output is read into a
+# variable first so the pattern is matched against other processes' argv, never
+# against this pipeline's own.
+if [ $# -gt 0 ]; then
+    snapshot=$(ps -eo pid=,args=)
+    for pat in "$@"; do
+        while read -r pid _rest; do add "$pid"; done \
+            < <(printf '%s\n' "$snapshot" | grep -E -- "$pat")
+    done
+fi
+
+targets=$(echo $targets)
+if [ -z "$targets" ]; then
+    echo "reap: nothing to kill"
+    exit 0
+fi
+
+for pid in $targets; do
+    printf 'reap: %s  %s\n' "$pid" "$(ps -o args= -p "$pid" 2>/dev/null | cut -c1-90)"
+done
+[ $dry -eq 1 ] && exit 0
+
+if [ $dump -eq 1 ]; then
+    # SIGABRT makes a faulthandler-enabled process print every thread's stack to
+    # its stderr, which is where the run's log is. Give it a moment to write.
+    for pid in $targets; do kill -ABRT "$pid" 2>/dev/null; done
+    sleep 3
+fi
+
+for pid in $targets; do kill -9 "$pid" 2>/dev/null; done
+
+# GPU memory is released asynchronously; wait for it rather than reporting a
+# stale figure, since the next run's memory profiling will fail if it is early.
+for _ in $(seq 1 20); do
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
+    [ "$used" -lt 200 ] && break
+    sleep 1
+done
+echo "reap: killed $(echo $targets | wc -w); GPU now ${used} MiB used"
