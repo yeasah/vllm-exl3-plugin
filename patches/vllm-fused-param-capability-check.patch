@@ -1,36 +1,48 @@
 diff --git a/vllm/model_executor/layers/linear.py b/vllm/model_executor/layers/linear.py
-index e4662148f..365225a3b 100644
+index e4662148f..a40f709b3 100644
 --- a/vllm/model_executor/layers/linear.py
 +++ b/vllm/model_executor/layers/linear.py
-@@ -953,8 +953,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
+@@ -953,8 +953,29 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                              loaded_weight=loaded_weight, shard_id=idx
                          )
                  return
 -            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
 -                param.load_merged_column_weight(loaded_weight=loaded_weight)
 +            elif not hasattr(param, "output_dim"):
-+                # No output_dim means the parameter cannot be narrowed by
++                # A parameter with no output_dim cannot be narrowed by
 +                # _load_fused_module_from_checkpoint below, so hand it the whole
-+                # tensor and let it split itself. Was `type(param) in
-+                # (RowvLLMParameter, BasevLLMParameter)`, which excluded
-+                # subclasses; hasattr covers exactly the same in-tree classes
-+                # while admitting out-of-tree parameters with the same shape of
-+                # problem (e.g. quantized formats whose sub-tensors have
-+                # different output granularities).
++                # tensor and let it split itself.
++                #
++                # Previously `type(param) in (RowvLLMParameter,
++                # BasevLLMParameter)`. That excluded subclasses, so an
++                # out-of-tree parameter with the same shape of problem fell
++                # through to the narrowing path and raised AttributeError on
++                # output_dim. hasattr states the actual requirement and selects
++                # exactly the same in-tree classes: every other parameter type
++                # here defines output_dim, and PerTensorScaleParameter (which
++                # does not) is already handled by the branch above.
++                #
++                # loaded_shard_id is forwarded because splitting is impossible
++                # without it: it says *which* of this layer's output shards the
++                # tensor covers -- a tuple such as (0, 1, 2) when one checkpoint
++                # tensor holds several, or None when it holds all of them. The
++                # existing recipients take **kwargs and ignore it, so this is
++                # backward compatible.
 +                param.load_merged_column_weight(
 +                    loaded_weight=loaded_weight, shard_id=loaded_shard_id
 +                )
                  return
              output_sizes = (
                  [self.output_sizes[idx] for idx in loaded_shard_id]
-@@ -1192,8 +1202,11 @@ class QKVParallelLinear(ColumnParallelLinear):
+@@ -1192,8 +1213,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                  for idx in range(param.data.shape[0]):
                      param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=idx)
                  return
 -            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
 -                param.load_qkv_weight(loaded_weight=loaded_weight)
 +            elif not hasattr(param, "output_dim"):
-+                # See the note in MergedColumnParallelLinear.weight_loader_v2.
++                # See the note in MergedColumnParallelLinear.weight_loader_v2
++                # for both the hasattr test and the forwarded shard id.
 +                param.load_qkv_weight(
 +                    loaded_weight=loaded_weight, shard_id=loaded_shard_id
 +                )
