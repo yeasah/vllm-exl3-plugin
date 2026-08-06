@@ -197,10 +197,25 @@ and **not shared experts**.
 
 ## An intermittent hang, still open
 
-Laguna generates correctly but hangs on roughly half of runs — GPU pinned at
-100%, no forward progress, no output. Runs with identical code, identical
-autotune cache and identical inputs differ, so it is a race rather than a bad
-cached kernel configuration; a fresh cache instead hangs earlier, during the
-profile run. This is very likely the same failure already recorded for
-Qwen3.5-35B-A3B above, which suggests it belongs to the `exl3_mgemm` path or its
-cooperative launches rather than to any one model. Not yet diagnosed.
+Laguna generates correctly but usually hangs — GPU pinned at 100%, no forward
+progress, no output — and the hang is **not** caused by the divisor fix:
+
+| code | runs | outcome |
+|---|---|---|
+| with the fix | 6 | 1 correct answer, 5 hangs |
+| pre-fix (`HEAD~1`, wrong output) | 3 | 3 hangs |
+| gemma-4-26B, either way | many | no hang observed |
+
+Runs with identical code, identical autotune cache and identical inputs differ,
+so it is a race rather than a bad cached kernel configuration; a fresh cache
+instead hangs earlier, during the profile run. It is very likely the same
+failure already recorded for Qwen3.5-35B-A3B above, which points at the
+`exl3_mgemm` path — plausibly its cooperative launches, where one block failing
+to make progress leaves the rest spinning at a grid-wide barrier forever —
+rather than at any one model. gemma-4-26B not hanging is the useful contrast:
+39 MoE layers x 256 experts against gemma's 26 x 128 means Laguna issues far
+more `exl3_mgemm` launches per forward.
+
+Not yet diagnosed. The next step is a stack trace from a hung process
+(`PYTHONFAULTHANDLER=1` plus `SIGABRT`) to confirm it is inside the kernel
+launch rather than in vLLM's scheduler.
