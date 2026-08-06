@@ -1,8 +1,8 @@
 diff --git a/vllm/model_executor/layers/linear.py b/vllm/model_executor/layers/linear.py
-index e4662148f..a40f709b3 100644
+index e4662148f..0557434c0 100644
 --- a/vllm/model_executor/layers/linear.py
 +++ b/vllm/model_executor/layers/linear.py
-@@ -953,8 +953,29 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
+@@ -953,8 +953,46 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                              loaded_weight=loaded_weight, shard_id=idx
                          )
                  return
@@ -17,10 +17,27 @@ index e4662148f..a40f709b3 100644
 +                # BasevLLMParameter)`. That excluded subclasses, so an
 +                # out-of-tree parameter with the same shape of problem fell
 +                # through to the narrowing path and raised AttributeError on
-+                # output_dim. hasattr states the actual requirement and selects
-+                # exactly the same in-tree classes: every other parameter type
-+                # here defines output_dim, and PerTensorScaleParameter (which
-+                # does not) is already handled by the branch above.
++                # output_dim. hasattr states the actual requirement.
++                #
++                # Four in-tree classes lack output_dim, and this changes the
++                # behaviour of exactly one of them:
++                #   BasevLLMParameter, RowvLLMParameter -- named in the old
++                #     test, so unchanged.
++                #   PerTensorScaleParameter -- never reaches this test; the
++                #     isinstance branch above claims it first, at both call
++                #     sites.
++                #   SharedWeightParameter -- reaches it, and raises either way.
++                #     Before: falls through and raises AttributeError on
++                #     output_dim inside _load_fused_module_from_checkpoint.
++                #     After: its own load_merged_column_weight does
++                #     kwargs.pop("shard_id") and asserts in _shard_id_as_int,
++                #     because a fused id is None or a tuple, not "q"/"k"/"v".
++                #     So no working path is lost; only the exception changes,
++                #     and it now comes from the parameter rather than from
++                #     linear.py internals. It is also not reachable in current
++                #     use: SharedWeightParameter is created only by
++                #     compressed-tensors HadamardTransform, which refuses
++                #     tensor parallelism outright.
 +                #
 +                # loaded_shard_id is forwarded because splitting is impossible
 +                # without it: it says *which* of this layer's output shards the
@@ -34,7 +51,7 @@ index e4662148f..a40f709b3 100644
                  return
              output_sizes = (
                  [self.output_sizes[idx] for idx in loaded_shard_id]
-@@ -1192,8 +1213,12 @@ class QKVParallelLinear(ColumnParallelLinear):
+@@ -1192,8 +1230,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                  for idx in range(param.data.shape[0]):
                      param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=idx)
                  return

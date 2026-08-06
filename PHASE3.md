@@ -104,8 +104,37 @@ actually means.
 `isinstance` would have been wrong: `ModelWeightParameter`, `PackedvLLMParameter`
 and the rest all inherit from `BasevLLMParameter` and *do* have `output_dim`, so
 an isinstance check would have diverted AWQ/GPTQ/compressed-tensors into the
-whole-tensor branch. Enumerating every in-tree parameter class confirms
-`hasattr(output_dim)` is false for exactly the two that take the branch today.
+whole-tensor branch.
+
+Enumerating the class tree programmatically — rather than by hand, which is how
+this was got wrong the first time — **four** in-tree classes lack `output_dim`,
+and the change affects exactly one of them:
+
+| class | before | after |
+|---|---|---|
+| `BasevLLMParameter` | takes branch | unchanged |
+| `RowvLLMParameter` | takes branch | unchanged |
+| `PerTensorScaleParameter` | never reaches the test | unchanged |
+| `SharedWeightParameter` | falls through, raises | takes branch, raises |
+
+`PerTensorScaleParameter` is claimed by an `isinstance` branch above ours, at
+both call sites, so it never arrives.
+
+`SharedWeightParameter` is the one that changes, and it **raises on both sides**.
+Before: it falls through to `_load_fused_module_from_checkpoint`, which reads
+`param.output_dim` it does not have — `AttributeError`. After: its own
+`load_merged_column_weight` does `kwargs.pop("shard_id")` and asserts inside
+`_shard_id_as_int`, because a fused shard id is `None` or a tuple rather than
+`"q"`/`"k"`/`"v"` — `AssertionError`. No working path is lost; the exception
+changes, and now originates in the parameter rather than in `linear.py`. It is
+additionally unreachable in current use: `SharedWeightParameter` is constructed
+only by compressed-tensors' `HadamardTransform`, which refuses tensor
+parallelism in its constructor.
+
+If a reviewer wants strictly zero behaviour change, the alternative is to keep
+the old tuple and add a disjunct for parameters that opt in
+(`... or getattr(param, "handles_fused_shards", False)`). That is additive and
+risk-free, but leaves the `type()` test in place.
 
 `EXL3Parameter._load_fused` then splits the tensor across the shards it covers,
 which is the same operation as a tensor-parallel column split and carries the
