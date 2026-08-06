@@ -28,9 +28,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 
-from vllm.logger import init_logger
 
 from ..format import EXL3FormatError
+from ..log import init_logger
 
 logger = init_logger(__name__)
 

@@ -130,5 +130,47 @@ class TestTensorNames(unittest.TestCase):
         )
 
 
+class TestIntermDivisor(unittest.TestCase):
+    """Recovering exllamav3's `interm_div` from the stored weights.
+
+    Ratios below are measured `mean|suh_gate| / mean|suh_up|` over real
+    checkpoints: gemma-4-26B-A4B (no divisor) and Laguna-XS-2.1 (128).
+    """
+
+    GEMMA_RATIOS = [0.9731, 0.9951, 0.9943, 0.9365]
+    LAGUNA_RATIOS = [127.584, 127.473, 129.705, 119.655]
+
+    def test_no_divisor_is_recognised(self):
+        for ratio in self.GEMMA_RATIOS:
+            self.assertEqual(format.infer_interm_divisor(ratio), 1.0, ratio)
+
+    def test_laguna_divisor_recovered_exactly(self):
+        # Every per-expert ratio has to land on 128 even at the 119.7 extreme,
+        # because the value is applied as a multiplier on every routed expert.
+        for ratio in self.LAGUNA_RATIOS:
+            self.assertEqual(format.infer_interm_divisor(ratio), 128.0, ratio)
+
+    def test_exact_powers_of_two(self):
+        for k in range(1, 10):
+            self.assertEqual(format.infer_interm_divisor(2.0**k), 2.0**k)
+
+    def test_rejects_non_power_of_two(self):
+        # 3x and 100x are both far enough from a power of two that guessing
+        # would be a silent factor-of-N error in every routed expert.
+        for ratio in (3.0, 100.0, 20.0):
+            with self.assertRaises(format.EXL3FormatError):
+                format.infer_interm_divisor(ratio)
+
+    def test_rejects_up_larger_than_gate(self):
+        # exllamav3 only ever scales the up projection *down*.
+        with self.assertRaises(format.EXL3FormatError):
+            format.infer_interm_divisor(0.5)
+
+    def test_rejects_degenerate_ratios(self):
+        for ratio in (0.0, -1.0, float("inf"), float("nan")):
+            with self.assertRaises(format.EXL3FormatError):
+                format.infer_interm_divisor(ratio)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ K is recoverable from the trellis shape alone.
 
 from __future__ import annotations
 
+import math
+
 # Weights are trellis-coded in 16x16 tiles; the trellis tensor is tile-granular
 # on both dimensions.
 TILE = 16
@@ -127,6 +129,68 @@ def check_tp_split(dim_size: int, tp_size: int, what: str) -> None:
             f"({HAD_BLOCK}). Splitting here would cut a Hadamard block in half "
             f"and silently produce wrong results."
         )
+
+
+#: How far the measured gate/up scale ratio may sit from an exact power of two,
+#: in log2 units. 0.15 is ~11%, which comfortably covers the spread introduced by
+#: per-channel calibration (Laguna's per-expert ratios run 119..130 around a true
+#: 128) while staying far from the next power of two.
+_DIVISOR_LOG2_TOLERANCE = 0.15
+
+
+def infer_interm_divisor(ratio: float) -> float:
+    """Recover the constant folded into a routed-expert up projection.
+
+    exllamav3 scales some architectures' routed `up_proj` down by a fixed
+    `interm_div` and multiplies the routing weights by the same constant to
+    compensate, purely to keep the fp16 intermediate in range (Laguna-XS:
+    `interm_div = 128.0`). For an EXL3 checkpoint the scale is *baked into the
+    stored weights* -- `Linear.load_exl3` ignores its own `weight_scale`, which
+    only ever applies on the fp16 fallback path -- so the compensating factor is
+    the only half of the pair a consumer can see, and it lives in exllamav3's
+    architecture definition rather than anywhere in the checkpoint.
+
+    That makes the constant unrecoverable by reading config.json: the model's
+    `moe_routed_scaling_factor` is the *unscaled* value, correct for the original
+    weights and wrong by exactly `interm_div` for these. It is recoverable from
+    the weights themselves, because the scale lands wholly in the up projection's
+    input scale `suh`, leaving `svh` and the trellis untouched.
+
+    `ratio` is a robust estimate of `mean|suh_gate| / mean|suh_up|` across
+    experts. Per-channel calibration puts a few percent of noise on it, so the
+    result is snapped to the nearest power of two -- exllamav3's constants are
+    powers of two, and snapping recovers the exact value rather than a
+    slightly-off measurement.
+
+    >>> infer_interm_divisor(0.9731)          # gemma-4-26B: no divisor
+    1.0
+    >>> infer_interm_divisor(127.58)          # Laguna-XS
+    128.0
+
+    Raises rather than guessing when the ratio is neither ~1 nor near a power of
+    two, since applying the wrong constant here is a silent factor-of-N error in
+    every routed expert.
+    """
+    if ratio <= 0.0 or not math.isfinite(ratio):
+        raise EXL3FormatError(
+            f"routed-expert gate/up scale ratio is {ratio!r}, which cannot be a "
+            "scale factor; the up projection's suh is probably not loaded"
+        )
+    exponent = math.log2(ratio)
+    nearest = round(exponent)
+    if nearest == 0:
+        return 1.0
+    if nearest < 0 or abs(exponent - nearest) > _DIVISOR_LOG2_TOLERANCE:
+        raise EXL3FormatError(
+            f"routed-expert up projection is scaled by {ratio:.4g} relative to "
+            f"the gate projection, which is neither ~1 nor close to a power of "
+            f"two. exllamav3 folds a power-of-two `interm_div` into these "
+            f"weights and compensates in the routing weights; this plugin "
+            f"recovers it by measurement, and cannot here. Refusing to guess, "
+            f"because the wrong constant is a silent factor-of-N error in every "
+            f"routed expert."
+        )
+    return float(2**nearest)
 
 
 def shard_bounds(

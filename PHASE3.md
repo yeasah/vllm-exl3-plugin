@@ -3,9 +3,12 @@
 Goal from the feasibility report: **MoE via `exl3_moe`/`exl3_mgemm` adapted to
 vLLM's `FusedMoE` interface.**
 
-**Status: working on `gemma-4-26B-A4B-it-exl3`** — a 26B MoE in **9.46 GiB**,
-answering correctly. `Laguna-XS-2.1-exl3` loads and runs but still generates
-degenerate output; see "The Laguna holdout".
+**Status: working on `gemma-4-26B-A4B-it-exl3`** — a 26B MoE in **9.46 GiB** —
+and on `Laguna-XS-2.1-exl3` (256 experts, 2bpw, **8.54 GiB**), both answering
+correctly. Laguna needed a scale factor that lives in exllamav3's architecture
+definition rather than in the checkpoint; see "Laguna: a scale factor the
+checkpoint does not record". It also hits an intermittent hang that Qwen3.5
+appears to share.
 
 ## `exl3_mgemm` is usable here, unlike merged QKV
 
@@ -145,25 +148,59 @@ unresolved problem, and given the model is a hybrid (`conv1d`, `A_log`,
 `dt_bias` — a gated delta net) the hang need not be in our code at all. Not yet
 investigated.
 
-## The Laguna holdout
+## Laguna: a scale factor the checkpoint does not record
 
-`Laguna-XS-2.1-exl3` @2.00bpw loads (8.54 GiB) and runs, but emits only
-whitespace or dashes. Ruled out by measurement:
+`Laguna-XS-2.1-exl3` @2.00bpw loaded (8.54 GiB) and ran, but emitted only
+whitespace and dashes. The routed-expert output was **128× too small**.
 
-- **Not the MoE layer.** Hooking a live `RoutedExperts` and recomputing it from
-  dequantized per-expert weights gives `max_abs_err = 0.0000` over routing
-  weights and the fused reduction.
-- **Not configuration.** 256 experts, silu, `experts_per_tok=8`, no fused shared
-  expert, stored intermediate 512, K=2 — all as the checkpoint says.
-- **Not prompting.** Its tokenizer *does* add BOS (unlike gemma-4-12B), the chat
-  template renders sensibly, and raw-completion and chat prompts degenerate
-  alike.
-- **Not shared experts.** vLLM applies those itself, before `forward_modular`,
-  and returns them separately; ignoring them in `apply()` is correct.
+exllamav3 divides Laguna's routed `up_proj` by a constant `interm_div = 128.0`
+and multiplies the routing weights by the same constant to compensate, purely
+to keep the fp16 intermediate in range. Both halves are needed; we had neither.
 
-What is left is everything around the MoE block: attention, the dense layer 0,
-the quantized untied `lm_head`, or the sigmoid routing. Next step is the
-technique that resolved gemma-4-12B — feed the same token ids to vLLM and to
-exllamav3 and compare hidden states layer by layer to find the first divergence.
-Since the MoE layer is provably exact, the informative outcome is *which* layer
-type diverges.
+The trap is that the two halves live in different places. The **divisor** is
+baked into the stored weights — `Linear.load_exl3` ignores its own
+`weight_scale`, which only ever applies on the fp16 fallback path, so a
+converted checkpoint carries the already-scaled weights. The **compensation** is
+a literal in exllamav3's architecture definition
+(`architecture/laguna.py`), not in `config.json` and not in
+`quantization_config.json`. A consumer reading only the checkpoint sees
+`moe_routed_scaling_factor: 2.5`, which is correct for the *original* weights
+and wrong by exactly 128 for these.
+
+Measured, not assumed — the scale lands wholly in the up projection's input
+scale `suh`, leaving `svh` and the trellis untouched:
+
+| | `mean\|suh_gate\| / mean\|suh_up\|` | dequantized `rms(W_gate)/rms(W_up)` |
+|---|---|---|
+| Laguna routed experts | 119.7 – 129.7 | 128.4 |
+| Laguna **shared** expert (`interm_div=1.0`) | 1.000 | 1.02 |
+| gemma-4-26B routed experts | 0.94 – 1.00 | — |
+
+The shared expert is the control that makes this conclusive: it sits in the same
+layer, was quantized by the same converter, and shows no such offset.
+
+`format.infer_interm_divisor` therefore recovers the constant from the weights
+and snaps it to the nearest power of two, and `EXL3MoEMethod` folds it into the
+routing weights — the same place exllamav3 restores the magnitude, after the
+fp16 down projection. It **raises rather than guessing** when the measured ratio
+is neither ~1 nor near a power of two, because the wrong constant here is a
+silent factor-of-N error in every routed expert rather than a crash.
+
+Result: `'The capital of France is **Paris**.'`, stopping on EOS.
+
+Four things were ruled out before this was found, and are worth keeping since
+they constrain any future MoE bug: it was **not the MoE layer** (a live
+`RoutedExperts` recomputed from dequantized weights gave `max_abs_err = 0.0000`
+— the layer is exact *given its inputs*, which is exactly why a scale factor
+applied outside it survived the check), **not configuration**, **not prompting**,
+and **not shared experts**.
+
+## An intermittent hang, still open
+
+Laguna generates correctly but hangs on roughly half of runs — GPU pinned at
+100%, no forward progress, no output. Runs with identical code, identical
+autotune cache and identical inputs differ, so it is a race rather than a bad
+cached kernel configuration; a fresh cache instead hangs earlier, during the
+profile run. This is very likely the same failure already recorded for
+Qwen3.5-35B-A3B above, which suggests it belongs to the `exl3_mgemm` path or its
+cooperative launches rather than to any one model. Not yet diagnosed.

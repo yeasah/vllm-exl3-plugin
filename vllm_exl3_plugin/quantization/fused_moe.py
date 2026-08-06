@@ -20,9 +20,10 @@ experts x 3 projections x 39 layers. Registering an `nn.Parameter` per stored
 tensor would mean ~120,000 of them, which is not a workable amount of Python
 object. Instead each layer registers eight collectors — `w13_*` and `w2_*` for
 each EXL3 sub-tensor — that accumulate per-expert tensors as vLLM's loader
-delivers them, and `process_weights_after_loading` stacks each group once into a
-contiguous `[num_experts, ...]` tensor plus an int64 table of device pointers,
-which is what the kernel actually consumes.
+delivers them, and `process_weights_after_loading` builds an int64 table of
+device pointers over them, which is what the kernel actually consumes. The
+per-expert tensors are deliberately left where they are rather than stacked; see
+`_pointers`.
 
 The `w13_` / `w2_` naming is not ours to choose: vLLM's expert mapping rewrites
 `experts.{id}.gate_proj.` to `experts.w13_` and keeps whatever suffix follows,
@@ -39,6 +40,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from .. import format, ops
+from ..log import init_logger
+
+logger = init_logger(__name__)
 
 #: vLLM's shard ids: w1 = gate, w3 = up (both land in w13_*), w2 = down.
 _GATE, _UP, _DOWN = "w1", "w3", "w2"
@@ -150,6 +154,24 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             )
 
     @staticmethod
+    def _interm_divisor(gate_suh, up_suh) -> float:
+        """The constant exllamav3 folded into this layer's up projection.
+
+        Measured rather than configured -- see `format.infer_interm_divisor` for
+        why the checkpoint cannot tell us. The median over experts is what makes
+        this safe: per-channel calibration puts a few percent on each expert's
+        ratio, but 256 of them agreeing on 128 is not something calibration
+        noise produces.
+        """
+        ratios = torch.stack(
+            [
+                g.float().abs().mean() / u.float().abs().mean()
+                for g, u in zip(gate_suh, up_suh)
+            ]
+        )
+        return format.infer_interm_divisor(ratios.median().item())
+
+    @staticmethod
     def _pointers(tensors) -> torch.Tensor:
         """int64 device addresses, one per expert -- what the kernel indexes.
 
@@ -189,6 +211,17 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             )
         layer.exl3_gate_bits = bits["gate"]
         layer.exl3_down_bits = bits["down"]
+        layer.exl3_interm_div = self._interm_divisor(
+            layer._exl3_gate_suh, layer._exl3_up_suh
+        )
+        if layer.exl3_interm_div != 1.0:
+            # Once, not once per layer: every MoE layer in a checkpoint carries
+            # the same divisor, and there are 39 of them in Laguna-XS.
+            logger.info_once(
+                "EXL3 routed experts: up projection is pre-scaled by 1/%g in "
+                "this checkpoint; compensating in the routing weights.",
+                layer.exl3_interm_div,
+            )
         # exllamav3 pads the intermediate dimension to a multiple of 128 before
         # quantizing (gemma-4-26B: 704 -> 768), so the width the kernels work in
         # is the stored one, not the model's.
@@ -237,6 +270,12 @@ class EXL3MoEMethod(FusedMoEMethodBase):
 
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
+        # The kernel's fused reduction scales each expert's result by its
+        # routing weight, so folding the divisor in here restores the magnitude
+        # exactly where exllamav3 restores it -- after the fp16 down projection,
+        # which is the whole point of pre-scaling the up projection.
+        if layer.exl3_interm_div != 1.0:
+            topk_weights = topk_weights * layer.exl3_interm_div
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,

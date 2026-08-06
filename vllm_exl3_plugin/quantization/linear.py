@@ -29,10 +29,10 @@ from vllm.model_executor.layers.linear import (
     register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.logger import init_logger
 from vllm.model_executor.utils import set_weight_attrs
 
 from .. import format, ops, tp
+from ..log import init_logger
 
 logger = init_logger(__name__)
 

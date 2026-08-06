@@ -20,8 +20,11 @@ vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
 unexercised.
 
 Phase 3 (MoE) works on gemma-4-26B-A4B — a 26B mixture-of-experts in 9.46 GiB —
-via exllamav3's pointer-table kernel. Two other MoE models still misbehave, and
-one needs a small vLLM patch (`patches/`) — see [PHASE3.md](PHASE3.md).
+and on Laguna-XS-2.1, 256 experts at 2bpw in 8.54 GiB, via exllamav3's
+pointer-table kernel. Laguna also turned up a scale factor that EXL3 checkpoints
+carry but do not record, which the plugin now recovers by measuring the weights.
+An intermittent hang in the MoE path and Qwen3.5 remain open, and Qwen3.5 needs
+a small vLLM patch (`patches/`) — see [PHASE3.md](PHASE3.md).
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
@@ -49,7 +52,7 @@ research and the phased plan.
 
     python -m unittest discover -s tests
 
-30 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
+48 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
 oracles and the end-to-end generations skip themselves without CUDA and
 exllamav3.
 
