@@ -19,12 +19,13 @@ and with CUDA graphs, reproducing TP=1 token for token — including a
 vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
 unexercised.
 
-Phase 3 (MoE) works on gemma-4-26B-A4B — a 26B mixture-of-experts in 9.46 GiB —
-and on Laguna-XS-2.1, 256 experts at 2bpw in 8.54 GiB, via exllamav3's
-pointer-table kernel. Laguna also turned up a scale factor that EXL3 checkpoints
-carry but do not record, which the plugin now recovers by measuring the weights.
-An intermittent hang in the MoE path and Qwen3.5 remain open, and Qwen3.5 needs
-a small vLLM patch (`patches/`) — see [PHASE3.md](PHASE3.md).
+Phase 3 (MoE) works on all three MoE checkpoints tried: gemma-4-26B-A4B (9.46
+GiB), Laguna-XS-2.1 (256 experts at 2bpw, 8.54 GiB) and Qwen3.5-35B-A3B (10.63
+GiB, needs the `patches/` change to load). Laguna turned up a scale factor that
+EXL3 checkpoints carry but do not record, which the plugin recovers by measuring
+the weights; and all three needed exllamav3's cooperative-kernel autotuner
+turned off, since it re-tunes on every new batch shape under continuous batching
+and deadlocks. See [PHASE3.md](PHASE3.md).
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
@@ -82,4 +83,5 @@ produces garbage without it. Drive models through their chat template
 |---|---|---|
 | `VLLM_EXL3_RECONSTRUCT_THRESHOLD` | 144 | rows above which to decode to dense fp16 and use cuBLAS; 0 always uses the fused kernel |
 | `VLLM_EXL3_DEQUANTIZE` | 0 | Phase 0 behaviour: dequantize at load. Correctness oracle, no memory saving |
+| `VLLM_EXL3_MOE_AUTOTUNE` | 0 | set to 1 to re-enable exllamav3's cooperative-kernel autotuner for routed experts. It deadlocks under continuous batching and buys no throughput; see PHASE3.md |
 | `VLLM_DISABLE_COMPILE_CACHE` | 0 | set to 1 while editing this plugin — vLLM's compile cache cannot see plugin code |

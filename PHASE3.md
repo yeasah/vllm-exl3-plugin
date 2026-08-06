@@ -5,10 +5,11 @@ vLLM's `FusedMoE` interface.**
 
 **Status: working on `gemma-4-26B-A4B-it-exl3`** — a 26B MoE in **9.46 GiB** —
 and on `Laguna-XS-2.1-exl3` (256 experts, 2bpw, **8.54 GiB**), both answering
-correctly. Laguna needed a scale factor that lives in exllamav3's architecture
-definition rather than in the checkpoint; see "Laguna: a scale factor the
-checkpoint does not record". It also hits an intermittent hang that Qwen3.5
-appears to share.
+correctly, as does `Qwen3.5-35B-A3B-exl3` (10.63 GiB). Laguna needed a scale
+factor that lives in exllamav3's architecture definition rather than in the
+checkpoint, and all three needed exllamav3's cooperative-kernel autotuner turned
+off — it re-tunes on every new batch shape under continuous batching and
+deadlocks. See the two sections at the end.
 
 ## `exl3_mgemm` is usable here, unlike merged QKV
 
@@ -142,11 +143,9 @@ which is the same operation as a tensor-parallel column split and carries the
 same 128-boundary constraint. Composing it with an actual TP split is not
 implemented and raises.
 
-**Result: Qwen3.5-35B-A3B now loads (10.63 GiB) but hangs during generation** —
-GPU pinned at 100% with no forward progress for 19 minutes. That is a separate,
-unresolved problem, and given the model is a hybrid (`conv1d`, `A_log`,
-`dt_bias` — a gated delta net) the hang need not be in our code at all. Not yet
-investigated.
+**Result: Qwen3.5-35B-A3B loads (10.63 GiB) and generates correctly.** It hung
+during generation when first tried; that turned out to be the autotuner problem
+described below, and it no longer reproduces either way.
 
 ## Laguna: a scale factor the checkpoint does not record
 
@@ -195,27 +194,51 @@ they constrain any future MoE bug: it was **not the MoE layer** (a live
 applied outside it survived the check), **not configuration**, **not prompting**,
 and **not shared experts**.
 
-## An intermittent hang, still open
+## The hang: exllamav3's autotuner versus continuous batching
 
-Laguna generates correctly but usually hangs — GPU pinned at 100%, no forward
-progress, no output — and the hang is **not** caused by the divisor fix:
+Laguna generated correctly but hung on 5 of 6 runs — GPU pinned at 100%, no
+forward progress. The cause is exllamav3's **cooperative-kernel autotuner**, and
+it is a design mismatch rather than a bug in either project.
 
-| code | runs | outcome |
+`exl3_mgemm` autotunes whenever both `force_shape_idx` and `force_num_sms` are
+`<= 0`, which is what we were passing. The autotuner times a few dozen candidate
+cooperative kernels and caches the winner under a key that includes
+`bszm_in`/`bszm_out` — **the batch dimension**. exllamav3's own generator
+presents a small, stable set of batch shapes, so it tunes a handful of times at
+startup and hits cache forever after. vLLM does the opposite: continuous
+batching varies the batch dimension from step to step, so nearly every call
+misses and re-tunes, firing bursts of cooperative launches throughout serving.
+Some of those deadlock.
+
+Evidence, on one RTX 5070 Ti (sm_120, 70 SMs):
+
+| configuration | runs | hangs |
 |---|---|---|
-| with the fix | 6 | 1 correct answer, 5 hangs |
-| pre-fix (`HEAD~1`, wrong output) | 3 | 3 hangs |
-| gemma-4-26B, either way | many | no hang observed |
+| autotuner on (the old default) | 6 | 5 |
+| autotuner on, `CUDA_LAUNCH_BLOCKING=1` | 4 | 0 |
+| autotuner off (`force_num_sms=1`) | 3 | 0 |
+| autotuner off, now the default | 4 | 0 |
 
-Runs with identical code, identical autotune cache and identical inputs differ,
-so it is a race rather than a bad cached kernel configuration; a fresh cache
-instead hangs earlier, during the profile run. It is very likely the same
-failure already recorded for Qwen3.5-35B-A3B above, which points at the
-`exl3_mgemm` path — plausibly its cooperative launches, where one block failing
-to make progress leaves the rest spinning at a grid-wide barrier forever —
-rather than at any one model. gemma-4-26B not hanging is the useful contrast:
-39 MoE layers x 256 experts against gemma's 26 x 128 means Laguna issues far
-more `exl3_mgemm` launches per forward.
+`CUDA_LAUNCH_BLOCKING` fixing it is what ruled out a value-dependent kernel bug
+and pointed at concurrency; disabling the autotuner while keeping asynchronous,
+full-size cooperative launches separated *the tuning* from *the launches* and
+localized it to the former.
 
-Not yet diagnosed. The next step is a stack trace from a hung process
-(`PYTHONFAULTHANDLER=1` plus `SIGABRT`) to confirm it is inside the kernel
-launch rather than in vLLM's scheduler.
+Diagnosis started from a `PYTHONFAULTHANDLER=1` stack dump, which bottomed out
+at `laguna.py:234`, `router_logits.float()` — a trivial cast. That is the
+signature of an asynchronous launch queue backing up: the Python thread blocks
+at whatever launch happens to fill the queue, not at the kernel that is stuck.
+Worth remembering, because the innermost Python frame is actively misleading
+here.
+
+**So the autotuner is off by default**, re-enabled with
+`VLLM_EXL3_MOE_AUTOTUNE=1`. It costs nothing: tuning cannot amortize under a
+varying batch dimension, and decode throughput on gemma-4-26B is the same either
+way — 41.4 tok/s with, 41.9 without, the autotuner marginally behind.
+
+## Qwen3.5 now runs
+
+`Qwen3.5-35B-A3B-exl3` loads (10.63 GiB) and answers correctly, 4 runs out of 4,
+with the autotuner either on or off. The hang recorded for it earlier does not
+reproduce. It needs the `patches/` change to load at all, and its routed experts
+carry no `interm_div`.
