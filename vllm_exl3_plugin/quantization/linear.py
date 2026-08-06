@@ -61,6 +61,7 @@ class EXL3Parameter(BasevLLMParameter):
         role: str = tp.ROLE_SCALAR,
         column_shard_size: int | None = None,
         row_shard_size: int | None = None,
+        output_partition_sizes: list[int] | None = None,
     ):
         super().__init__(data=None, weight_loader=weight_loader)
         self.num_shards = num_shards
@@ -71,6 +72,9 @@ class EXL3Parameter(BasevLLMParameter):
         self.role = role
         self.column_shard_size = column_shard_size
         self.row_shard_size = row_shard_size
+        # Needed only for checkpoints that fuse several of this layer's output
+        # shards into one stored tensor; see `_load_fused`.
+        self.output_partition_sizes = output_partition_sizes or []
 
     def store(self, loaded_weight: torch.Tensor, shard_id=0) -> None:
         index = self._shard_id_as_int(shard_id)
@@ -103,17 +107,67 @@ class EXL3Parameter(BasevLLMParameter):
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs) -> None:
         shard_id = kwargs.get("shard_id", 0)
+        if shard_id is None or isinstance(shard_id, tuple):
+            self._load_fused(loaded_weight, shard_id)
+            return
         size = kwargs.get("shard_size", self.column_shard_size)
         self.store(self._take_column(loaded_weight, size, self.tp_rank), shard_id)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs) -> None:
         shard_id = kwargs.get("shard_id", 0)
+        if shard_id is None or isinstance(shard_id, tuple):
+            self._load_fused(loaded_weight, shard_id)
+            return
         size = kwargs.get("shard_size", self.column_shard_size)
         # KV heads can be replicated across ranks when there are fewer of them
         # than ranks, in which case several ranks read the same slice.
         num_heads = kwargs.get("num_heads") or 1
         index = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
         self.store(self._take_column(loaded_weight, size, index), shard_id)
+
+    def _load_fused(self, loaded_weight: torch.Tensor, shard_id) -> None:
+        """One stored tensor covering several of this layer's output shards.
+
+        Qwen3.5's linear attention is the case in point: vLLM merges
+        `in_proj_qkv` and `in_proj_z` into one `in_proj_qkvz`, and its weights
+        mapper hands the checkpoint's `in_proj_qkv` over as shard ids
+        `(0, 1, 2)` -- three logical shards inside a single EXL3 tensor that was
+        quantized as one matrix.
+
+        Splitting it is the same operation as a tensor-parallel column split,
+        and carries the same constraint: the boundaries must be whole Hadamard
+        blocks, or the pieces are silently wrong.
+        """
+        if self.tp_size > 1:
+            raise NotImplementedError(
+                "checkpoints that fuse several output shards into one tensor "
+                "are not supported under tensor parallelism yet: the fused "
+                "split and the TP split would have to compose"
+            )
+        indices = (
+            list(shard_id)
+            if isinstance(shard_id, tuple)
+            else list(range(len(self.output_partition_sizes)))
+        )
+        if not self.output_partition_sizes:
+            raise format.EXL3FormatError(
+                "a fused checkpoint tensor arrived but this layer's output "
+                "partition sizes are unknown"
+            )
+
+        offset = 0
+        for index in indices:
+            size = self.output_partition_sizes[index]
+            if self.role in (tp.ROLE_TRELLIS, tp.ROLE_SVH):
+                format.check_tp_split(size, 1, f"fused shard {index}")
+                if size % format.HAD_BLOCK:
+                    raise format.EXL3FormatError(
+                        f"fused shard {index} is {size} wide, not a multiple of "
+                        f"the Hadamard block size {format.HAD_BLOCK}; this "
+                        "tensor cannot be split at that boundary"
+                    )
+            self.store(tp.shard_column(self.role, loaded_weight, offset, offset + size), index)
+            offset += size
 
     def release(self) -> None:
         self.shards.clear()
@@ -164,6 +218,7 @@ class EXL3LinearMethod(LinearMethodBase):
                 role=tp.role_of(name),
                 column_shard_size=output_partition_sizes[0],
                 row_shard_size=input_size_per_partition,
+                output_partition_sizes=list(output_partition_sizes),
             )
             set_weight_attrs(param, extra_weight_attrs)
             layer.register_parameter(name, param)

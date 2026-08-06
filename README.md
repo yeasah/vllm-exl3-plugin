@@ -20,8 +20,8 @@ vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
 unexercised.
 
 Phase 3 (MoE) works on gemma-4-26B-A4B — a 26B mixture-of-experts in 9.46 GiB —
-via exllamav3's pointer-table kernel; one other MoE model is still misbehaving,
-see [PHASE3.md](PHASE3.md).
+via exllamav3's pointer-table kernel. Two other MoE models still misbehave, and
+one needs a small vLLM patch (`patches/`) — see [PHASE3.md](PHASE3.md).
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and

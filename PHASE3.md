@@ -79,6 +79,45 @@ right, but the earlier per-layer MoE oracle could not have caught it either way,
 because the reference it compared against made the same assumption. An oracle
 only tests what it does not share with the thing under test.
 
+## Checkpoints that fuse output shards (Qwen3.5)
+
+Qwen3.5's linear-attention block makes vLLM merge `in_proj_qkv` and `in_proj_z`
+into one `in_proj_qkvz`, and its weights mapper hands the checkpoint's
+`in_proj_qkv` over as the shard *tuple* `(0, 1, 2)` — three logical shards
+inside a single EXL3 tensor that was quantized as one matrix. vLLM then tries to
+split it itself via `_load_fused_module_from_checkpoint`, which needs
+`param.output_dim`, and ours raised `AttributeError`.
+
+Adding the attribute would only have moved the failure somewhere quieter: an
+EXL3 tensor has no single output dimension in consistent units. The trellis is
+tile-granular on dim 1 (offsets would need dividing by 16), `svh` is
+element-granular on dim 0, and `suh` must not be split at all — it is the shared
+*input* scale.
+
+vLLM does have the right escape hatch — a branch that hands the whole tensor to
+`param.load_merged_column_weight` and lets it split itself — but it was gated on
+`type(param) in (RowvLLMParameter, BasevLLMParameter)`, an exact type check that
+excludes subclasses. **`patches/vllm-fused-param-capability-check.patch`**
+changes it to `not hasattr(param, "output_dim")`, which is what the branch
+actually means.
+
+`isinstance` would have been wrong: `ModelWeightParameter`, `PackedvLLMParameter`
+and the rest all inherit from `BasevLLMParameter` and *do* have `output_dim`, so
+an isinstance check would have diverted AWQ/GPTQ/compressed-tensors into the
+whole-tensor branch. Enumerating every in-tree parameter class confirms
+`hasattr(output_dim)` is false for exactly the two that take the branch today.
+
+`EXL3Parameter._load_fused` then splits the tensor across the shards it covers,
+which is the same operation as a tensor-parallel column split and carries the
+same 128-boundary constraint. Composing it with an actual TP split is not
+implemented and raises.
+
+**Result: Qwen3.5-35B-A3B now loads (10.63 GiB) but hangs during generation** —
+GPU pinned at 100% with no forward progress for 19 minutes. That is a separate,
+unresolved problem, and given the model is a hybrid (`conv1d`, `A_log`,
+`dt_bias` — a gated delta net) the hang need not be in our code at all. Not yet
+investigated.
+
 ## The Laguna holdout
 
 `Laguna-XS-2.1-exl3` @2.00bpw loads (8.54 GiB) and runs, but emits only
