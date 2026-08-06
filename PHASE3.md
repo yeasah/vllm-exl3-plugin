@@ -3,13 +3,18 @@
 Goal from the feasibility report: **MoE via `exl3_moe`/`exl3_mgemm` adapted to
 vLLM's `FusedMoE` interface.**
 
-**Status: working on `gemma-4-26B-A4B-it-exl3`** — a 26B MoE in **9.46 GiB** —
-and on `Laguna-XS-2.1-exl3` (256 experts, 2bpw, **8.54 GiB**), both answering
-correctly, as does `Qwen3.5-35B-A3B-exl3` (10.63 GiB). Laguna needed a scale
-factor that lives in exllamav3's architecture definition rather than in the
-checkpoint, and all three needed exllamav3's cooperative-kernel autotuner turned
-off — it re-tunes on every new batch shape under continuous batching and
-deadlocks. See the two sections at the end.
+**Status: working on two of three MoE checkpoints.** `gemma-4-26B-A4B-it-exl3`
+(9.46 GiB) and `Qwen3.5-35B-A3B-exl3` (10.63 GiB, needs the `patches/` change to
+load) both answer correctly and lead with a real, confident first token.
+`Laguna-XS-2.1-exl3` (256 experts, 2bpw, 8.54 GiB) loads and *looks* correct at
+temperature 0 but is **not** working: its prefill step produces a NaN hidden
+state, so its first token is garbage that detokenization hides. See "Laguna is
+still broken".
+
+Getting this far needed a scale factor that lives in exllamav3's architecture
+definition rather than in the checkpoint, and exllamav3's cooperative-kernel
+autotuner turned off — it re-tunes on every new batch shape under continuous
+batching and deadlocks.
 
 ## `exl3_mgemm` is usable here, unlike merged QKV
 
@@ -185,7 +190,9 @@ fp16 down projection. It **raises rather than guessing** when the measured ratio
 is neither ~1 nor near a power of two, because the wrong constant here is a
 silent factor-of-N error in every routed expert rather than a crash.
 
-Result: `'The capital of France is **Paris**.'`, stopping on EOS.
+Result: `'The capital of France is **Paris**.'`, stopping on EOS — but see
+"Laguna is still broken" below. That answer is real, and it is also hiding a
+garbage first token.
 
 Four things were ruled out before this was found, and are worth keeping since
 they constrain any future MoE bug: it was **not the MoE layer** (a live
@@ -224,6 +231,17 @@ and pointed at concurrency; disabling the autotuner while keeping asynchronous,
 full-size cooperative launches separated *the tuning* from *the launches* and
 localized it to the former.
 
+**This does not close the hang.** Every run in that table used
+`enforce_eager=True`; the CUDA-graph path was never tested, and hangs are still
+observed there — reliably on Laguna with a longer prompt, and on Qwen3.5. So the
+autotuner was *a* cause, not the only one. The remaining hang needs a proper
+matrix, `{graphs, eager} x {autotuner on, off}`, several runs per cell.
+
+Note that CUDA graphs *capture* batch shapes, which is precisely the condition
+under which the autotuner would start hitting cache rather than re-tuning. A
+hang that survives into the graph path therefore probably has a different
+mechanism rather than contradicting the diagnosis above.
+
 Diagnosis started from a `PYTHONFAULTHANDLER=1` stack dump, which bottomed out
 at `laguna.py:234`, `router_logits.float()` — a trivial cast. That is the
 signature of an asynchronous launch queue backing up: the Python thread blocks
@@ -232,13 +250,70 @@ Worth remembering, because the innermost Python frame is actively misleading
 here.
 
 **So the autotuner is off by default**, re-enabled with
-`VLLM_EXL3_MOE_AUTOTUNE=1`. It costs nothing: tuning cannot amortize under a
-varying batch dimension, and decode throughput on gemma-4-26B is the same either
-way — 41.4 tok/s with, 41.9 without, the autotuner marginally behind.
+`VLLM_EXL3_MOE_AUTOTUNE=1`. It costs nothing measurable *in eager mode*: tuning
+cannot amortize under a varying batch dimension, and eager decode throughput on
+gemma-4-26B is the same either way — 41.4 tok/s with, 41.9 without. That
+measurement does not carry to the CUDA-graph path, which runs 2-3x faster
+(gemma above 100 tok/s, Qwen3.5 ~130) and where captured shapes would let the
+autotuner amortize. The comparison should be redone there before treating "free"
+as general.
 
 ## Qwen3.5 now runs
 
-`Qwen3.5-35B-A3B-exl3` loads (10.63 GiB) and answers correctly, 4 runs out of 4,
-with the autotuner either on or off. The hang recorded for it earlier does not
-reproduce. It needs the `patches/` change to load at all, and its routed experts
-carry no `interm_div`.
+`Qwen3.5-35B-A3B-exl3` loads (10.63 GiB) and answers correctly, 4 runs out of 4
+in eager mode with the autotuner either on or off, leading with a real first
+token. It needs the `patches/` change to load at all, and its routed experts
+carry no `interm_div`. It does still hang under CUDA graphs — see the caveat in
+the hang section.
+
+## Laguna is still broken: NaN on the prefill step
+
+`Laguna-XS-2.1` is **not** working, despite producing a correct-looking answer at
+temperature 0. Its **prefill forward produces an entirely NaN final hidden
+state** — `hidden (1, 2048) std=nan nonfinite=2048` at `compute_logits` — which
+the quantized `lm_head` turns into all-zero logits. Every decode step after it is
+clean (`std = 1.59, 1.63, 1.76`). So exactly one token is wrong, the first:
+
+- **at temperature 0**, `argmax` of a zero tensor is token 0, which in this
+  tokenizer is `〈|UNK|〉`. vLLM skips special tokens when detokenizing, so the
+  text reads correctly and the damage is invisible.
+- **at temperature > 0**, that step samples uniformly from all 100,352 tokens.
+  A random token is injected at position 1 and the generation derails, which is
+  what "incoherent above temperature 0" turned out to mean.
+
+The tell is in the token ids, not the text: `[0, 785, 9626, ...]`. That leading
+`0` was present in the very first successful-looking Laguna run and was read
+past — **check `token_ids`, not just decoded text, before calling a model
+correct.** Reported logprobs are the other cheap tell: a first-step top-1 of
+exactly `-ln(vocab_size)` means a uniform distribution, i.e. constant logits.
+
+Scope, checked across every EXL3 checkpoint on hand:
+
+| model | kind | first token | step-1 top-1 logprob | |
+|---|---|---|---|---|
+| Llama-3.2-1B | dense | `The` | -0.0 | clean |
+| MiniCPM5-1B | dense | `<think>` | -0.0 | clean |
+| gemma-4-12B | dense | `The` | -0.0001 | clean |
+| gemma-4-26B-A4B | MoE | `The` | -0.0 | clean |
+| Qwen3.5-35B-A3B | MoE | `Thinking` | -0.0005 | clean |
+| **Laguna-XS-2.1** | MoE | `〈\|UNK\|〉` (id 0) | **-11.5164 = -ln(100352)** | **broken** |
+
+So this is Laguna-specific rather than an MoE-wide or plugin-wide fault, and the
+other models' verdicts stand.
+
+Ruled out: it is not vLLM's async scheduling (identical token ids and logprobs
+with it on and off), and it is not the logprobs machinery — the sampler faithfully
+reports a distribution that really is uniform, because the logits really are zero.
+
+**Leading hypothesis, not yet established:** fp16 range at our kernel boundary.
+`exl3_mm` casts activations to fp16, while exllamav3 runs Laguna with
+`out_dtype = torch.float` on both attention and MLP and carries an fp32 residual
+— a choice it makes for this architecture specifically, alongside the
+`interm_div = 128.0` above, which it justifies with "routed-expert activations
+overflow fp16". A bf16 residual above 65504 becomes `inf` on that cast and then
+NaN. Prefill-only fits: more token positions, more chances at the tail. If that
+is right, the divisor discovery and this are two symptoms of the same numerical
+pressure rather than unrelated finds.
+
+Next step is a layer-by-layer non-finite bisect over the prefill to find the
+first layer that goes NaN, then to look at the magnitudes entering the cast.
