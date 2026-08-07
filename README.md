@@ -19,15 +19,14 @@ and with CUDA graphs, reproducing TP=1 token for token — including a
 vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
 unexercised.
 
-Phase 3 (MoE) works on two of the three MoE checkpoints tried: gemma-4-26B-A4B
-(9.46 GiB) and Qwen3.5-35B-A3B (10.63 GiB, needs the `patches/` change to load).
-Laguna-XS-2.1 (256 experts at 2bpw, 8.54 GiB) loads and looks right at
-temperature 0 but is **not** correct — its prefill produces a NaN hidden state
-and its first token is garbage that detokenization hides. Along the way MoE
-needed a scale factor that EXL3 checkpoints carry but do not record, which the
-plugin recovers by measuring the weights, and exllamav3's cooperative-kernel
-autotuner turned off, since it re-tunes on every new batch shape under
-continuous batching and deadlocks. See [PHASE3.md](PHASE3.md).
+Phase 3 (MoE) works on all three MoE checkpoints tried: gemma-4-26B-A4B (9.46
+GiB), Qwen3.5-35B-A3B (10.63 GiB, needs the `patches/` change to load) and
+Laguna-XS-2.1 (256 experts at 2bpw, 8.54 GiB). Getting there needed a scale
+factor that EXL3 checkpoints carry but do not record, which the plugin recovers
+by measuring the weights; care about where that factor is applied, since inside
+the kernel it overflows fp16; and exllamav3's cooperative-kernel autotuner
+turned off, since it re-tunes on every new batch shape under continuous batching
+and deadlocks. See [PHASE3.md](PHASE3.md).
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and

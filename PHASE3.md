@@ -3,13 +3,13 @@
 Goal from the feasibility report: **MoE via `exl3_moe`/`exl3_mgemm` adapted to
 vLLM's `FusedMoE` interface.**
 
-**Status: working on two of three MoE checkpoints.** `gemma-4-26B-A4B-it-exl3`
-(9.46 GiB) and `Qwen3.5-35B-A3B-exl3` (10.63 GiB, needs the `patches/` change to
-load) both answer correctly and lead with a real, confident first token.
-`Laguna-XS-2.1-exl3` (256 experts, 2bpw, 8.54 GiB) loads and *looks* correct at
-temperature 0 but is **not** working: its prefill step produces a NaN hidden
-state, so its first token is garbage that detokenization hides. See "Laguna is
-still broken".
+**Status: working on all three MoE checkpoints.** `gemma-4-26B-A4B-it-exl3`
+(9.46 GiB), `Qwen3.5-35B-A3B-exl3` (10.63 GiB, needs the `patches/` change to
+load) and `Laguna-XS-2.1-exl3` (256 experts, 2bpw, 8.54 GiB) all answer
+correctly, lead with a real confident first token, and stay coherent when
+sampled at temperature. Laguna took two fixes rather than one — a scale factor
+the checkpoint does not record, and then an fp16 overflow that the first fix
+introduced.
 
 Getting this far needed a scale factor that lives in exllamav3's architecture
 definition rather than in the checkpoint, and exllamav3's cooperative-kernel
@@ -266,12 +266,13 @@ token. It needs the `patches/` change to load at all, and its routed experts
 carry no `interm_div`. It does still hang under CUDA graphs — see the caveat in
 the hang section.
 
-## Laguna is still broken: NaN on the prefill step
+## The second Laguna bug: fp16 overflow in the fused reduction
 
-`Laguna-XS-2.1` is **not** working, despite producing a correct-looking answer at
-temperature 0. Its **prefill forward produces an entirely NaN final hidden
-state** — `hidden (1, 2048) std=nan nonfinite=2048` at `compute_logits` — which
-the quantized `lm_head` turns into all-zero logits. Every decode step after it is
+*(Fixed. Kept because the symptom was so thoroughly disguised.)*
+
+After the divisor fix, `Laguna-XS-2.1` still produced an **entirely NaN prefill
+hidden state** — `hidden (1, 2048) std=nan nonfinite=2048` at `compute_logits` —
+which the quantized `lm_head` turned into all-zero logits. Every decode step after it is
 clean (`std = 1.59, 1.63, 1.76`). So exactly one token is wrong, the first:
 
 - **at temperature 0**, `argmax` of a zero tensor is token 0, which in this
@@ -315,5 +316,42 @@ NaN. Prefill-only fits: more token positions, more chances at the tail. If that
 is right, the divisor discovery and this are two symptoms of the same numerical
 pressure rather than unrelated finds.
 
-Next step is a layer-by-layer non-finite bisect over the prefill to find the
-first layer that goes NaN, then to look at the magnitudes entering the cast.
+### What it actually was
+
+A layer-by-layer bisect over the prefill found the residual climbing steadily —
+15, 24, 80, 119, ... 804 — and then **layer 38's routed output at 155648 with 16
+elements already `inf`**, against an fp16 ceiling of 65504. One `inf` in the
+residual takes the whole hidden state to NaN by layer 39.
+
+The amplification was ours. The divisor fix folded `interm_div = 128` into the
+routing weights, which is where exllamav3 puts it — but exllamav3 also gives the
+routed down projection `out_dtype = torch.float`, so its fused reduction
+accumulates in fp32. Ours allocated `out` as fp16 (`c_fp32 = C.dtype() ==
+at::kFloat` — the kernel writes whatever dtype it is handed), so the factor of
+128 landed inside an fp16 accumulator.
+
+The fix is to apply the divisor *outside* the kernel, which is algebraically
+identical — `sum_j (d*w_j) y_j == d * sum_j w_j y_j` — but keeps the reduction
+128x smaller and lands the scale in the model's own bf16 dtype, where it is
+exact because the divisor is a power of two. Giving the kernel an fp32 `C` works
+too and is what exllamav3 does, but costs a second full-size scratch buffer at
+max batch.
+
+The clipped value was not close to right: layer 38's true output is **1081344**,
+seven times the 155648 that fp16 saturated to.
+
+### Result
+
+First token `The` at logprob -0.0001, `'The capital of France is Paris.'` greedy,
+and coherent at temperature — at T=1.0, *"Known as \"the City of Light\" (La
+Ville Lumiere), Paris is renowned for its cultural heritage..."*. The
+temperature-dependent incoherence is gone, because it was only ever the first
+token being sampled from a uniform distribution.
+
+### Why this took two passes
+
+The first fix was correct and incomplete, and the symptom it left behind was
+disguised twice over: detokenization hides special tokens, and greedy decoding
+returns *something* from a degenerate tensor. Sampling above temperature 0 is
+what exposes it. **Check `token_ids`, not decoded text** — the leading `0` was
+printed in the very first successful-looking run and read past.

@@ -270,12 +270,6 @@ class EXL3MoEMethod(FusedMoEMethodBase):
 
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
-        # The kernel's fused reduction scales each expert's result by its
-        # routing weight, so folding the divisor in here restores the magnitude
-        # exactly where exllamav3 restores it -- after the fp16 down projection,
-        # which is the whole point of pre-scaling the up projection.
-        if layer.exl3_interm_div != 1.0:
-            topk_weights = topk_weights * layer.exl3_interm_div
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,
@@ -297,4 +291,20 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             self.mul1,
             self.activation_name(layer),
         )
+        # Restore the magnitude the checkpoint's pre-scaled up projection gave
+        # away, *outside* the kernel. Folding it into the routing weights
+        # instead is algebraically identical -- sum_j (d*w_j) y_j == d * sum_j
+        # w_j y_j -- but it puts the factor inside exl3_mgemm's fp16 output
+        # accumulator, where on Laguna-XS it drove the layer-38 routed output to
+        # 155648 against an fp16 ceiling of 65504. That overflowed to inf, and
+        # one inf in the residual stream turns the whole prefill hidden state
+        # NaN by the final layer. Applied here the reduction stays 128x smaller
+        # and the scale lands in the model's own (bf16) dtype, where it is exact
+        # because the divisor is a power of two.
+        #
+        # exllamav3 avoids the same overflow differently, by giving the routed
+        # down projection `out_dtype = torch.float`; that works too but costs a
+        # second full-size fp32 scratch buffer at max batch.
+        if layer.exl3_interm_div != 1.0:
+            out = out * layer.exl3_interm_div
         return out.reshape(orig_shape)
