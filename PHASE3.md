@@ -11,9 +11,10 @@ sampled at temperature. Laguna took two fixes rather than one — a scale factor
 the checkpoint does not record, and then an fp16 overflow that the first fix
 introduced.
 
-They are correct **when they complete**. Generation still hangs outright on some
-(model, engine config) combinations; see "The MoE hang" below. That is the open
-item for Phase 3, and it is not a correctness problem — it is a liveness one.
+Getting here needed a scale factor that lives in exllamav3's architecture
+definition rather than in the checkpoint, care about where that factor is
+applied, and one patch to exllamav3 itself — see "The MoE hang" below, which
+also cost two wrong theories worth recording.
 
 ## `exl3_mgemm` is usable here, unlike merged QKV
 
@@ -200,64 +201,85 @@ they constrain any future MoE bug: it was **not the MoE layer** (a live
 applied outside it survived the check), **not configuration**, **not prompting**,
 and **not shared experts**.
 
-## The MoE hang: cooperative grid geometry, unresolved
+## The MoE hang: an sm_90+ barrier in exllamav3
 
-MoE models hang during generation — GPU pinned at 100%, no forward progress.
-This is **not fixed**, and an earlier claim here that disabling exllamav3's
-cooperative-kernel autotuner fixed it was wrong.
+**Fixed**, by `patches/exllamav3-sm90-barrier.patch`. MoE models hung during
+generation — GPU pinned at 100%, no forward progress — on Laguna-XS and Qwen3.5.
 
-`exl3_mgemm` launches a cooperative kernel whose grid is sized to fill the
-device — `concurrency = MIN(total_sms / num_sms, bszm)`, grid `num_sms x
-concurrency`, capped at `total_sms` — and whose blocks synchronize through
-device-side locks (`DevCtx::get_locks`). A grid that never becomes fully
-co-resident therefore spins forever rather than failing. There is **zero
-headroom** in that sizing.
+`exl3_mgemm_kernel` synchronizes its blocks twice per iteration, and which
+barrier it uses depends on the architecture:
 
-The autotuner does not cause this. It selects a different grid geometry, which
-lands on a deadlocking one for different models in opposite directions:
+```c
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ > 890)
+    group_barrier(blockIdx.z, gridDim.x, barrier_counters_sense);
+#else
+    grid.sync();
+#endif
+```
 
-| model | engine config | tuner on | tuner off |
-|---|---|---|---|
-| Laguna-XS | `max_model_len=2048`, default seqs | 3/3 hang | **3/3 ok** |
-| Laguna-XS | `max_model_len=4096`, `max_num_seqs=2` | hang | 3/3 hang |
-| Qwen3.5 | `max_model_len=4096`, `max_num_seqs=2` | **3/3 ok** | 3/3 hang |
-| gemma-4-26B | `max_model_len=4096`, eager | ok (41.5 tok/s) | ok (40.2 tok/s) |
-| Llama-3.2-1B (dense) | any | ok | ok |
+These are not the same thing. `grid.sync()` is cooperative groups' whole-grid
+barrier, with per-launch state. `group_barrier` is a hand-rolled sense-reversing
+barrier over one z-slice that synchronizes through the **device-global `locks`
+buffer** — one allocation per device, shared by every launch, zeroed only once
+at allocation. sm_90+ (Hopper, Blackwell) takes the second path; Ampere and Ada
+take the first. Building with `grid.sync()` on sm_120 clears every hang.
 
-Laguna and Qwen want *opposite* settings, and Laguna's answer changes with
-`max_model_len` alone — same code, same prompt. What actually varies is
-`max_num_batched_tokens` -> `bszm` -> grid geometry. Prompt length, which looked
-like the trigger, is not: short and long prompts hang alike at 4096.
+The patch makes the hand-rolled barrier opt-in (`EXL3_SM90_BARRIER=1` at build
+time) rather than automatic above sm_89. It also adds two things worth keeping:
+`cuda_check` around `cudaLaunchCooperativeKernel` in the mgemm path, which
+previously swallowed launch failures the autotuner path already checked for, and
+an `EXL3_DIAG_GRID=1` dump of the launch geometry with the occupancy the kernel
+actually achieves.
 
-`VLLM_EXL3_MOE_AUTOTUNE` therefore selects between two geometries, neither
-universally safe. It defaults to `0` (autotuner off), which is right for Laguna
-at small context and wrong for Qwen3.5 — set it to `1` there. Throughput is not
-a consideration: where both settings complete, they are within noise (gemma-4-26B
-41.5 vs 40.2 tok/s).
+| cell | before | after |
+|---|---|---|
+| Laguna eager, long prompt | hang 3/3 | ok, 34.8 tok/s |
+| Laguna **graphs** | hang | **ok, 172-175 tok/s** |
+| Laguna eager, autotuner on | hang 3/3 | ok, 35.2 tok/s |
+| Qwen3.5 eager, autotuner off | hang 3/3 | ok, 25.8 tok/s |
+| Qwen3.5 **graphs** | hang (tuner off) | **ok, 123-125 tok/s** |
+| gemma-4-26B eager | ok | ok, 39.8 tok/s |
 
-Two diagnostics worth keeping:
+### Two wrong theories, and what killed them
 
-- **`CUDA_LAUNCH_BLOCKING=1` makes the hang disappear** (4/4 clean where the
-  same config otherwise hung 5/6). Serializing launches guarantees an empty
-  device, so every cooperative grid fits. That is what rules out a
-  value-dependent kernel bug and points at co-residency.
-- **The faulthandler stack lies.** It bottoms out at whatever trivial op fills
-  the async launch queue — `router_logits.float()` in our case — not at the
+Recording these because both looked convincing and both were wrong.
+
+**"The autotuner causes it."** Disabling it made Laguna stop hanging in 7/7 runs,
+so it shipped as the default. It was a coincidence of one model at one context
+length: Qwen3.5 turned out to hang with the autotuner *off* and run with it *on*,
+the exact inverse, and Laguna's answer flipped on `max_model_len` alone with the
+same code and prompt. The autotuner only ever changed which grid geometry got
+launched, which changed which barrier state got touched.
+
+**"The grid cannot be co-resident."** The grid is sized to fill the device
+exactly — `blocks_per_sm = 1`, `grid = 2 x 35 = 70`, `resident_max = 70` — so a
+barrier that requires full residency has zero headroom. Plausible, and false: the
+`EXL3_DIAG_GRID` instrumentation showed the grid never exceeded what fits, and
+forcing a margin (70 -> 66 blocks) changed nothing.
+
+What did survive was the one observation both theories had to explain:
+`CUDA_LAUNCH_BLOCKING=1` made the hang disappear. Serializing launches hides
+races over shared mutable state, which is exactly what the device-global barrier
+buffer is, and does nothing for an occupancy problem.
+
+### Diagnostic notes
+
+- **The faulthandler stack lies** under an async launch queue. It bottoms out at
+  whatever trivial op fills the queue — `router_logits.float()` here — not at the
   stuck kernel.
+- `force_num_sms` is **not** a grid override. `num_sms = tiles` overwrites it
+  immediately; it only gates whether the autotuner runs.
 
-The real fix is to give the launch headroom, which means patching the grid
-sizing in vendored exllamav3 rather than toggling anything from Python:
-`force_num_sms` is *not* a grid override, since `num_sms = tiles` overwrites it
-immediately. It only gates whether the autotuner runs.
+## CUDA graphs are worth 1.9x to 4.9x
 
-## CUDA graphs are worth 1.9x
+Llama-3.2-1B, identical work: 312 tok/s captured versus 163 eager. Laguna-XS is
+starker still — 172 versus 35, a 4.9x gap — because MoE decode is launch-bound.
+Until the barrier fix the graph path was unusable for MoE at all, so every MoE
+throughput figure recorded before it came from the slow path.
 
-Measured on Llama-3.2-1B, identical work: 312 tok/s captured versus 163 eager.
-That is the cost of any eager-only workaround, and the reason the graph path
-cannot be left unverified. gemma-4-26B additionally fails to *start* under graphs
-at `max_model_len=4096`, `gpu_memory_utilization=0.90` — graph memory leaves
-0.67 GiB against 0.86 GiB of KV cache needed. That is a configuration limit, not
-a plugin defect.
+gemma-4-26B fails to *start* under graphs at `max_model_len=4096`,
+`gpu_memory_utilization=0.90` — graph memory leaves 0.67 GiB against 0.86 GiB of
+KV cache needed. That is a configuration limit, not a plugin defect.
 
 ## Qwen3.5 now runs
 

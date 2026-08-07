@@ -26,11 +26,12 @@ factor that EXL3 checkpoints carry but do not record, which the plugin recovers
 by measuring the weights; and care about where that factor is applied, since inside
 the kernel it overflows fp16.
 
-**MoE models still hang** during generation on some (model, engine config)
-combinations — a cooperative-kernel co-residency problem in `exl3_mgemm`, not
-yet fixed. `VLLM_EXL3_MOE_AUTOTUNE` picks between two grid geometries and neither
-is universally safe: Laguna-XS needs `0` (the default), Qwen3.5 needs `1`.
-See [PHASE3.md](PHASE3.md).
+MoE also needed **`patches/exllamav3-sm90-barrier.patch`**: above sm_89
+exllamav3 swaps cooperative groups' `grid.sync()` for a hand-rolled barrier that
+synchronizes through a device-global buffer shared by every launch, and it
+deadlocks under vLLM. The patch makes that path opt-in, which clears the hangs on
+Hopper/Blackwell and unlocks CUDA graphs for MoE — Laguna-XS goes from 35 to 172
+tok/s. See [PHASE3.md](PHASE3.md).
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
@@ -39,6 +40,7 @@ research and the phased plan.
 
 ## Quick start
 
+    git -C deps/exllamav3 apply ../../patches/exllamav3-sm90-barrier.patch  # required on sm_90+
     pip install --no-deps --no-build-isolation -e deps/exllamav3   # builds the CUDA ext
     # if CUDA_HOME's toolkit does not match torch's, see PHASE2.md "Finishing this"
     pip install --no-deps -e .
@@ -88,5 +90,4 @@ produces garbage without it. Drive models through their chat template
 |---|---|---|
 | `VLLM_EXL3_RECONSTRUCT_THRESHOLD` | 144 | rows above which to decode to dense fp16 and use cuBLAS; 0 always uses the fused kernel |
 | `VLLM_EXL3_DEQUANTIZE` | 0 | Phase 0 behaviour: dequantize at load. Correctness oracle, no memory saving |
-| `VLLM_EXL3_MOE_AUTOTUNE` | 0 | selects which cooperative grid geometry `exl3_mgemm` uses for routed experts. Neither setting is universally safe against the MoE hang — Laguna-XS needs 0, Qwen3.5 needs 1. No throughput difference; see PHASE3.md |
 | `VLLM_DISABLE_COMPILE_CACHE` | 0 | set to 1 while editing this plugin — vLLM's compile cache cannot see plugin code |

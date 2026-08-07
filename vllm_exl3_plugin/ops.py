@@ -397,9 +397,9 @@ def _exl3_moe_mm(
     # reduction we rely on. With no expert parallelism there is nothing to
     # filter, so it stays off.
     lo, hi = -1, num_experts - 1
-    # See _FORCE_NUM_SMS: skips exllamav3's cooperative autotuner, whose
-    # re-tuning under vLLM's varying batch sizes is what hangs the engine.
-    sms = _FORCE_NUM_SMS
+    # force_shape_idx = -1 and force_num_sms = 0 leave exllamav3 free to pick
+    # the kernel shape and autotune the grid, which is its normal behaviour.
+    sms = 0
     e.exl3_mgemm(gathered, gate_trellis, interm_g, gate_suh, a_had, gate_svh,
                  indices, None, gate_bits, -1, mcg, mul1, lo, hi, sms, num_tokens)
     e.exl3_mgemm(gathered, up_trellis, interm_u, up_suh, a_had, up_svh,
@@ -417,31 +417,6 @@ def _exl3_moe_mm(
     # rows 0..num_tokens-1 hold the results.
     y = out[:num_tokens].squeeze(1)
     return y.to(out_dtype) if out_dtype != torch.half else y
-
-
-#: Whether to let `exl3_mgemm` run its cooperative-kernel autotuner. Off by
-#: default, because leaving it on hangs vLLM.
-#:
-#: The autotuner times a few dozen candidate cooperative kernels and caches the
-#: winner under a key that includes `bszm_in`/`bszm_out` -- the batch dimension.
-#: exllamav3's own generator presents a small, stable set of batch shapes, so it
-#: tunes a handful of times and then always hits cache. vLLM does the opposite:
-#: continuous batching makes the batch dimension vary from token to token, so
-#: nearly every call is a cache miss and re-tunes, firing bursts of cooperative
-#: launches throughout serving rather than once at startup. Some of those
-#: deadlock -- 5 of 6 Laguna-XS runs hung with the GPU pinned at 100%, against
-#: 0 of 7 with either this off or `CUDA_LAUNCH_BLOCKING=1`.
-#:
-#: It costs nothing to skip: the tuning never amortizes under a varying batch
-#: dimension, and decode throughput on gemma-4-26B is the same either way
-#: (41.4 vs 41.9 tok/s, autotuner marginally behind).
-#:
-#: `exl3_mgemm` autotunes only when *both* `force_shape_idx` and `force_num_sms`
-#: are <= 0, so passing 1 selects the deterministic sizing path. The value is
-#: not a grid size -- the kernel recomputes `num_sms` from the tile count
-#: regardless -- it only chooses which path runs.
-_MOE_AUTOTUNE = os.environ.get("VLLM_EXL3_MOE_AUTOTUNE", "0") == "1"
-_FORCE_NUM_SMS = 0 if _MOE_AUTOTUNE else 1
 
 
 #: `silu_and_mul` and friends compute `act(x[:d]) * x[d:]` -- the activation
