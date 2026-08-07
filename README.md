@@ -23,10 +23,14 @@ Phase 3 (MoE) works on all three MoE checkpoints tried: gemma-4-26B-A4B (9.46
 GiB), Qwen3.5-35B-A3B (10.63 GiB, needs the `patches/` change to load) and
 Laguna-XS-2.1 (256 experts at 2bpw, 8.54 GiB). Getting there needed a scale
 factor that EXL3 checkpoints carry but do not record, which the plugin recovers
-by measuring the weights; care about where that factor is applied, since inside
-the kernel it overflows fp16; and exllamav3's cooperative-kernel autotuner
-turned off, since it re-tunes on every new batch shape under continuous batching
-and deadlocks. See [PHASE3.md](PHASE3.md).
+by measuring the weights; and care about where that factor is applied, since inside
+the kernel it overflows fp16.
+
+**MoE models still hang** during generation on some (model, engine config)
+combinations — a cooperative-kernel co-residency problem in `exl3_mgemm`, not
+yet fixed. `VLLM_EXL3_MOE_AUTOTUNE` picks between two grid geometries and neither
+is universally safe: Laguna-XS needs `0` (the default), Qwen3.5 needs `1`.
+See [PHASE3.md](PHASE3.md).
 
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
@@ -84,5 +88,5 @@ produces garbage without it. Drive models through their chat template
 |---|---|---|
 | `VLLM_EXL3_RECONSTRUCT_THRESHOLD` | 144 | rows above which to decode to dense fp16 and use cuBLAS; 0 always uses the fused kernel |
 | `VLLM_EXL3_DEQUANTIZE` | 0 | Phase 0 behaviour: dequantize at load. Correctness oracle, no memory saving |
-| `VLLM_EXL3_MOE_AUTOTUNE` | 0 | set to 1 to re-enable exllamav3's cooperative-kernel autotuner for routed experts. It deadlocks under continuous batching and buys no throughput; see PHASE3.md |
+| `VLLM_EXL3_MOE_AUTOTUNE` | 0 | selects which cooperative grid geometry `exl3_mgemm` uses for routed experts. Neither setting is universally safe against the MoE hang — Laguna-XS needs 0, Qwen3.5 needs 1. No throughput difference; see PHASE3.md |
 | `VLLM_DISABLE_COMPILE_CACHE` | 0 | set to 1 while editing this plugin — vLLM's compile cache cannot see plugin code |

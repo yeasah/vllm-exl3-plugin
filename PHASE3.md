@@ -201,62 +201,64 @@ they constrain any future MoE bug: it was **not the MoE layer** (a live
 applied outside it survived the check), **not configuration**, **not prompting**,
 and **not shared experts**.
 
-## The hang: exllamav3's autotuner versus continuous batching
+## The MoE hang: cooperative grid geometry, unresolved
 
-Laguna generated correctly but hung on 5 of 6 runs — GPU pinned at 100%, no
-forward progress. The cause is exllamav3's **cooperative-kernel autotuner**, and
-it is a design mismatch rather than a bug in either project.
+MoE models hang during generation — GPU pinned at 100%, no forward progress.
+This is **not fixed**, and an earlier claim here that disabling exllamav3's
+cooperative-kernel autotuner fixed it was wrong.
 
-`exl3_mgemm` autotunes whenever both `force_shape_idx` and `force_num_sms` are
-`<= 0`, which is what we were passing. The autotuner times a few dozen candidate
-cooperative kernels and caches the winner under a key that includes
-`bszm_in`/`bszm_out` — **the batch dimension**. exllamav3's own generator
-presents a small, stable set of batch shapes, so it tunes a handful of times at
-startup and hits cache forever after. vLLM does the opposite: continuous
-batching varies the batch dimension from step to step, so nearly every call
-misses and re-tunes, firing bursts of cooperative launches throughout serving.
-Some of those deadlock.
+`exl3_mgemm` launches a cooperative kernel whose grid is sized to fill the
+device — `concurrency = MIN(total_sms / num_sms, bszm)`, grid `num_sms x
+concurrency`, capped at `total_sms` — and whose blocks synchronize through
+device-side locks (`DevCtx::get_locks`). A grid that never becomes fully
+co-resident therefore spins forever rather than failing. There is **zero
+headroom** in that sizing.
 
-Evidence, on one RTX 5070 Ti (sm_120, 70 SMs):
+The autotuner does not cause this. It selects a different grid geometry, which
+lands on a deadlocking one for different models in opposite directions:
 
-| configuration | runs | hangs |
-|---|---|---|
-| autotuner on (the old default) | 6 | 5 |
-| autotuner on, `CUDA_LAUNCH_BLOCKING=1` | 4 | 0 |
-| autotuner off (`force_num_sms=1`) | 3 | 0 |
-| autotuner off, now the default | 4 | 0 |
+| model | engine config | tuner on | tuner off |
+|---|---|---|---|
+| Laguna-XS | `max_model_len=2048`, default seqs | 3/3 hang | **3/3 ok** |
+| Laguna-XS | `max_model_len=4096`, `max_num_seqs=2` | hang | 3/3 hang |
+| Qwen3.5 | `max_model_len=4096`, `max_num_seqs=2` | **3/3 ok** | 3/3 hang |
+| gemma-4-26B | `max_model_len=4096`, eager | ok (41.5 tok/s) | ok (40.2 tok/s) |
+| Llama-3.2-1B (dense) | any | ok | ok |
 
-`CUDA_LAUNCH_BLOCKING` fixing it is what ruled out a value-dependent kernel bug
-and pointed at concurrency; disabling the autotuner while keeping asynchronous,
-full-size cooperative launches separated *the tuning* from *the launches* and
-localized it to the former.
+Laguna and Qwen want *opposite* settings, and Laguna's answer changes with
+`max_model_len` alone — same code, same prompt. What actually varies is
+`max_num_batched_tokens` -> `bszm` -> grid geometry. Prompt length, which looked
+like the trigger, is not: short and long prompts hang alike at 4096.
 
-**This does not close the hang.** Every run in that table used
-`enforce_eager=True`; the CUDA-graph path was never tested, and hangs are still
-observed there — reliably on Laguna with a longer prompt, and on Qwen3.5. So the
-autotuner was *a* cause, not the only one. The remaining hang needs a proper
-matrix, `{graphs, eager} x {autotuner on, off}`, several runs per cell.
+`VLLM_EXL3_MOE_AUTOTUNE` therefore selects between two geometries, neither
+universally safe. It defaults to `0` (autotuner off), which is right for Laguna
+at small context and wrong for Qwen3.5 — set it to `1` there. Throughput is not
+a consideration: where both settings complete, they are within noise (gemma-4-26B
+41.5 vs 40.2 tok/s).
 
-Note that CUDA graphs *capture* batch shapes, which is precisely the condition
-under which the autotuner would start hitting cache rather than re-tuning. A
-hang that survives into the graph path therefore probably has a different
-mechanism rather than contradicting the diagnosis above.
+Two diagnostics worth keeping:
 
-Diagnosis started from a `PYTHONFAULTHANDLER=1` stack dump, which bottomed out
-at `laguna.py:234`, `router_logits.float()` — a trivial cast. That is the
-signature of an asynchronous launch queue backing up: the Python thread blocks
-at whatever launch happens to fill the queue, not at the kernel that is stuck.
-Worth remembering, because the innermost Python frame is actively misleading
-here.
+- **`CUDA_LAUNCH_BLOCKING=1` makes the hang disappear** (4/4 clean where the
+  same config otherwise hung 5/6). Serializing launches guarantees an empty
+  device, so every cooperative grid fits. That is what rules out a
+  value-dependent kernel bug and points at co-residency.
+- **The faulthandler stack lies.** It bottoms out at whatever trivial op fills
+  the async launch queue — `router_logits.float()` in our case — not at the
+  stuck kernel.
 
-**So the autotuner is off by default**, re-enabled with
-`VLLM_EXL3_MOE_AUTOTUNE=1`. It costs nothing measurable *in eager mode*: tuning
-cannot amortize under a varying batch dimension, and eager decode throughput on
-gemma-4-26B is the same either way — 41.4 tok/s with, 41.9 without. That
-measurement does not carry to the CUDA-graph path, which runs 2-3x faster
-(gemma above 100 tok/s, Qwen3.5 ~130) and where captured shapes would let the
-autotuner amortize. The comparison should be redone there before treating "free"
-as general.
+The real fix is to give the launch headroom, which means patching the grid
+sizing in vendored exllamav3 rather than toggling anything from Python:
+`force_num_sms` is *not* a grid override, since `num_sms = tiles` overwrites it
+immediately. It only gates whether the autotuner runs.
+
+## CUDA graphs are worth 1.9x
+
+Measured on Llama-3.2-1B, identical work: 312 tok/s captured versus 163 eager.
+That is the cost of any eager-only workaround, and the reason the graph path
+cannot be left unverified. gemma-4-26B additionally fails to *start* under graphs
+at `max_model_len=4096`, `gpu_memory_utilization=0.90` — graph memory leaves
+0.67 GiB against 0.86 GiB of KV cache needed. That is a configuration limit, not
+a plugin defect.
 
 ## Qwen3.5 now runs
 
