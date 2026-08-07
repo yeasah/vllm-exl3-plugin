@@ -78,7 +78,9 @@ produces garbage without it. Drive models through their chat template
 
 ## Requirements
 
-- CUDA, compute capability 8.0+ (Ampere). No ROCm — exllamav3 has none.
+- CUDA, compute capability 8.0+ (Ampere). No ROCm — exllamav3 has none. On
+  sm_90+ apply `patches/exllamav3-sm90-barrier.patch` before building the
+  extension, or MoE models will hang.
 - float16 or bfloat16 activations. The kernels are fp16; `exl3_mm` casts at the
   kernel boundary, so bf16 models keep a bf16 residual stream.
 - TP=1 and TP=2. Higher degrees are implemented and proven arithmetically

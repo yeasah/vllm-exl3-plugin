@@ -277,9 +277,23 @@ starker still — 172 versus 35, a 4.9x gap — because MoE decode is launch-bou
 Until the barrier fix the graph path was unusable for MoE at all, so every MoE
 throughput figure recorded before it came from the slow path.
 
-gemma-4-26B fails to *start* under graphs at `max_model_len=4096`,
-`gpu_memory_utilization=0.90` — graph memory leaves 0.67 GiB against 0.86 GiB of
-KV cache needed. That is a configuration limit, not a plugin defect.
+An earlier note here claimed gemma-4-26B could not *start* under graphs. That
+was an artifact of the test harness, not a limit of the model, the graphs or the
+plugin. vLLM picks `max_num_batched_tokens` by usage context — 8192 for offline
+`LLM()`, 2048 for `vllm serve`, on any GPU below 70 GiB — so an offline harness
+profiles a batch **4x larger** and reserves correspondingly more activation
+memory:
+
+| `max_num_batched_tokens` | available KV | KV tokens |
+|---|---|---|
+| 8192 (offline default) | 0.77 GiB | — (fails at `max_model_len=4096`) |
+| 2560 (serve-like) | 1.91 GiB | 21,022 |
+
+At the serve-like setting gemma-4-26B runs under graphs at
+`max_model_len=16384`, `gpu_memory_utilization=0.90`, `max_num_seqs=2`. Worth
+remembering when comparing any offline measurement against a served one: they do
+not profile the same batch. (2048 exactly is not usable here — gemma's
+`max_tokens_per_mm_item` is 2496, and vLLM raises rather than chunking.)
 
 ## Qwen3.5 now runs
 
