@@ -52,17 +52,27 @@ exllamav3 pads before quantizing — gemma-4-26B stores 768 where the config say
 whichever sub-tensor carries it (trellis dim 1 or 0, `svh`, `suh`).
 
 That padding also decides which degrees are legal, and the answer differs per
-checkpoint because the stored width does:
+checkpoint because the stored widths do. `tools/tp_preflight.py` computes it
+from safetensors headers alone — no GPU, no weights — so it can be run before
+renting anything:
 
-| checkpoint | stored intermediate | TP=2 | TP=4 | TP=8 |
+| checkpoint | TP=2 | TP=4 | TP=8 | first blocker |
 |---|---|---|---|---|
-| Laguna-XS-2.1 | 512 | 256 ok | 128 ok | 64 **rejected** |
-| gemma-4-26B-A4B | 768 | 384 ok | 192 **rejected** | rejected |
+| Llama-3.2-1B | ok | **no** | no | `lm_head` 128256 (odd multiple of 128 at tp4) |
+| Laguna-XS-2.1 | ok | ok | **no** | expert intermediate 512 -> 64 |
+| Qwen3.5-35B-A3B | ok | ok | **no** | `k_proj` 512 -> 64 |
+| gemma-4-26B-A4B | **no** | no | no | dense `mlp` 2176 = 17x128 |
 
 `format.shard_bounds` enforces the 128-wide Hadamard rule, so an illegal degree
-raises at load rather than silently computing the wrong thing. Note gemma fails
-at TP=4 while Laguna succeeds — a larger stored intermediate is not a more
-divisible one.
+raises at load rather than silently computing the wrong thing.
+
+**gemma-4-26B cannot be tensor-parallel at any degree.** Its routed experts
+split fine at TP=2 (768 -> 384), but the *dense* MLP in the same model is 2176
+wide — seventeen Hadamard blocks, an odd multiple, which no even split can
+divide. That is not visible from the expert dimensions, from `config.json`, or
+from model size, which is exactly why the preflight exists. An earlier version of
+this table claimed gemma was usable at TP=2 on the strength of its expert width
+alone; it is not.
 
 Expert parallelism is still refused: `exl3_mgemm` can filter an expert range,
 but not in combination with the multi-token weighted reduction this method uses.
