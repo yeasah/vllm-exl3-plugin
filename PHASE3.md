@@ -11,10 +11,9 @@ sampled at temperature. Laguna took two fixes rather than one — a scale factor
 the checkpoint does not record, and then an fp16 overflow that the first fix
 introduced.
 
-Getting this far needed a scale factor that lives in exllamav3's architecture
-definition rather than in the checkpoint, and exllamav3's cooperative-kernel
-autotuner turned off — it re-tunes on every new batch shape under continuous
-batching and deadlocks.
+They are correct **when they complete**. Generation still hangs outright on some
+(model, engine config) combinations; see "The MoE hang" below. That is the open
+item for Phase 3, and it is not a correctness problem — it is a liveness one.
 
 ## `exl3_mgemm` is usable here, unlike merged QKV
 
