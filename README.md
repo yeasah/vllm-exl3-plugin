@@ -33,6 +33,10 @@ deadlocks under vLLM. The patch makes that path opt-in, which clears the hangs o
 Hopper/Blackwell and unlocks CUDA graphs for MoE — Laguna-XS goes from 35 to 172
 tok/s. See [PHASE3.md](PHASE3.md).
 
+[EXLLAMAV3_ARCH_NOTES.md](EXLLAMAV3_ARCH_NOTES.md) indexes where exllamav3
+changes behaviour by GPU architecture — worth consulting first when something
+inexplicable turns up, or before running on hardware other than Blackwell.
+
 See [PHASE1.md](PHASE1.md) for benchmarks, [PHASE0.md](PHASE0.md) for the format
 groundwork, and
 [VLLM_PLUGIN_FEASIBILITY.md](VLLM_PLUGIN_FEASIBILITY.md) for the background
