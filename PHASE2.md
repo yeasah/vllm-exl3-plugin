@@ -37,6 +37,42 @@ This bites at real TP degrees. Llama-3.2-1B has 8 KV heads of dim 64, so
 `k_proj` and `v_proj` produce 512 channels: fine at TP=2 and TP=4, **invalid at
 TP=8**, where each rank would get 64.
 
+## MoE under tensor parallelism
+
+Routed experts shard on the **intermediate** dimension: gate/up take a column
+(output) split, down takes a row (input) split, and each rank's partial sums are
+combined by the all-reduce vLLM already performs. `EXL3MoEMethod` reports no
+`moe_kernel`, so `MoERunner._fused_output_is_reduced` is False and the runner
+reduces the combined output for us.
+
+The dimension being cut is the **stored** intermediate, not the model's.
+exllamav3 pads before quantizing — gemma-4-26B stores 768 where the config says
+704 — so shard boundaries come from the tensor in hand rather than from vLLM's
+`intermediate_size_per_partition`, and `_tp_shard` reads that width from
+whichever sub-tensor carries it (trellis dim 1 or 0, `svh`, `suh`).
+
+That padding also decides which degrees are legal, and the answer differs per
+checkpoint because the stored width does:
+
+| checkpoint | stored intermediate | TP=2 | TP=4 | TP=8 |
+|---|---|---|---|---|
+| Laguna-XS-2.1 | 512 | 256 ok | 128 ok | 64 **rejected** |
+| gemma-4-26B-A4B | 768 | 384 ok | 192 **rejected** | rejected |
+
+`format.shard_bounds` enforces the 128-wide Hadamard rule, so an illegal degree
+raises at load rather than silently computing the wrong thing. Note gemma fails
+at TP=4 while Laguna succeeds — a larger stored intermediate is not a more
+divisible one.
+
+Expert parallelism is still refused: `exl3_mgemm` can filter an expert range,
+but not in combination with the multi-token weighted reduction this method uses.
+
+**Verified on one GPU only.** `tests/test_tp.py` simulates every rank
+sequentially and sums, which establishes that the split reconstructs the
+unsharded result at TP=2 and TP=4. What it cannot establish is vLLM's loader
+driving these slices across real workers, NCCL, or several processes writing the
+exllamav3 autotune cache at once.
+
 ## Why a row split can be summed
 
 With `H` the blockwise Hadamard, a layer computes

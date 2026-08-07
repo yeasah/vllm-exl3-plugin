@@ -39,7 +39,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-from .. import format, ops
+from .. import format, ops, tp
 from ..log import init_logger
 
 logger = init_logger(__name__)
@@ -51,16 +51,55 @@ _GATE, _UP, _DOWN = "w1", "w3", "w2"
 class EXL3MoEParameter(torch.nn.Parameter):
     """Collector for one EXL3 sub-tensor across every expert of a layer."""
 
-    def __new__(cls, device: torch.device):
+    def __new__(cls, device: torch.device, name: str, tp_rank: int, tp_size: int):
         obj = torch.Tensor._make_subclass(
             cls, torch.empty(0, device=device), False
         )
         obj.exl3_device = device
+        # Which EXL3 sub-tensor this collects, and where this rank sits: the
+        # loader needs both to slice, and it only ever sees the parameter.
+        obj.exl3_name = name
+        obj.exl3_tp_rank = tp_rank
+        obj.exl3_tp_size = tp_size
         obj.shards: dict[tuple[str, int], torch.Tensor] = {}
         return obj
 
     def release(self) -> None:
         self.shards.clear()
+
+
+def _tp_shard(
+    name: str, t: torch.Tensor, shard_id: str, tp_rank: int, tp_size: int
+) -> torch.Tensor:
+    """This rank's slice of one expert sub-tensor.
+
+    Routed experts shard on the *intermediate* dimension, which is a column
+    (output) split for gate/up and a row (input) split for down -- the same pair
+    of roles `tp.py` already describes for dense linears, applied per expert.
+
+    The dimension being split is the **stored** intermediate, not the model's.
+    exllamav3 pads before quantizing (gemma-4-26B: 704 -> 768), so the shard
+    boundaries have to come from the tensor in hand rather than from vLLM's
+    `intermediate_size_per_partition`. Each sub-tensor carries that width in a
+    different place, which is why the role decides where to read it.
+    """
+    role = tp.role_of(name)
+    if tp_size == 1:
+        return t
+    column = shard_id in (_GATE, _UP)
+    if role == tp.ROLE_TRELLIS:
+        dim = t.shape[1 if column else 0] * format.TILE
+    elif role == (tp.ROLE_SVH if column else tp.ROLE_SUH):
+        dim = t.shape[0]
+    else:
+        # The other scale vector indexes the hidden dimension, which this split
+        # leaves whole, and mcg/mul1 are scalars. Both replicate.
+        return t
+    first, last = format.shard_bounds(
+        dim, tp_rank, tp_size, f"MoE intermediate ({shard_id})"
+    )
+    split = tp.shard_column if column else tp.shard_row
+    return split(role, t, first, last)
 
 
 def _moe_weight_loader(
@@ -78,6 +117,10 @@ def _moe_weight_loader(
     # does not mistake them for packed multi-expert weights; undo that here.
     if loaded_weight.dim() == 4 and loaded_weight.shape[0] == 1:
         loaded_weight = loaded_weight.squeeze(0)
+    loaded_weight = _tp_shard(
+        param.exl3_name, loaded_weight, shard_id, param.exl3_tp_rank,
+        param.exl3_tp_size,
+    )
     param.shards[(shard_id, int(expert_id))] = loaded_weight.to(
         param.exl3_device
     ).contiguous()
@@ -104,18 +147,20 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del params_dtype
-        if getattr(layer, "tp_size", 1) > 1 or getattr(layer, "ep_size", 1) > 1:
+        tp_size, tp_rank = self.moe.tp_size, self.moe.tp_rank
+        if self.moe.ep_size > 1:
             raise NotImplementedError(
-                "EXL3 routed experts do not support tensor or expert "
-                "parallelism yet; see PHASE2.md for the sharding rules that "
-                "would have to be applied per expert."
+                "EXL3 routed experts do not support expert parallelism. "
+                "exl3_mgemm can filter an expert range (`min_index`/`max_index`) "
+                "but refuses to combine that with the multi-token weighted "
+                "reduction this method relies on."
             )
         extra_weight_attrs.pop("weight_loader", None)
         device = torch.empty(0).device
 
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
-                param = EXL3MoEParameter(device)
+                param = EXL3MoEParameter(device, name, tp_rank, tp_size)
                 set_weight_attrs(param, {"weight_loader": _moe_weight_loader})
                 set_weight_attrs(param, extra_weight_attrs)
                 layer.register_parameter(prefix + name, param)
@@ -123,6 +168,7 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         layer.exl3_num_experts = num_experts
         layer.exl3_hidden_size = hidden_size
         layer.exl3_intermediate = intermediate_size_per_partition
+        layer.exl3_tp_size = tp_size
 
     # ------------------------------------------------------------------ load
 

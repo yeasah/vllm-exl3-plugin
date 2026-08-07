@@ -196,3 +196,147 @@ class TestHadamardRuleIsReal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MOE_REPO, MOE_REVISION = "turboderp/Laguna-XS-2.1-exl3", "main"
+#: Stored intermediate is 512, so it splits cleanly at tp 2 and 4 but not 8.
+MOE_EXPERTS = 4
+
+
+@requires_gpu
+class TestMoEShardedMathMatches(unittest.TestCase):
+    """Routed experts sharded on the intermediate dimension.
+
+    Same argument as the dense case, one level in: gate/up take a column split
+    and down takes a row split, so each rank computes a partial sum over its
+    slice of the intermediate and vLLM's all-reduce adds them. Simulated here by
+    running every rank sequentially on the one device and summing.
+    """
+
+    def _experts(self):
+        """Per-expert tensors, from the local HF cache if it has them.
+
+        A 256-expert checkpoint is usually already on disk when anyone is
+        working on this, and range-fetching 36 tensors over HTTPS is both slow
+        and a network dependency in a test that otherwise needs none.
+        """
+        local = self._from_cache()
+        if local is not None:
+            return local
+        from tests.remote_tensors import fetch_module_tensors
+
+        out = []
+        try:
+            for e in range(MOE_EXPERTS):
+                base = f"model.layers.5.mlp.experts.{e}"
+                out.append({
+                    p: fetch_module_tensors(MOE_REPO, MOE_REVISION, f"{base}.{p}_proj")
+                    for p in ("gate", "up", "down")
+                })
+        except OSError as e:
+            self.skipTest(f"could not fetch {MOE_REPO}: {e}")
+        return out
+
+    @staticmethod
+    def _from_cache():
+        import glob
+        import json
+        import os
+
+        snaps = glob.glob(os.path.expanduser(
+            "~/.cache/huggingface/hub/models--turboderp--Laguna-XS-2.1-exl3/"
+            "snapshots/*/model.safetensors.index.json"))
+        if not snaps:
+            return None
+        try:
+            from safetensors import safe_open
+        except ImportError:
+            return None
+        d = os.path.dirname(snaps[0])
+        idx = json.load(open(snaps[0]))["weight_map"]
+        handles = {}
+
+        def get(key):
+            f = idx[key]
+            if f not in handles:
+                handles[f] = safe_open(os.path.join(d, f), framework="pt",
+                                       device="cuda:0")
+            return handles[f].get_tensor(key)
+
+        out = []
+        for e in range(MOE_EXPERTS):
+            base = f"model.layers.5.mlp.experts.{e}"
+            proj = {}
+            for p in ("gate", "up", "down"):
+                names = [k.rsplit(".", 1)[1] for k in idx
+                         if k.startswith(f"{base}.{p}_proj.")]
+                proj[p] = {n: get(f"{base}.{p}_proj.{n}") for n in names}
+            out.append(proj)
+        return out
+
+    @staticmethod
+    def _run(experts, x, topk_ids, topk_weights):
+        """One rank: pointer tables over whatever slices it was given."""
+        import torch
+
+        from vllm_exl3_plugin import format, ops
+
+        def ptrs(proj, name):
+            ts = [e[proj][name] for e in experts]
+            return torch.tensor([t.data_ptr() for t in ts], dtype=torch.long,
+                                device=ts[0].device)
+
+        gate0 = experts[0]["gate"]["trellis"]
+        bits = format.bits_from_trellis_shape(gate0.shape)
+        interm = gate0.shape[1] * format.TILE
+        return ops.exl3_moe_mm(
+            x, topk_ids, topk_weights,
+            ptrs("gate", "trellis"), ptrs("gate", "suh"), ptrs("gate", "svh"),
+            ptrs("up", "trellis"), ptrs("up", "suh"), ptrs("up", "svh"),
+            ptrs("down", "trellis"), ptrs("down", "suh"), ptrs("down", "svh"),
+            bits,
+            format.bits_from_trellis_shape(experts[0]["down"]["trellis"].shape),
+            interm, len(experts), False, True, "silu",
+        )
+
+    def test_intermediate_split_sums(self):
+        import torch
+
+        from vllm_exl3_plugin.quantization.fused_moe import _tp_shard
+
+        experts = self._experts()
+        hidden = experts[0]["gate"]["suh"].shape[0]
+        torch.manual_seed(0)
+        x = torch.randn((8, hidden), dtype=torch.half, device="cuda:0") * 0.1
+        top_k = 2
+        topk_ids = torch.randint(0, MOE_EXPERTS, (8, top_k), device="cuda:0")
+        topk_weights = torch.rand((8, top_k), dtype=torch.float, device="cuda:0")
+
+        whole = self._run(experts, x, topk_ids, topk_weights)
+
+        for tp_size in (2, 4):
+            with self.subTest(tp_size=tp_size):
+                total = torch.zeros_like(whole, dtype=torch.float32)
+                for rank in range(tp_size):
+                    sharded = [
+                        {
+                            proj: {
+                                n: _tp_shard(n, t, shard_id, rank, tp_size)
+                                for n, t in e[proj].items()
+                            }
+                            for proj, shard_id in
+                            (("gate", "w1"), ("up", "w3"), ("down", "w2"))
+                        }
+                        for e in experts
+                    ]
+                    total += self._run(sharded, x, topk_ids, topk_weights).float()
+                # Same tolerance rationale as the dense case: a narrower
+                # intermediate makes the kernel accumulate in a different order.
+                torch.testing.assert_close(
+                    total, whole.float(), rtol=2e-2, atol=5e-3
+                )
+
+    def test_rejects_sub_hadamard_moe_split(self):
+        """512 // 8 = 64 cuts a Hadamard block, and must be refused."""
+        with self.assertRaises(format.EXL3FormatError):
+            format.shard_bounds(512, 0, 8, "MoE intermediate")
