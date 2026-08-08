@@ -203,8 +203,11 @@ and **not shared experts**.
 
 ## The MoE hang: an sm_90+ barrier in exllamav3
 
-**Fixed**, by `patches/exllamav3-sm90-barrier.patch`. MoE models hung during
-generation — GPU pinned at 100%, no forward progress — on Laguna-XS and Qwen3.5.
+**Fixed**, carried directly in [our exllamav3
+fork](https://github.com/yeasah/exllamav3) (formerly an out-of-tree
+`patches/exllamav3-sm90-barrier.patch`, folded into history once the fork
+existed to hold it). MoE models hung during generation — GPU pinned at 100%,
+no forward progress — on Laguna-XS and Qwen3.5.
 
 `exl3_mgemm_kernel` synchronizes its blocks twice per iteration, and which
 barrier it uses depends on the architecture:
@@ -224,7 +227,7 @@ buffer** — one allocation per device, shared by every launch, zeroed only once
 at allocation. sm_90+ (Hopper, Blackwell) takes the second path; Ampere and Ada
 take the first. Building with `grid.sync()` on sm_120 clears every hang.
 
-The patch makes the hand-rolled barrier opt-in (`EXL3_SM90_BARRIER=1` at build
+The fix makes the hand-rolled barrier opt-in (`EXL3_SM90_BARRIER=1` at build
 time) rather than automatic above sm_89. It also adds two things worth keeping:
 `cuda_check` around `cudaLaunchCooperativeKernel` in the mgemm path, which
 previously swallowed launch failures the autotuner path already checked for, and

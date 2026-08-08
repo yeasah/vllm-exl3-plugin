@@ -1,3 +1,4 @@
 [submodule "deps/exllamav3"]
 	path = deps/exllamav3
-	url = https://github.com/turboderp-org/exllamav3.git
+	url = https://github.com/yeasah/exllamav3.git
+

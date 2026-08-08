@@ -26,12 +26,14 @@ factor that EXL3 checkpoints carry but do not record, which the plugin recovers
 by measuring the weights; and care about where that factor is applied, since inside
 the kernel it overflows fp16.
 
-MoE also needed **`patches/exllamav3-sm90-barrier.patch`**: above sm_89
-exllamav3 swaps cooperative groups' `grid.sync()` for a hand-rolled barrier that
-synchronizes through a device-global buffer shared by every launch, and it
-deadlocks under vLLM. The patch makes that path opt-in, which clears the hangs on
-Hopper/Blackwell and unlocks CUDA graphs for MoE — Laguna-XS goes from 35 to 172
-tok/s. See [PHASE3.md](PHASE3.md).
+MoE also needed a fix to exllamav3 itself: above sm_89 it swaps cooperative
+groups' `grid.sync()` for a hand-rolled barrier that synchronizes through a
+device-global buffer shared by every launch, and it deadlocks under vLLM. We
+carry that fix directly in [our exllamav3
+fork](https://github.com/yeasah/exllamav3) (formerly an out-of-tree patch;
+folded into history once the fork existed to hold it), making that path
+opt-in, which clears the hangs on Hopper/Blackwell and unlocks CUDA graphs for
+MoE — Laguna-XS goes from 35 to 172 tok/s. See [PHASE3.md](PHASE3.md).
 
 [EXLLAMAV3_ARCH_NOTES.md](EXLLAMAV3_ARCH_NOTES.md) indexes where exllamav3
 changes behaviour by GPU architecture — worth consulting first when something
@@ -44,7 +46,6 @@ research and the phased plan.
 
 ## Quick start
 
-    git -C deps/exllamav3 apply ../../patches/exllamav3-sm90-barrier.patch  # required on sm_90+
     pip install --no-deps --no-build-isolation -e deps/exllamav3   # builds the CUDA ext
     # if CUDA_HOME's toolkit does not match torch's, see PHASE2.md "Finishing this"
     pip install --no-deps -e .
@@ -82,9 +83,10 @@ produces garbage without it. Drive models through their chat template
 
 ## Requirements
 
-- CUDA, compute capability 8.0+ (Ampere). No ROCm — exllamav3 has none. On
-  sm_90+ apply `patches/exllamav3-sm90-barrier.patch` before building the
-  extension, or MoE models will hang.
+- CUDA, compute capability 8.0+ (Ampere). No ROCm — exllamav3 has none. The
+  submodule points at [our fork](https://github.com/yeasah/exllamav3), which
+  carries the sm_90+ barrier fix directly; MoE will hang on Hopper/Blackwell
+  against unpatched upstream exllamav3.
 - float16 or bfloat16 activations. The kernels are fp16; `exl3_mm` casts at the
   kernel boundary, so bf16 models keep a bf16 residual stream.
 - TP=1 and TP=2. Higher degrees are implemented and proven arithmetically

@@ -1,7 +1,9 @@
 # Architecture-conditional code in exllamav3
 
 A census, not an analysis. We lost most of a day to one arch-gated barrier
-(`patches/exllamav3-sm90-barrier.patch`), so this is an index of *where else*
+(fixed directly in [our exllamav3 fork](https://github.com/yeasah/exllamav3),
+formerly `patches/exllamav3-sm90-barrier.patch`), so this is an index of
+*where else*
 exllamav3 changes behaviour by GPU architecture — somewhere to look first when
 the next baffling thing turns up, and a checklist for when we run on hardware
 other than the sm_120 Blackwell everything so far was measured on.
