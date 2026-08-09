@@ -345,6 +345,15 @@ def exl3_mm(
 # multipliers but forwards them into `exl3_mgemm_gr`, which takes `bool`. The
 # implicit conversion makes any nonzero value `true`, so they are booleans in
 # practice, exactly as for `exl3_gemm`.
+#
+# The trailing `None, None` on every call below are `size_n_list`/`c_ptrs`,
+# added upstream for per-matrix output widths (each slot writing to its own
+# address with its own N) -- irrelevant here, since every expert in a layer
+# already shares one shape. `exl3_mgemm`'s pybind binding declares no
+# `py::arg` defaults, so both must be passed explicitly even though the C++
+# signature defaults them to `{}`; passing None reproduces that default and
+# takes the plain single-N/shared-C path exl3_gemm.cu already special-cases
+# for it (size_n_list's absence is what gates c_ptrs off too).
 
 
 def _exl3_moe_mm(
@@ -401,9 +410,11 @@ def _exl3_moe_mm(
     # the kernel shape and autotune the grid, which is its normal behaviour.
     sms = 0
     e.exl3_mgemm(gathered, gate_trellis, interm_g, gate_suh, a_had, gate_svh,
-                 indices, None, gate_bits, -1, mcg, mul1, lo, hi, sms, num_tokens)
+                 indices, None, gate_bits, -1, mcg, mul1, lo, hi, sms, num_tokens,
+                 None, None)
     e.exl3_mgemm(gathered, up_trellis, interm_u, up_suh, a_had, up_svh,
-                 indices, None, gate_bits, -1, mcg, mul1, lo, hi, sms, num_tokens)
+                 indices, None, gate_bits, -1, mcg, mul1, lo, hi, sms, num_tokens,
+                 None, None)
 
     interm_a = _gated_activation(activation, interm_g, interm_u)
 
@@ -411,7 +422,8 @@ def _exl3_moe_mm(
     # projection's scratch -- the same reuse exllamav3 makes.
     out = torch.empty((bszm, 1, hidden), dtype=torch.half, device=x.device)
     e.exl3_mgemm(interm_a, down_trellis, out, down_suh, interm_g, down_svh,
-                 indices, weights, down_bits, -1, mcg, mul1, lo, hi, sms, num_tokens)
+                 indices, weights, down_bits, -1, mcg, mul1, lo, hi, sms, num_tokens,
+                 None, None)
 
     # With `weights` given, the kernel reduces the top_k partials per token;
     # rows 0..num_tokens-1 hold the results.
