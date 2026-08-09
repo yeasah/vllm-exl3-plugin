@@ -77,11 +77,50 @@ alone; it is not.
 Expert parallelism is still refused: `exl3_mgemm` can filter an expert range,
 but not in combination with the multi-token weighted reduction this method uses.
 
-**Verified on one GPU only.** `tests/test_tp.py` simulates every rank
-sequentially and sums, which establishes that the split reconstructs the
-unsharded result at TP=2 and TP=4. What it cannot establish is vLLM's loader
-driving these slices across real workers, NCCL, or several processes writing the
-exllamav3 autotune cache at once.
+### Verified on real multi-GPU hardware
+
+2x RTX 5060 Ti (sm_120), vLLM 0.26.0, both execution modes:
+
+| model | TP | eager | graphs | outcome |
+|---|---|---|---|---|
+| Laguna-XS-2.1 | 1 | 16.2 tok/s | 132.5 tok/s | ok |
+| Laguna-XS-2.1 | **2** | 15.1 tok/s | **131.5 tok/s** | **ok** |
+| Qwen3.5-35B-A3B | 1 | 12.2 tok/s | 93.4 tok/s | ok |
+| Qwen3.5-35B-A3B | 2 | — | — | blocked at load, see below |
+
+Weights split correctly: **4.4 GiB per worker against 8.54 GiB at TP=1.**
+Throughput is flat, which is the expected shape — decode is latency-bound and TP
+adds an all-reduce, so what TP buys here is memory headroom, not speed.
+
+**Token-for-token equality does not hold, and cannot for this checkpoint.** The
+Phase 2 standard was established on dense models; Laguna at 2bpw diverges from
+its own TP=1 run at token 16 of 48. The sweep supplied its own control, though:
+
+    tp1 eager vs tp1 graphs   diverges at token 26/48  (laguna, no sharding at all)
+    tp1 eager vs tp1 graphs   diverges at token 43/48  (qwen,   no sharding at all)
+    tp1 vs tp2, same mode     diverges at token 16/48  (laguna)
+
+Merely changing execution mode at TP=1 diverges comparably, so greedy divergence
+here is a property of a 2bpw model's numerical fragility rather than evidence
+about sharding. Together with the offline test below matching to 2e-2, that reads
+as correct — but it is **weaker evidence than the dense Phase 2 result**, because
+the strongest available check simply does not apply to this checkpoint.
+
+**Qwen3.5 is blocked at TP>1** by a known gap, not a bug: its `in_proj_qkv`
+arrives as the shard tuple `(0, 1, 2)` inside one stored tensor, and
+`EXL3Parameter._load_fused` cannot compose that split with a tensor-parallel one.
+It fails at load with exactly that message. `tools/tp_preflight.py` now predicts
+it; it previously cleared Qwen for TP=2 because every dimension divides, which
+was a blind spot — the obstacle is vLLM's packing, not the checkpoint's shapes.
+
+**Still not covered by any of this:** TP>2 on real hardware, and several worker
+processes writing the exllamav3 autotune cache at once.
+
+### The offline simulation
+
+`tests/test_tp.py` also simulates every rank sequentially on one device and sums,
+establishing that the split reconstructs the unsharded result at TP=2 and TP=4.
+That remains the check that runs without hardware.
 
 ## Why a row split can be summed
 

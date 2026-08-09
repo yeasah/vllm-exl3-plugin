@@ -34,8 +34,29 @@ COLUMN = re.compile(
     r"|(^|\.)lm_head$")
 ROW = re.compile(r"\.(o_proj|down_proj|out_proj)$")
 
+#: Stored tensors that vLLM hands over as a *tuple* of output shards, because it
+#: merges them into a wider parameter than the checkpoint has (Qwen3.5's linear
+#: attention fuses `in_proj_qkv` + `in_proj_z` into `in_proj_qkvz`, so the single
+#: stored `in_proj_qkv` covers shards 0, 1 and 2).
+#:
+#: `EXL3Parameter._load_fused` can split such a tensor, but not while *also*
+#: taking a tensor-parallel slice -- the two splits would have to compose, and
+#: that is unimplemented. So these block TP>1 no matter how the dimensions
+#: divide, which is a fact about vLLM's packing rather than about the
+#: checkpoint. It cannot be derived from the safetensors headers, hence a list of
+#: known cases; an unknown one shows up as a load-time NotImplementedError rather
+#: than as anything silent.
+FUSED_MULTI_SHARD = re.compile(r"\.in_proj_qkv$")
+
 
 def resolve(target: str) -> str:
+    """Pick the snapshot that actually holds weights.
+
+    A repo often has several: fetching one file at a different revision (a
+    `processor_config.json`, say) leaves a snapshot directory containing only
+    that file. Choosing by name would pick it about half the time, so choose by
+    weight count instead.
+    """
     if os.path.isdir(target):
         return target
     hits = sorted(glob.glob(os.path.expanduser(
@@ -43,7 +64,11 @@ def resolve(target: str) -> str:
         + target.replace("/", "--") + "/snapshots/*")))
     if not hits:
         raise SystemExit(f"no local snapshot for {target!r}")
-    return hits[-1]
+    weighted = [(len(glob.glob(os.path.join(h, "*.safetensors"))), h) for h in hits]
+    n, best = max(weighted)
+    if not n:
+        raise SystemExit(f"no snapshot of {target!r} contains safetensors")
+    return best
 
 
 def trellis_shapes(d: str) -> dict[str, list[int]]:
@@ -78,7 +103,12 @@ def main() -> None:
     print(f"{target}\n  {d}\n  {len(shapes)} quantized tensors, "
           f"{len(groups)} distinct shapes\n")
     worst = {}
+    fused = []
     for (generic, in_f, out_f), members in sorted(groups.items()):
+        if FUSED_MULTI_SHARD.search(generic):
+            fused.append((generic, len(members)))
+            print(f"  fus {generic:<52} {out_f:>6}  blocks TP>1 (fused output shards)")
+            continue
         if COLUMN.search(generic):
             axis, size = "col", out_f
         elif ROW.search(generic):
@@ -99,8 +129,20 @@ def main() -> None:
     print()
     for tp in degrees:
         bad = worst.get(tp, 0)
-        verdict = "USABLE" if not bad else f"BLOCKED ({bad} tensors cannot split)"
+        if fused:
+            n = sum(c for _, c in fused)
+            verdict = (f"BLOCKED ({n} tensors carry fused output shards"
+                       + (f"; {bad} also cannot split)" if bad else ")"))
+        elif bad:
+            verdict = f"BLOCKED ({bad} tensors cannot split)"
+        else:
+            verdict = "USABLE"
         print(f"  TP={tp}: {verdict}")
+    if fused:
+        print("\n  Fused output shards are a vLLM packing property, not a"
+              "\n  dimension property: EXL3Parameter._load_fused cannot compose"
+              "\n  its split with a tensor-parallel one. Verified against a real"
+              "\n  TP=2 run, which failed at load with exactly that error.")
 
 
 if __name__ == "__main__":

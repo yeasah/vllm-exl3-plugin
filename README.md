@@ -14,10 +14,13 @@ exllamav3 kernels do the multiply, under torch.compile and CUDA graphs. On
 Llama-3.2-1B @3bpw that is 2.35 GiB -> 0.86 GiB with decode 22% *faster* than
 the dense path; gemma-4-12B at 3bpw runs in 6.32 GiB on a 16 GB card.
 
-Phase 2 (tensor parallelism) is **validated at TP=2** across three models, eager
-and with CUDA graphs, reproducing TP=1 token for token — including a
-vocab-parallel quantized `lm_head`. See [PHASE2.md](PHASE2.md). TP>2 is
-unexercised.
+Phase 2 (tensor parallelism) is **validated at TP=2** across three dense models,
+eager and with CUDA graphs, reproducing TP=1 token for token — including a
+vocab-parallel quantized `lm_head`. Routed experts shard too, verified at TP=2 on
+2x Blackwell (8.54 GiB -> 4.4 GiB per worker) and at TP=2/4 offline. See
+[PHASE2.md](PHASE2.md). TP>2 is unexercised on hardware, and
+`tools/tp_preflight.py` reports which degrees a given checkpoint even admits —
+the answer is checkpoint-specific and often surprising.
 
 Phase 3 (MoE) works on all three MoE checkpoints tried: gemma-4-26B-A4B (9.46
 GiB), Qwen3.5-35B-A3B (10.63 GiB, needs the `patches/` change to load) and
