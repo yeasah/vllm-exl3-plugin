@@ -113,8 +113,38 @@ It fails at load with exactly that message. `tools/tp_preflight.py` now predicts
 it; it previously cleared Qwen for TP=2 because every dimension divides, which
 was a blind spot — the obstacle is vLLM's packing, not the checkpoint's shapes.
 
-**Still not covered by any of this:** TP>2 on real hardware, and several worker
-processes writing the exllamav3 autotune cache at once.
+### Measuring this properly: `tools/tp_compare.py`
+
+First-divergence-token is a bad instrument. It conflates numerical error with
+model confidence, and after the first difference the two runs are on *different
+contexts*, so everything downstream compares prompts rather than arithmetic.
+
+`tools/tp_compare.py` teacher-forces instead: both configurations score the same
+fixed token sequence via `prompt_logprobs`, giving a per-position comparison at
+identical contexts, reported as KL plus argmax disagreement. Comparing a capture
+against itself is exactly zero, which is the sanity check that the metric is
+measuring what it claims.
+
+The point is the **noise floor**. Capture eager against CUDA graphs at TP=1 —
+same weights, no sharding, no collectives — and whatever differs is that
+checkpoint's irreducible kernel-ordering noise. For Laguna-XS at 2bpw:
+
+| TP=1 eager vs TP=1 graphs | argmax disagreements | KL max / mean |
+|---|---|---|
+| factual prompt | 2/47 | 7.0e-2 / 1.3e-2 |
+| open-ended prompt | 9/91 | 5.5e-1 / 2.5e-2 |
+
+Nine argmax flips in 91 positions from an execution-mode change alone. Against
+that floor, a generation diverging at token 16 under TP=2 says nothing, and
+**token-identical output was never achievable for this checkpoint under any
+configuration change** — which is why the dense Phase 2 standard could not be
+met here and why chasing it with a higher-bpw checkpoint is a quality question
+rather than a correctness one.
+
+**Still not covered by any of this:** TP>2 on real hardware, several worker
+processes writing the exllamav3 autotune cache at once, and a TP=2 capture to
+compare against the floor above — the box was released before `tp_compare.py`
+existed.
 
 ### The offline simulation
 
