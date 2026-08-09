@@ -12,6 +12,19 @@ This reads safetensors headers only -- no GPU, no weights, no vLLM -- so it can
 be run before renting anything.
 
     tools/tp_preflight.py <snapshot-dir-or-hf-repo-name> [tp ...]
+    tools/tp_preflight.py <hf-repo> --remote --revision 3.0bpw
+
+`--remote` answers the question for a checkpoint that is not downloaded, via
+`HfApi.get_safetensors_metadata`, the Hub's own supported call for reading
+tensor metadata without fetching weights. It is deliberately *less* hub traffic
+than the alternative: today the only way to learn whether a checkpoint is
+TP-viable is to download all of it, so this replaces gigabytes with a few
+kilobytes of header reads per model.
+
+It takes one repo per invocation on purpose. Do not wrap it in an enumeration
+over the Hub -- vetting a shortlist you already have is a different thing from
+crawling, and only the first is intended here. Authentication is whatever
+`huggingface_hub` already has (`HF_TOKEN`, or a stored `hf auth login`).
 """
 
 from __future__ import annotations
@@ -71,6 +84,23 @@ def resolve(target: str) -> str:
     return best
 
 
+def remote_trellis_shapes(repo: str, revision: str | None) -> dict[str, list[int]]:
+    """Every `<module>.trellis` shape, read from the Hub without downloading.
+
+    EXL3 repos publish one branch per bit rate and `main` often carries no
+    weights at all, so `revision` usually matters.
+    """
+    from huggingface_hub import HfApi
+
+    meta = HfApi().get_safetensors_metadata(repo, revision=revision)
+    shapes = {}
+    for f in meta.files_metadata.values():
+        for name, t in f.tensors.items():
+            if name.endswith(".trellis"):
+                shapes[name[: -len(".trellis")]] = list(t.shape)
+    return shapes
+
+
 def trellis_shapes(d: str) -> dict[str, list[int]]:
     """Every `<module>.trellis` shape, from the safetensors headers."""
     shapes = {}
@@ -85,10 +115,22 @@ def trellis_shapes(d: str) -> dict[str, list[int]]:
 
 
 def main() -> None:
-    target = sys.argv[1]
-    degrees = [int(a) for a in sys.argv[2:]] or [2, 4, 8]
-    d = resolve(target)
-    shapes = trellis_shapes(d)
+    argv = sys.argv[1:]
+    remote = "--remote" in argv
+    revision = None
+    if "--revision" in argv:
+        i = argv.index("--revision")
+        revision = argv[i + 1]
+        del argv[i : i + 2]
+    argv = [a for a in argv if a != "--remote"]
+    target = argv[0]
+    degrees = [int(a) for a in argv[1:]] or [2, 4, 8]
+    if remote:
+        d = f"{target}@{revision or 'main'} (hub metadata)"
+        shapes = remote_trellis_shapes(target, revision)
+    else:
+        d = resolve(target)
+        shapes = trellis_shapes(d)
     if not shapes:
         raise SystemExit(f"no EXL3 trellis tensors under {d}")
 

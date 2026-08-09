@@ -66,6 +66,34 @@ renting anything:
 `format.shard_bounds` enforces the 128-wide Hadamard rule, so an illegal degree
 raises at load rather than silently computing the wrong thing.
 
+`--remote` answers the same question for a checkpoint that is not downloaded,
+through `HfApi.get_safetensors_metadata` — the Hub's supported call for reading
+tensor metadata without fetching weights, so vetting a candidate costs kilobytes
+instead of the gigabytes a download would. Verified to agree with the local path
+on the same checkpoint.
+
+### What blocks high TP degrees
+
+TP=8 needs every split dimension divisible by 1024, and the recurring blockers
+are structural rather than unlucky:
+
+- **fine-grained MoE expert intermediates** (512 in both Laguna and Qwen3.5) —
+  small *by design*, so a fine-grained MoE essentially cannot reach TP=8 on the
+  intermediate axis at all;
+- **narrow KV projections** (`k_proj`/`v_proj` at 512 or 256);
+- **vocabulary size** — 128256, 130560 and 248320 all fail; 100352 and 262144
+  pass. Whether a vocab cooperates is close to arbitrary, and a power-of-two
+  vocab is the reliable case.
+
+For MoE specifically, the right axis at high degree is **expert parallelism**,
+which gives each rank whole experts, cuts no tensor, and sidesteps the Hadamard
+constraint entirely. That is currently refused (`exl3_mgemm` will not combine
+expert-range filtering with the fused weighted reduction), so scaling MoE wide
+is a kernel feature gap, not a hardware-coverage gap.
+
+A dense model can reach TP=8: `gemma-4-31B-it-exl3` @3.00bpw clears every
+dimension, including its 262144 vocab.
+
 **gemma-4-26B cannot be tensor-parallel at any degree.** Its routed experts
 split fine at TP=2 (768 -> 384), but the *dense* MLP in the same model is 2176
 wide — seventeen Hadamard blocks, an odd multiple, which no even split can
