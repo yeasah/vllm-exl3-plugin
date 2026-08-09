@@ -52,13 +52,11 @@ ROW = re.compile(r"\.(o_proj|down_proj|out_proj)$")
 #: attention fuses `in_proj_qkv` + `in_proj_z` into `in_proj_qkvz`, so the single
 #: stored `in_proj_qkv` covers shards 0, 1 and 2).
 #:
-#: `EXL3Parameter._load_fused` can split such a tensor, but not while *also*
-#: taking a tensor-parallel slice -- the two splits would have to compose, and
-#: that is unimplemented. So these block TP>1 no matter how the dimensions
-#: divide, which is a fact about vLLM's packing rather than about the
-#: checkpoint. It cannot be derived from the safetensors headers, hence a list of
-#: known cases; an unknown one shows up as a load-time NotImplementedError rather
-#: than as anything silent.
+#: `EXL3Parameter._load_fused` composes that split with the tensor-parallel one
+#: (`format.fused_shard_bounds`), so these no longer block TP -- but the path is
+#: only verified offline, never on multi-GPU hardware, so it is still called out
+#: rather than passed over silently. It cannot be derived from the safetensors
+#: headers, hence a list of known cases.
 FUSED_MULTI_SHARD = re.compile(r"\.in_proj_qkv$")
 
 
@@ -149,7 +147,8 @@ def main() -> None:
     for (generic, in_f, out_f), members in sorted(groups.items()):
         if FUSED_MULTI_SHARD.search(generic):
             fused.append((generic, len(members)))
-            print(f"  fus {generic:<52} {out_f:>6}  blocks TP>1 (fused output shards)")
+            print(f"  fus {generic:<52} {out_f:>6}  fused output shards, "
+                  "TP path unverified on hardware")
             continue
         if COLUMN.search(generic):
             axis, size = "col", out_f
@@ -171,20 +170,18 @@ def main() -> None:
     print()
     for tp in degrees:
         bad = worst.get(tp, 0)
-        if fused:
-            n = sum(c for _, c in fused)
-            verdict = (f"BLOCKED ({n} tensors carry fused output shards"
-                       + (f"; {bad} also cannot split)" if bad else ")"))
-        elif bad:
+        if bad:
             verdict = f"BLOCKED ({bad} tensors cannot split)"
         else:
             verdict = "USABLE"
         print(f"  TP={tp}: {verdict}")
     if fused:
-        print("\n  Fused output shards are a vLLM packing property, not a"
-              "\n  dimension property: EXL3Parameter._load_fused cannot compose"
-              "\n  its split with a tensor-parallel one. Verified against a real"
-              "\n  TP=2 run, which failed at load with exactly that error.")
+        n = sum(c for _, c in fused)
+        print(f"\n  {n} tensors carry fused output shards -- a vLLM packing"
+              "\n  property, not a dimension one. _load_fused composes that split"
+              "\n  with the TP split; the arithmetic is unit-tested but the path"
+              "\n  has never run on real multi-GPU hardware. Treat a TP verdict"
+              "\n  above as provisional for this checkpoint.")
 
 
 if __name__ == "__main__":

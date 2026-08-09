@@ -206,6 +206,63 @@ def shard_bounds(
     return tp_rank * per_rank, (tp_rank + 1) * per_rank
 
 
+def fused_shard_bounds(
+    output_partition_sizes,
+    indices,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+) -> list[tuple[int, int, int]]:
+    """Where each fused output shard lives in the stored tensor, for this rank.
+
+    Some checkpoints put several of a layer's output shards in one quantized
+    tensor -- Qwen3.5's `in_proj_qkv` carries shards 0, 1 and 2 of the merged
+    `in_proj_qkvz`. Under tensor parallelism that tensor has to be cut twice:
+    once to separate the shards, and again to take this rank's slice of each.
+
+    The two cuts compose straightforwardly because they are both column splits.
+    vLLM's `output_partition_sizes` are already per-rank, so shard `i` occupies
+    `per_rank[i] * tp_size` contiguous columns of the stored tensor, and this
+    rank wants the `tp_rank`-th slice within that span:
+
+        stored:  [ shard0 rank0 | shard0 rank1 | shard1 rank0 | shard1 rank1 ]
+        rank 0 takes  ^^^^^^^^^^^^                ^^^^^^^^^^^^
+
+    Returns `(shard_index, first, last)` per covered shard, in storage
+    coordinates. At `tp_size == 1` this degenerates to consecutive spans, which
+    is the un-parallel case.
+
+    Every boundary must land on a whole Hadamard block, and one condition
+    secures all of them: if each per-rank width is a multiple of `HAD_BLOCK`
+    then so is every span and every offset derived from them.
+    """
+    sizes = list(output_partition_sizes)
+    if not sizes:
+        raise EXL3FormatError(
+            "a fused checkpoint tensor arrived but this layer's output "
+            "partition sizes are unknown"
+        )
+    bounds = []
+    offset = 0
+    for index in indices:
+        if index >= len(sizes):
+            raise EXL3FormatError(
+                f"fused tensor claims output shard {index}, but the layer has "
+                f"only {len(sizes)}"
+            )
+        per_rank = sizes[index]
+        if per_rank % HAD_BLOCK:
+            raise EXL3FormatError(
+                f"fused shard {index} is {per_rank} columns wide per rank, not "
+                f"a multiple of the EXL3 Hadamard block size ({HAD_BLOCK}). "
+                "Cutting it there would split a Hadamard block and silently "
+                "produce wrong results."
+            )
+        first = offset + tp_rank * per_rank
+        bounds.append((index, first, first + per_rank))
+        offset += per_rank * tp_size
+    return bounds
+
+
 def module_key_for_tensor(name: str) -> str | None:
     """Map a checkpoint tensor name to its owning module key, or None.
 

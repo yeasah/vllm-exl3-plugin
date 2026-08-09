@@ -145,8 +145,29 @@ intent survives a change to the base default.
 
 `EXL3Parameter._load_fused` then splits the tensor across the shards it covers,
 which is the same operation as a tensor-parallel column split and carries the
-same 128-boundary constraint. Composing it with an actual TP split is not
-implemented and raises.
+same 128-boundary constraint.
+
+Under tensor parallelism both cuts apply — once to separate the shards, once to
+take this rank's slice of each — and they compose, because both are column
+splits. `format.fused_shard_bounds` does that arithmetic: vLLM's
+`output_partition_sizes` are already per-rank, so shard `i` spans
+`per_rank[i] * tp_size` stored columns and this rank takes the `tp_rank`-th
+slice within it.
+
+    stored:  [ shard0 rank0 | shard0 rank1 | shard1 rank0 | shard1 rank1 ]
+    rank 0 takes  ^^^^^^^^^^^^                ^^^^^^^^^^^^
+
+One condition secures every boundary: if each per-rank width is a multiple of
+`HAD_BLOCK` then so is every span and offset derived from it, so a single check
+covers both cuts.
+
+**Unit-tested, not hardware-tested.** `tests/test_format.py` checks the property
+that matters — every rank's slices tile the unsharded shard exactly, with no gap
+or overlap — plus Hadamard alignment at each boundary, across TP=1/2/4. What has
+never run is vLLM's loader driving it across real workers; Qwen3.5 at TP=2 was
+blocked by the old `NotImplementedError` when the 2x box was available, and the
+box was released before this landed. `tools/tp_preflight.py` reports the
+checkpoint as provisional for that reason.
 
 **Result: Qwen3.5-35B-A3B loads (10.63 GiB) and generates correctly.** It hung
 during generation when first tried; that turned out to be the autotuner problem

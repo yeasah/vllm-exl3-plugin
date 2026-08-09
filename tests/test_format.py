@@ -172,5 +172,64 @@ class TestIntermDivisor(unittest.TestCase):
                 format.infer_interm_divisor(ratio)
 
 
+class TestFusedShardBounds(unittest.TestCase):
+    """Composing a fused-shard split with a tensor-parallel one.
+
+    Qwen3.5's `in_proj_qkv` carries shards 0, 1 and 2 of the merged
+    `in_proj_qkvz`, so under TP the stored tensor is cut twice.
+    """
+
+    # Per-rank widths, as vLLM supplies them.
+    SIZES = [1024, 512, 512, 256]
+
+    def test_tp1_spans_are_consecutive(self):
+        got = format.fused_shard_bounds(self.SIZES, [0, 1, 2])
+        self.assertEqual(got, [(0, 0, 1024), (1, 1024, 1536), (2, 1536, 2048)])
+
+    def test_rank_slices_tile_the_unsharded_shard(self):
+        """The union of every rank's slice must be exactly the TP=1 span."""
+        for tp_size in (2, 4):
+            with self.subTest(tp_size=tp_size):
+                # At TP=N vLLM reports per-rank sizes, i.e. 1/N of TP=1's.
+                sizes = [s // tp_size for s in self.SIZES]
+                whole = format.fused_shard_bounds(self.SIZES, [0, 1, 2])
+                per_shard = {i: [] for i, _, _ in whole}
+                for rank in range(tp_size):
+                    for i, lo, hi in format.fused_shard_bounds(
+                        sizes, [0, 1, 2], rank, tp_size
+                    ):
+                        per_shard[i].append((lo, hi))
+                for (i, lo, hi) in whole:
+                    covered = sorted(per_shard[i])
+                    # contiguous, no gaps or overlaps, and spanning the whole
+                    self.assertEqual(covered[0][0], lo)
+                    self.assertEqual(covered[-1][1], hi)
+                    for (_, a), (b, _) in zip(covered, covered[1:]):
+                        self.assertEqual(a, b)
+
+    def test_every_boundary_is_hadamard_aligned(self):
+        for tp_size in (1, 2, 4):
+            sizes = [s // tp_size for s in self.SIZES]
+            for rank in range(tp_size):
+                for _, lo, hi in format.fused_shard_bounds(
+                    sizes, [0, 1, 2], rank, tp_size
+                ):
+                    self.assertEqual(lo % format.HAD_BLOCK, 0)
+                    self.assertEqual(hi % format.HAD_BLOCK, 0)
+
+    def test_rejects_shard_that_cuts_a_hadamard_block(self):
+        # 512 across 8 ranks is 64 per rank, half a Hadamard block.
+        with self.assertRaises(format.EXL3FormatError):
+            format.fused_shard_bounds([64, 64, 64], [0, 1, 2], 0, 8)
+
+    def test_rejects_unknown_shard_index(self):
+        with self.assertRaises(format.EXL3FormatError):
+            format.fused_shard_bounds([1024, 512], [0, 1, 2])
+
+    def test_rejects_missing_partition_sizes(self):
+        with self.assertRaises(format.EXL3FormatError):
+            format.fused_shard_bounds([], [0])
+
+
 if __name__ == "__main__":
     unittest.main()

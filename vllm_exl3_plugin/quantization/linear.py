@@ -142,38 +142,27 @@ class EXL3Parameter(BasevLLMParameter):
 
         Splitting it is the same operation as a tensor-parallel column split,
         and carries the same constraint: the boundaries must be whole Hadamard
-        blocks, or the pieces are silently wrong.
+        blocks, or the pieces are silently wrong. Under tensor parallelism both
+        cuts apply -- once to separate the shards, once to take this rank's
+        slice of each -- and they compose, because both are column splits.
+        `format.fused_shard_bounds` does that arithmetic.
+
+        `suh` and the codebook scalars are exempt: a column split leaves the
+        input scale whole, so `tp.shard_column` returns them untouched and every
+        shard index stores the same tensor.
         """
-        if self.tp_size > 1:
-            raise NotImplementedError(
-                "checkpoints that fuse several output shards into one tensor "
-                "are not supported under tensor parallelism yet: the fused "
-                "split and the TP split would have to compose"
-            )
         indices = (
             list(shard_id)
             if isinstance(shard_id, tuple)
             else list(range(len(self.output_partition_sizes)))
         )
-        if not self.output_partition_sizes:
-            raise format.EXL3FormatError(
-                "a fused checkpoint tensor arrived but this layer's output "
-                "partition sizes are unknown"
+        bounds = format.fused_shard_bounds(
+            self.output_partition_sizes, indices, self.tp_rank, self.tp_size
+        )
+        for index, first, last in bounds:
+            self.store(
+                tp.shard_column(self.role, loaded_weight, first, last), index
             )
-
-        offset = 0
-        for index in indices:
-            size = self.output_partition_sizes[index]
-            if self.role in (tp.ROLE_TRELLIS, tp.ROLE_SVH):
-                format.check_tp_split(size, 1, f"fused shard {index}")
-                if size % format.HAD_BLOCK:
-                    raise format.EXL3FormatError(
-                        f"fused shard {index} is {size} wide, not a multiple of "
-                        f"the Hadamard block size {format.HAD_BLOCK}; this "
-                        "tensor cannot be split at that boundary"
-                    )
-            self.store(tp.shard_column(self.role, loaded_weight, offset, offset + size), index)
-            offset += size
 
     def release(self) -> None:
         self.shards.clear()
