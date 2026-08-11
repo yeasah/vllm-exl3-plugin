@@ -95,6 +95,15 @@ produces garbage without it. Drive models through their chat template
 - TP=1 and TP=2. Higher degrees are implemented and proven arithmetically
   but unexercised, and warn at startup; see [PHASE2.md](PHASE2.md).
 
+## Patches
+
+`patches/` holds changes to *vLLM*, applied to a source checkout:
+
+| patch | why |
+|---|---|
+| `vllm-fused-param-capability-check.patch` | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it |
+| `vllm-gemma4-transformers-5.15-per-layer.patch` | gemma-4 on transformers >= 5.15, which moves `head_dim`/`num_key_value_heads` into per-layer configs |
+
 ## Environment variables
 
 | variable | default | effect |

@@ -288,3 +288,39 @@ dispatch (four paths, including a full dequant above 144 rows) has to live
 signature, and every op needs a `register_fake`. The open questions there are
 the cooperative-launch lock buffer and the on-disk autotune cache under
 multi-process workers.
+
+
+## transformers 5.15: heterogeneous configs
+
+transformers 5.15 formalised per-layer configuration. Attributes that differ
+across layers now live in `config.per_layer_config[i]`, and reading one off the
+top-level config raises `AmbiguousGlobalPerLayerAttributeError`.
+
+Two properties of that make it more disruptive than it first looks:
+
+- **It subclasses `RuntimeError`, not `AttributeError`.** So the defensive
+  idiom `getattr(config, name, default)` does not catch it, `hasattr` does not
+  return False, and `config_a == config_b` raises while comparing. Every
+  defensive read of a per-layer attribute propagates.
+- **The old top-level aliases can disappear.** gemma-4's `global_head_dim` is
+  folded into the per-layer entries and is simply absent afterwards, so
+  `getattr(config, "global_head_dim", config.head_dim)` silently returns the
+  *sliding* dimension for full-attention layers -- 256 where the checkpoint has
+  512 -- and fails much later as `Attempted to load weight (512) into parameter
+  (256)`.
+
+The documented escape hatch (`allow_global_per_layer_attribute_access = True`)
+is **not** a fix for that second point: it restores the global read, but the
+global value is the wrong one. Verified -- it gets past config resolution and
+then fails at weight loading.
+
+`patches/vllm-gemma4-transformers-5.15-per-layer.patch` reads the per-layer
+configs at the five sites gemma-4 reaches, and takes the max where vLLM wants a
+single number for buffer sizing (matching `get_num_experts_from_block_configs`,
+which already did this for NemotronH). For gemma-4-12B the per-layer max
+reproduces the pre-5.15 values exactly: `head_dim` max(256, 512) = 512, and
+`num_key_value_heads` max(1, 8) = 8 = its old top-level value.
+
+Worth expecting again: Laguna already has per-layer head counts, and Muse
+Glimmer has per-layer rope theta and layer types. Heterogeneous configs are
+becoming normal, and this class of break will recur.
