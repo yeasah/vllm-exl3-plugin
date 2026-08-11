@@ -209,3 +209,69 @@ class TestQuantizedHeadDetection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStorageMapCanOmitQuantizedModules(unittest.TestCase):
+    """`tensor_storage` is metadata, and it can disagree with the checkpoint.
+
+    Shapes taken from `turboderp/Muse-Glimmer-30B-exl3` @4.00bpw, which
+    quantizes its 50-layer vision tower, adapter and projection -- 303 modules --
+    and lists none of them in `quantization_config.json`, recording only the 416
+    language-model modules and `lm_head`. Believing the metadata means handing
+    303 quantized modules to `UnquantizedLinearMethod`, which allocates a dense
+    `weight` the checkpoint does not contain.
+    """
+
+    INDEX = {
+        "model.language_model.layers.0.self_attn.q_proj.trellis": "a",
+        "model.language_model.layers.0.self_attn.q_proj.suh": "a",
+        "model.language_model.layers.0.input_layernorm.weight": "a",
+        # Quantized, and absent from the storage map below.
+        "model.vision_tower.layers.0.attn.q_proj.trellis": "b",
+        "model.vision_tower.layers.0.attn.q_proj.suh": "b",
+        "model.vision_tower.layers.0.attn.q_proj.bias": "b",
+        "model.vision_adapter.fc1.trellis": "b",
+        "model.vision_tower.layers.0.norm1.weight": "b",
+        "lm_head.trellis": "b",
+    }
+    STORAGE = {
+        "model.language_model.layers.0.self_attn.q_proj": {"quant_format": "exl3"},
+        "model.language_model.layers.0.input_layernorm": {"quant_format": None},
+        "lm_head": {"quant_format": "exl3"},
+    }
+
+    def _config(self):
+        from vllm_exl3_plugin.quantization.config import EXL3Config
+
+        c = EXL3Config(bits=4.0, head_bits=6, codebook="mul1")
+        c.tensor_storage = dict(self.STORAGE)
+        c.quantized_modules = format.quantized_module_keys(self.INDEX)
+        c.tie_word_embeddings = False
+        return c
+
+    def test_index_finds_what_storage_omits(self):
+        c = self._config()
+        self.assertEqual(len(c._modules_missing_from_storage()), 2)
+        for m in ("model.vision_tower.layers.0.attn.q_proj",
+                  "model.vision_adapter.fc1"):
+            self.assertTrue(c.is_quantized(m), m)
+
+    def test_unquantized_modules_stay_unquantized(self):
+        c = self._config()
+        for m in ("model.language_model.layers.0.input_layernorm",
+                  "model.vision_tower.layers.0.norm1"):
+            self.assertFalse(c.is_quantized(m), m)
+
+    def test_storage_only_still_works(self):
+        """No index (single-file repo): fall back to the storage map."""
+        c = self._config()
+        c.quantized_modules = None
+        self.assertTrue(
+            c.is_quantized("model.language_model.layers.0.self_attn.q_proj"))
+        self.assertFalse(c.is_quantized("model.vision_tower.layers.0.attn.q_proj"))
+
+    def test_head_follows_the_index(self):
+        c = self._config()
+        self.assertTrue(c.head_is_quantized())
+        c.tie_word_embeddings = True
+        self.assertFalse(c.head_is_quantized())

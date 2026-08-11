@@ -9,10 +9,18 @@ this is the part of the GGUF plugin that EXL3 simply does not need.
 Models quantized since ~v0.0.2 additionally ship `quantization_config.json`,
 which carries a per-module `tensor_storage` map (shapes, dtypes, bit width,
 codebook). It is not part of the HF config, so vLLM does not read it; we fetch
-it ourselves in `maybe_update_config` and use it to tell quantized modules from
-untouched ones. Older checkpoints lack it, and there we fall back to assuming
-every linear in the model is quantized -- which is what exllamav3's converter
-actually does.
+it ourselves in `maybe_update_config`.
+
+**`tensor_storage` is metadata, not the checkpoint, and the two can disagree.**
+`turboderp/Muse-Glimmer-30B-exl3` quantizes its 50-layer vision tower, adapter
+and projection -- 303 modules -- and lists none of them, recording only the 416
+language-model modules and `lm_head`. So what actually decides whether a module
+is quantized is `model.safetensors.index.json`, which names every tensor that
+exists; the storage map is consulted for the things only it knows (codebook,
+bit widths) and as a fallback for single-file repos that have no index.
+
+Checkpoints with neither fall back to assuming every linear is quantized --
+which is what exllamav3's converter did before it recorded anything.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 
 
+from .. import format
 from ..format import EXL3FormatError
 from ..log import init_logger
 
@@ -64,6 +73,10 @@ class EXL3Config(QuantizationConfig):
         self.out_scales = out_scales
         # Populated by maybe_update_config when quantization_config.json exists.
         self.tensor_storage: dict[str, Any] | None = None
+        # Modules the *checkpoint* quantizes, from the safetensors index. Takes
+        # precedence over tensor_storage, which can omit some (see
+        # _load_index_modules). None means "no index was readable".
+        self.quantized_modules: set[str] | None = None
         self._ancestors: set[str] | None = None
         # Also from maybe_update_config, which is the only hook that sees
         # hf_config. None means "not yet known".
@@ -186,9 +199,40 @@ class EXL3Config(QuantizationConfig):
                 getattr(hf_config, "tie_word_embeddings", False)
             )
 
+    def _load_index_modules(self, model_name: str, revision: str | None) -> None:
+        """Modules that actually carry a trellis, from the safetensors index.
+
+        `tensor_storage` is *metadata about* the checkpoint and can disagree
+        with it. `turboderp/Muse-Glimmer-30B-exl3` is the case that forced this:
+        it quantizes the whole 50-layer vision tower, its adapter and its
+        projection -- 303 modules -- and lists none of them, recording only the
+        416 language-model modules and `lm_head`. Believing the metadata there
+        means handing 303 quantized modules to `UnquantizedLinearMethod`, which
+        allocates a dense `weight` the checkpoint does not contain.
+
+        The index is ground truth: it names every tensor that exists. Where the
+        two disagree, this wins.
+        """
+        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+
+        try:
+            index = get_hf_file_to_dict(
+                "model.safetensors.index.json", model_name, revision or "main"
+            )
+        except Exception:
+            index = None
+        weight_map = (index or {}).get("weight_map")
+        if not weight_map:
+            # Single-file checkpoints have no index. `tensor_storage` remains
+            # the only map we have, so leave this unset and fall back to it.
+            return
+        self.quantized_modules = format.quantized_module_keys(weight_map)
+        self._ancestors = None
+
     def _load_tensor_storage(self, model_name: str, revision: str | None) -> None:
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
+        self._load_index_modules(model_name, revision)
         try:
             extra = get_hf_file_to_dict(
                 "quantization_config.json", model_name, revision or "main"
@@ -199,6 +243,20 @@ class EXL3Config(QuantizationConfig):
             self.tensor_storage = extra.get("tensor_storage")
             self._ancestors = None
             self.codebook = extra.get("codebook", self.codebook)
+            missing = self._modules_missing_from_storage()
+            if missing:
+                logger.warning(
+                    "quantization_config.json for %s@%s omits %d module(s) that "
+                    "the checkpoint quantizes anyway (e.g. %s). Trusting the "
+                    "safetensors index instead; the storage map is metadata, "
+                    "not the checkpoint.",
+                    model_name, revision or "main", len(missing),
+                    ", ".join(sorted(missing)[:2]),
+                )
+        elif self.quantized_modules is not None:
+            # No storage map, but the index still says exactly what is
+            # quantized, which is all `is_quantized` needs.
+            pass
         else:
             # The fallback is "assume every linear is quantized", which holds
             # for the text-only checkpoints that predate this file but is wrong
@@ -227,6 +285,8 @@ class EXL3Config(QuantizationConfig):
         """
         if self.tie_word_embeddings:
             return False
+        if self.quantized_modules is not None:
+            return "lm_head" in self.quantized_modules
         if self.tensor_storage is not None:
             head = self.tensor_storage.get("lm_head")
             return bool(head) and head.get("quant_format") == "exl3"
@@ -253,6 +313,35 @@ class EXL3Config(QuantizationConfig):
         if self.tensor_storage is not None:
             self.tensor_storage = hf_to_vllm_mapper.apply_dict(self.tensor_storage)
             self._ancestors = None
+        if self.quantized_modules is not None:
+            # apply_dict works on a dict, so round-trip through one.
+            self.quantized_modules = set(
+                hf_to_vllm_mapper.apply_dict(
+                    dict.fromkeys(self.quantized_modules, True)
+                )
+            )
+            self._ancestors = None
+
+    def _exl3_modules(self) -> set[str]:
+        """Every module known to carry EXL3 storage, index first."""
+        if self.quantized_modules is not None:
+            return self.quantized_modules
+        return {
+            key
+            for key, entry in (self.tensor_storage or {}).items()
+            if entry.get("quant_format") == "exl3"
+        }
+
+    def _modules_missing_from_storage(self) -> set[str]:
+        """Quantized modules the storage map fails to mention."""
+        if self.quantized_modules is None or self.tensor_storage is None:
+            return set()
+        listed = {
+            key
+            for key, entry in self.tensor_storage.items()
+            if entry.get("quant_format") == "exl3"
+        }
+        return self.quantized_modules - listed
 
     def _quantized_ancestors(self) -> set[str]:
         """Every prefix that has at least one EXL3 module beneath it.
@@ -264,9 +353,7 @@ class EXL3Config(QuantizationConfig):
         """
         if self._ancestors is None:
             ancestors: set[str] = set()
-            for key, entry in (self.tensor_storage or {}).items():
-                if entry.get("quant_format") != "exl3":
-                    continue
+            for key in self._exl3_modules():
                 parts = key.split(".")
                 for i in range(1, len(parts)):
                     ancestors.add(".".join(parts[:i]))
@@ -293,13 +380,11 @@ class EXL3Config(QuantizationConfig):
 
     def is_quantized(self, prefix: str) -> bool:
         """Whether the module at `prefix` has EXL3 storage in the checkpoint."""
-        if self.tensor_storage is None:
+        if self.tensor_storage is None and self.quantized_modules is None:
             return True
         candidates = self._unfuse(prefix)
-        if any(
-            self.tensor_storage.get(key, {}).get("quant_format") == "exl3"
-            for key in candidates
-        ):
+        known = self._exl3_modules()
+        if any(key in known for key in candidates):
             return True
         ancestors = self._quantized_ancestors()
         if any(key in ancestors for key in candidates):
