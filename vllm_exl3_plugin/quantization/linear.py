@@ -247,14 +247,27 @@ class EXL3LinearMethod(LinearMethodBase):
         global _TP_WARNED
         if tp_size > 2 and not _TP_WARNED:
             _TP_WARNED = True
-            logger.warning(
-                "vllm-exl3-plugin tensor parallelism has only been validated at "
-                "TP=2 (2x RTX 3060, vLLM 0.26.0), where it reproduces TP=1 "
-                "token for token. TP=%d is unexercised: the sharding arithmetic "
-                "is proven for any degree in tests/test_tp.py, but nothing has "
-                "run it. Compare against TP=1 before trusting the output.",
-                tp_size,
-            )
+            if tp_size == 8:
+                logger.warning(
+                    "vllm-exl3-plugin tensor parallelism is validated at TP=2 "
+                    "(2x RTX 3060, vLLM 0.26.0) and TP=8 (8x RTX 3090, vLLM "
+                    "0.27.1.dev0+g4bdc8a788, gemma-4-31B-it-exl3 @3.00bpw), "
+                    "both token-for-token identical to TP=1. The TP=8 check was "
+                    "eager-only, on that one checkpoint shape -- CUDA graphs at "
+                    "TP=8, and other checkpoints, are not yet exercised. TP=3..7 "
+                    "remain fully unexercised: the sharding arithmetic is proven "
+                    "for any degree in tests/test_tp.py, but nothing has run them."
+                )
+            else:
+                logger.warning(
+                    "vllm-exl3-plugin tensor parallelism is validated at TP=2 "
+                    "(2x RTX 3060, vLLM 0.26.0) and TP=8 (8x RTX 3090, gemma-4-"
+                    "31B-it-exl3 @3.00bpw), both token-for-token identical to "
+                    "TP=1. TP=%d is unexercised: the sharding arithmetic is "
+                    "proven for any degree in tests/test_tp.py, but nothing has "
+                    "run it. Compare against TP=1 before trusting the output.",
+                    tp_size,
+                )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         names = self.quant_config.stored_tensor_names()

@@ -3,11 +3,12 @@
 Goal from the feasibility report: **resolve the Hadamard-block-128 sharding
 question, then add tensor parallelism.**
 
-**Status: validated at TP=2**, across three models, eager and with CUDA graphs.
-TP=2 reproduces TP=1 **token for token** every time; the autotune cache survives
-two worker processes writing it concurrently; and vocab-parallel quantized
-`lm_head` now works. TP>2 remains unexercised for want of hardware. See "What is
-validated" for the exact boundary.
+**Status: validated at TP=2** (three models, eager and with CUDA graphs) **and
+at TP=8** (one model, eager only). TP=2 and TP=8 both reproduce TP=1 **token
+for token**; the autotune cache survives two worker processes writing it
+concurrently; and vocab-parallel quantized `lm_head` now works. TP=3..7 remain
+unexercised, and TP=8 has only been checked eager, on one checkpoint shape.
+See "What is validated" for the exact boundary.
 
 ## The rule
 
@@ -241,16 +242,31 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
 4. **The plugin works against a vLLM release.** Everything to date was developed
    against main; 0.26.0 needed no changes. That matters for packaging (Phase 4),
    which can pin a release rather than chase main.
+5. **TP=8 is token-identical to TP=1**, on an 8x RTX 3090 box (sm_86), vLLM
+   0.27.1.dev0+g4bdc8a788 (main), `gemma-4-31b-it-exl3` @3.00bpw -- the dense
+   model `tools/tp_preflight.py` identifies as clearing every TP=8 split
+   boundary, including its 262144 vocab (see "What blocks high TP degrees"
+   above). Same method as the TP=2 result: greedy decode, compared on token ids
+   and per-token logprobs rather than text, against a TP=1 run of the same
+   checkpoint. Both prompts matched exactly, down to the same -0.0006 logprob
+   at the same position. Eager only; one checkpoint; one degree. `linear.py`'s
+   runtime warning reflects exactly this boundary.
 
 ## What is still NOT validated
 
-1. **TP=4 and above.** Two GPUs is what was rented. The arithmetic is proven for
-   any degree in `tests/test_tp.py`, but only TP=2 has run. `create_weights`
-   warns once above TP=2 rather than at every degree.
+1. **TP=3 through TP=7.** Only TP=2 and TP=8 have actually run; the arithmetic
+   is proven for any degree in `tests/test_tp.py`. `create_weights` warns once
+   above TP=2 rather than at every degree.
 2. **MoE at TP>1**, which raises (Phase 3 is itself unfinished).
 3. **The alignment guard in a live engine.** `format.check_tp_split` is
-   thoroughly unit-tested, but no TP degree available here misaligns
-   Llama-3.2-1B: 512 KV channels need TP=8 to break, and the box has two cards.
+   thoroughly unit-tested, but no checkpoint run here has actually hit it live:
+   `gemma-4-31b-it-exl3` was chosen for TP=8 *because* it clears every split
+   boundary. Llama-3.2-1B's 512 KV channels are still the known way to break
+   TP=8 (64 channels per rank), but nobody has run that combination and watched
+   the guard actually refuse it.
+4. **TP=8 with CUDA graphs, and TP=8 on any checkpoint shape other than
+   `gemma-4-31b-it-exl3`.** The TP=2 result covered three models and both
+   execution modes; the TP=8 result covers one of each.
 
 ## Vocab-parallel `lm_head`
 
@@ -272,8 +288,10 @@ TP=1 test still passes unchanged. `MiniCPM5-1B` (vocab 130560, so 65280 per rank
 
 ## Finishing this
 
-TP=2, the autotune-cache question and the quantized `lm_head` are done. What
-remains: TP=4 on a four-card box, and MoE once Phase 3 works. The sharding
+TP=2, TP=8, the autotune-cache question and the quantized `lm_head` are done.
+What remains: TP=3..7 (a four/six-card box would close most of that range),
+CUDA graphs at TP=8, a second checkpoint at TP=8, watching the alignment guard
+actually refuse a live illegal split, and MoE once Phase 3 works. The sharding
 arithmetic has not needed revisiting and should not.
 
 One environment note worth keeping, because it cost more than the test did. The

@@ -98,9 +98,13 @@ for pid in $targets; do kill -9 "$pid" 2>/dev/null; done
 
 # GPU memory is released asynchronously; wait for it rather than reporting a
 # stale figure, since the next run's memory profiling will fail if it is early.
+# One line per GPU, not one number -- on anything but a single-card box, `used`
+# is multi-line and `[ "$used" -lt 200 ]` breaks on the first extra line. Take
+# the max, so this waits for every device to clear, not just whichever line a
+# single-GPU-shaped comparison happened to see first.
 for _ in $(seq 1 20); do
-    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | sort -n | tail -1)
     [ "$used" -lt 200 ] && break
     sleep 1
 done
-echo "reap: killed $(echo $targets | wc -w); GPU now ${used} MiB used"
+echo "reap: killed $(echo $targets | wc -w); GPU now ${used} MiB used (max across devices)"
