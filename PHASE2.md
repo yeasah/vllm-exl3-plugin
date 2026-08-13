@@ -9,10 +9,14 @@ eager only). All reproduce TP=1 **token for token**; the autotune cache
 survives eight worker processes writing it concurrently from empty (not just
 two); and vocab-parallel quantized `lm_head` now works. TP=3, 5, 6, 7 remain
 unexercised, TP=8 has only been checked eager on one checkpoint shape, and
-**MoE at TP=4 has an open, unresolved performance problem** on the one
-checkpoint tried (Laguna-XS-2.1) that has nothing to do with correctness --
-see "MoE under tensor parallelism" below. See "What is validated" for the
-exact boundary.
+**`exl3_mgemm` has a severe (100-1000x) performance bug, profiled with `nsys`
+down to the exact two kernel instantiations, on one MoE checkpoint at TP=4
+(Laguna-XS-2.1) -- but not on another with an identical expert/layer/shard-width
+profile (Qwen3.5-35B-A3B, also TP=4, also validated above).** So it isn't
+simply "TP=4" or "128-wide shards"; something checkpoint-specific selects a
+pathological kernel variant. See "MoE under tensor parallelism" below. It's a
+kernel performance problem, not a correctness one. See "What is validated" for
+the exact boundary.
 
 ## The rule
 
@@ -110,50 +114,91 @@ alone; it is not.
 Expert parallelism is still refused: `exl3_mgemm` can filter an expert range,
 but not in combination with the multi-token weighted reduction this method uses.
 
-### Open problem: Laguna-XS-2.1 at TP=4 does not finish in reasonable time
+### Open problem: `exl3_mgemm` is catastrophically slow at TP=4's narrowest legal shard width
 
-Attempted on the 8x RTX 3090 box, `tools/tp_compare.py capture --tp 4 --eager`.
-Preflight says TP=4 is legal (every dimension divides at that degree), and
-TP=1 captures of the same checkpoint complete in about a minute. This did not
-finish in over an hour, twice, and was killed both times rather than left to
-run further.
+Attempted on the 8x RTX 3090 box, `tools/tp_compare.py capture --tp 4 --eager`
+against `Laguna-XS-2.1-exl3`. Preflight says TP=4 is legal (every dimension
+divides at that degree), and TP=1 captures of the same checkpoint complete in
+about a minute. This did not finish in over an hour, twice, and was killed
+both times before a profiler pinned it down.
 
-What was ruled out before killing it:
+What was ruled out, in order:
 
 - **Not a deadlock.** All four worker processes stayed pinned at 100% GPU
   utilization continuously (sampled repeatedly, including two `/proc/PID/io`
   reads 608s apart), and their CPU time climbed in lockstep with wall clock.
-  Something is genuinely, continuously executing.
+  Something was genuinely, continuously executing.
 - **Not a compile stall.** No `nvcc`/`ninja`/`cicc`/compiler subprocess existed
-  anywhere on the box at any point checked (`ps --ppid` on all four workers was
-  empty throughout). A red herring surfaced during manual inspection -- an open
-  fd to `flashinfer_jit.log` on all four hot workers -- but that file's mtime
-  predated this run by hours (it's FlashInfer's *sampling*-kernel JIT from
-  session start, unrelated and already complete).
-- **Not an autotune-cache write storm**, or at least not evidenced by host-side
-  I/O: a windowed `/proc/PID/io` diff (not the noisy whole-process-lifetime
-  average, which is dominated by an earlier phase) showed only ~4 read and ~4
-  write syscalls/sec, averaging ~1.8 bytes/write -- consistent with ordinary
-  low-rate inter-process signaling (pipes/eventfds between the four ranks), not
-  a tight loop. This also does not rule anything *in*: GPU device ioctls (the
-  actual kernel-launch traffic) are invisible to `/proc/PID/io` entirely, so
-  this measurement cannot see the thing most likely to be looping.
-- **Not cache-size-dependent.** Retried with `EXLLAMAV3_TUNE_CACHE` pointed at
-  a completely empty directory, isolating whether a large accumulated cache
+  anywhere on the box at any point checked. A red herring surfaced during
+  manual inspection -- an open fd to `flashinfer_jit.log` on all four hot
+  workers -- but that file's mtime predated this run by hours (FlashInfer's
+  *sampling*-kernel JIT from session start, unrelated and already complete).
+- **Not evidenced by host-side I/O as an autotune-cache write storm:** a
+  windowed `/proc/PID/io` diff (not the noisy whole-process-lifetime average,
+  which is dominated by an earlier phase and had wrongly suggested a 32-byte
+  write pattern) showed only ~4 read and ~4 write syscalls/sec -- ordinary
+  low-rate inter-process signaling, not a tight loop. This didn't rule
+  anything *in* either: GPU device ioctls are invisible to `/proc/PID/io`
+  entirely.
+- **Not exllamav3's own autotuner.** Rebuilt with `CACHEDEBUG` enabled
+  (confirmed loaded and working), which prints every cache lookup/store. Zero
+  such lines appeared despite 5+ minutes of continuous 100% GPU utilization
+  across all four ranks -- the compute wasn't going through that code path at
+  all.
+- **Not Triton's autotuner either.** Reran with `TRITON_PRINT_AUTOTUNING=1`
+  (vLLM's own MoE routing/permutation machinery is Triton-based). Also zero
+  output.
+- **Not cache-size-dependent.** One retry used `EXLLAMAV3_TUNE_CACHE` pointed
+  at a completely empty directory, isolating whether a large accumulated cache
   (222 records, from every other run this session) was itself the problem.
   Same symptom from a cold start.
 
-**Not root-caused.** Localizing further needs either `exllamav3`'s
-`CACHEDEBUG` build flag (a source rebuild, not attempted) or a profiler this
-container's sandboxing blocks (`ptrace` is refused outright; `nsys`/`ncu`
-almost certainly need the same capability). The working theory -- Laguna's
-per-rank expert intermediate at TP=4 is exactly 128, the *minimum* legal
-Hadamard block width, and something about that boundary produces tied or
-near-tied candidate timings that a variance/stability-based autotune stopping
-rule never resolves -- is plausible given where it sits in the shard-width
-range, but unverified. Worth retrying if the exl3_mgemm autotuner's stopping
-condition is ever inspected for other reasons; not worth more rented GPU time
-chasing blind.
+**Root-caused with `nsys` (Nsight Systems).** `ptrace` is refused outright in
+this container, but `nsys profile --trace=cuda,osrt,nvtx
+--trace-fork-before-exec=true` needs no elevated capability for CUDA-API-level
+tracing and worked immediately (`ncu`'s hardware performance counters would
+likely fail -- `cap_perfmon`/`cap_sys_admin` are absent from the container's
+capability set -- but weren't needed). A 420-second bounded capture
+(`nsys stats --report cuda_gpu_kern_sum,cuda_api_sum`) settled it in one shot:
+
+| kernel | launches (in 420s) | avg latency | max latency | % of GPU time |
+|---|---|---|---|---|
+| `exl3_mgemm_kernel<3,0,2,16,16,128,6,5>` | 541 | **1.39s** | 3.83s | 60.9% |
+| `exl3_mgemm_kernel<3,0,2,16,32,128,4,3>` | 492 | **0.98s** | 3.18s | 39.0% |
+| `ncclDevKernel_AllReduce_Sum_bf16` | 16 | 43ms | 190ms | 0.1% |
+
+Everything else -- NCCL's all-reduce, every other CUDA kernel in the trace --
+sums to under 0.1% of GPU time and looks completely ordinary. The two
+`exl3_mgemm_kernel` instantiations *are* the entire cost, and neither is stuck
+in a loop or a benchmark sweep: each is one single kernel launch taking
+**900ms to nearly 4 seconds to return**. Elsewhere in this document the same
+kernel family sustains 93-132 tok/s, i.e. single-digit-millisecond launches --
+this is a 100-1000x slowdown per call, on real work, not an autotune search.
+
+`exl3_mgemm` dispatches via `cudaLaunchCooperativeKernel` (12 calls avg 11.6ms
+in the API summary -- that's launch overhead, not execution; the actual
+1-4s/call is the kernel body itself, captured in `cudaEventSynchronize`'s
+73.1% of total API time). Cooperative kernels require every thread block to be
+co-resident on the GPU simultaneously by construction, which made "the
+per-rank shard is exactly 128, the minimum legal Hadamard block" the obvious
+first theory for a grid that can't actually fit and serializes internally
+instead of failing loudly.
+
+**That theory doesn't survive contact with the other data point.**
+Qwen3.5-35B-A3B -- validated token-identical at this same TP=4, above -- has
+an *identical* expert profile: 256 experts, top-8 routing, 512-wide expert
+intermediate (so also 128-wide per rank at TP=4), 40 layers. Same shard width,
+same expert count, same layer count, no slowdown. So this isn't a function of
+TP degree or shard width alone; something specific to Laguna's checkpoint --
+most likely its actual per-tensor quantization parameters (bit width / K),
+which select a *different* low-level kernel template than Qwen3.5's tensors
+do, per the specific instantiations named above -- routes into a pathological
+variant that Qwen3.5 never touches. This has not been checked against the
+kernel source. Next step, if picked back up, is comparing the two checkpoints'
+actual per-tensor K values against which `exl3_mgemm_kernel` template each one
+dispatches to, and reading that template's grid-size computation directly --
+the profiling narrowed this to two exact kernel instantiations; closing it
+needs source-level attention, not further black-box measurement.
 
 ### Verified on real multi-GPU hardware
 
@@ -342,12 +387,15 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
    checkpoint** (all three on hand are structurally blocked at TP=8 by narrow
    expert/KV/vocab dimensions -- see "What blocks high TP degrees"). The
    arithmetic is proven for any degree in `tests/test_tp.py`; only TP=2, TP=4
-   and TP=8 have actually run, and TP=4 has only run for one dense checkpoint
-   and one MoE checkpoint each.
-2. **MoE at TP=4 has an open, unresolved performance problem.** See
-   "MoE under tensor parallelism" below -- this is not a correctness gap, the
-   checkpoint that hit it (Laguna-XS-2.1) simply never finished in any
-   reasonable time, twice, including with a completely fresh autotune cache.
+   and TP=8 have actually run, and **TP=4 has only ever run on MoE
+   checkpoints** (Qwen3.5-35B-A3B and Laguna-XS-2.1) -- no dense checkpoint has
+   been tried at TP=4 at all.
+2. **`exl3_mgemm` has a profiled, checkpoint-specific, 100-1000x performance
+   bug at TP=4.** See "MoE under tensor parallelism" below -- not a
+   correctness gap (Laguna-XS-2.1 simply never finished, twice, in any
+   reasonable time), and not reproduced by Qwen3.5-35B-A3B despite an
+   identical expert/layer/shard-width profile, so it isn't a function of TP
+   degree or shard width alone.
 3. **The alignment guard in a live engine.** `format.check_tp_split` is
    thoroughly unit-tested, but no checkpoint run here has actually hit it live:
    every checkpoint run at a given degree was chosen *because* it clears every
@@ -387,10 +435,12 @@ TP>1 is no longer categorically unvalidated -- Qwen3.5-35B-A3B works, verified,
 at TP=2 and TP=4. What remains: TP=3, 5, 6, 7 (a box with those card counts
 would close the range), CUDA graphs at TP=8, a second checkpoint at TP=8,
 watching the alignment guard actually refuse a live illegal split, expert
-parallelism (a kernel development gap, not a hardware one), and the open
-Laguna-XS-2.1 TP=4 performance problem above, which needs source-level
-debugging tools this session didn't have rather than more GPU time. The
-sharding arithmetic itself has not needed revisiting and should not.
+parallelism (a kernel development gap, not a hardware one), and the
+`exl3_mgemm` performance bug above -- `nsys` narrowed it to two exact kernel
+instantiations and ruled out both autotuners, but closing it needs someone
+reading `exl3_mgemm`'s source against Laguna's and Qwen3.5's actual per-tensor
+quantization parameters, not more GPU time. The sharding arithmetic itself has
+not needed revisiting and should not.
 
 One environment note worth keeping, because it cost more than the test did. The
 rented box advertised CUDA 12.9 but carried torch built against 13.0, and
