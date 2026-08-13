@@ -5,10 +5,11 @@ question, then add tensor parallelism.**
 
 **Status: validated at TP=2** (three models, eager and with CUDA graphs), **at
 TP=4** (one MoE model, Qwen3.5-35B-A3B), **and at TP=8** (one dense model,
-eager only). All reproduce TP=1 **token for token**; the autotune cache
-survives eight worker processes writing it concurrently from empty (not just
-two); and vocab-parallel quantized `lm_head` now works. TP=3, 5, 6, 7 remain
-unexercised, TP=8 has only been checked eager on one checkpoint shape, and
+both eager and CUDA graphs). All reproduce TP=1 **token for token**; the
+autotune cache survives eight worker processes writing it concurrently from
+empty (not just two); vocab-parallel quantized `lm_head` now works; and the
+live alignment guard correctly refuses a real illegal split. TP=3, 5, 6, 7
+remain unexercised, TP=8 has only been checked on one checkpoint shape, and
 **`exl3_mgemm` has a severe (100-1000x) performance bug, profiled with `nsys`
 down to the exact two kernel instantiations, on one MoE checkpoint at TP=4
 (Laguna-XS-2.1) -- but not on another with an identical expert/layer/shard-width
@@ -380,6 +381,22 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
    dense models, not a sharding bug. `tools/tp_preflight.py` correctly rejects
    TP=8 for this checkpoint (narrow expert/KV dimensions), which was not
    attempted.
+8. **TP=8 with CUDA graphs is also token-identical**, same checkpoint
+   (`gemma-4-31b-it-exl3` @3.00bpw), same box. Both capture passes (51
+   PIECEWISE shapes, then 35 FULL shapes) completed cleanly per worker, and
+   generation matched both the TP=1 baseline and the earlier TP=8-eager result
+   exactly -- same token ids, same -0.0006 logprob quirk at the same position.
+   Closes the "TP=2 result covered both execution modes, TP=8 only had eager"
+   gap for this checkpoint.
+9. **The alignment guard refuses a live illegal split**, not just in
+   `tests/test_tp.py`. `Llama-3.2-1B-Instruct-exl3` @3.0bpw at TP=8 -- its
+   known-illegal case, 512 KV channels giving 64 per rank -- raised
+   `EXL3FormatError` on every affected rank at weight-creation time, with the
+   exact diagnostic (`"tensor-parallel shard would be 64 channels wide, which
+   is not a multiple of the EXL3 Hadamard block size (128)... would silently
+   produce wrong results"`), before any real compute. `format.check_tp_split`
+   works identically live to how the unit tests already proved it works
+   offline.
 
 ## What is still NOT validated
 
@@ -396,16 +413,12 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
    reasonable time), and not reproduced by Qwen3.5-35B-A3B despite an
    identical expert/layer/shard-width profile, so it isn't a function of TP
    degree or shard width alone.
-3. **The alignment guard in a live engine.** `format.check_tp_split` is
-   thoroughly unit-tested, but no checkpoint run here has actually hit it live:
-   every checkpoint run at a given degree was chosen *because* it clears every
-   split boundary at that degree. Llama-3.2-1B's 512 KV channels are still the
-   known way to break TP=8 (64 channels per rank), but nobody has run that
-   combination and watched the guard actually refuse it.
-4. **TP=8 with CUDA graphs, and TP=8 on any checkpoint shape other than
-   `gemma-4-31b-it-exl3`.** The TP=2 result covered three models and both
-   execution modes; the TP=8 result covers one of each.
-5. **Expert parallelism**, which remains refused at the kernel level
+3. **TP=8 on any checkpoint shape other than `gemma-4-31b-it-exl3`.** Both
+   execution modes are now covered for that one checkpoint (see "What is
+   validated" #5 and #8); no other checkpoint on hand clears TP=8 preflight
+   (`gemma-4-12B`, `Qwen3.5-9B`, `Qwen3.6-27B` are each blocked by 1-8 tensors)
+   -- closing this needs a checkpoint not yet downloaded.
+4. **Expert parallelism**, which remains refused at the kernel level
    regardless of TP degree (see "What blocks high TP degrees") -- a
    development gap, not something more hardware time closes.
 
@@ -429,18 +442,18 @@ TP=1 test still passes unchanged. `MiniCPM5-1B` (vocab 130560, so 65280 per rank
 
 ## Finishing this
 
-TP=2, TP=4, TP=8, the autotune-cache question (now stress-tested at eight
-concurrent writers, not just two) and the quantized `lm_head` are done. MoE at
-TP>1 is no longer categorically unvalidated -- Qwen3.5-35B-A3B works, verified,
-at TP=2 and TP=4. What remains: TP=3, 5, 6, 7 (a box with those card counts
-would close the range), CUDA graphs at TP=8, a second checkpoint at TP=8,
-watching the alignment guard actually refuse a live illegal split, expert
-parallelism (a kernel development gap, not a hardware one), and the
-`exl3_mgemm` performance bug above -- `nsys` narrowed it to two exact kernel
-instantiations and ruled out both autotuners, but closing it needs someone
-reading `exl3_mgemm`'s source against Laguna's and Qwen3.5's actual per-tensor
-quantization parameters, not more GPU time. The sharding arithmetic itself has
-not needed revisiting and should not.
+TP=2, TP=4, TP=8 (both execution modes), the autotune-cache question (now
+stress-tested at eight concurrent writers, not just two), the quantized
+`lm_head`, and the live alignment guard are all done. MoE at TP>1 is no longer
+categorically unvalidated -- Qwen3.5-35B-A3B works, verified, at TP=2 and
+TP=4. What remains: TP=3, 5, 6, 7 (a box with those card counts would close
+the range), a second checkpoint at TP=8 (needs a download -- nothing else on
+hand clears preflight), expert parallelism (a kernel development gap, not a
+hardware one), and the `exl3_mgemm` performance bug above -- `nsys` narrowed
+it to two exact kernel instantiations and ruled out both autotuners, but
+closing it needs someone reading `exl3_mgemm`'s source against Laguna's and
+Qwen3.5's actual per-tensor quantization parameters, not more GPU time. The
+sharding arithmetic itself has not needed revisiting and should not.
 
 One environment note worth keeping, because it cost more than the test did. The
 rented box advertised CUDA 12.9 but carried torch built against 13.0, and

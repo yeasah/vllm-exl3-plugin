@@ -251,10 +251,10 @@ class EXL3LinearMethod(LinearMethodBase):
                 logger.warning(
                     "vllm-exl3-plugin tensor parallelism is validated at TP=2 "
                     "(2x RTX 3060, vLLM 0.26.0) and TP=8 (8x RTX 3090, vLLM "
-                    "0.27.1.dev0+g4bdc8a788, gemma-4-31B-it-exl3 @3.00bpw), "
-                    "both token-for-token identical to TP=1. The TP=8 check was "
-                    "eager-only, on that one checkpoint shape -- CUDA graphs at "
-                    "TP=8, and other checkpoints, are not yet exercised. TP=3..7 "
+                    "0.27.1.dev0+g4bdc8a788, gemma-4-31B-it-exl3 @3.00bpw, both "
+                    "eager and CUDA graphs), both token-for-token identical to "
+                    "TP=1. The TP=8 check was on that one checkpoint shape -- "
+                    "other checkpoints at TP=8 are not yet exercised. TP=3..7 "
                     "remain fully unexercised: the sharding arithmetic is proven "
                     "for any degree in tests/test_tp.py, but nothing has run them."
                 )
