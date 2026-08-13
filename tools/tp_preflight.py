@@ -179,9 +179,10 @@ def main() -> None:
         n = sum(c for _, c in fused)
         print(f"\n  {n} tensors carry fused output shards -- a vLLM packing"
               "\n  property, not a dimension one. _load_fused composes that split"
-              "\n  with the TP split; the arithmetic is unit-tested but the path"
-              "\n  has never run on real multi-GPU hardware. Treat a TP verdict"
-              "\n  above as provisional for this checkpoint.")
+              "\n  with the TP split; verified token-identical to TP=1 at TP=2 and"
+              "\n  TP=4 for Qwen3.5-35B-A3B (see PHASE2.md), but that is one"
+              "\n  checkpoint -- treat a TP verdict above as provisional until this"
+              "\n  checkpoint specifically has been run.")
 
 
 if __name__ == "__main__":

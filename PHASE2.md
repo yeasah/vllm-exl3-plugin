@@ -3,12 +3,16 @@
 Goal from the feasibility report: **resolve the Hadamard-block-128 sharding
 question, then add tensor parallelism.**
 
-**Status: validated at TP=2** (three models, eager and with CUDA graphs) **and
-at TP=8** (one model, eager only). TP=2 and TP=8 both reproduce TP=1 **token
-for token**; the autotune cache survives two worker processes writing it
-concurrently; and vocab-parallel quantized `lm_head` now works. TP=3..7 remain
-unexercised, and TP=8 has only been checked eager, on one checkpoint shape.
-See "What is validated" for the exact boundary.
+**Status: validated at TP=2** (three models, eager and with CUDA graphs), **at
+TP=4** (one MoE model, Qwen3.5-35B-A3B), **and at TP=8** (one dense model,
+eager only). All reproduce TP=1 **token for token**; the autotune cache
+survives eight worker processes writing it concurrently from empty (not just
+two); and vocab-parallel quantized `lm_head` now works. TP=3, 5, 6, 7 remain
+unexercised, TP=8 has only been checked eager on one checkpoint shape, and
+**MoE at TP=4 has an open, unresolved performance problem** on the one
+checkpoint tried (Laguna-XS-2.1) that has nothing to do with correctness --
+see "MoE under tensor parallelism" below. See "What is validated" for the
+exact boundary.
 
 ## The rule
 
@@ -106,6 +110,51 @@ alone; it is not.
 Expert parallelism is still refused: `exl3_mgemm` can filter an expert range,
 but not in combination with the multi-token weighted reduction this method uses.
 
+### Open problem: Laguna-XS-2.1 at TP=4 does not finish in reasonable time
+
+Attempted on the 8x RTX 3090 box, `tools/tp_compare.py capture --tp 4 --eager`.
+Preflight says TP=4 is legal (every dimension divides at that degree), and
+TP=1 captures of the same checkpoint complete in about a minute. This did not
+finish in over an hour, twice, and was killed both times rather than left to
+run further.
+
+What was ruled out before killing it:
+
+- **Not a deadlock.** All four worker processes stayed pinned at 100% GPU
+  utilization continuously (sampled repeatedly, including two `/proc/PID/io`
+  reads 608s apart), and their CPU time climbed in lockstep with wall clock.
+  Something is genuinely, continuously executing.
+- **Not a compile stall.** No `nvcc`/`ninja`/`cicc`/compiler subprocess existed
+  anywhere on the box at any point checked (`ps --ppid` on all four workers was
+  empty throughout). A red herring surfaced during manual inspection -- an open
+  fd to `flashinfer_jit.log` on all four hot workers -- but that file's mtime
+  predated this run by hours (it's FlashInfer's *sampling*-kernel JIT from
+  session start, unrelated and already complete).
+- **Not an autotune-cache write storm**, or at least not evidenced by host-side
+  I/O: a windowed `/proc/PID/io` diff (not the noisy whole-process-lifetime
+  average, which is dominated by an earlier phase) showed only ~4 read and ~4
+  write syscalls/sec, averaging ~1.8 bytes/write -- consistent with ordinary
+  low-rate inter-process signaling (pipes/eventfds between the four ranks), not
+  a tight loop. This also does not rule anything *in*: GPU device ioctls (the
+  actual kernel-launch traffic) are invisible to `/proc/PID/io` entirely, so
+  this measurement cannot see the thing most likely to be looping.
+- **Not cache-size-dependent.** Retried with `EXLLAMAV3_TUNE_CACHE` pointed at
+  a completely empty directory, isolating whether a large accumulated cache
+  (222 records, from every other run this session) was itself the problem.
+  Same symptom from a cold start.
+
+**Not root-caused.** Localizing further needs either `exllamav3`'s
+`CACHEDEBUG` build flag (a source rebuild, not attempted) or a profiler this
+container's sandboxing blocks (`ptrace` is refused outright; `nsys`/`ncu`
+almost certainly need the same capability). The working theory -- Laguna's
+per-rank expert intermediate at TP=4 is exactly 128, the *minimum* legal
+Hadamard block width, and something about that boundary produces tied or
+near-tied candidate timings that a variance/stability-based autotune stopping
+rule never resolves -- is plausible given where it sits in the shard-width
+range, but unverified. Worth retrying if the exl3_mgemm autotuner's stopping
+condition is ever inspected for other reasons; not worth more rented GPU time
+chasing blind.
+
 ### Verified on real multi-GPU hardware
 
 2x RTX 5060 Ti (sm_120), vLLM 0.26.0, both execution modes:
@@ -135,12 +184,22 @@ about sharding. Together with the offline test below matching to 2e-2, that read
 as correct — but it is **weaker evidence than the dense Phase 2 result**, because
 the strongest available check simply does not apply to this checkpoint.
 
-**Qwen3.5 is blocked at TP>1** by a known gap, not a bug: its `in_proj_qkv`
-arrives as the shard tuple `(0, 1, 2)` inside one stored tensor, and
-`EXL3Parameter._load_fused` cannot compose that split with a tensor-parallel one.
-It fails at load with exactly that message. `tools/tp_preflight.py` now predicts
-it; it previously cleared Qwen for TP=2 because every dimension divides, which
-was a blind spot — the obstacle is vLLM's packing, not the checkpoint's shapes.
+**Qwen3.5 was blocked at TP>1** by a known gap, not a bug: its `in_proj_qkv`
+arrived as the shard tuple `(0, 1, 2)` inside one stored tensor, and
+`EXL3Parameter._load_fused` could not compose that split with a tensor-parallel
+one. It failed at load with exactly that message, and `tools/tp_preflight.py`
+predicted it -- it previously cleared Qwen for TP=2 because every dimension
+divides, which was a blind spot, since the obstacle was vLLM's packing, not the
+checkpoint's shapes.
+
+**This is now fixed and verified on real hardware.** `_load_fused` composing
+its split with `format.fused_shard_bounds` closed the gap (offline only, at the
+time); on an 8x RTX 3090 box, `Qwen3.5-35B-A3B-exl3` @3.00bpw now loads and runs
+correctly at both TP=2 and TP=4, token-identical to TP=1 on both prompts tried
+-- see "What is validated" above for the full result. `tools/tp_preflight.py`'s
+warning about this path being hardware-unverified is accordingly stale for this
+specific case and should be softened once a broader set of fused-shard
+checkpoints has been run this way, not just Qwen3.5.
 
 ### Measuring this properly: `tools/tp_compare.py`
 
@@ -170,10 +229,14 @@ configuration change** — which is why the dense Phase 2 standard could not be
 met here and why chasing it with a higher-bpw checkpoint is a quality question
 rather than a correctness one.
 
-**Still not covered by any of this:** TP>2 on real hardware, several worker
-processes writing the exllamav3 autotune cache at once, and a TP=2 capture to
-compare against the floor above — the box was released before `tp_compare.py`
-existed.
+**Still not covered by any of this:** a TP=2 capture to compare against the
+floor above — the box was released before `tp_compare.py` existed, and it has
+not been rerun since. TP=4 *was* attempted on the 8x RTX 3090 box, via
+`tp_compare.py`, and several worker processes did write the autotune cache
+concurrently elsewhere in that session (see "The autotune cache survives eight
+concurrent workers" above, using a dense model) — but the TP=4 attempt on this
+specific checkpoint never finished; see "Open problem" above. So this
+checkpoint's TP-vs-floor comparison remains open at every degree above 1.
 
 ### The offline simulation
 
@@ -251,22 +314,52 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
    checkpoint. Both prompts matched exactly, down to the same -0.0006 logprob
    at the same position. Eager only; one checkpoint; one degree. `linear.py`'s
    runtime warning reflects exactly this boundary.
+6. **The autotune cache survives eight concurrent workers writing it from
+   empty**, not just two. Same 8x RTX 3090 box: the cache was cleared, then
+   `gemma-4-31b-it-exl3` @3.00bpw run fresh at TP=8 so all eight ranks raced to
+   populate it simultaneously rather than mostly hitting existing entries.
+   Afterward: valid magic, 16-byte header, exactly 64 32-byte records, zero
+   remainder -- no torn write -- and output was still token-identical to the
+   TP=1 baseline, so the race didn't just produce a well-formed file, it
+   produced *correct* entries.
+7. **Qwen3.5-35B-A3B is token-identical to TP=1 at both TP=2 and TP=4**, on
+   the same 8x RTX 3090 box, and this is the first time this has run on real
+   hardware at all -- the fused-shard TP composition (`EXL3Parameter._load_fused`
+   composing with `format.fused_shard_bounds`, see below) was previously only
+   unit-tested. Same method as the dense results: greedy decode, token ids and
+   per-token logprobs against a TP=1 run of the same checkpoint. Both prompts
+   matched exactly at both degrees; the largest logprob difference at any
+   position was noise-level (e.g. a soft-confidence token moving from -0.4179
+   to -0.4566 without changing which token was chosen), consistent with the
+   tile-shape-dependent fp16 accumulation noise already characterized for
+   dense models, not a sharding bug. `tools/tp_preflight.py` correctly rejects
+   TP=8 for this checkpoint (narrow expert/KV dimensions), which was not
+   attempted.
 
 ## What is still NOT validated
 
-1. **TP=3 through TP=7.** Only TP=2 and TP=8 have actually run; the arithmetic
-   is proven for any degree in `tests/test_tp.py`. `create_weights` warns once
-   above TP=2 rather than at every degree.
-2. **MoE at TP>1**, which raises (Phase 3 is itself unfinished).
+1. **TP=3, TP=5, TP=6, TP=7 for any checkpoint**, and **TP=8 for any MoE
+   checkpoint** (all three on hand are structurally blocked at TP=8 by narrow
+   expert/KV/vocab dimensions -- see "What blocks high TP degrees"). The
+   arithmetic is proven for any degree in `tests/test_tp.py`; only TP=2, TP=4
+   and TP=8 have actually run, and TP=4 has only run for one dense checkpoint
+   and one MoE checkpoint each.
+2. **MoE at TP=4 has an open, unresolved performance problem.** See
+   "MoE under tensor parallelism" below -- this is not a correctness gap, the
+   checkpoint that hit it (Laguna-XS-2.1) simply never finished in any
+   reasonable time, twice, including with a completely fresh autotune cache.
 3. **The alignment guard in a live engine.** `format.check_tp_split` is
    thoroughly unit-tested, but no checkpoint run here has actually hit it live:
-   `gemma-4-31b-it-exl3` was chosen for TP=8 *because* it clears every split
-   boundary. Llama-3.2-1B's 512 KV channels are still the known way to break
-   TP=8 (64 channels per rank), but nobody has run that combination and watched
-   the guard actually refuse it.
+   every checkpoint run at a given degree was chosen *because* it clears every
+   split boundary at that degree. Llama-3.2-1B's 512 KV channels are still the
+   known way to break TP=8 (64 channels per rank), but nobody has run that
+   combination and watched the guard actually refuse it.
 4. **TP=8 with CUDA graphs, and TP=8 on any checkpoint shape other than
    `gemma-4-31b-it-exl3`.** The TP=2 result covered three models and both
    execution modes; the TP=8 result covers one of each.
+5. **Expert parallelism**, which remains refused at the kernel level
+   regardless of TP degree (see "What blocks high TP degrees") -- a
+   development gap, not something more hardware time closes.
 
 ## Vocab-parallel `lm_head`
 
@@ -288,11 +381,16 @@ TP=1 test still passes unchanged. `MiniCPM5-1B` (vocab 130560, so 65280 per rank
 
 ## Finishing this
 
-TP=2, TP=8, the autotune-cache question and the quantized `lm_head` are done.
-What remains: TP=3..7 (a four/six-card box would close most of that range),
-CUDA graphs at TP=8, a second checkpoint at TP=8, watching the alignment guard
-actually refuse a live illegal split, and MoE once Phase 3 works. The sharding
-arithmetic has not needed revisiting and should not.
+TP=2, TP=4, TP=8, the autotune-cache question (now stress-tested at eight
+concurrent writers, not just two) and the quantized `lm_head` are done. MoE at
+TP>1 is no longer categorically unvalidated -- Qwen3.5-35B-A3B works, verified,
+at TP=2 and TP=4. What remains: TP=3, 5, 6, 7 (a box with those card counts
+would close the range), CUDA graphs at TP=8, a second checkpoint at TP=8,
+watching the alignment guard actually refuse a live illegal split, expert
+parallelism (a kernel development gap, not a hardware one), and the open
+Laguna-XS-2.1 TP=4 performance problem above, which needs source-level
+debugging tools this session didn't have rather than more GPU time. The
+sharding arithmetic itself has not needed revisiting and should not.
 
 One environment note worth keeping, because it cost more than the test did. The
 rented box advertised CUDA 12.9 but carried torch built against 13.0, and
