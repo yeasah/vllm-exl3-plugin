@@ -124,7 +124,41 @@ Note the mapper's target prefix is model-dependent (`model.embed_tokens` vs
 already deals with exactly this restructuring for `tensor_storage` and is the place to
 resolve it.
 
-## Open question: quality
+## Phase A result
+
+Implemented and measured on `turboderp/Qwen3-0.6B-exl3` (tied, quantized `lm_head` on
+disk). qbench, openwebtext 8x2048, transformers bf16 reference, dense-vs-quantized
+embedding as the only difference between each pair:
+
+| | bpw embed | vram_gb | ppl | KLD | KLD median |
+|---|---|---|---|---|---|
+| 4.0bpw dense embed | 16.000 | 0.4960 | 30.6353 | 0.043633 | 0.027594 |
+| 4.0bpw quant embed | 6.016 | **0.3152** | 30.6332 | 0.044664 | 0.028407 |
+| 3.0bpw dense embed | 16.000 | 0.4448 | 35.5235 | 0.192459 | 0.120742 |
+| 3.0bpw quant embed | 6.016 | **0.2639** | 35.5409 | 0.193530 | 0.121412 |
+
+- **4.0bpw: -36.5% VRAM for +2.4% KLD** (absolute +0.00103)
+- **3.0bpw: -40.7% VRAM for +0.56% KLD** (absolute +0.00107)
+
+The absolute KLD cost is essentially *constant* across bit rates (+0.00103 vs +0.00107),
+which is what it should be -- it is the same 6-bit embedding in both cases, contributing a
+fixed error independent of how hard the layers are quantized. So as a fraction it shrinks
+the more aggressive the quantization, i.e. the trade improves exactly in the regime the
+appliance cares about. ppl is unchanged to within noise (30.6353 -> 30.6332, slightly
+*lower* with the quantized embedding at 4.0bpw).
+
+Throughput cost, same checkpoint, eager, batch as noted:
+
+| | dense | quant | |
+|---|---|---|---|
+| prefill 2048x1 | 149,597 tok/s | 156,304 tok/s | +4.5% (noise; less memory traffic) |
+| decode 1x256 | 99.1 tok/s | 95.7 tok/s | -3.4% |
+| decode 16x128 | 1562.7 tok/s | 1521.6 tok/s | -2.6% |
+
+~3% decode cost, on the model where the fixed per-step embedding work is amortized over
+the least layer compute it ever will be, in naive PyTorch with no kernel work.
+
+## Open question: quality at scale
 
 Phase A makes the embedding inherit the head's bit width (`head_bits`, usually 6). That is
 a quality question, not just plumbing, and gemma-4 is the most numerically delicate family
