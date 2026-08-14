@@ -156,6 +156,68 @@ def dense_weight(
     return w.t().contiguous()
 
 
+def embed_rows(
+    trellis: torch.Tensor,
+    suh: torch.Tensor,
+    svh: torch.Tensor,
+    bits: int,
+    mcg: bool,
+    mul1: bool,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Gather rows of an EXL3 tensor without dequantizing the whole thing.
+
+    Returns (tokens, in_features), the same rows `dense_weight(...)[token_ids]`
+    would give, exactly -- this is how a quantized token embedding is served, so
+    the fp16 embedding never has to exist in VRAM.
+
+    The whole idea rests on `dense_weight`'s chain touching output rows in
+    exactly one place: `had_right` is block-diagonal in blocks of `HAD_BLOCK`,
+    so row `t` depends on the 128-row block containing it and nothing else.
+    Everything after it (`svh`) is a per-row scalar and everything before it
+    (`had_left`, `suh`) either leaves output rows independent or acts along the
+    input dimension, which is wanted whole anyway. So the decode is one
+    `[k/16, HAD_BLOCK/16, 16*bits]` trellis slab per distinct block -- for a
+    151936-row vocabulary that is 96 KiB out of 111 MiB, 0.08% of the tensor.
+
+    Cost therefore scales with the number of *distinct* 128-blocks a batch
+    touches, not with the batch size, which is why the blocks are deduplicated
+    before decoding. The 128x read amplification for a single row is inherent to
+    the Hadamard block size and cannot be optimized away, only amortized.
+
+    See PHASE4.md for the measurements and the derivation.
+    """
+    if token_ids.numel() == 0:
+        return torch.empty(
+            (0, trellis.shape[0] * TILE), dtype=torch.half, device=trellis.device
+        )
+
+    tiles_per_block = HAD_BLOCK // TILE
+    blocks, inverse = torch.unique(token_ids // HAD_BLOCK, return_inverse=True)
+
+    # One contiguous decode covering every block this batch needs.
+    tile_index = (
+        blocks.unsqueeze(1) * tiles_per_block
+        + torch.arange(tiles_per_block, device=trellis.device)
+    ).flatten()
+    w = reconstruct(trellis[:, tile_index, :].contiguous(), bits, mcg, mul1)
+
+    w = had_left(w)
+    w = w * suh.unsqueeze(1)
+    # Blockwise along dim 1 in HAD_BLOCK-wide blocks, which is exactly the block
+    # layout just gathered -- each decoded block transforms independently, so
+    # this stays equal to the full-tensor result.
+    w = had_right(w)
+    columns = (
+        blocks.unsqueeze(1) * HAD_BLOCK
+        + torch.arange(HAD_BLOCK, device=trellis.device)
+    ).flatten()
+    w = w * svh[columns].unsqueeze(0)
+
+    # Column of the gathered slab holding each requested row.
+    return w[:, inverse * HAD_BLOCK + (token_ids % HAD_BLOCK)].t().contiguous()
+
+
 # ---------------------------------------------------------------------------
 # Fused path: exl3_gemm behind an opaque custom op
 # ---------------------------------------------------------------------------

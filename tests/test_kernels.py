@@ -259,5 +259,124 @@ class TestFusedKernel(unittest.TestCase):
         self.assertEqual(tuple(y.shape), (0, out_f))
 
 
+@requires_gpu
+class TestEmbedRows(unittest.TestCase):
+    """`embed_rows` must return exactly what indexing the dense weight would.
+
+    This is the Phase 4 correctness claim, and it is an equality claim rather
+    than a tolerance one: gathering a row decodes a strict subset of the tensor
+    (the row's own 128-block), but every arithmetic step it performs is the same
+    step `dense_weight` performs on the same values, so the results should agree
+    bit for bit. A tolerance here would hide exactly the bug this is for --
+    picking up the wrong block, or applying `had_right` across a block boundary.
+    """
+
+    CASES = [
+        # An lm_head, which is what Phase A actually serves an embedding from,
+        # plus an ordinary linear to show nothing about this is head-specific.
+        ("turboderp/Llama-3.2-1B-Instruct-exl3", "3.0bpw", "lm_head"),
+        (
+            "turboderp/Llama-3.2-1B-Instruct-exl3",
+            "3.0bpw",
+            "model.layers.0.self_attn.q_proj",
+        ),
+    ]
+
+    def test_matches_dense_reference(self):
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        for repo, revision, key in self.CASES:
+            with self.subTest(key=key):
+                try:
+                    t = fetch_module_tensors(repo, revision, key)
+                except OSError as e:
+                    self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+                bits = format.bits_from_trellis_shape(t["trellis"].shape)
+                _, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+                mcg, mul1 = "mcg" in t, "mul1" in t
+
+                dense = ops.dense_weight(
+                    t["trellis"], t["suh"], t["svh"], bits, mcg, mul1
+                )
+                # Block boundaries either side, a within-block run, duplicates
+                # (which must dedupe to one decode without changing the answer),
+                # and the last row -- the one a padded vocabulary gets wrong.
+                ids = torch.tensor(
+                    [0, 1, 127, 128, 129, 255, 256, 7, 7, 128, out_f - 1],
+                    device="cuda:0",
+                )
+                got = ops.embed_rows(
+                    t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids
+                )
+                torch.testing.assert_close(got, dense[ids], rtol=0, atol=0)
+
+    def test_single_row_and_empty(self):
+        """The decode path (one token) and zero-token forwards both happen."""
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = self.CASES[0]
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+        bits = format.bits_from_trellis_shape(t["trellis"].shape)
+        in_f, _ = format.dims_from_trellis_shape(t["trellis"].shape)
+        mcg, mul1 = "mcg" in t, "mul1" in t
+        dense = ops.dense_weight(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1)
+
+        one = torch.tensor([9707], device="cuda:0")
+        got = ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, one)
+        torch.testing.assert_close(got, dense[one], rtol=0, atol=0)
+
+        empty = torch.empty((0,), dtype=torch.long, device="cuda:0")
+        got = ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, empty)
+        self.assertEqual(tuple(got.shape), (0, in_f))
+
+    def test_decodes_only_the_needed_blocks(self):
+        """The point of the exercise: cost tracks distinct 128-blocks, not batch
+        size. Asserted through `reconstruct`, since a version that decoded the
+        whole tensor would still return the right rows."""
+        from unittest import mock
+
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = self.CASES[0]
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+        bits = format.bits_from_trellis_shape(t["trellis"].shape)
+        mcg, mul1 = "mcg" in t, "mul1" in t
+
+        # 300 tokens drawn from 2 distinct blocks -> 2 blocks' worth decoded.
+        ids = torch.cat(
+            [
+                torch.arange(0, 128, device="cuda:0").repeat(2),
+                torch.full((44,), 5000, device="cuda:0"),
+            ]
+        )
+        real = ops.reconstruct
+        seen = []
+
+        def spy(trellis, *a, **kw):
+            seen.append(trellis.shape)
+            return real(trellis, *a, **kw)
+
+        with mock.patch.object(ops, "reconstruct", spy):
+            ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids)
+
+        self.assertEqual(len(seen), 1, "should be a single fused decode")
+        tiles = seen[0][1]
+        self.assertEqual(
+            tiles,
+            2 * (format.HAD_BLOCK // format.TILE),
+            f"decoded {tiles} tiles for 2 distinct blocks",
+        )
+        self.assertLess(tiles, t["trellis"].shape[1] / 10)
+
+
 if __name__ == "__main__":
     unittest.main()
