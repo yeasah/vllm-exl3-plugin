@@ -334,6 +334,52 @@ class TestEmbedRows(unittest.TestCase):
         got = ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, empty)
         self.assertEqual(tuple(got.shape), (0, in_f))
 
+    def test_chunking_is_transparent(self):
+        """Block decoding is chunked to bound the intermediate.
+
+        The default chunking must be bit-exact against the dense reference --
+        that is the claim the serving path relies on. Other chunk sizes are
+        equal only to within fp16 rounding, and deliberately so: `had_right` is
+        a batched matmul whose batch count *is* the chunk size, and cuBLAS picks
+        accumulation order by shape, so a different chunking occasionally rounds
+        an fp32 intermediate across an fp16 boundary (measured: 14 elements in
+        8.2M, ~1 ulp). Asserting equality there would be asserting something
+        about cuBLAS, not about this code.
+        """
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = self.CASES[0]
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+        bits = format.bits_from_trellis_shape(t["trellis"].shape)
+        _, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+        mcg, mul1 = "mcg" in t, "mul1" in t
+
+        torch.manual_seed(0)
+        ids = torch.randint(0, out_f, (4000,), device="cuda:0")
+        dense = ops.dense_weight(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1)
+        ref = dense[ids]
+
+        # The default, which is what actually serves: bit-exact.
+        got = ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids)
+        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+        original = ops._EMBED_BLOCK_CHUNK
+        try:
+            for chunk in (1, 7, 33, 100000):
+                ops._EMBED_BLOCK_CHUNK = chunk
+                got = ops.embed_rows(
+                    t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids
+                )
+                torch.testing.assert_close(
+                    got, ref, rtol=1e-3, atol=1e-4, msg=f"{chunk=}"
+                )
+        finally:
+            ops._EMBED_BLOCK_CHUNK = original
+
     def test_decodes_only_the_needed_blocks(self):
         """The point of the exercise: cost tracks distinct 128-blocks, not batch
         size. Asserted through `reconstruct`, since a version that decoded the
@@ -368,7 +414,7 @@ class TestEmbedRows(unittest.TestCase):
         with mock.patch.object(ops, "reconstruct", spy):
             ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids)
 
-        self.assertEqual(len(seen), 1, "should be a single fused decode")
+        self.assertEqual(len(seen), 1, "2 blocks fits one chunk, so one decode")
         tiles = seen[0][1]
         self.assertEqual(
             tiles,

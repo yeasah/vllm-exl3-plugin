@@ -90,8 +90,21 @@ read amplification.
 already ships a quantized `lm_head` (this project's quantizer writes one regardless of
 tying, TODO.md #2). So the embedding can be served from that existing tensor, and the fp16
 `embed_tokens` simply never loaded. No repair tool, no quantizer work, works on published
-checkpoints as they are. Applies to gemma-4-12B (**-1.88 GiB, 29% of the checkpoint**),
-gemma-4-26B-A4B (-12.6%), Qwen3-0.6B (-52%), Llama-3.2-1B (-54%).
+checkpoints as they are.
+
+The saving is **embed minus head**, not embed: vLLM skips `lm_head.*` entirely for a tied
+model, so that tensor was *never resident* before, and serving the embedding from it makes
+it newly resident. Getting this wrong overstates the win by the size of the head.
+
+| checkpoint | embed (fp16) | head (quantized) | saving | of previously resident |
+|---|---|---|---|---|
+| gemma-4-12B-it | 1.88 GiB | 0.70 GiB | **1.18 GiB** | -20.4% |
+| gemma-4-26B-A4B-it | 1.38 GiB | 0.52 GiB | 0.86 GiB | -8.3% |
+| Qwen3-0.6B | 0.29 GiB | 0.11 GiB | 0.18 GiB | -36.5% |
+| Llama-3.2-1B | 0.49 GiB | 0.18 GiB | 0.31 GiB | -42% |
+
+Confirmed against gemma-4-12B in practice: KV cache headroom went from 7.32 GiB to
+8.47 GiB, i.e. **+1.15 GiB**, against the 1.18 GiB predicted.
 
 **Phase B -- untied models.** Qwen3.6-27B, Qwen3.5-9B, Laguna, MiniCPM5 have no quantized
 embedding anywhere, so one has to be produced: the repair tool (TODO.md #2) or the pipeline

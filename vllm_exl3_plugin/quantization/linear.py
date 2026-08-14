@@ -4,7 +4,7 @@ Weights stay quantized: `process_weights_after_loading` keeps the trellis
 resident and `apply` calls `ops.exl3_mm`, which decodes inside the kernel.
 
 Phase 0's dequantize-at-load strategy is still here behind
-`VLLM_EXL3_DEQUANTIZE=1`. It is a transcription of exllamav3's own
+`EXL3_DEQUANTIZE=1`. It is a transcription of exllamav3's own
 dequantization, which makes it the reference the fused path is checked against
 -- running the same prompts both ways separates a kernel bug from a plumbing
 bug. It costs the entire memory saving, so it is opt-in.
@@ -302,7 +302,7 @@ class EXL3LinearMethod(LinearMethodBase):
 
         Retained because it is a transcription of exllamav3's own
         dequantization, which makes it the reference the fused path is checked
-        against. Selected by `VLLM_EXL3_DEQUANTIZE=1`.
+        against. Selected by `EXL3_DEQUANTIZE=1`.
         """
         weights = []
         for (trellis, suh, svh, bits), out_size in zip(

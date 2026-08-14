@@ -30,6 +30,7 @@ from functools import lru_cache
 import torch
 from torch.library import Library
 
+from . import env
 from .format import HAD_BLOCK, TILE
 
 _EXT = None
@@ -156,6 +157,22 @@ def dense_weight(
     return w.t().contiguous()
 
 
+#: Distinct 128-row blocks decoded per pass in `embed_rows`. Bounds the
+#: intermediate at roughly `in_features * 128 * chunk` elements (fp32 while
+#: transformed): 256 is ~500 MiB at a 4096-wide model, small enough not to
+#: surprise vLLM's memory profiler and large enough that the per-chunk Python
+#: and launch overhead stays amortized.
+#:
+#: Changing it can perturb the last bit of a result. `had_right` is a *batched*
+#: matmul whose batch count is the chunk size, and cuBLAS selects accumulation
+#: order by shape, so a different chunking occasionally rounds an fp32
+#: intermediate across an fp16 boundary -- measured at 14 elements in 8.2M, ~1
+#: ulp, between chunk sizes 7 and 256. Mathematically the blocks are
+#: independent and the chunking is exact; this is float, not logic. The default
+#: is bit-exact against `dense_weight`, which is what the tests pin.
+_EMBED_BLOCK_CHUNK = int(env.get("EMBED_BLOCK_CHUNK", "256"))
+
+
 def embed_rows(
     trellis: torch.Tensor,
     suh: torch.Tensor,
@@ -185,6 +202,16 @@ def embed_rows(
     before decoding. The 128x read amplification for a single row is inherent to
     the Hadamard block size and cannot be optimized away, only amortized.
 
+    Decoding is chunked because the intermediate is what gets big, not the
+    result: decoding B blocks at once materializes `(in_features, 128 * B)`,
+    which `had_left`/`had_right` then promote to fp32. A large prefill on a
+    large-vocabulary model can touch every block there is -- gemma-4-12B at
+    262144 vocabulary is 2048 blocks, i.e. a 3840x262144 intermediate, ~2 GiB in
+    fp16 and ~4 GiB while transformed. That allocation is invisible to vLLM's
+    memory profiler (its profiling run does not see a realistic spread of token
+    ids), so leaving it unbounded shows up as an out-of-memory that only appears
+    at high `max_num_seqs` and does not respond to the usual memory knobs.
+
     See PHASE4.md for the measurements and the derivation.
     """
     if token_ids.numel() == 0:
@@ -194,28 +221,40 @@ def embed_rows(
 
     tiles_per_block = HAD_BLOCK // TILE
     blocks, inverse = torch.unique(token_ids // HAD_BLOCK, return_inverse=True)
+    local = token_ids % HAD_BLOCK
 
-    # One contiguous decode covering every block this batch needs.
-    tile_index = (
-        blocks.unsqueeze(1) * tiles_per_block
-        + torch.arange(tiles_per_block, device=trellis.device)
-    ).flatten()
-    w = reconstruct(trellis[:, tile_index, :].contiguous(), bits, mcg, mul1)
+    out = torch.empty(
+        (token_ids.numel(), trellis.shape[0] * TILE),
+        dtype=torch.half,
+        device=trellis.device,
+    )
+    arange_tiles = torch.arange(tiles_per_block, device=trellis.device)
+    arange_cols = torch.arange(HAD_BLOCK, device=trellis.device)
 
-    w = had_left(w)
-    w = w * suh.unsqueeze(1)
-    # Blockwise along dim 1 in HAD_BLOCK-wide blocks, which is exactly the block
-    # layout just gathered -- each decoded block transforms independently, so
-    # this stays equal to the full-tensor result.
-    w = had_right(w)
-    columns = (
-        blocks.unsqueeze(1) * HAD_BLOCK
-        + torch.arange(HAD_BLOCK, device=trellis.device)
-    ).flatten()
-    w = w * svh[columns].unsqueeze(0)
+    for start in range(0, blocks.numel(), _EMBED_BLOCK_CHUNK):
+        chunk = blocks[start : start + _EMBED_BLOCK_CHUNK]
+        tile_index = (chunk.unsqueeze(1) * tiles_per_block + arange_tiles).flatten()
+        w = reconstruct(trellis[:, tile_index, :].contiguous(), bits, mcg, mul1)
 
-    # Column of the gathered slab holding each requested row.
-    return w[:, inverse * HAD_BLOCK + (token_ids % HAD_BLOCK)].t().contiguous()
+        w = had_left(w)
+        w = w * suh.unsqueeze(1)
+        # Blockwise along dim 1 in HAD_BLOCK-wide blocks, which is exactly the
+        # block layout just gathered -- each decoded block transforms
+        # independently, so chunking cannot change the result.
+        w = had_right(w)
+        columns = (chunk.unsqueeze(1) * HAD_BLOCK + arange_cols).flatten()
+        w = w * svh[columns].unsqueeze(0)
+
+        # Rows whose block landed in this chunk, and where inside it.
+        wanted = (inverse >= start) & (inverse < start + chunk.numel())
+        rows = wanted.nonzero(as_tuple=True)[0]
+        if rows.numel():
+            out[rows] = w[
+                :, (inverse[rows] - start) * HAD_BLOCK + local[rows]
+            ].t()
+        del w
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +293,9 @@ _EXL3_LIB = Library("vllm_exl3", "FRAGMENT")
 #:
 #: The dense matrix is transient -- one layer's worth, freed on return -- so
 #: this costs scratch space rather than the memory saving. Set
-#: VLLM_EXL3_RECONSTRUCT_THRESHOLD=0 to disable and always use the kernel.
+#: EXL3_RECONSTRUCT_THRESHOLD=0 to disable and always use the kernel.
 RECONSTRUCT_THRESHOLD = int(
-    os.environ.get("VLLM_EXL3_RECONSTRUCT_THRESHOLD", "144")
+    env.get("RECONSTRUCT_THRESHOLD", "144")
 )
 
 

@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 
 
-from .. import format
+from .. import env, format
 from ..format import EXL3FormatError
 from ..log import init_logger
 
@@ -85,12 +85,12 @@ class EXL3Config(QuantizationConfig):
         # is a transcription of exllamav3's own dequantization, so serving the
         # same prompts both ways isolates a kernel bug from a plumbing bug.
         # Costs the entire memory saving, so it is opt-in.
-        self.dequantize = os.environ.get("VLLM_EXL3_DEQUANTIZE", "0") == "1"
+        self.dequantize = env.flag("DEQUANTIZE")
         if self.dequantize:
             self._disable_stale_compile_cache()
         # Escape hatch for the quantized-embedding path; see
         # `embedding_is_quantized`.
-        self._dense_embed = os.environ.get("VLLM_EXL3_DENSE_EMBED", "0") == "1"
+        self._dense_embed = env.flag("DENSE_EMBED")
         # Where the token embedding lives in vLLM's module tree. Multimodal
         # wrappers nest it (`model.language_model.embed_tokens`), so this is
         # resolved from the model's own weights mapper in `apply_vllm_mapper`
@@ -115,7 +115,7 @@ class EXL3Config(QuantizationConfig):
 
         vLLM's compile-cache key is built from its own config objects and its
         own version. It cannot see out-of-tree plugin code, so switching
-        `VLLM_EXL3_DEQUANTIZE` -- which changes what `apply()` traces to, one
+        `EXL3_DEQUANTIZE` -- which changes what `apply()` traces to, one
         `F.linear` versus one `exl3_mm` per shard -- reuses the previously
         compiled artifact and dies with a bare `KeyError` on a parameter name
         deep inside an AOT-compiled graph.
@@ -131,7 +131,7 @@ class EXL3Config(QuantizationConfig):
             return
         _os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
         logger.warning(
-            "VLLM_EXL3_DEQUANTIZE is set, so VLLM_DISABLE_COMPILE_CACHE=1 has "
+            "EXL3_DEQUANTIZE is set, so VLLM_DISABLE_COMPILE_CACHE=1 has "
             "been forced: vLLM's compile cache does not key on plugin code, "
             "and would otherwise reuse a graph traced from the fused path."
         )
@@ -327,7 +327,7 @@ class EXL3Config(QuantizationConfig):
         have no quantized copy of the embedding anywhere and stay dense until
         something produces one (PHASE4.md, Phase B).
 
-        Opt out with `VLLM_EXL3_DENSE_EMBED=1`, which is the first thing to try
+        Opt out with `EXL3_DENSE_EMBED=1`, which is the first thing to try
         if a model looks numerically wrong: it isolates the embedding from every
         other change, since nothing else about the model differs between the two
         paths.

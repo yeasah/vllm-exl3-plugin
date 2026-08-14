@@ -30,7 +30,7 @@ scratch for the transformed activations. exllamav3 aliases that scratch onto A
 for its cached batch-1 path, which vLLM cannot do — the activation tensor is a
 live residual stream — so we always allocate separately.
 
-Phase 0's dequantize-at-load path is retained behind `VLLM_EXL3_DEQUANTIZE=1`.
+Phase 0's dequantize-at-load path is retained behind `EXL3_DEQUANTIZE=1`.
 It is a transcription of exllamav3's own dequantization, which makes it the
 reference the fused path is tested against.
 
@@ -56,7 +56,7 @@ cuBLAS once the multiply is compute-bound — 3.9x, which is the difference
 between usable and not. exllamav3 solves this with
 `AUTO_RECONSTRUCT_THRESHOLD = 144`: above that many rows it decodes the trellis
 to a dense fp16 matrix and calls hgemm. We now do the same
-(`VLLM_EXL3_RECONSTRUCT_THRESHOLD`, default 144, 0 disables), which recovers
+(`EXL3_RECONSTRUCT_THRESHOLD`, default 144, 0 disables), which recovers
 prefill to within 13% of the dense-weight ceiling. The dense matrix is transient
 — one layer's worth, freed on return — so it costs scratch, not the memory
 saving.
@@ -180,5 +180,5 @@ out-of-tree plugin code. Any edit that changes what `apply()` traces to will
 silently reuse a stale compiled graph and fail with a bare `KeyError` on a
 parameter name deep inside an AOT-compiled artifact. **Set
 `VLLM_DISABLE_COMPILE_CACHE=1` while working on this plugin.** Toggling
-`VLLM_EXL3_DEQUANTIZE` forces it automatically, since there the mismatch is
+`EXL3_DEQUANTIZE` forces it automatically, since there the mismatch is
 guaranteed.
