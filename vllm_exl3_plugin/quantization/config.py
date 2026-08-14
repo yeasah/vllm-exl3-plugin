@@ -88,6 +88,14 @@ class EXL3Config(QuantizationConfig):
         self.dequantize = os.environ.get("VLLM_EXL3_DEQUANTIZE", "0") == "1"
         if self.dequantize:
             self._disable_stale_compile_cache()
+        # Escape hatch for the quantized-embedding path; see
+        # `embedding_is_quantized`.
+        self._dense_embed = os.environ.get("VLLM_EXL3_DENSE_EMBED", "0") == "1"
+        # Where the token embedding lives in vLLM's module tree. Multimodal
+        # wrappers nest it (`model.language_model.embed_tokens`), so this is
+        # resolved from the model's own weights mapper in `apply_vllm_mapper`
+        # rather than assumed; this is the flat-text-model default.
+        self.embed_prefix = "model.embed_tokens"
 
         if self.codebook not in _CODEBOOK_TENSORS:
             raise EXL3FormatError(
@@ -295,6 +303,74 @@ class EXL3Config(QuantizationConfig):
         # the head always set it; the ones that do not, omit it entirely.
         return self.head_bits is not None
 
+    def _head_storage_exists(self) -> bool:
+        """Whether the checkpoint physically stores a quantized `lm_head`.
+
+        Deliberately *not* `head_is_quantized`, which answers a different
+        question -- whether vLLM's `lm_head` module should load one -- and is
+        false for every tied model precisely because vLLM skips those weights.
+        Here the tying is the reason to look.
+        """
+        if self.quantized_modules is not None:
+            return "lm_head" in self.quantized_modules
+        if self.tensor_storage is not None:
+            head = self.tensor_storage.get("lm_head")
+            return bool(head) and head.get("quant_format") == "exl3"
+        return self.head_bits is not None
+
+    def embedding_is_quantized(self) -> bool:
+        """Whether the token embedding is served from EXL3 storage.
+
+        True only for a tied model whose checkpoint carries a quantized
+        `lm_head`: that tensor *is* the embedding, so it can serve the lookup
+        and the dense `embed_tokens.weight` need never be loaded. Untied models
+        have no quantized copy of the embedding anywhere and stay dense until
+        something produces one (PHASE4.md, Phase B).
+
+        Opt out with `VLLM_EXL3_DENSE_EMBED=1`, which is the first thing to try
+        if a model looks numerically wrong: it isolates the embedding from every
+        other change, since nothing else about the model differs between the two
+        paths.
+        """
+        if self._dense_embed:
+            return False
+        return bool(self.tie_word_embeddings) and self._head_storage_exists()
+
+    def get_cache_scale_mapper(self):
+        """Route a tied model's `lm_head.*` onto the embedding module.
+
+        This hook is named for KV-cache scales, but it is the one place a
+        quantization config may rewrite the weight stream, and
+        `AutoWeightsLoader` applies it *before* the skip filter
+        (`models/utils.py:418` vs `:421`). That ordering is what makes this
+        possible at all: every tied model drops `lm_head.*` on the floor
+        (`skip_prefixes` for Qwen3-style, `skip_substrs` for gemma4-style), so
+        renaming those tensors first is what gets them to the embedding instead
+        of requiring the loader to be patched.
+
+        Declared a `@staticmethod` on the base class but invoked on the
+        instance, so overriding it as a normal method is safe and is what lets
+        the rename depend on this checkpoint being tied.
+        """
+        mapper = super().get_cache_scale_mapper()
+        if not self.embedding_is_quantized():
+            return mapper
+
+        import re
+
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return mapper | WeightsMapper(
+            # Drop the dense embedding unread -- this is the actual saving, and
+            # it has to go because the module no longer has a `weight` to put it
+            # in. Matched on the checkpoint's own name: regex rules run before
+            # the prefix rules below (`models/utils.py:101` vs `:121`), so this
+            # sees `...embed_tokens.weight` and never the renamed `lm_head.*`,
+            # which end in `.trellis`/`.suh`/`.svh`.
+            orig_to_new_regex={re.compile(r"(^|\.)embed_tokens\.weight$"): None},
+            orig_to_new_prefix={"lm_head.": f"{self.embed_prefix}."},
+        )
+
     def apply_vllm_mapper(self, hf_to_vllm_mapper) -> None:
         """Translate `tensor_storage` keys into vLLM's module naming.
 
@@ -423,14 +499,30 @@ class EXL3Config(QuantizationConfig):
             if not self.is_quantized(prefix):
                 return UnquantizedLinearMethod()
             return EXL3LinearMethod(self)
+        from .embedding import EXL3EmbeddingMethod, EXL3TiedLMHeadMethod
+
         # ParallelLMHead subclasses VocabParallelEmbedding, so it must be
         # tested first.
         if isinstance(layer, ParallelLMHead):
+            if self.embedding_is_quantized():
+                # Tied, and served from the quantized lm_head this head's own
+                # weights were renamed onto. Owns no storage; see embedding.py.
+                return EXL3TiedLMHeadMethod(self)
             return EXL3LMHeadMethod(self) if self.head_is_quantized() else None
         if isinstance(layer, VocabParallelEmbedding):
-            # EXL3 never quantizes the input embedding: `embed_tokens.weight`
-            # is stored dense in every checkpoint inspected.
-            return None
+            # EXL3 never quantizes the input embedding -- `embed_tokens.weight`
+            # is dense in every checkpoint inspected -- but a *tied* model ships
+            # a quantized lm_head covering the same matrix, which can serve as
+            # the embedding so the dense copy is never loaded at all.
+            if not self.embedding_is_quantized():
+                return None
+            # Where the rename in `get_cache_scale_mapper` has to send
+            # `lm_head.*`. Taken from the module itself rather than guessed:
+            # multimodal wrappers nest the embedding (gemma-4 puts it under
+            # `language_model`), and construction runs before any weight is
+            # loaded, so this is known in time.
+            self.embed_prefix = prefix
+            return EXL3EmbeddingMethod(self)
 
         from vllm.model_executor.layers.fused_moe import RoutedExperts
 
