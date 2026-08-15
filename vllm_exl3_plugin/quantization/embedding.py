@@ -4,12 +4,12 @@ No EXL3 checkpoint stores a quantized `embed_tokens`: the quantizer leaves the
 input embedding at fp16 in every checkpoint inspected. At the sizes this project
 targets that is a quarter to a half of the whole file, which is the single
 largest remaining gap between EXL3's advertised efficiency and what it actually
-costs to serve (PHASE4.md has the census).
+costs to serve (docs/embeddings.md has the census).
 
 What makes this fixable *today*, with no new checkpoint format and no quantizer
 work, is that a **tied** model already ships a quantized `lm_head` covering
 exactly the same matrix -- exllamav3 writes one for every tied model regardless
-of the tying (TODO.md #2). So the embedding can be served from that tensor and
+of the tying -- a pipeline defect. So the embedding can be served from that tensor and
 the fp16 copy simply never loaded. gemma-4-12B-it sheds 1.88 GiB this way, 29%
 of the checkpoint.
 

@@ -1,4 +1,7 @@
-# Phase 0 — registration spike
+# Format and loading
+
+*Originally "Phase 0 — registration spike". The on-disk EXL3 format, how vLLM's
+loader is driven to fill it, and the quantized `lm_head`.*
 
 Goal, unchanged from the feasibility report: **prove the registration path and
 confirm an EXL3 checkpoint loads and generates correct tokens through vLLM's
@@ -7,7 +10,7 @@ forward pass**, single GPU, TP=1, no CUDA graphs, no fused kernels.
 **Status: done and verified on hardware.** An EXL3 checkpoint loads through
 vLLM and generates coherent tokens, at both a uniform and a mixed bit width, and
 the dequantization is bit-for-bit identical to exllamav3's own, including
-models with a quantized `lm_head`. 30 tests pass.
+models with a quantized `lm_head`. 30 tests passed at the time.
 See "Verified" below for what was actually run and "Remaining gaps" for what
 Phase 0 deliberately does not cover.
 
@@ -107,6 +110,9 @@ concatenated `suh` is meaningless.
   inherit `torch_dtype: bfloat16` from their base model, so vLLM defaults to
   bfloat16 and `vllm/config/vllm.py:728` hard-errors. Serving needs an explicit
   `--dtype float16`. Loud failure, documented.
+  **Superseded — see [kernels.md](kernels.md) "bfloat16 activations".** `exl3_mm`
+  casts at the kernel boundary, so `get_supported_act_dtypes` now returns both and
+  the explicit `--dtype float16` is no longer needed.
 - **Dimensions are padded to 128 on disk.** `Linear(pad_to = 128)` rounds both
   dimensions up before quantizing, so stored dims can exceed the model's real
   dims (gpt-oss: 2880 → 2944). Padded output columns hold quantization noise and
@@ -126,6 +132,37 @@ concatenated `suh` is meaningless.
   "everything below the registration API moves fast" warning. This plugin does
   not override the method at all, so it is unaffected.
 
+## The checkpoint is not a complete description of itself
+
+Worth stating plainly, because it shapes how much any consumer can trust: **an EXL3
+checkpoint can carry numerical conventions recorded nowhere in the checkpoint** —
+not `config.json`, not `quantization_config.json`, not the tensor metadata. Some
+live only as literals in exllamav3's per-architecture Python
+(`exllamav3/architecture/*.py`), and a consumer reading only the files gets a
+silently wrong model rather than an error.
+
+The worked example is Laguna's `interm_div = 128.0`, where the divisor is baked
+into the stored weights while the compensating multiply exists only in
+`architecture/laguna.py` — so the checkpoint's own stated
+`moe_routed_scaling_factor` is correct for the *original* weights and wrong by
+exactly 128 for the ones on disk. Full account in [moe.md](moe.md).
+
+Two consequences that generalize past that one model:
+
+- **A per-layer oracle cannot catch this class of bug.** The layer is exact *given
+  its inputs*; a scale applied outside it survives every check that recomputes the
+  layer from dequantized weights. When a new model produces degenerate output but
+  its layers verify exact, suspect a scale convention before suspecting kernels.
+- **Recover such constants by measuring the weights, not by hardcoding per
+  architecture**, and raise rather than guess — `format.infer_interm_divisor` is
+  the pattern: it measures the ratio, snaps to a power of two, and refuses anything
+  that is neither ~1 nor near one. The wrong constant here is a silent factor-of-N
+  error in every routed expert, not a crash.
+
+The useful control for detecting one is a tensor the same converter treated
+*differently* in the same layer — Laguna's shared expert (`interm_div = 1.0`)
+against its routed experts.
+
 ## Layout
 
     vllm_exl3_plugin/
@@ -138,11 +175,14 @@ concatenated `suh` is meaningless.
         linear.py          EXL3LinearMethod, weight_loader_v2-native
         lm_head.py         EXL3LMHeadMethod for quantized output projections
     tests/
-      test_format.py       14 tests — no GPU, torch or vLLM needed
-      test_kernels.py      3 oracles against exllamav3 itself
-      test_codebooks.py    10 tests — mcg/mul1 + head detection
-      test_e2e.py          3 full vLLM generations
+      test_format.py       no GPU, torch or vLLM needed
+      test_kernels.py      oracles against exllamav3 itself
+      test_codebooks.py    mcg/mul1 + head detection
+      test_e2e.py          full vLLM generations
       remote_tensors.py    ranged reads of one layer from a remote checkpoint
+
+(`tests/test_tp.py` joined them in [tensor-parallel.md](tensor-parallel.md).
+Counts are deliberately not recorded here — see README for the current total.)
 
 `format.py` deliberately has no torch dependency so the shape rules — where a
 format misunderstanding turns into silently wrong output — stay testable
@@ -187,8 +227,8 @@ editable vLLM `edbc4969a`, exllamav3 v1.3.0 built from the submodule.
    has no such file; `maybe_update_config` swallows the miss and falls back to
    treating every linear as quantized, which is correct for it.
 
-Reproduce with `python -m unittest discover -s tests` (30 tests, ~45s on the
-above machine once the checkpoints are cached).
+Reproduce with `python -m unittest discover -s tests` (30 tests at the time, ~45s
+on the above machine once the checkpoints are cached).
 
 ## Remaining gaps
 
@@ -289,6 +329,69 @@ signature, and every op needs a `register_fake`. The open questions there are
 the cooperative-launch lock buffer and the on-disk autotune cache under
 multi-process workers.
 
+
+## CPU offload: why vLLM's UVA offloader skips EXL3 entirely
+
+*Traced from TODO, where it had accumulated as an investigation log. The work
+itself is open — TODO `cpu-offload`.*
+
+`vllm serve --cpu-offload-gb` silently offloads nothing for EXL3. The log reports
+`Total CPU offloaded parameters: 0.01` on an EXL3 checkpoint where the same model
+as AWQ offloads 3.63 GiB under otherwise identical settings.
+
+There are two independent causes, and the second is the harder one.
+
+**Construction-time eligibility.** The UVA offloader
+(`vllm/model_executor/offloader/uva.py`) decides per-module eligibility at
+construction time, before checkpoint weights load, by peeking at
+`next(module.parameters()).device`. Our `EXL3Parameter` placeholders
+(`create_weights`, `linear.py:184`) are `Parameter(data=None)` — a default empty
+*CPU* tensor — so every EXL3-quantized layer reads as "already on CPU" and gets
+skipped outright, before any real weight exists. The 0.01 GiB that does get
+offloaded is just the ordinary dense params living directly on decoder-layer
+submodules outside `EXL3LinearMethod` (RMSNorm weights and the like).
+
+**Parameter replacement.** Even if that check passed,
+`process_weights_after_loading` (`linear.py:272`) replaces the placeholders with
+brand-new `Parameter` objects (`exl3_trellis_N` / `exl3_suh_N` / `exl3_svh_N`, or
+`exl3_weight` on the dequantize path) built fresh on-device. The offloader never
+sees these — it wrapped modules once, at construction, before the replacement
+happened. AWQ does not hit this because it preallocates its weight tensor
+on-device at construction and mutates it in place the whole way through, so the
+offloader's construction-time view stays attached to the same tensor that is still
+serving inference later.
+
+**Considered and rejected: match AWQ's pattern.** Preallocating the correct final
+shape at construction needs the per-tensor bit width `K` known upfront, since
+trellis shape depends on it. Checkpoints since ~v0.0.2 carry a `tensor_storage` map
+in `quantization_config.json` recording bit width per module (already fetched in
+`config.py`'s `_load_tensor_storage`, just not for this purpose) — but it is known
+to be incomplete on real checkpoints (`Muse-Glimmer-30B-exl3` omits 303 quantized
+modules), does not exist pre-v0.0.2 at all, and improving it going forward would
+not retroactively fix what is already published. More to the point, the project is
+moving toward repaired-only checkpoints anyway (see [embeddings.md](embeddings.md)), so
+betting on
+upstream checkpoint metadata quality is not where the value is.
+
+**Chosen direction.** Do not make EXL3 loading conform to "preallocate and mutate
+in place". `process_weights_after_loading` already holds the finished
+trellis/suh/svh tensors, at real final shape, at exactly the moment it builds them.
+Reach into vLLM's offloader singleton there (`get_offloader()`,
+`vllm/model_executor/offloader/base.py:111`), and if it is a `UVAOffloader` with
+remaining `cpu_offload_max_bytes` budget, do what `uva.py`'s `_maybe_offload_to_cpu`
+does: pin the tensor, wrap it with `get_accelerator_view_from_cpu_tensor`, and
+register that instead of a plain on-device `Parameter` — updating the offloader's
+own byte counter so later layers' budget accounting stays correct.
+Bits-agnostic, checkpoint-vintage-agnostic, no vLLM changes, no plugin storage-path
+refactor. Covers only the UVA backend, not `PrefetchOffloader` (a different
+per-layer streaming design), which is acceptable since UVA is close to universal on
+the CUDA-only stack this project already requires.
+
+**Known cost, going in with eyes open.** This reaches into a vLLM internal —
+`get_offloader()` / `UVAOffloader` are not public API — which is one more surface
+that can silently break on a vLLM version bump, the same standing risk already
+taken on with `exl3_mgemm`'s call sites across the exllamav3 fork transition. Worth
+it here: it is the only way to make CPU offload work for EXL3 at all.
 
 ## transformers 5.15: heterogeneous configs
 

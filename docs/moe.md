@@ -1,4 +1,7 @@
-# Phase 3 — mixture of experts
+# Mixture of experts
+
+*Originally "Phase 3 — mixture of experts". `exl3_mgemm` behind vLLM's `FusedMoE`,
+the unrecorded Laguna scale factor, and the sm_90+ barrier hang.*
 
 Goal from the feasibility report: **MoE via `exl3_moe`/`exl3_mgemm` adapted to
 vLLM's `FusedMoE` interface.**
@@ -10,6 +13,11 @@ correctly, lead with a real confident first token, and stay coherent when
 sampled at temperature. Laguna took two fixes rather than one — a scale factor
 the checkpoint does not record, and then an fp16 overflow that the first fix
 introduced.
+
+That verdict is for TP=1. Under tensor parallelism Laguna is a different story:
+`exl3_mgemm` hits a profiled 100-1000x per-launch slowdown at TP=4 on this
+checkpoint and not on Qwen3.5, which has an identical expert/layer/shard-width
+profile. See [tensor-parallel.md](tensor-parallel.md) "Open problem".
 
 Getting here needed a scale factor that lives in exllamav3's architecture
 definition rather than in the checkpoint, care about where that factor is
@@ -161,13 +169,17 @@ One condition secures every boundary: if each per-rank width is a multiple of
 `HAD_BLOCK` then so is every span and offset derived from it, so a single check
 covers both cuts.
 
-**Unit-tested, not hardware-tested.** `tests/test_format.py` checks the property
-that matters — every rank's slices tile the unsharded shard exactly, with no gap
-or overlap — plus Hadamard alignment at each boundary, across TP=1/2/4. What has
-never run is vLLM's loader driving it across real workers; Qwen3.5 at TP=2 was
-blocked by the old `NotImplementedError` when the 2x box was available, and the
-box was released before this landed. `tools/tp_preflight.py` reports the
-checkpoint as provisional for that reason.
+`tests/test_format.py` checks the property that matters — every rank's slices tile
+the unsharded shard exactly, with no gap or overlap — plus Hadamard alignment at
+each boundary, across TP=1/2/4.
+
+**Since verified on hardware.** This was unit-tested only when written: Qwen3.5 at
+TP=2 was blocked by the old `NotImplementedError` while the 2x box was available,
+and that box was released before the fix landed. It has since run on the 8x RTX
+3090 box — `Qwen3.5-35B-A3B-exl3` @3.00bpw is token-identical to TP=1 at both TP=2
+and TP=4; see [tensor-parallel.md](tensor-parallel.md) "What is validated" #7.
+`tools/tp_preflight.py` still reports fused-shard checkpoints as provisional,
+which now means "verified on one checkpoint, not a class" rather than "never run".
 
 **Result: Qwen3.5-35B-A3B loads (10.63 GiB) and generates correctly.** It hung
 during generation when first tried; that turned out to be the autotuner problem
@@ -324,8 +336,8 @@ not profile the same batch. (2048 exactly is not usable here — gemma's
 `Qwen3.5-35B-A3B-exl3` loads (10.63 GiB) and answers correctly, 4 runs out of 4
 in eager mode with the autotuner either on or off, leading with a real first
 token. It needs the `patches/` change to load at all, and its routed experts
-carry no `interm_div`. It does still hang under CUDA graphs — see the caveat in
-the hang section.
+carry no `interm_div`. It also runs under CUDA graphs at 123-125 tok/s — the hang
+that used to make graphs unusable here was the sm_90+ barrier, fixed above.
 
 ## The second Laguna bug: fp16 overflow in the fused reduction
 

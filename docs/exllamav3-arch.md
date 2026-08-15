@@ -1,5 +1,8 @@
 # Architecture-conditional code in exllamav3
 
+*Where exllamav3 changes behaviour by GPU architecture. Consult before running on
+hardware other than the sm_120 Blackwell most figures were measured on.*
+
 A census, not an analysis. We lost most of a day to one arch-gated barrier
 (fixed directly in [our exllamav3 fork](https://github.com/yeasah/exllamav3),
 formerly `patches/exllamav3-sm90-barrier.patch`), so this is an index of

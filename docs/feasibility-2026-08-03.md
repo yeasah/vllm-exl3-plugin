@@ -1,5 +1,29 @@
 # Feasibility: an out-of-tree vLLM plugin for EXL3
 
+> **FROZEN — 2026-08-03. Historical record; do not edit to keep it current.**
+>
+> This is the report the project started from. Its verdict held and most of its
+> analysis is still accurate, but four things have since been overturned or moved
+> on, and it is not the place to look for current state:
+>
+> - **The suggested phase ordering (§7) is obsolete**, and its numbering no longer
+>   addresses anything. Notes are named by subject in `docs/`; sequencing lives in
+>   [../TODO.md](../TODO.md). In particular this report's "Phase 4" was *packaging*,
+>   which is unrelated to the quantized-embedding work that briefly carried that
+>   name — see [embeddings.md](embeddings.md).
+> - **Hard problem #1, TP vs. the blocked Hadamard**, called "the single largest
+>   open technical question", was already solved upstream: exllamav3 ships its own
+>   splitting rule. See [format-and-loading.md](format-and-loading.md) and
+>   [tensor-parallel.md](tensor-parallel.md).
+> - **Hard problem #2 is refuted, not open.** Reusing `exl3_mgemm` for fused QKV
+>   cannot work at any phase: EXL3 assigns bit widths per tensor and real
+>   checkpoints mix them inside one layer, while `MultiLinear` asserts equal K. See
+>   [format-and-loading.md](format-and-loading.md) "Fused QKV cannot use
+>   `exl3_mgemm`".
+> - **The reference checkout moved** from the root of this directory to
+>   `deps/exllamav3`, and now points at [our
+>   fork](https://github.com/yeasah/exllamav3) rather than upstream.
+
 Status: research/feasibility only, no code written. `exllamav3` is cloned at the
 root of this directory (`0b9745c5`, v1.3.0, 2026-07-31) as a reference checkout;
 everything below is grounded in that source plus vLLM's plugin docs/source and

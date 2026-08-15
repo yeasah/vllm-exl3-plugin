@@ -53,8 +53,9 @@ ROW = re.compile(r"\.(o_proj|down_proj|out_proj)$")
 #: stored `in_proj_qkv` covers shards 0, 1 and 2).
 #:
 #: `EXL3Parameter._load_fused` composes that split with the tensor-parallel one
-#: (`format.fused_shard_bounds`), so these no longer block TP -- but the path is
-#: only verified offline, never on multi-GPU hardware, so it is still called out
+#: (`format.fused_shard_bounds`), so these no longer block TP. The path is
+#: verified on hardware for Qwen3.5-35B-A3B at TP=2 and TP=4
+#: (docs/tensor-parallel.md), but that is one checkpoint, so it is still called out
 #: rather than passed over silently. It cannot be derived from the safetensors
 #: headers, hence a list of known cases.
 FUSED_MULTI_SHARD = re.compile(r"\.in_proj_qkv$")
@@ -148,7 +149,7 @@ def main() -> None:
         if FUSED_MULTI_SHARD.search(generic):
             fused.append((generic, len(members)))
             print(f"  fus {generic:<52} {out_f:>6}  fused output shards, "
-                  "TP path unverified on hardware")
+                  "TP path verified on one checkpoint only")
             continue
         if COLUMN.search(generic):
             axis, size = "col", out_f
@@ -180,7 +181,7 @@ def main() -> None:
         print(f"\n  {n} tensors carry fused output shards -- a vLLM packing"
               "\n  property, not a dimension one. _load_fused composes that split"
               "\n  with the TP split; verified token-identical to TP=1 at TP=2 and"
-              "\n  TP=4 for Qwen3.5-35B-A3B (see PHASE2.md), but that is one"
+              "\n  TP=4 for Qwen3.5-35B-A3B (see docs/tensor-parallel.md), but that is one"
               "\n  checkpoint -- treat a TP verdict above as provisional until this"
               "\n  checkpoint specifically has been run.")
 

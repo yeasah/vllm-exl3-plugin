@@ -212,7 +212,7 @@ def embed_rows(
     ids), so leaving it unbounded shows up as an out-of-memory that only appears
     at high `max_num_seqs` and does not respond to the usual memory knobs.
 
-    See PHASE4.md for the measurements and the derivation.
+    See docs/embeddings.md for the measurements and the derivation.
     """
     if token_ids.numel() == 0:
         return torch.empty(

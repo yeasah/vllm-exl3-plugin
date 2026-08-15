@@ -325,7 +325,7 @@ class EXL3Config(QuantizationConfig):
         `lm_head`: that tensor *is* the embedding, so it can serve the lookup
         and the dense `embed_tokens.weight` need never be loaded. Untied models
         have no quantized copy of the embedding anywhere and stay dense until
-        something produces one (PHASE4.md, Phase B).
+        something produces one (docs/embeddings.md, Phase B).
 
         Opt out with `EXL3_DENSE_EMBED=1`, which is the first thing to try
         if a model looks numerically wrong: it isolates the embedding from every

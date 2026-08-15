@@ -1,4 +1,11 @@
-# Phase 4: quantized embeddings (TODO #3)
+# Quantized embeddings
+
+*Originally "Phase 4: quantized embeddings". Not the feasibility report's Phase 4,
+which was packaging. Tracked in TODO as `quantized-embeddings`.*
+
+*"Phase A" and "Phase B" below are local to this note: A is serving a tied model's
+embedding from its existing quantized head (shipped), B is producing an embedding
+tensor for untied models (open).*
 
 Goal: stop paying fp16 for the token embedding. Every EXL3 checkpoint stores it
 unquantized, and at the sizes this project targets that is a quarter to a half of the
@@ -24,6 +31,52 @@ just the census in the commit that added this file):
 The win is concentrated in **dense mid-size models with large vocabularies** -- precisely
 the appliance target. MoE checkpoints dilute it (expert weights dominate) and Laguna is an
 outlier with a small vocabulary for its size.
+
+### Against other formats: this is where EXL3 loses
+
+The census above is internal. The reason it matters is competitive, and the comparison
+was the original motivation for all of the work below (measured 2026-08-08 from real
+safetensors bytes and from the Hub's tensor-metadata viewer -- no downloads).
+
+On `Llama-3.2-1B-Instruct` (128,256 vocab, tied), EXL3 spends **0.673 GiB on embed+head
+at every target bpw** -- identical at 2.00, 3.00 and 4.00, because neither tensor
+participates in the bit-rate target -- against **0.201 GiB** for bartowski's Q6_K GGUF
+and **0.168 GiB** for unsloth's Q5_K. A 3.3-4x gap, from two compounding pipeline
+choices rather than the quantization algorithm: the embedding is never quantized at all,
+and a tie is never exploited (a second, independently quantized `lm_head` is baked out
+*in addition to* the untouched fp16 embedding, where GGUF stores the shared tensor once).
+
+The consequence is not academic. On real total file size, bartowski's IQ4_XS is smaller
+than *every* EXL3 checkpoint tested and beats two of the three on KLD -- the opposite of
+what an embed/head-excluded comparison shows.
+
+It persists at target scale. Relative tax shrinks with model size but never disappears,
+and tracks embedding-parameter count against package size more than scale per se:
+
+| model | bpw low → high | EXL3 embed share | GGUF embed share |
+|---|---|---|---|
+| Qwen3.5-35B-A3B (509M embed params) | 2.13 → 4.09 | 9.04% → 5.23% | 1.43% (flat) |
+| gemma-4-26B-A4B-it (738M embed params) | 2.10 → 6.10 | 14.40% → 6.28% | 2.86% (flat) |
+| Laguna-XS-2.1 (205M embed params) | 2.00 → 6.10 | 4.43% → 1.57% | 0.59% (flat) |
+
+Two readings. **GGUF's share stays flat across quant tiers** because it scales embedding
+precision with the target level; EXL3's fixed fp16 means its tax is worst exactly at the
+low-bpw end — worst for precisely the VRAM-constrained users who pick a low-bpw
+checkpoint in the first place. And **the most "efficiently sized" model is the worst
+case, not the best**: gemma-4-26B-A4B-it, the closest of the three to this project's
+target shape, spends 14.4% of the entire package on the embedding at 2.10bpw, and 19.79%
+on embed+head together once its duplicate head is counted (it is the only tied source of
+the three, so GGUF skips the head entirely). In body-layer budget at matched download
+size that is ~8.25 of 10.28 GiB for EXL3 against ~9.64 of 9.92 GiB for unsloth's
+same-size UD-IQ2_XXS — **~1.4 GiB, 17% more actual weight budget**, for two tensors the
+per-layer allocator never touches.
+
+**This is not an EXL3 defect so much as an ecosystem one.** AWQ, GPTQ, AutoRound and
+DASHQ checkpoints all ship full fp16/bf16 embeddings too; GGUF is the only widely used
+format that gets this right, plausibly because llama.cpp grew up optimizing for consumer
+hardware where every byte mattered, while the GPU-serving formats grew up where a few
+hundred MB against a 70B+ model was noise. Fixing it puts this project ahead of the
+entire GPU-quantization ecosystem outside GGUF, not merely at parity with one competitor.
 
 ## Feasibility: can a row be read without dequantizing the tensor?
 
@@ -88,9 +141,9 @@ read amplification.
 
 **Phase A -- tied models, no new checkpoint format.** A tied model's EXL3 checkpoint
 already ships a quantized `lm_head` (this project's quantizer writes one regardless of
-tying, TODO.md #2). So the embedding can be served from that existing tensor, and the fp16
-`embed_tokens` simply never loaded. No repair tool, no quantizer work, works on published
-checkpoints as they are.
+tying -- a pipeline defect, and the reason a repair tool is wanted). So the embedding can
+be served from that existing tensor, and the fp16 `embed_tokens` simply never loaded. No
+repair tool, no quantizer work, works on published checkpoints as they are.
 
 The saving is **embed minus head**, not embed: vLLM skips `lm_head.*` entirely for a tied
 model, so that tensor was *never resident* before, and serving the embedding from it makes
@@ -107,9 +160,9 @@ Confirmed against gemma-4-12B in practice: KV cache headroom went from 7.32 GiB 
 8.47 GiB, i.e. **+1.15 GiB**, against the 1.18 GiB predicted.
 
 **Phase B -- untied models.** Qwen3.6-27B, Qwen3.5-9B, Laguna, MiniCPM5 have no quantized
-embedding anywhere, so one has to be produced: the repair tool (TODO.md #2) or the pipeline
-(#4b). Phase A builds and de-risks the entire lookup path Phase B then reuses; only the
-source of the tensor differs.
+embedding anywhere, so one has to be produced -- by a repair tool over published
+checkpoints, or by the quantizer pipeline itself. Phase A builds and de-risks the entire
+lookup path Phase B then reuses; only the source of the tensor differs.
 
 ## vLLM integration: the hooks, all sanctioned
 
@@ -279,13 +332,18 @@ Embedding + head storage, and the KLD tax each option carries:
 
 | option | embed+head | tax |
 |---|---|---|
-| exllamav3 native (fp16 embed + trellis head) | 2.46 GiB | +0 |
-| **Phase A** (one trellis serving both) | **0.672 GiB** | +0.0216 |
-| trellis head + per-row 4-bit embed | 1.12 GiB | +0.0019 |
-| trellis head + per-row 6-bit embed | 1.34 GiB | +0.00024 |
+| exllamav3 native (fp16 embed + trellis head) | 2.579 GiB | +0 |
+| **Phase A** (one trellis serving both) | **0.704 GiB** | +0.0216 |
+| trellis head + per-row 4-bit embed | 1.172 GiB | +0.0019 |
+| trellis head + per-row 6-bit embed | 1.407 GiB | +0.00024 |
+
+(Sizes are 262144 x 3840 at the stated depth, head at the checkpoint's 6.004 bits:
+fp16 embed 1.875 GiB, trellis head 0.704 GiB. An earlier revision of this table
+carried the same four rows ~4.8% low against an inconsistent shape; these agree
+with the census at the top and with "The full menu" below.)
 
 Phase A remains the smallest configuration and keeps its place as the extreme-VRAM option.
-But a separate per-row embedding buys back essentially the entire tax for 0.45-0.67 GiB --
+But a separate per-row embedding buys back essentially the entire tax for 0.47-0.70 GiB --
 and at this operating point that is better value than spending the same bytes on layer
 bits, since the layer curve has to flatten hard (0.0270 is already only 0.025 above the
 0.00176 noise floor, so no amount of layer precision can buy what fixing the embedding
@@ -295,6 +353,15 @@ So Phase B should **not** be "quantize the embedding with exllamav3's quantizer"
 be a per-row integer scheme at 4-6 bits: better quality per bit by an order of magnitude,
 far simpler, no Hadamard, no 128-block read amplification, and a trivially cheap row
 gather.
+
+**Trap for whoever builds that: quantize from the original fp16 embedding, never from a
+trellis reconstruction.** A tied checkpoint offers two apparent sources for the embedding
+matrix — the true fp16 `embed_tokens`, and a dequantization of the quantized `lm_head`,
+which is the same logical matrix and is *right there*. The second is already ~2% lossy per
+row. Quantizing it again is double quantization and the errors compound visibly, for no
+saving: the fp16 original is in the same checkpoint. The two techniques stack (serve a
+tied model from its existing head today; emit a per-row tensor in a repair tool) but each
+needs its own best-available source.
 
 ### The head sweep: the mirror image, and it settles the tied-model question
 
@@ -430,14 +497,15 @@ noise. So: 4 bits, or 5 for margin, and never more.
 takes a checkpoint whose layer bpw is already fixed and cannot move bytes into the body, so
 it has exactly one free variable and nothing to solve -- the heuristic (or an explicit
 override) is the right interface. Trading depth *across* components only becomes a real
-optimization in the from-scratch quantizer (TODO.md #4b), where layer bpw is free and the
+optimization in the from-scratch quantizer, where layer bpw is free and the
 Lagrangian actually binds.
 
 ### Untied models, measured
 
-Three untied checkpoints, embedding varied with the trellis head untouched. This is the
-first time the embedding is perturbed on models where it is genuinely a *different matrix*
-from the head:
+Three checkpoints, embedding varied with the trellis head untouched. Two are genuinely
+untied, so this is the first time the embedding is perturbed on models where it is a
+*different matrix* from the head; gemma-4-12B is carried over from the sweeps above as
+the tied reference point, not as a fourth untied case:
 
 | model | arch | vocab x hidden | body | noise floor | 4-bit tax | 5-bit | 6-bit |
 |---|---|---|---|---|---|---|---|
@@ -500,13 +568,19 @@ The *shape* of the findings should transfer (per-row for embeddings, trellis for
 additivity, head-sets-the-depth); the specific constants are gemma-4-12B's and are cheap to
 re-derive per family once a tool exists to produce the tensors.
 
-## Open question: quality at scale
+## Quality at scale: asked, and answered
 
-Phase A makes the embedding inherit the head's bit width (`head_bits`, usually 6). That is
-a quality question, not just plumbing, and gemma-4 is the most numerically delicate family
-here (it already needs fp32 residuals, and is the reason for the flash-attention head-dim
-work in TODO #1). Reason for optimism: low-bit GGUFs run gemma embeddings down at Q3_K.
+Phase A makes the embedding inherit the head's bit width (`head_bits`, usually 6), which
+is a quality question rather than plumbing — and gemma-4 is the most numerically delicate
+family here (it already needs fp32 residuals, and is the reason for the flash-attention
+head-dim work in TODO `fa-head-dim-512`). This was the open question when Phase A shipped.
 
-qbench answers this directly now, and the `embed_quant` option already prototyped in
-`Exl3Backend` (simulated embedding precision, independent of any real storage format) is
-the right instrument for finding the knee before committing to a bit width.
+It has since been answered, by the sweeps above: `Exl3Backend`'s `embed_quant` was indeed
+the right instrument, and the knee is *not* a constant. On gemma-4-12B inheriting 6.004
+bits of trellis costs +0.0216 KLD, an order of magnitude more than a per-row scheme at the
+same depth; across three models the 4-bit tax spans 35x, so depth has to be calibrated per
+model. See "Choosing depths" and "Untied models, measured".
+
+What remains open is only the generalization: everything measured is gemma-4-12B,
+MiniCPM5-1B and Qwen3.5-9B. The *shape* of the findings should transfer; the constants
+are theirs.

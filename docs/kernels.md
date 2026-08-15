@@ -1,4 +1,7 @@
-# Phase 1 — the fused kernels
+# The fused kernels
+
+*Originally "Phase 1 — the fused kernels". Keeping weights quantized at runtime:
+`exl3_mm`, the reconstruct threshold, CUDA graphs, bf16 activations.*
 
 Goal from the feasibility report: **swap in the real fused GEMM/GEMV kernels
 behind a `direct_register_custom_op`, and validate under vLLM's actual serving
@@ -7,7 +10,7 @@ loop (continuous batching, CUDA graph capture, prefix caching).**
 **Status: done and verified**, on `Llama-3.2-1B-Instruct-exl3` (3.0bpw and
 3.5bpw), `MiniCPM5-1B-exl3` (3.00bpw, mcg codebook, quantized head) and
 `gemma-4-12B-it-exl3` (3.00bpw, mul1 codebook, multimodal) — a 12B model in
-6.32 GiB on a 16 GB card. 34 tests pass.
+6.32 GiB on a 16 GB card. 34 tests passed at the time.
 
 ## What changed
 
@@ -76,8 +79,11 @@ a capture. It works because vLLM runs `cudagraph_num_of_warmups` dummy passes at
 each shape before capturing it, priming the autotune cache.
 
 The autotune cache is on disk at `~/.cache/exllamav3/autotune/`, overridable
-with `EXLLAMAV3_TUNE_CACHE`. Multi-process TP workers racing on it remains an
-open Phase 2 question; the env var gives a per-worker override if needed.
+with `EXLLAMAV3_TUNE_CACHE`. Multi-process TP workers racing on it was left open
+here; the env var gives a per-worker override if needed. **Since answered** — the
+cache survives two concurrent writers and eight writing it from empty, producing
+correct entries either way; see [tensor-parallel.md](tensor-parallel.md) "What is
+validated" #3 and #6.
 
 Adding the reconstruct threshold cut graph capture from 35s to 2s, because the
 large shapes no longer invoke the autotuner at all.

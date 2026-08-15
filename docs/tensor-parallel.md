@@ -1,4 +1,7 @@
-# Phase 2 — tensor parallelism
+# Tensor parallelism
+
+*Originally "Phase 2 — tensor parallelism". The Hadamard-block-128 sharding rule,
+what each TP degree admits, and what has actually run on hardware.*
 
 Goal from the feasibility report: **resolve the Hadamard-block-128 sharding
 question, then add tensor parallelism.**
@@ -319,9 +322,14 @@ split — then compares against unsharded execution of the same layer:
 
 ## What is validated
 
-Run on a rented Vast.ai instance: 2x RTX 3060 (sm_86), torch 2.11.0+cu130,
-**vLLM 0.26.0 — the release, not main** — exllamav3 v1.3.0 built from the
-pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
+Two rented boxes, and which one a result came from matters — they differ in
+architecture, vLLM version and checkpoint:
+
+- **Box A**, items 1-4: 2x RTX 3060 (sm_86), torch 2.11.0+cu130, **vLLM 0.26.0 —
+  the release, not main** — exllamav3 v1.3.0 from the pinned submodule,
+  `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw unless noted.
+- **Box B**, items 5-9: 8x RTX 3090 (sm_86), vLLM 0.27.1.dev0+g4bdc8a788 (main),
+  checkpoints as noted per item.
 
 1. **TP=2 is token-identical to TP=1**, on three models chosen to exercise
    different paths, compared on token ids rather than text. Not "close" --
@@ -349,8 +357,8 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
    cold-written cache produces identical output again -- so the entries the race
    produced select correct kernels. This was the open question flagged in Phase 1.
 4. **The plugin works against a vLLM release.** Everything to date was developed
-   against main; 0.26.0 needed no changes. That matters for packaging (Phase 4),
-   which can pin a release rather than chase main.
+   against main; 0.26.0 needed no changes. That matters for packaging, which can
+   pin a release rather than chase main.
 5. **TP=8 is token-identical to TP=1**, on an 8x RTX 3090 box (sm_86), vLLM
    0.27.1.dev0+g4bdc8a788 (main), `gemma-4-31b-it-exl3` @3.00bpw -- the dense
    model `tools/tp_preflight.py` identifies as clearing every TP=8 split
@@ -408,7 +416,7 @@ pinned submodule, `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw.
    checkpoints** (Qwen3.5-35B-A3B and Laguna-XS-2.1) -- no dense checkpoint has
    been tried at TP=4 at all.
 2. **`exl3_mgemm` has a profiled, checkpoint-specific, 100-1000x performance
-   bug at TP=4.** See "MoE under tensor parallelism" below -- not a
+   bug at TP=4.** See "MoE under tensor parallelism" above -- not a
    correctness gap (Laguna-XS-2.1 simply never finished, twice, in any
    reasonable time), and not reproduced by Qwen3.5-35B-A3B despite an
    identical expert/layer/shard-width profile, so it isn't a function of TP
