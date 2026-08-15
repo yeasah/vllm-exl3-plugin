@@ -171,6 +171,137 @@ Throughput cost, same checkpoint, eager, batch as noted:
 ~3% decode cost, on the model where the fixed per-step embedding work is amortized over
 the least layer compute it ever will be, in naive PyTorch with no kernel work.
 
+## gemma-4-12B: the tax, and where it lives
+
+The Qwen3-0.6B result did not survive contact with a real target-class model unchanged.
+On `gemma-4-12B-it-exl3`, dense-embedding (exllamav3 native) vs quantized-embedding
+(vLLM, Phase A), openwebtext 10x2048:
+
+| layer bpw | native KLD | quant-embed KLD | tax | vram (native -> quant) |
+|---|---|---|---|---|
+| 3.00 | 0.10293 | 0.12354 | +0.0206 | 6.39 -> 4.60 GiB |
+| 3.50 | 0.07026 | 0.09135 | +0.0211 | 7.03 -> 5.23 GiB |
+| 4.00 | 0.02696 | 0.04858 | +0.0216 | 7.66 -> 5.87 GiB |
+
+A flat **+0.021 KLD** for a flat **-1.79 GiB**. Still a dominant trade -- quant-embed at
+4.00bpw (5.87 GiB, 0.0486) beats native at 3.50bpw (7.03 GiB, 0.0703) on both axes -- but
+an order of magnitude more than the ~0.001-0.002 seen on Qwen3-0.6B, and at 4.00bpw the
+embedding contributes nearly as much divergence as every layer combined.
+
+**The tax is one confidence bucket, not a general degradation.** At 4.00bpw, native ->
+quant-embed by reference-confidence bucket:
+
+| ref conf | native | quant embed | |
+|---|---|---|---|
+| [0.00,0.25) | 0.0417 | 0.0434 | +4% |
+| [0.25,0.50) | 0.0366 | 0.0392 | +7% |
+| [0.50,0.75) | 0.0299 | 0.0315 | +6% |
+| [0.75,0.95) | 0.0161 | 0.0166 | +3% |
+| **[0.95,1.00)** | **0.0108** | **0.1161** | **+979%** |
+
+That bucket is 19.2% of tokens and accounts for 0.0202 of the 0.0216 tax -- essentially
+all of it. Its *median* is unchanged (0.000391 -> 0.000416), so it is a heavy tail, not a
+shift. And on the quantized-embedding side that bucket mean is nearly flat across layer
+bpw (0.1435 / 0.1318 / 0.1161 for 3.0 / 3.5 / 4.0) while native falls away fast (0.0380 /
+0.0280 / 0.0108): an error floor that spending bits on *layers* cannot buy down. It also
+explains why ppl barely moves (17.898 -> 17.937) -- perplexity is not tail-sensitive.
+
+### It is not a few broken tokens
+
+The obvious hypothesis -- outlier embedding rows that 6 bits cannot hold -- is **false**.
+Measuring the substitution error directly (6-bit dequantized `lm_head` row vs the bf16
+`embed_tokens` row, per token, all 262144 of them):
+
+- relative row error: mean 0.0209, median 0.0206, p90 0.0215, **p99 0.0280**, max 0.1417
+- tokens with relative error > 0.5: **zero**
+- row norm has no predictive power: every norm decile lands on 0.0207, including the top
+  decile running to norm 7.13
+- the only elevated blocks are in the reserved region, and the worst tokens decode to
+  `<unused642>`, `<unused607>`, `<unused618>`, ... -- slots that never appear in text and
+  therefore cannot contribute a single count to the KLD
+
+So the substitution is a **uniform ~2.06% perturbation of every row**. There is nothing to
+special-case, and no clamp or exception list can help; reducing the tax means more bits,
+globally. (Incidentally this is a good result for EXL3's regularization: a 6-bit code over
+a 262144x3840 matrix with p99 error 2.8% and no catastrophic rows is the Hadamard doing
+exactly its job.)
+
+The heavy tail therefore comes from KL's own nonlinearity rather than from bad rows: where
+the reference is near-deterministic, KL ~ -log q(top), so a uniform small perturbation
+produces enormous divergence wherever a confident prediction sat on a narrow logit margin,
+and little anywhere else. Which is precisely the bucket pattern above.
+
+### Consequence for Phase B
+
+Phase A cannot act on this -- it is locked to whatever `head_bits` the checkpoint used
+(6.004 here). Phase B chooses the embedding's bit width, so the knee is worth locating.
+
+More interestingly, the uniformity is an argument *against* using EXL3 format for
+embeddings at all. EXL3's advantage is handling ill-conditioned weights with outliers;
+this matrix has none (norms clustered near 1.03, error uniform, nothing for the Hadamard
+to rescue). A plain per-row integer scheme could plausibly match it at a fraction of the
+complexity -- and would drop the 128-block read amplification entirely, since row
+extraction becomes a trivial slice instead of a block decode.
+
+### Measured: a naive per-row quantizer beats the trellis by ~89x at equal bits
+
+Swept with `Exl3Backend`'s `embed_quant` (simulated embedding precision, storage-format
+independent) on gemma-4-12B @4.00bpw. Everything else is held fixed -- real 4.00bpw
+layers, real 6-bit trellis `lm_head` -- so only the input embedding varies:
+
+| embedding | ppl | KLD | tax vs fp16 | vs the trellis |
+|---|---|---|---|---|
+| fp16 (baseline) | 17.8979 | 0.026963 | — | |
+| 8-bit per-row | 17.9019 | 0.027012 | +0.000049 | 440x better |
+| **6-bit per-row** | 17.9112 | 0.027206 | **+0.000243** | **89x better** |
+| 5-bit per-row | 17.8893 | 0.027535 | +0.000572 | 38x better |
+| **4-bit per-row** | 17.9090 | 0.028835 | **+0.001872** | **11.5x better** |
+| 3-bit per-row | 26.6644 | 0.512568 | +0.485605 | cliff |
+| 6-bit per-*tensor* | 2708219 | 12.750586 | +12.72 | catastrophic |
+| **6-bit EXL3 trellis (real)** | 17.9370 | 0.048582 | **+0.021619** | 1x |
+
+The trellis is not merely beatable here, it is *badly* beaten: a min/max per-row integer
+quantizer at the **same 6 bits** costs 89x less divergence, and at **4 bits** -- a third
+fewer -- still costs 11.5x less. Two supporting readings: the 3-bit cliff is sharp
+(4-bit is fine, 3-bit destroys the model), and per-*tensor* granularity at 6 bits is
+catastrophic, which confirms per-row scaling is doing the real work and that the harness
+is genuinely perturbing what it claims to be.
+
+The likely reason is a mismatch of objective rather than a defect. EXL3 quantized this
+tensor as an **output projection**: the quantizer optimizes `x @ W.T` against typical
+activations, where error in directions the activations rarely occupy is nearly free. Using
+the same tensor as an **embedding** demands something different -- that each individual
+*row* be an accurate vector on its own. Nothing in the format was asked to preserve that.
+
+### Consequence: the Phase B menu, for gemma-4-12B
+
+Embedding + head storage, and the KLD tax each option carries:
+
+| option | embed+head | tax |
+|---|---|---|
+| exllamav3 native (fp16 embed + trellis head) | 2.46 GiB | +0 |
+| **Phase A** (one trellis serving both) | **0.672 GiB** | +0.0216 |
+| trellis head + per-row 4-bit embed | 1.12 GiB | +0.0019 |
+| trellis head + per-row 6-bit embed | 1.34 GiB | +0.00024 |
+
+Phase A remains the smallest configuration and keeps its place as the extreme-VRAM option.
+But a separate per-row embedding buys back essentially the entire tax for 0.45-0.67 GiB --
+and at this operating point that is better value than spending the same bytes on layer
+bits, since the layer curve has to flatten hard (0.0270 is already only 0.025 above the
+0.00176 noise floor, so no amount of layer precision can buy what fixing the embedding
+buys).
+
+So Phase B should **not** be "quantize the embedding with exllamav3's quantizer". It should
+be a per-row integer scheme at 4-6 bits: better quality per bit by an order of magnitude,
+far simpler, no Hadamard, no 128-block read amplification, and a trivially cheap row
+gather.
+
+**Open, and worth testing before committing:** whether per-row also suffices for the
+*head*. If it does, a tied model could serve both roles from one per-row tensor at ~0.672
+GiB with the small tax rather than the large one -- strictly better than Phase A on both
+axes. But the head is the case the trellis was actually designed for, so that must be
+measured, not assumed; this sweep says nothing about it.
+
 ## Open question: quality at scale
 
 Phase A makes the embedding inherit the head's bit width (`head_bits`, usually 6). That is
