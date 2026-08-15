@@ -337,20 +337,50 @@ both roles measures +0.004771. So the two can be chosen separately without inter
 | trellis head + per-row 4-bit embed | 1.172 GiB | 0.028835 | +0.001872 |
 | trellis head + per-row 6-bit embed | 1.407 GiB | 0.027206 | +0.000243 |
 
+### The measured frontier
+
+Filling in the shared-tensor depths (all measured; the noise floor for this model and test
+set is **0.001759**):
+
+| option | embed+head | tax | vs noise floor | |
+|---|---|---|---|---|
+| shared per-row 5-bit | 0.586 GiB | +0.045547 | 26x | frontier |
+| shared per-row 6-bit | 0.703 GiB | +0.004771 | 2.7x | frontier |
+| shared trellis 6.004-bit (Phase A) | 0.704 GiB | +0.021619 | 12x | **dominated** |
+| **shared per-row 7-bit** | **0.820 GiB** | **+0.001120** | **0.64x** | frontier |
+| shared per-row 8-bit | 0.938 GiB | +0.000413 | 0.23x | frontier |
+| trellis head + per-row 4-bit embed | 1.172 GiB | +0.001944 | 1.1x | **dominated** |
+| trellis head + per-row 6-bit embed | 1.407 GiB | +0.000315 | 0.18x | frontier |
+| exllamav3 native | 2.579 GiB | +0 | — | frontier |
+
+**At 7 bits shared, the entire embed+head encoding costs less divergence than the model's
+own numerical self-noise**, for 0.820 GiB against native's 2.579 -- a 1.76 GiB saving that
+is, in quality terms, free. 8-bit buys a further 2.7x margin for 0.118 GiB.
+
+Splitting is dominated across the whole useful range: shared 7-bit is both 0.35 GiB
+*smaller* and 1.7x *better* than trellis-head-plus-4-bit-embed. The reason is structural --
+splitting stores the same logical matrix twice, and since the embedding has a hard floor at
+4 bits (3-bit is a cliff), splitting cannot go below `head_bits + 4`. Sharing satisfies
+both roles at 7. Splitting only re-enters above ~1.4 GiB, where it is paying ~0.47 GiB to
+shave 0.00009 off something already well under the noise floor.
+
+Additivity held at every point and was slightly conservative (measured came in 0.000003 to
+0.000274 *better* than head-tax + embed-tax predicted), so the two roles can be costed
+independently and the cross-product does not need sweeping.
+
 Two conclusions for a **tied** model:
 
-1. **If one tensor must serve both roles, it should be per-row, not the trellis.** At
-   identical size (0.703 vs 0.704 GiB) a shared per-row 6-bit tensor is **4.5x better**
-   than Phase A's shared trellis. The asymmetry is why: the head degrades gracefully under
-   per-row (+0.0045) while the embedding degrades badly under the trellis (+0.0216). This
-   is a cheap, strictly-better replacement for Phase A on tied models.
-2. **Near-zero tax does require carrying both encodings** -- redundant storage of the same
-   logical matrix. Trellis head + per-row 4-bit embedding costs 1.172 GiB for +0.0019,
-   still less than half of native's 2.579 GiB. Whether the extra ~0.47 GiB is worth
-   removing a +0.0029 difference is a deployment choice, not a correctness one.
+1. **One shared per-row tensor, at 7 bits.** Not the trellis (dominated), and not two
+   tensors (also dominated). This is what a repair tool should emit, and it is simpler
+   than either alternative: no Hadamard, no block gather, row extraction is a slice.
+2. **The head sets the bit depth, not the embedding.** The head is ~60x more
+   bit-sensitive, so a shared tensor is priced by what the head needs and the embedding
+   rides along above its own requirement. That waste is still far cheaper than a second
+   copy of the matrix.
 
-Untied models are unaffected by the sharing question and simply want a per-row embedding
-alongside their existing trellis head.
+Untied models are unaffected by the sharing question -- genuinely different matrices --
+and simply want a per-row embedding at 4-6 bits alongside their existing trellis head,
+which the additive model prices directly off the embedding column above.
 
 ## Open question: quality at scale
 
