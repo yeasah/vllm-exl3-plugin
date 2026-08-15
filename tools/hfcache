@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+# Inspect the Hugging Face hub cache, per revision rather than per repo.
+#
+# `hf cache ls` answers a different question than the one that matters here.
+# Three gaps, all of which bite this project's usage pattern:
+#
+#   - It drops any repo whose refs are inconsistent, so a repo holding three
+#     complete bpw revisions can vanish from the listing entirely because of
+#     one unrelated dangling ref (see `doctor`).
+#   - It reports per-repo aggregates. EXL3 repos publish one branch per bit
+#     rate, so "24 revisions, 173G" says nothing about whether the 3.00bpw you
+#     are about to serve is actually all there.
+#   - Its completeness check is per *file* (a blob is whole or `.incomplete`).
+#     A revision missing four files entirely is, to `hf cache`, perfectly fine.
+#
+# The last one used to be genuinely unanswerable offline. It isn't anymore:
+# huggingface_hub >= 1.x writes the full remote file listing for a commit to
+# `<repo>/trees/<commit>.json` as a side effect of `snapshot_download`, and
+# because a commit hash is immutable that listing never needs invalidating.
+# This tool joins it against what is on disk. `hf cache` ignores it.
+#
+# Do not reach for `hf download --dry-run` as a substitute: it counts bytes it
+# would fetch, deduplicated by blob, so a revision whose files are missing from
+# its snapshot dir but whose blobs exist under a sibling revision reports
+# "0 files to download" while still being unusable.
+#
+# Usage:
+#   tools/hfcache                    one row per cached revision
+#   tools/hfcache ls [PATTERN...]    ... restricted to matching repos
+#   tools/hfcache check [PATTERN...] per-file detail: what is present, what is not
+#   tools/hfcache path REPO[@REV]    print the snapshot directory
+#   tools/hfcache doctor             dangling refs, orphaned blobs, detached revs
+#   tools/hfcache doctor --fix-refs  delete dangling refs (nothing else)
+#   tools/hfcache doctor --rm-incomplete   delete `.incomplete` blobs (nothing else)
+#
+# The two `doctor` mutations are deliberately separate switches. `hf cache
+# prune` fuses "drop incomplete downloads" with "drop revisions no ref points
+# at", and the second is often exactly the checkpoint you meant to keep.
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Files whose absence makes a revision unusable vs. merely incomplete. A
+# download run with `--exclude "*.md"` is a normal thing to do; one missing a
+# shard is not.
+DOC_SUFFIXES = (".md", ".txt", ".png", ".jpg", ".jpeg", ".gif", ".svg")
+DOC_NAMES = (".gitattributes", ".gitignore", "LICENSE", "USE_POLICY")
+
+TREE_FORMAT_VERSION = 1
+
+
+def is_doc(path: str) -> bool:
+    base = os.path.basename(path)
+    return base.startswith(DOC_NAMES) or base.endswith(DOC_SUFFIXES)
+
+
+def human(n: float) -> str:
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}P"
+
+
+def cache_root() -> Path:
+    from huggingface_hub import constants
+
+    return Path(constants.HF_HUB_CACHE)
+
+
+def read_tree(repo_dir: Path, commit: str) -> dict | None:
+    """The remote file listing for a commit, or None if never recorded.
+
+    Read straight off disk rather than through `get_cached_repo_tree`, because
+    this tool walks directories instead of resolving repo ids -- it has to be
+    able to describe repos that no repo-id-based API will look at.
+    """
+    tree_file = repo_dir / "trees" / f"{commit}.json"
+    if not tree_file.is_file():
+        return None
+    try:
+        blob = json.loads(tree_file.read_text())
+    except (OSError, ValueError):
+        return None
+    if blob.get("format_version") != TREE_FORMAT_VERSION:
+        print(
+            f"warning: unknown tree format {blob.get('format_version')!r} in "
+            f"{tree_file}; ignoring",
+            file=sys.stderr,
+        )
+        return None
+    return blob.get("files") or {}
+
+
+class Revision:
+    def __init__(self, repo, commit, refs):
+        self.repo = repo
+        self.commit = commit
+        self.refs = sorted(refs)
+        self.path = repo.dir / "snapshots" / commit
+        self.dangling = not self.path.is_dir()
+        self.manifest = None if self.dangling else read_tree(repo.dir, commit)
+        self.present, self.missing, self.mismatched = [], [], []
+        self.size = 0
+
+        if self.dangling:
+            return
+        if self.manifest is None:
+            # No listing: all we can honestly report is what is here.
+            for f in sorted(self.path.rglob("*")):
+                if f.is_file() or f.is_symlink():
+                    rel = str(f.relative_to(self.path))
+                    self.present.append(rel)
+                    self.size += f.stat().st_size if f.exists() else 0
+            return
+        for rel, info in sorted(self.manifest.items()):
+            want = info.get("size")
+            f = self.path / rel
+            if not f.exists():
+                self.missing.append(rel)
+                continue
+            self.present.append(rel)
+            actual = f.stat().st_size
+            self.size += actual
+            if want is not None and actual != want:
+                self.mismatched.append(rel)
+
+    @property
+    def label(self) -> str:
+        return ",".join(self.refs) if self.refs else "(detached)"
+
+    @property
+    def expected_size(self) -> int:
+        if self.manifest is None:
+            return self.size
+        return sum(i.get("size") or 0 for i in self.manifest.values())
+
+    @property
+    def status(self) -> str:
+        if self.dangling:
+            return "dangling"
+        if self.manifest is None:
+            return "unknown"
+        if self.mismatched:
+            return "corrupt"
+        if not self.missing:
+            return "ok"
+        return "docs" if all(is_doc(m) for m in self.missing) else "partial"
+
+
+class Repo:
+    def __init__(self, path: Path):
+        self.dir = path
+        kind, _, name = path.name.partition("--")
+        self.kind = {"models": "model", "datasets": "dataset", "spaces": "space"}.get(
+            kind, kind
+        )
+        self.name = name.replace("--", "/")
+
+        refs: dict[str, list[str]] = {}
+        refs_dir = path / "refs"
+        if refs_dir.is_dir():
+            for ref in sorted(refs_dir.rglob("*")):
+                if ref.is_file():
+                    refs.setdefault(ref.read_text().strip(), []).append(
+                        str(ref.relative_to(refs_dir))
+                    )
+
+        snaps = set()
+        if (path / "snapshots").is_dir():
+            snaps = {p.name for p in (path / "snapshots").iterdir() if p.is_dir()}
+
+        self.revisions = [
+            Revision(self, c, refs.get(c, [])) for c in sorted(snaps | set(refs))
+        ]
+        blobs = path / "blobs"
+        self.incomplete = sorted(blobs.glob("*.incomplete")) if blobs.is_dir() else []
+
+    @property
+    def qualified(self) -> str:
+        return self.name if self.kind == "model" else f"{self.kind}/{self.name}"
+
+
+def load_repos(patterns) -> list[Repo]:
+    root = cache_root()
+    if not root.is_dir():
+        sys.exit(f"no hub cache at {root}")
+    repos = [
+        Repo(p)
+        for p in sorted(root.iterdir())
+        if p.is_dir() and "--" in p.name and (p / "snapshots").exists()
+    ]
+    if patterns:
+        low = [x.lower() for x in patterns]
+        repos = [r for r in repos if any(p in r.qualified.lower() for p in low)]
+    return repos
+
+
+def cmd_ls(args):
+    repos = load_repos(args.pattern)
+    rows = []
+    for repo in repos:
+        for rev in repo.revisions:
+            if rev.manifest is not None:
+                n = f"{len(rev.present)}/{len(rev.manifest)}"
+            else:
+                n = f"{len(rev.present)}/?"
+            rows.append(
+                (
+                    rev.status,
+                    n,
+                    human(rev.size),
+                    human(rev.expected_size),
+                    f"{repo.qualified}@{rev.label}",
+                    rev.commit[:8],
+                )
+            )
+    if not rows:
+        print("no matching repos")
+        return
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    print(
+        f"{'STATUS':<{widths[0]}}  {'FILES':>{widths[1]}}  "
+        f"{'ON DISK':>{widths[2]}}  {'FULL':>{widths[3]}}  REPO@REF"
+    )
+    for status, n, size, full, name, commit in rows:
+        print(
+            f"{status:<{widths[0]}}  {n:>{widths[1]}}  {size:>{widths[2]}}  "
+            f"{full:>{widths[3]}}  {name}  [{commit}]"
+        )
+    bad = [r for r in rows if r[0] in ("partial", "corrupt", "dangling")]
+    print(f"\n{len(rows)} revision(s) across {len(repos)} repo(s); {len(bad)} need attention")
+    if any(r.incomplete for r in repos):
+        print("`.incomplete` blobs present -- see `hfcache doctor`")
+
+
+def cmd_check(args):
+    for repo in load_repos(args.pattern):
+        print(f"\n{repo.qualified}  ({repo.dir})")
+        for rev in repo.revisions:
+            print(f"  {rev.label}  [{rev.commit[:8]}]  {rev.status}")
+            if rev.dangling:
+                print("      ref points at a commit with no snapshot directory")
+                continue
+            if rev.manifest is None:
+                print("      no tree listing recorded; cannot verify completeness")
+            for f in rev.present:
+                print(f"      +  {f}")
+            for f in rev.missing:
+                print(f"      -  {f}{'  (doc)' if is_doc(f) else ''}")
+            for f in rev.mismatched:
+                print(f"      !  {f}  wrong size on disk")
+
+
+def cmd_path(args):
+    target, _, want_ref = args.target.partition("@")
+    for repo in load_repos([target]):
+        for rev in repo.revisions:
+            if rev.dangling:
+                continue
+            if not want_ref or want_ref in rev.refs or rev.commit.startswith(want_ref):
+                print(rev.path)
+                return
+    sys.exit(f"no cached revision matching {args.target!r}")
+
+
+def cmd_doctor(args):
+    repos = load_repos(args.pattern)
+    dangling = [(r, rev) for r in repos for rev in r.revisions if rev.dangling]
+    detached = [(r, rev) for r in repos for rev in r.revisions if not rev.dangling and not rev.refs]
+    incomplete = [(r, b) for r in repos for b in r.incomplete]
+
+    if dangling:
+        print("Dangling refs (these hide the whole repo from `hf cache ls`):")
+        for repo, rev in dangling:
+            for ref in rev.refs:
+                print(f"  {repo.qualified}  refs/{ref} -> {rev.commit[:8]}  (no snapshot)")
+    if detached:
+        print("\nDetached revisions (present, but no ref names them):")
+        for repo, rev in detached:
+            print(f"  {repo.qualified}  [{rev.commit[:8]}]  {human(rev.size)}")
+    if incomplete:
+        total = sum(b.stat().st_size for _, b in incomplete)
+        print(f"\nIncomplete blobs ({human(total)}):")
+        for repo, blob in incomplete:
+            print(f"  {repo.qualified}  {blob.name}  {human(blob.stat().st_size)}")
+    if not (dangling or detached or incomplete):
+        print("nothing to report")
+        return
+
+    if args.fix_refs:
+        for repo, rev in dangling:
+            for ref in rev.refs:
+                (repo.dir / "refs" / ref).unlink()
+                print(f"removed {repo.qualified} refs/{ref}")
+    if args.rm_incomplete:
+        for repo, blob in incomplete:
+            blob.unlink()
+            print(f"removed {repo.qualified} {blob.name}")
+    if not (args.fix_refs or args.rm_incomplete):
+        print("\n(read-only; pass --fix-refs and/or --rm-incomplete to act)")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("ls", help="one row per cached revision")
+    p.add_argument("pattern", nargs="*")
+    p.set_defaults(func=cmd_ls)
+
+    p = sub.add_parser("check", help="per-file detail for each revision")
+    p.add_argument("pattern", nargs="*")
+    p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("path", help="print a revision's snapshot directory")
+    p.add_argument("target", help="REPO or REPO@REF")
+    p.set_defaults(func=cmd_path)
+
+    p = sub.add_parser("doctor", help="dangling refs, detached revisions, orphaned blobs")
+    p.add_argument("pattern", nargs="*")
+    p.add_argument("--fix-refs", action="store_true", help="delete dangling refs")
+    p.add_argument("--rm-incomplete", action="store_true", help="delete .incomplete blobs")
+    p.set_defaults(func=cmd_doctor)
+
+    args = parser.parse_args()
+    if args.cmd is None:
+        args = parser.parse_args(["ls"])
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
