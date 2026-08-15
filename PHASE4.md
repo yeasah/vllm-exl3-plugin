@@ -411,7 +411,10 @@ The offset is stable where the ratio is not (2.50x -> 1.33x), so this is an addi
 body (+169%) but the *correct* choice at 2bpw (+6%), because it was never intrinsically bad,
 only mismatched.
 
-**Untied models (keep the trellis head, add a per-row embedding): 4 bits, flat.**
+**Untied models (keep the trellis head, add a per-row embedding): measure per model.**
+
+*Superseded below.* The 4-bit figure derived here holds for gemma-4-12B and does not
+generalize -- see "Untied models, measured" for three models spanning a 35x range.
 
 The head is what drives the tied depth. Remove it from the shared tensor and the embedding
 alone wants 4 bits at every body depth in shipping range (2.00-4.50bpw), set by the 3-bit
@@ -430,7 +433,48 @@ override) is the right interface. Trading depth *across* components only becomes
 optimization in the from-scratch quantizer (TODO.md #4b), where layer bpw is free and the
 Lagrangian actually binds.
 
-### How far this generalizes
+### Untied models, measured
+
+Three untied checkpoints, embedding varied with the trellis head untouched. This is the
+first time the embedding is perturbed on models where it is genuinely a *different matrix*
+from the head:
+
+| model | arch | vocab x hidden | body | noise floor | 4-bit tax | 5-bit | 6-bit |
+|---|---|---|---|---|---|---|---|
+| gemma-4-12B (tied ckpt) | Gemma3 | 262144 x 3840 | 4.00 | 0.001759 | +0.00187 | +0.00057 | +0.00024 |
+| MiniCPM5-1B | Llama | 130560 x 1536 | 3.00 | 0.000966 | +0.00568 | +0.00068 | +0.00077 |
+| Qwen3.5-9B | Qwen3.5 | 248320 x 4096 | 4.00 | 0.000718 | **+0.06453** | +0.01488 | +0.00173 |
+
+**The flat-4-bit rule is false.** The 4-bit tax spans 35x across models, and the optimal
+depth under the marginal criterion is 4 / ~5 / 6 respectively. Qwen3.5-9B at 4 bits costs
++0.065 against a 4.00bpw body of 0.0102 -- a 6x increase in total divergence.
+
+**What does generalize is that the tax is body-independent.** Qwen3.5-9B measured at three
+body depths:
+
+| body bpw | body KLD | 5-bit tax | 4-bit tax |
+|---|---|---|---|
+| 2.00 | 0.212714 | +0.014252 | +0.065794 |
+| 4.00 | 0.010221 | +0.014883 | +0.064530 |
+| 6.00 | 0.001237 | +0.014252 | +0.064228 |
+
+Constant to three significant figures. So **one sweep at any single body depth
+characterizes a model completely**, which keeps per-model calibration cheap even though no
+universal constant exists.
+
+**It is not encoding difficulty.** Per-row distribution shape is nearly identical across
+all three (crest factor p50 3.5-4.0, kurtosis ~3, i.e. Gaussian), so per-row min/max
+produces similar *relative* error everywhere; gemma is even the outlier in the wrong
+direction (crest p99 of 31.5) and is the *least* sensitive. The 35x spread is how much
+each model's downstream computation cares about a given embedding perturbation, not how
+well the perturbation is represented. Mechanism unestablished -- immediate post-embedding
+normalization is a plausible candidate and is untested.
+
+Practical consequence for the repair tool: it cannot ship a constant. It needs either a
+per-model calibration sweep (cheap, one body depth) or a conservative default -- 6 bits
+covers all three models measured, at a cost of over-provisioning gemma by ~2 bits.
+
+## How far this generalizes
 
 Everything above is one model family at one vocabulary size. Two things temper how much
 that matters:
