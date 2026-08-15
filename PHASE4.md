@@ -382,6 +382,71 @@ Untied models are unaffected by the sharing question -- genuinely different matr
 and simply want a per-row embedding at 4-6 bits alongside their existing trellis head,
 which the additive model prices directly off the embedding column above.
 
+## Choosing depths: what the repair tool should default to
+
+The criterion that makes this well-posed is **equal marginal KLD per byte** -- push a
+component's depth until the next byte buys less there than it would elsewhere. Both curves
+are measured: the embed/head taxes here, and the layer curve from turboderp's own model
+card for `gemma-4-12B-it-exl3` (2.00-8.00bpw), which agrees with our measurements to within
+label rounding where they overlap (3.00/3.50/4.00bpw: their 0.107/0.073/0.028 vs our
+0.1029/0.0703/0.0270).
+
+Note the leverage: **1 bpw of layers costs 10.8x what 1 bit of embed+head costs** on this
+model, which is why the first few embed/head bits are such good value and why they fall off
+a cliff so quickly afterwards.
+
+**Tied models (one shared per-row tensor): `depth = body_bpw + 3`.**
+
+| body bpw | layer marginal (KLD/GiB) | optimal depth | ratio | offset |
+|---|---|---|---|---|
+| 2.00 | 0.5892 | 5 | 2.50x | +3.0 |
+| 3.00 | 0.0536 | 6 | 2.00x | +3.0 |
+| 4.00 | 0.0142 | 7 | 1.75x | +3.0 |
+| 5.00 | 0.0039 | 8 | 1.60x | +3.0 |
+| 6.00 | 0.0008 | 8 | 1.33x | +2.0 |
+
+The offset is stable where the ratio is not (2.50x -> 1.33x), so this is an additive law.
+"Double the body depth" is a good rule of thumb only near 3bpw, where 2x3 happens to equal
+3+3; it over-provisions above that. This also rehabilitates 5-bit: catastrophic at a 4bpw
+body (+169%) but the *correct* choice at 2bpw (+6%), because it was never intrinsically bad,
+only mismatched.
+
+**Untied models (keep the trellis head, add a per-row embedding): 4 bits, flat.**
+
+The head is what drives the tied depth. Remove it from the shared tensor and the embedding
+alone wants 4 bits at every body depth in shipping range (2.00-4.50bpw), set by the 3-bit
+cliff rather than by any tradeoff -- the 3->4 bit marginal is 4.13 KLD/GiB, the 4->5 is
+0.011, and the layer curve sits between them across that whole range.
+
+It is cheaper than that framing suggests: the embedding-only tax is **+0.00187 at 4 bits,
+which is this model's noise floor (0.00176)**, and +0.00057 at 5 bits, a third of it. Above
+5 bits the tax is not resolvable -- the 6/7/8-bit measurements are non-monotone, which is
+noise. So: 4 bits, or 5 for margin, and never more.
+
+**The size-budget solver belongs to the full quantizer, not the repair tool.** A repair tool
+takes a checkpoint whose layer bpw is already fixed and cannot move bytes into the body, so
+it has exactly one free variable and nothing to solve -- the heuristic (or an explicit
+override) is the right interface. Trading depth *across* components only becomes a real
+optimization in the from-scratch quantizer (TODO.md #4b), where layer bpw is free and the
+Lagrangian actually binds.
+
+### How far this generalizes
+
+Everything above is one model family at one vocabulary size. Two things temper how much
+that matters:
+
+- **Tied models are rare in the target range.** Of the checkpoints censused here, only the
+  gemma-4 family is both tied and mid-size; Qwen3.5-9B, Qwen3.6-27B, Laguna and MiniCPM5
+  are all untied. So the `body + 3` rule governs a narrow slice, and the flat 4-bit untied
+  rule governs most of what would actually be deployed.
+- **But tied small models are not irrelevant.** Llama-3.2-1B and Qwen3-0.6B are tied, and
+  the embedding is 50%+ of those checkpoints -- exactly the profile of a speculative-decoding
+  draft model sitting alongside a large untied target.
+
+The *shape* of the findings should transfer (per-row for embeddings, trellis for heads,
+additivity, head-sets-the-depth); the specific constants are gemma-4-12B's and are cheap to
+re-derive per family once a tool exists to produce the tensors.
+
 ## Open question: quality at scale
 
 Phase A makes the embedding inherit the head's bit width (`head_bits`, usually 6). That is
