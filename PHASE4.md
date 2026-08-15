@@ -296,11 +296,61 @@ be a per-row integer scheme at 4-6 bits: better quality per bit by an order of m
 far simpler, no Hadamard, no 128-block read amplification, and a trivially cheap row
 gather.
 
-**Open, and worth testing before committing:** whether per-row also suffices for the
-*head*. If it does, a tied model could serve both roles from one per-row tensor at ~0.672
-GiB with the small tax rather than the large one -- strictly better than Phase A on both
-axes. But the head is the case the trellis was actually designed for, so that must be
-measured, not assumed; this sweep says nothing about it.
+### The head sweep: the mirror image, and it settles the tied-model question
+
+Same method, `head_quant`, holding the embedding at fp16 and replacing the checkpoint's
+quantized head with the (tied) embedding matrix put through the same fake quantizer.
+`bits: 16` is the control that isolates the trellis head's own cost.
+
+Control (fp16 embedding, fp16 head): KLD **0.026890**.
+
+| head encoding | tax | |
+|---|---|---|
+| **trellis, 6.004-bit (real)** | **+0.000072** | 1x |
+| per-row 8-bit | +0.000423 | 6x worse |
+| per-row 6-bit | +0.004531 | **63x worse** |
+| per-row 5-bit | +0.045249 | 625x worse |
+
+**Exactly the mirror image of the embedding result.** At the same 6 bits, the trellis is
+63x *better* for the head, where per-row was 89x better for the embedding. Per-row does
+not catch the trellis on the head even given two extra bits (8-bit per-row is still 6x
+worse than 6-bit trellis).
+
+This is strong confirmation of the objective-mismatch reading rather than any defect in
+either scheme: each encoding wins decisively at the job it was designed for. The trellis
+optimizes `x @ W.T` against typical activations, which is what a head does. A per-row
+min/max integer scheme preserves each row as a vector, which is what an embedding needs.
+Neither transfers.
+
+The two error sources are also **independent and additive**: head 6-bit (+0.004531) plus
+embedding 6-bit (+0.000243) predicts +0.004774, and sharing one 6-bit per-row tensor for
+both roles measures +0.004771. So the two can be chosen separately without interaction.
+
+### The full menu, gemma-4-12B @4.00bpw
+
+| option | embed+head | KLD | tax |
+|---|---|---|---|
+| exllamav3 native (fp16 embed + trellis head) | 2.579 GiB | 0.026963 | +0 |
+| **Phase A: one shared trellis** | **0.704 GiB** | 0.048582 | +0.021619 |
+| **one shared per-row 6-bit** | **0.703 GiB** | 0.031734 | +0.004771 |
+| one shared per-row 5-bit | 0.586 GiB | 0.072510 | +0.045547 |
+| trellis head + per-row 4-bit embed | 1.172 GiB | 0.028835 | +0.001872 |
+| trellis head + per-row 6-bit embed | 1.407 GiB | 0.027206 | +0.000243 |
+
+Two conclusions for a **tied** model:
+
+1. **If one tensor must serve both roles, it should be per-row, not the trellis.** At
+   identical size (0.703 vs 0.704 GiB) a shared per-row 6-bit tensor is **4.5x better**
+   than Phase A's shared trellis. The asymmetry is why: the head degrades gracefully under
+   per-row (+0.0045) while the embedding degrades badly under the trellis (+0.0216). This
+   is a cheap, strictly-better replacement for Phase A on tied models.
+2. **Near-zero tax does require carrying both encodings** -- redundant storage of the same
+   logical matrix. Trellis head + per-row 4-bit embedding costs 1.172 GiB for +0.0019,
+   still less than half of native's 2.579 GiB. Whether the extra ~0.47 GiB is worth
+   removing a +0.0029 difference is a deployment choice, not a correctness one.
+
+Untied models are unaffected by the sharing question and simply want a per-row embedding
+alongside their existing trellis head.
 
 ## Open question: quality at scale
 
