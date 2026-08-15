@@ -65,6 +65,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [moe.md](docs/moe.md) | `exl3_mgemm` behind `FusedMoE`, the Laguna scale factor, the sm_90+ barrier hang |
 | [embeddings.md](docs/embeddings.md) | quantized embeddings, per-row vs. trellis, depth selection |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
+| [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
 | [exllamav3-arch.md](docs/exllamav3-arch.md) | where exllamav3 branches by GPU architecture |
 | [feasibility-2026-08-03.md](docs/feasibility-2026-08-03.md) | the original research report (frozen) |
 
@@ -152,6 +153,7 @@ produces garbage without it. Drive models through their chat template
 |---|---|
 | `vllm-fused-param-capability-check.patch` | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it |
 | `vllm-gemma4-transformers-5.15-per-layer.patch` | gemma-4 on transformers >= 5.15, which moves `head_dim`/`num_key_value_heads` into per-layer configs |
+| `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend |
 
 ## Environment variables
 
