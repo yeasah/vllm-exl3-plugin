@@ -439,9 +439,18 @@ that matters:
   gemma-4 family is both tied and mid-size; Qwen3.5-9B, Qwen3.6-27B, Laguna and MiniCPM5
   are all untied. So the `body + 3` rule governs a narrow slice, and the flat 4-bit untied
   rule governs most of what would actually be deployed.
-- **But tied small models are not irrelevant.** Llama-3.2-1B and Qwen3-0.6B are tied, and
-  the embedding is 50%+ of those checkpoints -- exactly the profile of a speculative-decoding
-  draft model sitting alongside a large untied target.
+- **Tied small models still load through this path** (Llama-3.2-1B, Qwen3-0.6B, where the
+  embedding is 50%+ of the checkpoint), so Phase A serves them today with no tooling. But
+  they do *not* motivate the depth heuristic, and it should not be applied to them: a
+  speculative-decoding draft model has its every token verified against the target, so its
+  output distribution is the target's no matter how badly it is quantized. Draft quality is
+  an acceptance-rate knob -- speed, not fidelity -- and KLD against the draft's own fp16
+  self, which is what qbench measures, is simply the wrong metric. The relevant divergence
+  would be against the *target* model, where the baseline disagreement is dominated by the
+  model-size gap rather than by quantization, so the marginal cost of quantizing a draft
+  hard is small. Combined with its small share of total VRAM, allocation decisions there
+  barely move anything. Draft models want "quantize aggressively, measure acceptance rate",
+  which is a different experiment and a different harness.
 
 The *shape* of the findings should transfer (per-row for embeddings, trellis for heads,
 additivity, head-sets-the-depth); the specific constants are gemma-4-12B's and are cheap to
