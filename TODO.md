@@ -56,6 +56,15 @@ This may look at first glance like a bad deal in terms of complexity versus payo
 
 ## 2. Repair tool for existing EXL3 checkpoints
 
+**Design settled by the Phase 4 measurements (2026-08-15); see PHASE4.md.** Do *not* re-quantize
+embeddings with exllamav3's quantizer: as an embedding, a per-row integer scheme beats the trellis
+by ~89x at equal bits on gemma-4-12B, because the trellis optimizes `x @ W.T` for a head rather than
+per-row accuracy. Emit per-row integer instead -- simpler, no Hadamard, and row extraction becomes a
+slice rather than a block decode. For tied models one shared per-row tensor serves both roles and
+dominates both the shared trellis and any two-tensor split. Depth is **model-dependent** (4-bit tax
+spans 35x across gemma/MiniCPM/Qwen3.5-9B) so the tool cannot ship a constant -- but the tax is
+constant in body bpw, so one calibration sweep at any single depth characterizes a model.
+
 Every existing EXL3 checkpoint is seriously handicapped by two mistakes, to the point that its otherwise impressive efficiency gains are more than erased as compared to other formats.
 
  - The quantization pipeline generates a separate output head and embeddings for all tied models (which is entirely redundant content, and not small)
@@ -67,6 +76,19 @@ Every existing EXL3 checkpoint is seriously handicapped by two mistakes, to the 
   - Otherwise, the F16 embeddings need to be quantized, leveraging the same quantization tools that were used to originally quantize the rest of the model -- but also recognizing that it takes the form of a constrained optimization problem, where the rest of the model quantization decisions have already been made, and allocation decisions happen following those already-made decisions.
 
 ## 3. VRAM-efficient use of the quantized embeddings
+
+**Status (2026-08-15): the gating question is answered and tied models are shipped. See PHASE4.md
+for everything below in detail.**
+
+- Row extraction from an EXL3 tensor is exact and cheap (`had_right` is block-diagonal in 128-row
+  blocks, so a row needs 0.084% of the tensor). `ops.embed_rows`, bit-identical to `dense_weight`.
+- **Phase A shipped**: `EXL3EmbeddingMethod` serves a *tied* model's embedding from its existing
+  quantized `lm_head`, with the fp16 `embed_tokens` never loaded. Works on published checkpoints as
+  they are -- no repair tool, no quantizer work. Measured: Qwen3-0.6B 508 → 323 MiB resident,
+  gemma-4-12B +1.15 GiB of KV headroom, ~3% decode cost. All hooks are sanctioned vLLM extension
+  points; nothing is monkeypatched.
+- **Phase B (open)**: untied models have no quantized embedding to reuse, so one must be produced --
+  that is item #2 / #4b below, and PHASE4.md specifies what to produce.
 
 Our current explorations with quantized embeddings have involved dequantizing at load, which does prove that they work mathematically, and would save on file storage and I/O, but doesn't change the VRAM situation at all -- it still gets loaded at full resolution. To actually benefit in the way that matters most to the project (VRAM savings), the embeddings need to be loaded quantized and used that way. While the obvious and probably highest performing answer to this is to create new kernels for this, it is worth investigating other less costly approaches that may or may not have acceptable performance without the development overhead (and likely further pinning on CUDA -- exllamav3 currently does not support ROCm, but they talk about it, and adding more blockers to that support should it ever land isn't ideal)
 
