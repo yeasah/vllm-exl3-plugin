@@ -173,10 +173,19 @@ The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
 `tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
 decode underneath it that is trellis-only.
 
-**Open decision before coding:** whether to bit-pack. The measured optimal depths are
-mostly not byte-aligned (4 for gemma untied, ~5 for MiniCPM5-1B, 6 for Qwen3.5-9B, 7
-for tied gemma shared); only 4 and 8 pack cleanly. Padding 6 → 8 costs ~+0.24 GiB on
-Qwen3.5-9B, so this is a real trade rather than an obvious call.
+**Bit-pack; arbitrary depths 4-8, not just byte-aligned ones.** The measured optima
+are per-model and mostly not byte-aligned (4 for gemma untied, ~5 for MiniCPM5-1B, 6
+for Qwen3.5-9B, 7 for tied gemma shared), so restricting to 4/8 would push most models
+to 8 and hand back ~0.24 GiB on Qwen3.5-9B alone — 12-15% of the whole win. Storing a
+6-bit value in an 8-bit slot is never the answer either: same bytes as 8-bit
+quantization, worse quality.
+
+The alignment worry does not arise. A row is `hidden x depth` bits and `hidden` is a
+multiple of 8 in every real model (`num_heads x head_dim`, and EXL3 pads to 128
+besides), so rows land on whole bytes at every depth — 3840 x 6 = 2880 B, 4096 x 6 =
+3072 B, 1536 x 5 = 960 B. No row padding, every row independently sliceable, which is
+the property that made per-row attractive in the first place. Only intra-row
+extraction is left. Assert the multiple-of-8 rather than assuming it.
 
 A fused kernel is the obvious highest-performing answer to the remaining per-token
 cost, but is worth weighing against less costly approaches first: it is development
