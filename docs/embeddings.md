@@ -456,6 +456,44 @@ Untied models are unaffected by the sharing question -- genuinely different matr
 and simply want a per-row embedding at 4-6 bits alongside their existing trellis head,
 which the additive model prices directly off the embedding column above.
 
+### The frontier scores bytes and KLD, not serviceability -- and that reorders it
+
+The table above ranks storage against divergence, which is the right way to price what a
+repair tool should *emit*. It is not sufficient to decide what to *build first*, because
+it does not ask whether either role can still be served from the result.
+
+A tied model's tensor does two jobs. The embedding role is a row gather, which per-row
+makes strictly easier -- a slice instead of a 128-block decode. The head role is a GEMM,
+and today that is `ops.exl3_mm`, the fused trellis kernel that keeps weights packed and
+decodes inside the MMA pipeline. **There is no per-row-integer GEMM.** exllamav3 exposes
+four entry points (`reconstruct`, `exl3_gemm`, `exl3_mgemm`, `had_r_128`) and none of them
+serves per-row-quantized weights, nor does anything in torch keep them packed at 4-7 bits.
+
+So a shared per-row tensor leaves three options: dequantize to dense fp16 for the head,
+which returns 1.875 GiB on gemma-4-12B and destroys the entire saving; write an int-GEMM
+kernel, which is the one kind of work this project has deliberately stayed out of; or do
+not share. On that axis the ranking inverts:
+
+| option | embed+head | tax | new kernel needed? |
+|---|---|---|---|
+| shared per-row 7-bit | 0.820 GiB | +0.00112 | **yes** -- head has no GEMM |
+| trellis head + per-row 4-bit embed | 1.172 GiB | +0.00194 | no |
+| trellis head + per-row 6-bit embed | 1.407 GiB | +0.00032 | no |
+| exllamav3 native | 2.579 GiB | +0 | — |
+
+The "dominated" split option costs 0.35 GiB more than sharing and is still 1.4 GiB better
+than native, needs no kernel work, and -- decisively -- **is the only shape untied models
+can use at all**, since their head really is a different matrix. One implementation
+therefore covers untied models completely and tied models at a small penalty.
+
+**Build the split first; treat the shared tensor as a later optimization gated on kernel
+work.** Its value is also narrower than it looks: sharing only helps *tied* models, and of
+the checkpoints censused here only the gemma-4 family is both tied and mid-size. If
+gemma-4 turns out not to be practically deployable -- which currently rides on the
+flash-attention head-dim-512 question (TODO `fa-head-dim-512`) -- the shared-tensor
+optimization has almost nothing left to apply to. It is best read as a possible follow-up
+to that work rather than as an independent goal.
+
 ## Choosing depths: what the repair tool should default to
 
 The criterion that makes this well-posed is **equal marginal KLD per byte** -- push a

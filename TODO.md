@@ -76,6 +76,12 @@ holding a confusing array of implementations across CUDA, ROCm, FA2-4 and Hopper
 The open question is whether any surface in that fork could be extended the way the
 llama.cpp changeset extends ggml, for consumer Ampere / Ada / Blackwell.
 
+**Something now hangs off the answer.** gemma-4 is the only tied mid-size family on
+hand, so it is effectively the entire constituency for the shared per-row embed+head
+tensor deferred under `quantized-embeddings`. If this turns out to be a lost cause and
+gemma-4 is not practically deployable, that optimization loses most of its reason to
+exist; if it lands, the optimization becomes the natural follow-up here.
+
 ## `repair-tool` — Repair tool for existing EXL3 checkpoints
 
 Every existing EXL3 checkpoint is handicapped by two pipeline mistakes, badly enough
@@ -134,14 +140,43 @@ that motivate it were done without it.
 
 So the tensor format is decided but unimplemented at both ends. **Both tooling items
 are blocked on this**: a repair tool emitting per-row tensors today would produce
-checkpoints nothing can serve. Needs a storage layout (values plus per-row
-scale/zero-point), the `create_weights`/`process_weights_after_loading` registration
-for it, and a gather — which should be markedly simpler than the trellis path, since
-row extraction becomes a slice with no Hadamard and no 128-block read amplification.
+checkpoints nothing can serve.
+
+**Next up, and scoped to untied models: a per-row embedding tensor served alongside
+the checkpoint's existing trellis head.** Needs a storage layout (packed values plus
+per-row scale/zero-point), `create_weights`/`process_weights_after_loading`
+registration, and a gather — which should be markedly simpler than the trellis path,
+since row extraction becomes a slice with no Hadamard and no 128-block read
+amplification. Per-row rows are also independent, so vocab-parallel TP carries none
+of the 128-block alignment arithmetic the trellis path needs.
+
+Two reasons this shape rather than the shared per-row tensor the frontier table
+favours. It is the **only** shape untied models can use, since their head is a
+genuinely different matrix. And it needs no new kernel: a shared tensor has to serve
+the head role too, and there is no per-row-integer GEMM anywhere — sharing would mean
+either dequantizing to dense fp16 (which gives back the whole saving) or a trip to
+kernel town. Costs ~0.35 GiB against sharing on gemma-4-12B, and is still ~1.4 GiB
+better than native.
+
+It is also where the new value is. Tied models already run with a much improved VRAM
+profile via Phase A; what they carry is a **KLD hit we now know is unnecessary**
+(+0.0216 from the trellis where per-row costs +0.0002 at the same depth). Untied
+models get nothing at all today.
+
+The shared-tensor optimization is deferred, possibly a long way. It only helps tied
+models, and gemma-4 is the only tied mid-size family on hand — so if gemma-4 proves
+impractical to deploy, which currently rides on `fa-head-dim-512`, there is almost
+nothing left for it to apply to. Natural follow-up to that item rather than an
+independent one.
 
 The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
 `tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
 decode underneath it that is trellis-only.
+
+**Open decision before coding:** whether to bit-pack. The measured optimal depths are
+mostly not byte-aligned (4 for gemma untied, ~5 for MiniCPM5-1B, 6 for Qwen3.5-9B, 7
+for tied gemma shared); only 4 and 8 pack cleanly. Padding 6 → 8 costs ~+0.24 GiB on
+Qwen3.5-9B, so this is a real trade rather than an obvious call.
 
 A fused kernel is the obvious highest-performing answer to the remaining per-token
 cost, but is worth weighing against less costly approaches first: it is development
