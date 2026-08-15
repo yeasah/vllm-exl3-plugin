@@ -354,6 +354,13 @@ be a per-row integer scheme at 4-6 bits: better quality per bit by an order of m
 far simpler, no Hadamard, no 128-block read amplification, and a trivially cheap row
 gather.
 
+**Note what does not yet exist.** Every per-row number above comes from `fake_quantize`
+simulating a precision level on a resident fp16 tensor -- deliberately, since that
+characterizes sensitivity without committing to a packed format. But it means there is no
+per-row *storage* format and no per-row *serving* path anywhere: the plugin loads trellis
+tensors only, and `ops.embed_rows` is trellis row extraction. Both ends have to be built
+before a repair tool's output is loadable at all.
+
 **Trap for whoever builds that: quantize from the original fp16 embedding, never from a
 trellis reconstruction.** A tied checkpoint offers two apparent sources for the embedding
 matrix — the true fp16 `embed_tokens`, and a dequantization of the quantized `lm_head`,

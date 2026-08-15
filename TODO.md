@@ -118,9 +118,30 @@ from its existing quantized `lm_head`, with the fp16 `embed_tokens` never loaded
 Works on published checkpoints as they are, no repair tool and no quantizer work.
 All hooks are sanctioned vLLM extension points; nothing is monkeypatched.
 
-**What is open** is untied models, which have no quantized embedding to reuse, so
-one must be produced — that is `repair-tool` / `quantize-embeddings-pipeline`. The
-lookup path itself is built and de-risked; only the source of the tensor differs.
+**Two things are open**, and the second is easy to overlook because the measurements
+that motivate it were done without it.
+
+1. **Untied models have no quantized embedding to reuse**, so one must be produced —
+   that is `repair-tool` / `quantize-embeddings-pipeline`.
+2. **There is no per-row serving path.** Everything the plugin can load today is
+   trellis: `stored_tensor_names()` is `trellis`/`suh`/`svh` plus a codebook tensor,
+   and `EXL3EmbeddingMethod` serves via `ops.embed_rows`, which is trellis row
+   extraction. The per-row scheme that the Phase 4 sweeps showed is ~89x better as
+   an embedding exists **only as simulation** — qbench's `fake_quantize` rounds a
+   resident fp16 tensor to a bits-bit grid and immediately dequantizes it,
+   explicitly "in place of dtype/storage changes... without committing to a real
+   packed format or a real kernel". Nothing is packed, stored, or loaded.
+
+So the tensor format is decided but unimplemented at both ends. **Both tooling items
+are blocked on this**: a repair tool emitting per-row tensors today would produce
+checkpoints nothing can serve. Needs a storage layout (values plus per-row
+scale/zero-point), the `create_weights`/`process_weights_after_loading` registration
+for it, and a gather — which should be markedly simpler than the trellis path, since
+row extraction becomes a slice with no Hadamard and no 128-block read amplification.
+
+The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
+`tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
+decode underneath it that is trellis-only.
 
 A fused kernel is the obvious highest-performing answer to the remaining per-token
 cost, but is worth weighing against less costly approaches first: it is development
@@ -128,6 +149,33 @@ overhead and likely further pinning on CUDA, and exllamav3 has no ROCm support t
 while talking about adding it.
 
 → [docs/embeddings.md](docs/embeddings.md)
+
+## `transformers-backend` — Do we work through vLLM's Transformers fallback?
+
+Unknown, and worth establishing. vLLM can serve a model it has no native
+implementation for by falling back to the Transformers modelling code
+(`--model-impl transformers`), which is how coverage reaches architectures ahead of
+vLLM's own porting. If EXL3 works through that path, the plugin's model coverage
+stops being "what vLLM implements natively" and becomes something much closer to
+"what transformers implements" — a large jump for a small amount of work, *if* it
+works.
+
+`Muse-Glimmer-30B-exl3` is the natural test case. It is already the checkpoint that
+forced two pieces of the current design (its `tensor_storage` omits 303 quantized
+modules, so the safetensors index has to be ground truth; and it carries per-layer
+rope theta and layer types), and it is downloaded.
+
+**What makes this uncertain rather than obvious.** The plugin hooks vLLM's own
+layer construction: `get_quant_method()` dispatches on vLLM module prefixes, and
+`apply_vllm_mapper` translates checkpoint names into vLLM's naming for a given
+architecture. The Transformers backend builds the model from HF modules and
+substitutes linear layers on its own terms, so neither the prefixes nor the
+mapper's assumptions necessarily hold. Expect the failure mode this project has
+seen repeatedly — modules silently classified as unquantized, and a dense fp16
+allocation that OOMs pointing nowhere near the cause — rather than a clean error.
+
+First step is cheap: load it and check what `get_quant_method` is actually asked
+about, before assuming either outcome.
 
 ## `exl3-metadata` — Improving the metadata situation
 
@@ -139,13 +187,36 @@ keep their incomplete metadata regardless, unless we repair and republish them
 
 ## `quantize-embeddings-pipeline` — Quantizing embeddings in the pipeline
 
-Largely interchangeable with "stop emitting an extra head copy for tied models",
-because it is the same data either way. Do what is already done for tied models, for
-every model, and store it as the embedding rather than as a new head.
+Stop shipping a full fp16 embedding, and stop emitting a redundant head for tied
+models, at conversion time rather than as a repair pass. Forward-looking: it fixes
+what gets published from here on, where `repair-tool` rescues what already exists.
+
+**Not "do for every model what is already done for tied models".** That framing
+predates the Phase 4 measurements and is wrong — it would emit a trellis, which is
+the wrong encoding for an embedding by roughly two orders of magnitude. The
+objective mismatch is the reason: the trellis optimizes `x @ W.T` against typical
+activations, which is what a *head* needs, while an embedding needs each individual
+row accurate as a vector. What to emit instead:
+
+- **Tied models**: one shared per-row integer tensor serving both roles. Dominates
+  both the shared trellis and any two-tensor split. Depth is set by the head, which
+  is ~60x more bit-sensitive; the embedding rides along above its own requirement,
+  and that waste is still far cheaper than a second copy of the matrix.
+- **Untied models**: a per-row integer embedding at a lower depth, alongside the
+  trellis head exactly as produced today. The head is already right; only the
+  embedding changes.
+
+Depths are per-model — the 4-bit tax spans 35x across the three models measured —
+but constant in body bpw, so one calibration sweep at any single depth
+characterizes a model.
 
 Distinct from `repair-tool` in one way that matters: here layer bpw is *free*, so
-trading depth across components becomes a real constrained optimization rather than
-a one-variable heuristic.
+trading depth across components becomes a real constrained optimization (the
+Lagrangian actually binds) rather than a one-variable heuristic. This is where the
+size-budget solver belongs.
+
+Depends on `quantized-embeddings` growing a per-row serving path — see there.
+Nothing can load what this would emit today.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
