@@ -60,7 +60,16 @@ def _git(path: str, *args: str) -> str | None:
         return None
 
 
-def source_provenance(path: str) -> dict | None:
+#: Baselines are this suite's *output*, and they live inside the tree whose
+#: provenance a capture records. Without excluding them, blessing dirties the
+#: thing it is describing: the first entry writes a baseline, so the second
+#: records `dirty_files: 1`, the third `2`, and a full bless can never record a
+#: clean plugin state no matter how clean the checkout was. Provenance is about
+#: the code that produced a measurement, not the measurement.
+_PROVENANCE_EXCLUDE = (":(exclude)bench/expected",)
+
+
+def source_provenance(path: str, exclude: tuple[str, ...] = ()) -> dict | None:
     """What code a source tree actually held, which its package version may not say.
 
     Installed version strings are not reliable here and one of ours is actively
@@ -84,9 +93,10 @@ def source_provenance(path: str) -> dict | None:
     head = _git(path, "rev-parse", "HEAD")
     if head is None:
         return None  # not a git checkout: a wheel install, or a tarball
-    status = _git(path, "status", "--porcelain") or ""
+    scope = ("--", ".") + exclude if exclude else ()
+    status = _git(path, "status", "--porcelain", *scope) or ""
     dirty = [ln for ln in status.splitlines() if ln.strip()]
-    diff = _git(path, "diff", "HEAD")
+    diff = _git(path, "diff", "HEAD", *scope)
     diff_sha = None
     if diff:
         import hashlib
@@ -155,7 +165,9 @@ def environment() -> dict:
     except Exception:  # pragma: no cover
         pass
     for name, path in _source_trees().items():
-        prov = source_provenance(path)
+        prov = source_provenance(
+            path, _PROVENANCE_EXCLUDE if name == "plugin" else ()
+        )
         if prov is not None:
             env[f"src.{name}"] = prov
     try:

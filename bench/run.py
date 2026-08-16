@@ -338,7 +338,7 @@ def warn_if_plugin_dirty() -> None:
     edit. Worse, editing during a long `bless` gives *different* entries
     different provenance, which is how this warning came to exist.
     """
-    prov = core.source_provenance(ROOT) or {}
+    prov = core.source_provenance(ROOT, core._PROVENANCE_EXCLUDE) or {}
     if prov.get("dirty_files"):
         print(f"  ! plugin tree is dirty ({prov['dirty_files']} files, "
               f"diff_sha {prov.get('diff_sha')}).")
