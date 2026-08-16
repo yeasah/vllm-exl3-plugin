@@ -6,9 +6,16 @@ implementation of the architecture. Tracked in TODO as `transformers-backend`.*
 
 **Status: it works.** An EXL3 checkpoint served through the Transformers backend is
 token-for-token identical to the same checkpoint served through vLLM's native
-implementation. Text-only models need no changes at all; multimodal models need one
-small vLLM patch. That moves the plugin's model coverage from "what vLLM implements
-natively" to approximately "what transformers implements".
+implementation, and — on Muse-Glimmer, which vLLM has no native implementation of —
+to native exllamav3. Text-only models on plain architectures need no changes at all;
+multimodal models, and models whose architecture puts arithmetic in places the
+backend does not look, need vLLM patches. That moves the plugin's model coverage
+from "what vLLM implements natively" to approximately "what transformers
+implements".
+
+**The recurring hazard is not the plugin.** Every defect found here is the backend
+dropping something the transformers modelling code does *outside* the plain
+module graph, and doing it silently — see [What the backend drops](#what-the-backend-drops).
 
 ## Why it was in doubt
 
@@ -101,23 +108,118 @@ fuse linears differently and so accumulate in a different order.
 through the backend: *"The capital of France is Paris."*, every logprob >= -0.002,
 stopping on EOS.
 
-## Open: Muse-Glimmer's output quality
+## What the backend drops
 
-Loading is not the same as working. `Muse-Glimmer-30B-exl3` @2.00bpw loads (3.37 GiB
-KV cache, 67,856 tokens, ~21 tok/s eager on a 16 GiB card) but does not produce
-usable text:
+Muse-Glimmer was the case that surfaced this. `Muse-Glimmer-30B-exl3` @2.00bpw
+loaded (3.37 GiB KV cache, 67,856 tokens, ~21 tok/s eager on a 16 GiB card) and
+emitted confident nonsense — an immediate `<|eom|>`/`<|eot|>` at a logprob near
+zero. The checkpoint was fine and so was the plugin: **native exllamav3 on the same
+token ids generates correctly at 2.00bpw**, opening the template's reasoning channel
+and reasoning coherently:
 
-- raw completion prompt → garbage, which is the documented BOS trap (see README) and
-  expected;
-- through the chat template → a single token `200008` = `<|eot|>`, at logprob
-  **-0.0025**, on every prompt tried.
+    ' to=self<|message|>What is the capital of France?\n\nWe should answer.
+     Probably Paris. Simple.\n\nWe can respond with Paris...'
 
-That is *confident*, not degenerate — a degenerate uniform distribution over this
-200k vocabulary would be about -12.2 — so it is not the all-zero-logits failure seen
-on Laguna. Candidates, unranked: the chat template needs something not being given
-(the `<|eom|>`/`<|eot|>` layout at 200007/200008 suggests a channel-style template
-where the assistant must open a channel), genuine damage at 2.00bpw, which is the
-most aggressive rate and where the body sits while the vision tower is at 4 bits, or
-something in this path that only shows up on this model.
+Two independent defects, both in vLLM's Transformers backend, both silent, and
+neither EXL3-specific — an unquantized Muse-Glimmer served with
+`--model-impl transformers` has both.
 
-None of this is attributable to the backend, which the MiniCPM result isolates.
+### 1. The dropped embedding norm — the actual failure
+
+`base.py` substitutes the model's input embedding wholesale with a
+`VocabParallelEmbedding`. It recognizes exactly one form of custom behaviour, a
+scalar `embed_scale` attribute, and discards everything else. Muse-Glimmer's
+embedding is `MuseGlimmerTextNormedEmbedding`:
+
+```python
+def forward(self, input_ids):
+    return self.embed_norm(super().forward(input_ids))
+```
+
+an **unweighted** RMSNorm over the looked-up rows. No `embed_scale`, so it is
+dropped — and being unweighted, no weight goes unloaded, so nothing warns. The
+residual stream starts at the wrong scale from token zero.
+
+Confirmed from both directions, which is what makes it the whole cause rather than
+a contributor. Deleting the same norm from native exllamav3 (which models it as
+`model.language_model.embed_tokens.embed_norm`) reproduces vLLM's output **token for
+token**:
+
+| | greedy ids |
+|---|---|
+| vLLM, unpatched | `[200007, 198, 200007, 191099, 845, 845, 200008]` |
+| native, `embed_norm` ablated | `[200007, 198, 200007, 191099, 845, 845, 200008]` |
+
+both decoding to `'<|eom|>\n<|eom|>ிட��<|eot|>'`. Fixed by
+`patches/vllm-transformers-backend-embedding-postprocess.patch`.
+
+### 2. The dropped logit transform — invisible behind the first
+
+transformers applies Muse-Glimmer's logit transform in
+`MuseGlimmerForConditionalGeneration.forward`, one level *above* `self.model(...)`,
+which is all the backend runs:
+
+    logits = logits * output_multiplier                # 0.19611613513818404
+    logits = T * tanh(logits / T)                      # final_logit_softcapping = 20
+
+The backend's own `compute_logits` reads an attribute named `logit_scale` (this
+model spells it `output_multiplier`, so it defaults to 1.0) and never passes
+`soft_cap`. Neither transform survives.
+
+Both are monotonic, so **greedy decoding is unaffected** — which is why this hid
+behind the first defect instead of causing a visible failure. What it corrupts is
+every reported logprob and every temperature-dependent sampling decision: the
+effective temperature is ~5.1x too low. This also invalidates the reasoning that
+originally made this look like a template problem — the observed `-0.0025` was an
+artifact of the missing transform, not the model's real confidence, which is nearer
+`-0.27`.
+
+`LogitsProcessor` applies its `scale` *after* the cap, so the two cannot simply both
+be passed. But it can express the intended order exactly, by folding the multiplier
+into the cap:
+
+    tanh(z / (T/m)) * (T/m) * m  ==  T * tanh(z * m / T)
+
+so `soft_cap = T/m` with `scale = m`, reducing to the plain cap at `m == 1`. Fixed by
+`patches/vllm-transformers-backend-logit-softcap.patch`, with no change to
+`LogitsProcessor` itself.
+
+### Result
+
+With both patches, vLLM matches native exllamav3 on Muse-Glimmer @2.00bpw: 40 greedy
+tokens identical, and step-0 top-15 logprobs agreeing to ~0.03 nats — the same fp16
+accumulation noise floor characterized above and in
+[tensor-parallel.md](tensor-parallel.md).
+
+Regression-checked on MiniCPM5-1B @3.00bpw, which has a plain `nn.Embedding` and no
+softcapping: native impl and backend remain identical to each other, to the last
+digit of the top-0 logprob (`-2.6226e-06`), and neither new branch fires.
+
+### Ruled out along the way
+
+Worth recording, because each looked plausible and cost nothing to eliminate:
+
+- **The chat template.** It really is channel-style — the generation prompt ends at a
+  bare `<|start|>assistant` with no `<|message|>`, so the model must emit its own
+  recipient. But it was being applied correctly all along; native produces
+  ` to=self<|message|>` from exactly these ids.
+- **2.00bpw damage.** Native generates coherently at that rate.
+- **The quantized vision tower** (`vision_bits: 4`, a first for this plugin). Not
+  reached on a text-only prompt.
+- **`qk_scale_factor: 3.87`.** Applied inside the attention module, on `query_states`
+  after `qk_norm`, so it survives the backend's attention-interface swap.
+- **`MuseGlimmerTextCenteredRMSNorm` → vLLM's `GemmaRMSNorm`.** The substitution is
+  correct despite the name: it does not center, it is `x·rsqrt(mean(x²)+eps)·(1+w)`,
+  which is exactly `GemmaRMSNorm`.
+- **Per-layer RoPE and sliding-window layout** (3× sliding at theta 500000, every 4th
+  full at theta 0 = NoPE). transformers handles both inside the module graph the
+  backend keeps; the 63-token probe is far under the 2048 window besides.
+
+### The general shape
+
+Both defects are the same failure mode, and it is the one to expect next: the
+backend runs the model's *base* module graph, so anything transformers does **above**
+it (`ForConditionalGeneration.forward`) or **inside a layer it substitutes**
+(the embedding, the norms, the linears) is at risk of being dropped. It is dropped
+silently whenever the missing arithmetic carries no weights, because weight-loading
+is the only thing that checks.

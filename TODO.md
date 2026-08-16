@@ -198,29 +198,36 @@ while talking about adding it.
 
 **Mostly answered: it works.** Serving through vLLM's Transformers backend
 (`--model-impl transformers`) is token-for-token identical to the native path on
-MiniCPM5-1B, and dispatch resolves correctly on a model vLLM has no implementation
-for, vision tower included. Model coverage therefore moves from "what vLLM
-implements natively" to approximately "what transformers implements".
+MiniCPM5-1B, and — with three vLLM patches — to *native exllamav3* on
+Muse-Glimmer-30B, a model vLLM has no implementation for, vision tower included.
+Model coverage therefore moves from "what vLLM implements natively" to
+approximately "what transformers implements".
 
-Text-only models need nothing. Multimodal models need
-`patches/vllm-replicated-linear-weight-loader-v2.patch`, since `ReplicatedLinear` —
-which the backend uses for every submodule it does not shard — is the one
-`LinearBase` subclass with no `weight_loader_v2` branch.
+Text-only models on plain architectures need nothing. Beyond that the backend needs
+patching, and the reason is always the same: it runs the model's *base* module
+graph, so arithmetic living above it or inside a layer it substitutes gets dropped
+— silently, whenever that arithmetic carries no weights.
 
 → [docs/transformers-backend.md](docs/transformers-backend.md)
 
 **What remains open:**
 
-- **Muse-Glimmer @2.00bpw loads but does not produce usable text** — through its
-  chat template it emits `<|eot|>` immediately at logprob -0.0025, which is
-  confident rather than degenerate. Not attributable to the backend (the MiniCPM
-  comparison isolates that). Suspects: the chat template, or damage at 2.00bpw.
-  Testing a higher bpw needs more VRAM than the dev box has, and CPU offload does
-  not work for EXL3 (`cpu-offload`).
-- **Upstreaming the patch.** It reads as a consistency fix rather than an EXL3
-  special case. Check the `RowvLLMParameter`-narrowing edge noted in the doc first.
-- **Breadth.** Two architectures tested through the backend, both small and dense.
-  No MoE, no TP, and no multimodal model that generates correctly yet.
+- **Upstreaming the three patches.** All read as backend gaps rather than EXL3
+  special cases, so all are plausible contributions. For
+  `vllm-replicated-linear-weight-loader-v2.patch`, check the
+  `RowvLLMParameter`-narrowing edge noted in the doc first. For
+  `vllm-transformers-backend-embedding-postprocess.patch`, the detection is
+  structural (an `nn.Embedding` subclass overriding `forward` with exactly one
+  submodule) and upstream may want something declared by transformers instead.
+- **Auditing rather than waiting.** Both Muse-Glimmer defects were found by reading
+  the transformers modelling file against what the backend substitutes, and both
+  would have stayed invisible on any metric short of a token-level comparison
+  against another engine. The same read is worth doing per architecture before
+  trusting the backend on it, and a cheap generic version — diffing a model's
+  `ForCausalLM.forward` against the backend's `compute_logits`, and each
+  substituted layer class against its replacement — would catch the whole family.
+- **Breadth.** Three architectures tested through the backend, one of them
+  multimodal and generating correctly. Still no MoE and no TP through the backend.
 
 ## `exl3-metadata` — Improving the metadata situation
 

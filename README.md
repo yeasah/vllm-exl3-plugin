@@ -154,6 +154,8 @@ produces garbage without it. Drive models through their chat template
 | `vllm-fused-param-capability-check.patch` | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it |
 | `vllm-gemma4-transformers-5.15-per-layer.patch` | gemma-4 on transformers >= 5.15, which moves `head_dim`/`num_key_value_heads` into per-layer configs |
 | `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend |
+| `vllm-transformers-backend-embedding-postprocess.patch` | the Transformers backend substitutes the input embedding wholesale, silently dropping normalization the model applied inside it (MuseGlimmer's `embed_norm`) |
+| `vllm-transformers-backend-logit-softcap.patch` | the Transformers backend applies neither `final_logit_softcapping` nor a pre-scale under a non-standard name (MuseGlimmer's `output_multiplier`) |
 
 ## Environment variables
 
