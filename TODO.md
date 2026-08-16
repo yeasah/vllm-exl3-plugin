@@ -71,10 +71,22 @@ validated by hand in [docs/tensor-parallel.md](docs/tensor-parallel.md), so thos
 are what a tier should pin; `tools/tp_compare.py` already shares the numerics and
 its eager-vs-graphs floor workflow is the model for setting the tolerance.
 
-Worth doing before the TP tier, and cheaper: nothing currently gates **throughput**.
-A bump that silently costs 30% would pass every entry here, since the gate reads
-what is served and not how fast. `docs/kernels.md` has the benchmark numbers that
-would seed it.
+**Carry a hub-prefetch subcommand with it.** A tier is only runnable on a box that
+already holds its checkpoints, and the TP tier's boxes are short-lived cloud
+rentals where a `bless` that discovers a missing 14 GiB repo halfway through has
+wasted the rental. `bench/run.py deps --tier tp` should print `repo@revision` per
+entry, with `--fetch` doing the download. Both forms rather than one: the listing
+is what you want before committing to 50 GiB and in any planning or CI context,
+the fetch is what you want on a fresh box, and the two differ by a flag. The
+entries already carry `model`/`revision`, so this reads the matrix rather than
+duplicating it.
+
+Throughput is now gated separately (`perf-check`/`perf-bless`, baselines in
+`bench/expected/perf/`), reproducing `docs/kernels.md`'s workload shape so that
+note's table stays live. A TP tier wants perf entries too, and there the
+interesting number is not raw throughput but how it *scales* with degree —
+a collective-path regression shows up as a scaling change while each degree's
+absolute number still looks plausible against its own baseline.
 
 → [bench/README.md](bench/README.md)
 

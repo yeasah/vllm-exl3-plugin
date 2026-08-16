@@ -7,7 +7,13 @@ bench/run.py list                 what the matrix covers, and why
 bench/run.py check [--tier fast]  compare a fresh capture to the baseline
 bench/run.py bless [--tier fast]  record the current build as the baseline
 bench/run.py capture <entry> OUT  one entry, for hand inspection
+bench/run.py perf-check           throughput against its own baseline
+bench/run.py perf-bless           record throughput baselines
 ```
+
+`check` reads *what* is served and is blind to how fast; `perf-check` is the
+other half. A bump wants both — a change costing 30% of decode throughput passes
+every correctness entry cleanly.
 
 Run `check` before and after a vLLM or exllamav3 bump. `bless` only after reading
 a failure and deciding the change is intended — blessing is how a real regression
@@ -64,6 +70,31 @@ Argmax and greedy stay exact on purpose. A kernel change big enough to flip an
 argmax at fixed context is one a human should look at, and it will occasionally
 fire on something benign — that cost buys a gate that does not quietly absorb the
 next dropped norm.
+
+## Throughput
+
+Separate entries, separate baselines (`expected/perf/`), and a different
+configuration: **CUDA graphs on**, because perf measured in eager mode would gate
+a way nobody serves. The workload deliberately reproduces the shape in
+[docs/kernels.md](../docs/kernels.md) — decode 8 concurrent × 128 tokens, prefill
+4 × ~2.2k, fp16, prefix caching off — so that note's recorded numbers and these
+are the same measurement. It reproduces to ~0.1% on decode.
+
+The gate is **−10%, one-sided**. Throughput is not deterministic the way logprobs
+are, but on the dev card it is far steadier than expected:
+
+| | spread |
+|---|---|
+| repeated runs inside one process | ~1% |
+| medians across fresh processes | ~0.5% (decode 2750.9 / 2738.9 / 2741.2 tok/s) |
+
+So −10% is roughly 20× the observed noise and still catches anything worth the
+name. Only regressions fail: a large speedup with correct logits is good news,
+and work being silently skipped is what the correctness gate is for.
+
+Deliberately few entries. A throughput regression is broad — a kernel or
+scheduler change lands on any model exercising that path — so covering every
+*path* matters and covering every checkpoint does not.
 
 ## Known-broken entries
 

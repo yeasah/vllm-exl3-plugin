@@ -331,6 +331,38 @@ remembering when comparing any offline measurement against a served one: they do
 not profile the same batch. (2048 exactly is not usable here — gemma's
 `max_tokens_per_mm_item` is 2496, and vLLM raises rather than chunking.)
 
+## MoE prefill has no reconstruct fallback, and it shows
+
+Surfaced by `bench/`'s first MoE throughput baseline rather than looked for.
+`Qwen3.5-35B-A3B-exl3` @2.00bpw on the 5070 Ti, graphs on, the same workload
+shape as [kernels.md](kernels.md) (decode 8x128, prefill 4x~2.2k):
+
+| | decode | prefill | ratio |
+|---|---|---|---|
+| Llama-3.2-1B @3.0bpw, dense | 2752 tok/s | 34239 tok/s | 12.4x |
+| Qwen3.5-35B-A3B @2.0bpw, MoE | 546 tok/s | 961 tok/s | **1.8x** |
+
+Part of that gap is simply model size, but not a 7x difference in *shape*. The
+dense path switches to cuBLAS above `RECONSTRUCT_THRESHOLD` rows
+([ops.py](../vllm_exl3_plugin/ops.py) `_exl3_mm`), which
+[kernels.md](kernels.md) measures as 3.4x on prefill — the cooperative GEMM loses
+badly once the multiply is compute-bound. **`fused_moe.py` has no equivalent**,
+so MoE prefill stays on `exl3_mgemm` in exactly the regime the dense path
+abandons it.
+
+Whether that is worth fixing is genuinely open, and the reason is memory rather
+than effort. Reconstructing a dense fp16 weight is cheap for one linear and
+transient; for MoE it would mean reconstructing the *active experts*, and during
+prefill with many token positions the active set approaches all of them — which
+for a 35B at 2bpw is the whole reason the checkpoint fits at all. A partial form
+(reconstruct only the top-k experts of a chunk, bounded like
+`_EMBED_BLOCK_CHUNK`) is the shape that might work.
+
+Recorded here rather than in TODO because it is an observation with an open
+feasibility question, not yet a task. The numbers are now gated
+(`bench/run.py perf-check --tier full`), so if anything changes them it will say
+so.
+
 ## Qwen3.5 now runs
 
 `Qwen3.5-35B-A3B-exl3` loads (10.63 GiB) and answers correctly, 4 runs out of 4

@@ -163,6 +163,43 @@ ENTRIES: list[Entry] = [
 ]
 
 
+#: Throughput entries, kept separate from the correctness matrix rather than
+#: flagged within it, because they want a different configuration: CUDA graphs
+#: **on**, since perf measured in eager mode would gate a way nobody serves,
+#: while most correctness entries force eager for the cleaner comparison.
+#:
+#: Deliberately few. Each one costs a model load plus six workload repetitions,
+#: and throughput regressions are broad -- a kernel or scheduler change shows up
+#: on any model that exercises the path, so covering every checkpoint buys
+#: little over covering every *path*.
+PERF_ENTRIES: list[Entry] = [
+    Entry(
+        label="llama-3.2-1B 3.0bpw perf",
+        model="turboderp/Llama-3.2-1B-Instruct-exl3",
+        revision="3.0bpw",
+        enforce_eager=False,
+        max_model_len=4096,
+        exercises="the anchor. Same checkpoint, card and workload shape as the "
+        "table in docs/kernels.md, so its recorded 2754 tok/s decode / 33938 "
+        "prefill stay a live reference rather than history. Covers the fused "
+        "kernel at decode and the reconstruct-threshold fallback at prefill, "
+        "which are the two paths a throughput regression would land on",
+    ),
+    Entry(
+        label="qwen3.5-35B-A3B 2.0bpw MoE perf",
+        model="turboderp/Qwen3.5-35B-A3B-exl3",
+        revision="2.00bpw",
+        tier="full",
+        enforce_eager=False,
+        gpu_memory_utilization=0.92,
+        exercises="MoE throughput, which is its own regime: exl3_mgemm rather "
+        "than exl3_gemm, and the path where CUDA graphs matter most -- the "
+        "sm_90+ barrier fix is worth 35 -> 172 tok/s on Laguna-XS. A "
+        "correctness gate cannot see any of that",
+    ),
+]
+
+
 def by_tier(tier: str | None) -> list[Entry]:
     if tier in (None, "all"):
         return list(ENTRIES)
@@ -174,3 +211,16 @@ def by_name(name: str) -> Entry:
         if e.name == name:
             return e
     raise SystemExit(f"no such entry: {name!r}")
+
+
+def perf_by_tier(tier: str | None) -> list[Entry]:
+    if tier in (None, "all"):
+        return list(PERF_ENTRIES)
+    return [e for e in PERF_ENTRIES if e.tier == tier]
+
+
+def perf_by_name(name: str) -> Entry:
+    for e in PERF_ENTRIES:
+        if e.name == name:
+            return e
+    raise SystemExit(f"no such perf entry: {name!r}")

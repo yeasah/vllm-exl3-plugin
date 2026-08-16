@@ -42,6 +42,13 @@ reference the fused path is tested against.
 `Llama-3.2-1B-Instruct-exl3` @ 3.0bpw, RTX 5070 Ti, fp16, prefix caching off.
 Decode is 8 concurrent sequences x 128 tokens; prefill is 4 x ~2.2k tokens.
 
+**These numbers are gated, not historical.** `bench/run.py perf-check` reruns this
+exact shape against a committed baseline and fails on a >10% regression — see
+[bench/README.md](../bench/README.md). Re-measured 2026-08-16 on the same card:
+decode 2752 tok/s against the 2754 below, prefill 34239 against 33938. Throughput
+on this box turns out to be far steadier than expected — ~1% spread within a
+process, ~0.5% across fresh ones — which is what makes a gate practical at all.
+
 | | Phase 0 (dense fp16) | fused only | **fused + threshold** |
 |---|---|---|---|
 | weights | 2.35 GiB | 0.86 GiB | **0.86 GiB** |

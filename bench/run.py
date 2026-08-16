@@ -5,6 +5,11 @@
     bench/run.py check [--tier fast]  compare a fresh capture to the baseline
     bench/run.py bless [--tier fast]  record the current build as the baseline
     bench/run.py capture <entry> OUT  one entry, for hand inspection
+    bench/run.py perf-check           throughput against its own baseline
+    bench/run.py perf-bless           record throughput baselines
+
+`check` reads *what* is served and is blind to how fast; `perf-check` is the
+other half, and a bump wants both.
 
 Run `check` before and after a vLLM or exllamav3 bump. `bless` only after
 reading a `check` failure and deciding the change is intended -- blessing is how
@@ -152,6 +157,97 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
     return failures
 
 
+#: One-sided, and generous. Throughput is not deterministic the way logprobs
+#: are, but on the dev card it is far steadier than expected: repeated runs
+#: inside one process spread ~1%, and medians *across* processes spread ~0.5%
+#: (decode 2750.9 / 2738.9 / 2741.2 tok/s on three fresh runs). So -10% is about
+#: 20x the observed noise while still catching anything worth the name.
+#:
+#: Only regressions fail. A large speedup with correct logits is good news, and
+#: work being silently skipped is what the correctness gate is for.
+PERF_REGRESSION_PCT = 10.0
+
+PERF_EXPECTED = os.path.join(HERE, "expected", "perf")
+
+
+def run_perf_entry(entry: suite.Entry, out_path: str, timeout: int,
+                   reps: int) -> dict:
+    cmd = [sys.executable, os.path.join(HERE, "perf.py"), entry.name,
+           "--out", out_path, "--reps", str(reps)]
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    print(f"  -- {entry.label}", flush=True)
+    proc = subprocess.run(cmd, cwd=ROOT, env=env, timeout=timeout,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True)
+    if proc.returncode != 0 or "BENCH_PERF_OK" not in proc.stdout:
+        log_path = out_path + ".log"
+        with open(log_path, "w") as f:
+            f.write(proc.stdout)
+        cause = [ln for ln in proc.stdout.splitlines()
+                 if "ERROR" in ln and "core.py" in ln]
+        detail = "\n".join(cause[-12:]) if cause else \
+            "\n".join(proc.stdout.strip().splitlines()[-15:])
+        raise SystemExit(f"perf failed for {entry.name!r} "
+                         f"(exit {proc.returncode}); full log at {log_path}\n"
+                         f"{detail}")
+    data = json.load(open(out_path))
+    print(f"     decode {data['decode']:.0f} tok/s (+-{data['decode_spread_pct']}%)"
+          f"   prefill {data['prefill']:.0f} tok/s "
+          f"(+-{data['prefill_spread_pct']}%)")
+    return data
+
+
+def cmd_perf_bless(args) -> int:
+    os.makedirs(PERF_EXPECTED, exist_ok=True)
+    entries = suite.perf_by_tier(args.tier)
+    for e in entries:
+        run_perf_entry(e, os.path.join(PERF_EXPECTED, f"{e.name}.json"),
+                       args.timeout, args.reps)
+    print(f"\nblessed {len(entries)} perf entries into {PERF_EXPECTED}")
+    return 0
+
+
+def cmd_perf_check(args) -> int:
+    import tempfile
+
+    failed = {}
+    entries = suite.perf_by_tier(args.tier)
+    with tempfile.TemporaryDirectory() as tmp:
+        for e in entries:
+            baseline_path = os.path.join(PERF_EXPECTED, f"{e.name}.json")
+            if not os.path.exists(baseline_path):
+                print(f"  -- {e.label}\n     ! no baseline; run perf-bless")
+                failed[e.name] = ["no baseline recorded"]
+                continue
+            fresh = run_perf_entry(e, os.path.join(tmp, f"{e.name}.json"),
+                                   args.timeout, args.reps)
+            base = json.load(open(baseline_path))
+            problems = []
+            for metric in ("decode", "prefill"):
+                delta = (fresh[metric] - base[metric]) / base[metric] * 100
+                verdict = "ok"
+                if delta < -PERF_REGRESSION_PCT:
+                    verdict = "REGRESSION"
+                    problems.append(
+                        f"{metric} {base[metric]:.0f} -> {fresh[metric]:.0f} "
+                        f"tok/s ({delta:+.1f}%)")
+                print(f"     {metric:8} {delta:+6.1f}% vs baseline  {verdict}")
+            if problems:
+                failed[e.name] = problems
+
+    print()
+    if not failed:
+        print(f"PASS: {len(entries)} perf entries within "
+              f"{PERF_REGRESSION_PCT:.0f}% of baseline")
+        return 0
+    print(f"FAIL: {len(failed)}/{len(entries)} perf entries regressed")
+    for name, problems in failed.items():
+        print(f"  {name}")
+        for p in problems:
+            print(f"    - {p}")
+    return 1
+
+
 def cmd_list(args) -> int:
     for e in suite.by_tier(args.tier):
         print(f"{e.name}  [{e.tier}]")
@@ -241,6 +337,12 @@ def main() -> int:
     p.set_defaults(func=cmd_bless)
     p = sub.add_parser("capture"); p.add_argument("entry"); p.add_argument("out")
     p.set_defaults(func=cmd_capture)
+    p = sub.add_parser("perf-check")
+    p.add_argument("--tier", default="fast"); p.add_argument("--reps", type=int, default=5)
+    p.set_defaults(func=cmd_perf_check)
+    p = sub.add_parser("perf-bless")
+    p.add_argument("--tier", default="fast"); p.add_argument("--reps", type=int, default=5)
+    p.set_defaults(func=cmd_perf_bless)
 
     args = ap.parse_args()
     return args.func(args)
