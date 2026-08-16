@@ -11,8 +11,9 @@ interfaces — it does not build kernels.
 
 **Status: dense, MoE and tensor-parallel serving all work, plus quantized
 embeddings for tied models.** Weights stay quantized and the fused exllamav3
-kernels do the multiply, under torch.compile and CUDA graphs. On Llama-3.2-1B
-@3bpw that is 2.35 GiB -> 0.86 GiB with decode 22% *faster* than the dense path;
+kernels do the multiply, under torch.compile and CUDA graphs — the embedding
+gather included, as of 2026-08-16. On Llama-3.2-1B @3bpw that is
+2.35 GiB -> 0.86 GiB with decode 22% *faster* than the dense path;
 gemma-4-12B at 3bpw runs in 6.32 GiB on a 16 GB card. See
 [docs/kernels.md](docs/kernels.md).
 
@@ -63,11 +64,12 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [kernels.md](docs/kernels.md) | fused kernels, reconstruct threshold, CUDA graphs, bf16, benchmarks |
 | [tensor-parallel.md](docs/tensor-parallel.md) | Hadamard-block-128 sharding, what each TP degree admits, hardware results |
 | [moe.md](docs/moe.md) | `exl3_mgemm` behind `FusedMoE`, the Laguna scale factor, the sm_90+ barrier hang |
-| [embeddings.md](docs/embeddings.md) | quantized embeddings, per-row vs. trellis, depth selection |
+| [embeddings.md](docs/embeddings.md) | quantized embeddings, per-row vs. trellis, depth selection, serving under torch.compile |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
 | [exllamav3-arch.md](docs/exllamav3-arch.md) | where exllamav3 branches by GPU architecture |
 | [feasibility-2026-08-03.md](docs/feasibility-2026-08-03.md) | the original research report (frozen) |
+| [bench/README.md](bench/README.md) | the dependency-bump gate: what it captures and why |
 
 ## Quick start
 
@@ -90,6 +92,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
     deps/exllamav3                 submodule, reference checkout
     docs/                          subject notes; see "Notes" above
     tests/                         runnable without a GPU
+    bench/                         dependency-bump gate; baselines in expected/
 
 ## Tests
 

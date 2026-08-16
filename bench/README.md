@@ -49,11 +49,21 @@ leaves the parent deadlocked on a zombie.
 ## Thresholds
 
 `argmax_disagreements`, the greedy continuation and `weight_gib` are exact.
-`dlogprob_max` (0.1 nats) and `kl_max` (1e-2) have headroom, sized from the two
-populations actually measured: benign cross-implementation noise on this project
-runs ~0.02–0.03 nats, while the one real defect with numbers moved logprobs by
-~15 nats. A `check` run immediately after `bless` gives exactly 0.0 on both, so
-the entire budget is headroom for upstream change.
+`dlogprob_max` (0.25 nats) and `kl_max` (5e-2) have headroom, bracketed by two
+floors measured on this build rather than guessed:
+
+| floor | value | what it is |
+|---|---|---|
+| same build, re-run | **exactly 0.0** | teacher-forced decoding at fixed context is deterministic — a `check` that changes nothing reports nothing |
+| same weights, different kernels | **~0.157 nats / 0.013 KL** | Qwen3-0.6B eager vs CUDA graphs with the embedding path removed; the closest proxy for benign upstream drift |
+
+The one real defect with numbers moved logprobs by ~15 nats, so 0.25 sits above
+the drift floor and ~60× below a bug.
+
+Argmax and greedy stay exact on purpose. A kernel change big enough to flip an
+argmax at fixed context is one a human should look at, and it will occasionally
+fire on something benign — that cost buys a gate that does not quietly absorb the
+next dropped norm.
 
 ## Known-broken entries
 

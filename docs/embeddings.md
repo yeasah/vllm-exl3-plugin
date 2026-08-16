@@ -224,6 +224,53 @@ Throughput cost, same checkpoint, eager, batch as noted:
 ~3% decode cost, on the model where the fixed per-step embedding work is amortized over
 the least layer compute it ever will be, in naive PyTorch with no kernel work.
 
+## Serving under torch.compile and CUDA graphs
+
+Every measurement above was taken **eager**, and that turned out to be hiding something:
+until 2026-08-16, `EXL3EmbeddingMethod` did not work under vLLM's *default* execution
+mode at all. `bench/` caught it on its first run — `vllm serve` on a tied EXL3 checkpoint
+failed to start, without anyone asking for anything unusual.
+
+Two distinct problems, and the second is the one worth remembering.
+
+**Tracing.** `embed_rows` deduplicates the 128-blocks a batch touches, which means
+`torch.unique` (data-dependent output size), a Python loop bounded by
+`blocks.numel()`, and a `nonzero` inside it. Dynamo can trace none of it, so the engine
+died during startup compilation. Fixed by putting the gather behind an opaque custom op,
+the same way `exl3_mm` already handles kernel-level branching.
+
+**Capture.** Opacity was necessary and *not sufficient*, which is the interesting part.
+A CUDA graph records a fixed kernel sequence against fixed buffers; here every gather
+index descended from the capture-time token ids, so a replayed graph would have returned
+capture-time rows. That is a silent-wrong-answer shape. It failed loudly instead —
+`cudaErrorStreamCaptureInvalidated`, because reading `blocks.numel()` back to the host is
+a synchronization and synchronizing mid-capture is illegal — but the loudness was luck,
+not design.
+
+The fix is a second path taken below `EXL3_EMBED_STATIC_MAX` (default 512, sized to cover
+vLLM's capture sizes) that chunks over the *token count* rather than over deduplicated
+blocks. Its loop bound comes from `token_ids.shape`, which is metadata, so the kernel
+sequence depends on batch size alone. It decodes one block per token, giving up
+deduplication.
+
+**That trade is nearly free where it applies, and avoided where it is not.** Deduplication
+only pays when tokens share a 128-block, which scattered decode-batch ids rarely do; it
+pays enormously on a large prefill, where it saturates at the vocabulary's block count
+(Qwen3-0.6B: 1187 blocks for 8192 tokens). So the deduplicating path still runs above the
+threshold, and prefill is never graph-captured anyway.
+
+Verified three ways: bit-exact against `dense_weight` including duplicate ids (the
+existing equality tests, unchanged); a capture-then-replay test that captures on one set
+of ids and replays on a *different* set, demanding the second set's rows; and end to end,
+where the eager and CUDA-graph bench entries agree with their own baselines exactly.
+
+One measurement worth keeping from that verification: eager and CUDA graphs differ by
+**~0.157 nats** on Qwen3-0.6B with the embedding path removed entirely
+(`EXL3_DENSE_EMBED=1`). The quantized path differs by *less* than that across the same two
+modes, which is how the static path was cleared of introducing error — the cross-mode
+floor is a property of vLLM, not of this code. It is also why the two modes get separate
+baselines in `bench/`.
+
 ## gemma-4-12B: the tax, and where it lives
 
 The Qwen3-0.6B result did not survive contact with a real target-class model unchanged.

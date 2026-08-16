@@ -380,30 +380,42 @@ class TestEmbedRows(unittest.TestCase):
         finally:
             ops._EMBED_BLOCK_CHUNK = original
 
-    def test_decodes_only_the_needed_blocks(self):
-        """The point of the exercise: cost tracks distinct 128-blocks, not batch
-        size. Asserted through `reconstruct`, since a version that decoded the
-        whole tensor would still return the right rows."""
-        from unittest import mock
-
+    def _tensors(self):
         from tests.remote_tensors import fetch_module_tensors
-        from vllm_exl3_plugin import format, ops
+        from vllm_exl3_plugin import format
 
         repo, revision, key = self.CASES[0]
         try:
             t = fetch_module_tensors(repo, revision, key)
         except OSError as e:
             self.skipTest(f"could not fetch {repo}@{revision}: {e}")
-        bits = format.bits_from_trellis_shape(t["trellis"].shape)
-        mcg, mul1 = "mcg" in t, "mul1" in t
+        return (t, format.bits_from_trellis_shape(t["trellis"].shape),
+                "mcg" in t, "mul1" in t)
 
-        # 300 tokens drawn from 2 distinct blocks -> 2 blocks' worth decoded.
+    def test_decodes_only_the_needed_blocks(self):
+        """Above `_EMBED_STATIC_MAX`, cost tracks distinct 128-blocks rather than
+        batch size. Asserted through `reconstruct`, since a version that decoded
+        the whole tensor would still return the right rows.
+
+        The batch has to clear the threshold deliberately. Below it the
+        capture-safe path runs instead and does *not* deduplicate -- that is the
+        trade documented on `_embed_rows_static`, and the next test pins it.
+        """
+        from unittest import mock
+
+        from vllm_exl3_plugin import format, ops
+
+        t, bits, mcg, mul1 = self._tensors()
+
+        n = ops._EMBED_STATIC_MAX + 300
         ids = torch.cat(
             [
-                torch.arange(0, 128, device="cuda:0").repeat(2),
-                torch.full((44,), 5000, device="cuda:0"),
+                torch.arange(0, 128, device="cuda:0").repeat(n // 128),
+                torch.full((n - 128 * (n // 128),), 5000, device="cuda:0"),
             ]
         )
+        self.assertGreater(ids.shape[0], ops._EMBED_STATIC_MAX)
+
         real = ops.reconstruct
         seen = []
 
@@ -422,6 +434,97 @@ class TestEmbedRows(unittest.TestCase):
             f"decoded {tiles} tiles for 2 distinct blocks",
         )
         self.assertLess(tiles, t["trellis"].shape[1] / 10)
+
+    def test_static_path_trades_dedup_for_a_fixed_kernel_sequence(self):
+        """Below the threshold, one block is decoded per token.
+
+        This is the cost of being capturable, and it is worth pinning so the
+        trade stays visible. What must *not* regress is the property the whole
+        gather exists for: still a small subset of the tensor, not all of it.
+        """
+        from unittest import mock
+
+        from vllm_exl3_plugin import format, ops
+
+        t, bits, mcg, mul1 = self._tensors()
+
+        # 12 tokens, 2 distinct blocks. The deduplicating path would decode 2.
+        ids = torch.cat(
+            [
+                torch.arange(0, 8, device="cuda:0"),
+                torch.full((4,), 5000, device="cuda:0"),
+            ]
+        )
+        self.assertLessEqual(ids.shape[0], ops._EMBED_STATIC_MAX)
+
+        real = ops.reconstruct
+        seen = []
+
+        def spy(trellis, *a, **kw):
+            seen.append(trellis.shape)
+            return real(trellis, *a, **kw)
+
+        with mock.patch.object(ops, "reconstruct", spy):
+            ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids)
+
+        self.assertEqual(len(seen), 1)
+        tiles = seen[0][1]
+        self.assertEqual(
+            tiles,
+            ids.shape[0] * (format.HAD_BLOCK // format.TILE),
+            "static path decodes one block per token",
+        )
+        self.assertLess(tiles, t["trellis"].shape[1] / 10)
+
+    def test_survives_cuda_graph_capture_and_replay(self):
+        """The property the static path exists for.
+
+        A captured graph replays a fixed kernel sequence against fixed buffers.
+        If any index came from reading the token values back to the host, replay
+        would gather the *capture-time* rows and be silently wrong -- so this
+        captures on one set of ids and replays on a different set, and demands
+        the second set's rows.
+
+        The deduplicating path cannot pass this: `torch.unique` synchronizes,
+        which invalidates the capture outright (`cudaErrorStreamCaptureInvalidated`).
+        """
+        from vllm_exl3_plugin import ops
+
+        t, bits, mcg, mul1 = self._tensors()
+        dense = ops.dense_weight(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1)
+
+        capture_ids = torch.tensor([0, 1, 127, 128, 900], device="cuda:0")
+        replay_ids = torch.tensor([5000, 63, 4096, 7, 129], device="cuda:0")
+        static_ids = capture_ids.clone()
+
+        def call():
+            return ops.embed_rows(
+                t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, static_ids
+            )
+
+        # Warm up on a side stream: capture refuses to record lazy
+        # initialization, and the allocator needs to have settled.
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                call()
+        torch.cuda.current_stream().wait_stream(side)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = call()
+
+        # Capture records kernels without running them, so `out` holds nothing
+        # until the graph is replayed at least once.
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out, dense[capture_ids], rtol=0, atol=0)
+
+        static_ids.copy_(replay_ids)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out, dense[replay_ids], rtol=0, atol=0)
 
 
 if __name__ == "__main__":

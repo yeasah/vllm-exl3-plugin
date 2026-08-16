@@ -173,7 +173,7 @@ def dense_weight(
 _EMBED_BLOCK_CHUNK = int(env.get("EMBED_BLOCK_CHUNK", "256"))
 
 
-def embed_rows(
+def _embed_rows(
     trellis: torch.Tensor,
     suh: torch.Tensor,
     svh: torch.Tensor,
@@ -187,6 +187,11 @@ def embed_rows(
     Returns (tokens, in_features), the same rows `dense_weight(...)[token_ids]`
     would give, exactly -- this is how a quantized token embedding is served, so
     the fp16 embedding never has to exist in VRAM.
+
+    Dispatches: small batches take `_embed_rows_static`, which is what a CUDA
+    graph can capture. The deduplicating implementation below is the large-batch
+    path, and cannot be captured at any size -- it synchronizes. The rest of this
+    docstring describes that path.
 
     The whole idea rests on `dense_weight`'s chain touching output rows in
     exactly one place: `had_right` is block-diagonal in blocks of `HAD_BLOCK`,
@@ -212,11 +217,22 @@ def embed_rows(
     ids), so leaving it unbounded shows up as an out-of-memory that only appears
     at high `max_num_seqs` and does not respond to the usual memory knobs.
 
+    `token_ids` is 1-D; callers flatten first, and the registered fake impl
+    derives the output shape from `shape[0]` on that basis.
+
     See docs/embeddings.md for the measurements and the derivation.
     """
-    if token_ids.numel() == 0:
+    if token_ids.shape[0] == 0:
         return torch.empty(
             (0, trellis.shape[0] * TILE), dtype=torch.half, device=trellis.device
+        )
+
+    # Branching on `shape` is host-side metadata, not a read of the tensor, so
+    # it costs no synchronization and is legal mid-capture. Everything below
+    # this line is not: see `_embed_rows_static`.
+    if token_ids.shape[0] <= _EMBED_STATIC_MAX:
+        return _embed_rows_static(
+            trellis, suh, svh, bits, mcg, mul1, token_ids
         )
 
     tiles_per_block = HAD_BLOCK // TILE
@@ -255,6 +271,123 @@ def embed_rows(
         del w
 
     return out
+
+
+#: Batch sizes at or below this use the capture-safe path. It must cover every
+#: CUDA-graph capture size vLLM might use, because that path is the only one a
+#: graph can hold: above it the deduplicating path runs, and that one
+#: synchronizes. vLLM's default maximum capture size is 512.
+#:
+#: Above the threshold the choice is a performance one and goes the other way.
+#: Deduplication saturates at the number of 128-blocks in the vocabulary, so a
+#: large prefill decodes each block once (Qwen3-0.6B: 1187 blocks) where the
+#: static path decodes one per token (8192). At decode batch sizes the two are
+#: near-identical instead, because scattered token ids rarely share a block --
+#: which is what makes the split nearly free rather than a trade.
+_EMBED_STATIC_MAX = int(env.get("EMBED_STATIC_MAX", "512"))
+
+
+def _embed_rows_static(
+    trellis: torch.Tensor,
+    suh: torch.Tensor,
+    svh: torch.Tensor,
+    bits: int,
+    mcg: bool,
+    mul1: bool,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """`_embed_rows` with a kernel sequence that does not depend on token values.
+
+    Same arithmetic per block, but one block decode per token and chunking over
+    the token count rather than over deduplicated blocks. Nothing here reads a
+    tensor's contents back to the host: the loop bound comes from
+    `token_ids.shape`, which is metadata, so the sequence of kernels is fixed by
+    the batch size alone. That is what CUDA-graph capture requires, and what the
+    deduplicating path cannot offer -- `torch.unique` has a data-dependent
+    output size, and asking for it is a synchronization.
+
+    A full chunk hands `reconstruct`/`had_left` exactly the same shape the
+    deduplicating path does (`_EMBED_BLOCK_CHUNK * HAD_BLOCK` columns), so the
+    intermediate is bounded identically and the fp32 rounding matches.
+    """
+    tiles_per_block = HAD_BLOCK // TILE
+    n = token_ids.shape[0]
+    out = torch.empty(
+        (n, trellis.shape[0] * TILE), dtype=torch.half, device=trellis.device
+    )
+    arange_tiles = torch.arange(tiles_per_block, device=trellis.device)
+    arange_cols = torch.arange(HAD_BLOCK, device=trellis.device)
+
+    for start in range(0, n, _EMBED_BLOCK_CHUNK):
+        stop = min(start + _EMBED_BLOCK_CHUNK, n)
+        ids = token_ids[start:stop]
+        block = ids // HAD_BLOCK
+        local = ids % HAD_BLOCK
+
+        tile_index = (block.unsqueeze(1) * tiles_per_block + arange_tiles).flatten()
+        w = reconstruct(trellis[:, tile_index, :].contiguous(), bits, mcg, mul1)
+
+        w = had_left(w)
+        w = w * suh.unsqueeze(1)
+        # Blockwise along dim 1 in HAD_BLOCK-wide blocks, which is the layout
+        # just gathered -- one block per token, in token order.
+        w = had_right(w)
+        columns = (block.unsqueeze(1) * HAD_BLOCK + arange_cols).flatten()
+        w = w * svh[columns].unsqueeze(0)
+
+        # Token i's block occupies slot i, so its row is at that slot's offset
+        # plus the row's position inside the block.
+        slot = torch.arange(stop - start, device=trellis.device)
+        out[start:stop] = w[:, slot * HAD_BLOCK + local].t()
+        del w
+
+    return out
+
+
+def _embed_rows_fake(
+    trellis: torch.Tensor,
+    suh: torch.Tensor,
+    svh: torch.Tensor,
+    bits: int,
+    mcg: bool,
+    mul1: bool,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    del suh, svh, bits, mcg, mul1
+    return torch.empty(
+        (token_ids.shape[0], trellis.shape[0] * TILE),
+        dtype=torch.half,
+        device=trellis.device,
+    )
+
+
+def embed_rows(
+    trellis: torch.Tensor,
+    suh: torch.Tensor,
+    svh: torch.Tensor,
+    bits: int,
+    mcg: bool,
+    mul1: bool,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Gather rows of an EXL3 tensor, behind an opaque op.
+
+    The implementation's control flow is driven by token *values* -- a
+    `torch.unique` whose output size is data-dependent, a Python loop bounded by
+    that size, and a `nonzero` inside it. Dynamo cannot trace any of it, so
+    without this wrapper the whole engine fails to start whenever vLLM compiles
+    the model, which is its default.
+
+    Opacity is necessary but **not sufficient**, and the difference matters:
+    see `EXL3EmbeddingMethod` and TODO `embed-rows-compile`. A CUDA graph
+    captures a fixed kernel sequence, and every index tensor here comes from the
+    capture-time token ids, so a replayed graph would gather capture-time rows.
+    Tracing is what this fixes; capture is handled where the decision about
+    graph capture actually lives.
+    """
+    return torch.ops.vllm_exl3.exl3_embed_rows(
+        trellis, suh, svh, bits, mcg, mul1, token_ids
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +538,12 @@ def _register_ops() -> None:
         op_name="exl3_moe_mm",
         op_func=_exl3_moe_mm,
         fake_impl=_exl3_moe_mm_fake,
+        target_lib=_EXL3_LIB,
+    )
+    direct_register_custom_op(
+        op_name="exl3_embed_rows",
+        op_func=_embed_rows,
+        fake_impl=_embed_rows_fake,
         target_lib=_EXL3_LIB,
     )
 

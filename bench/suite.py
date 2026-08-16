@@ -66,15 +66,12 @@ ENTRIES: list[Entry] = [
         revision="3.0bpw",
         enforce_eager=False,
         exercises="the CUDA-graph capture/replay path, identical weights to the "
-        "eager entry so any difference is execution mode alone",
-        known_broken="EXL3EmbeddingMethod does not survive torch.compile. "
-        "`ops.embed_rows` calls torch.unique (data-dependent output shape) and "
-        "then loops with a data-dependent bound (`range(0, blocks.numel(), ...)`), "
-        "neither of which dynamo can trace, so EngineCore dies during startup. "
-        "Qwen3-0.6B is tied, so the quantized-embedding path is on by default. "
-        "Isolated: the same entry with EXL3_DENSE_EMBED=1 captures fine. This is "
-        "vLLM's *default* execution mode, and docs/embeddings.md's tied-path "
-        "measurements were all taken eager. See TODO `embed-rows-compile`.",
+        "eager entry so any difference is execution mode alone. This entry is "
+        "why `ops.embed_rows` has a capture-safe path at all: it found that "
+        "serving a tied model's embedding did not survive torch.compile, on "
+        "vLLM's default execution mode. Its baseline is its own -- eager and "
+        "graphs differ by ~0.157 nats on this model for reasons that have "
+        "nothing to do with the plugin",
     ),
     Entry(
         label="qwen3-0.6B 3.5bpw mixed",

@@ -24,17 +24,27 @@ actually measured:
 - a real defect is orders of magnitude larger. The dropped MuseGlimmer logit
   transform moved top-1 logprobs by ~15 nats while changing no token at all.
 
-So `dlogprob_max` at 0.1 nats is roughly 3x above the noise and ~100x below the
-one real bug we have numbers for. `argmax_disagreements` and the greedy
-continuation are exact, because at fixed context there is no benign reason for
-the argmax to move.
+Two floors were measured on this build rather than guessed, and they bracket the
+budget:
 
-Measured, not assumed, on the build these baselines were recorded against: a
-`check` immediately after `bless` gives `dlogprob_max` and `kl_max` of **exactly
-0.0** across all 388 scored positions of the fast tier. Same build, same weights,
-same order -- teacher-forced decoding at fixed context is deterministic here. So
-the whole 0.1 budget is headroom for *upstream* change, and any nonzero movement
-at all is worth reading before it is blessed away.
+- **Same build, re-run: exactly 0.0** on both metrics across all 388 scored
+  positions of the fast tier. Teacher-forced decoding at fixed context is
+  deterministic here, so a `check` that changes nothing reports nothing.
+- **Same weights, different kernels: ~0.157 nats / 0.013 KL.** That is
+  Qwen3-0.6B eager vs CUDA graphs with the embedding path taken out of the
+  picture entirely (`EXL3_DENSE_EMBED=1`), which is the closest available proxy
+  for what a benign upstream change does -- same arithmetic, different kernel
+  selection and accumulation order.
+
+So `dlogprob_max` at 0.25 sits above the kernel-drift floor and ~60x below the
+one real defect we have numbers for, which moved logprobs by ~15 nats.
+
+`argmax_disagreements` and the greedy continuation stay **exact**, and that is a
+deliberate choice rather than an oversight: a kernel change large enough to flip
+an argmax at fixed context is one a human should look at. It will occasionally
+fire on something benign. Firing on something benign and making you read it is
+the intended cost; the alternative is a gate that quietly absorbs the next
+`embed_norm`.
 
 `weight_bytes` is exact. It is vLLM's own "Model loading took N GiB", and it
 does not drift for benign reasons -- if it moves, either the checkpoint changed
@@ -58,8 +68,8 @@ sys.path.insert(0, ROOT)
 from bench import core, suite  # noqa: E402
 
 DEFAULT_TOLERANCE = {
-    "dlogprob_max": 0.1,
-    "kl_max": 1e-2,
+    "dlogprob_max": 0.25,
+    "kl_max": 5e-2,
     "argmax_disagreements": 0,
 }
 
