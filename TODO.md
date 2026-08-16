@@ -55,6 +55,50 @@ take EXL3 from significantly underperforming competing formats on most checkpoin
 advertised. [docs/qbench.md](docs/qbench.md) has the measurement that establishes
 the gap is real on the served path.
 
+## `embed-rows-compile` — `EXL3EmbeddingMethod` does not survive torch.compile
+
+Serving a tied model's embedding from its quantized `lm_head` works eager and
+**fails to start under vLLM's default (compiled / CUDA-graph) execution mode**.
+EngineCore dies during startup inside `ops.embed_rows`.
+
+Two things in that function are untraceable by dynamo: `torch.unique`, whose
+output shape is data-dependent, and the chunk loop immediately after it, whose
+bound is `range(0, blocks.numel(), _EMBED_BLOCK_CHUNK)` — a Python loop over a
+tensor-derived count. Isolated: the same configuration with `EXL3_DENSE_EMBED=1`
+starts and captures normally, so the quantized embedding path is the whole cause.
+
+**This matters more than an ordinary limitation** because non-eager is the
+default: `vllm serve` on a tied EXL3 checkpoint hits it without asking for
+anything unusual. Whether it ever worked under graphs is unestablished; every
+tied-path measurement in [docs/embeddings.md](docs/embeddings.md) was taken
+eager, and the README's "under torch.compile and CUDA graphs" claim covers the
+linear kernels, not the embedding.
+
+**Candidate approaches, unranked and unmeasured.** Mark the gather as a custom op
+so dynamo treats it as an opaque call rather than tracing into it — cheapest, and
+the shape it already wants, since the row set is genuinely data-dependent. Or
+make the work shape-static: drop `unique`/chunking and decode per-token, trading
+the block-sharing win for traceability. The right answer probably depends on
+whether the embedding forward is worth compiling at all, which is measurable.
+
+Found by `bench/`, on its first run, and gated there as a `known_broken` entry —
+so a fix will be noticed by `bench/run.py check` starting to fail.
+
+→ [docs/embeddings.md](docs/embeddings.md), [bench/README.md](bench/README.md)
+
+## `bench-suite` — Extend the bump gate past the fast tier
+
+`bench/` gates vLLM and exllamav3 bumps on token ids, per-position logprobs and
+resident weight bytes, with baselines committed against the current pin. The fast
+tier covers uniform K=3, mixed-in-layer bit widths, the `mcg` codebook, tied and
+untied models, and both execution modes — ~12 min on the dev card.
+
+**Not yet covered**, in rough priority order: MoE (`fused_moe`), the `mul1`
+codebook, the Transformers backend, and TP. The first three fit the dev card;
+TP needs the 8×3090 box, so it wants its own tier rather than blocking the rest.
+
+→ [bench/README.md](bench/README.md)
+
 ## `fa-head-dim-512` — Flash Attention for head dim 512 on pre-FA4 architectures
 
 vLLM has no FA path for head dim 512, and does not allow mixed attention layers

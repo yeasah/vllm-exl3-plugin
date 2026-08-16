@@ -33,20 +33,15 @@ from __future__ import annotations
 import argparse
 import glob
 import json
-import math
 import os
 import sys
 
-#: Deliberately spans the confidence range, because that is the axis that makes
-#: token-based comparison lie. The factual prompt is near-deterministic; the
-#: open-ended one leaves the model genuinely uncertain.
-PROMPTS = [
-    "What is the capital of France?",
-    "I am comparing three approaches to quantizing large language models: "
-    "trellis coding, group-wise integer quantization, and low-rank adapters "
-    "applied post-training. For each one, explain the core idea, where the "
-    "error comes from, and which hardware makes it fast.",
-]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The prompts and the divergence numerics are shared with bench/, which asks the
+# same question against a committed baseline rather than against a second live
+# capture. One implementation, because two copies of a KL that drift apart would
+# undermine both tools at once.
+from bench.core import PROMPTS, compare_prompt, kl, prompt_ids  # noqa: E402,F401
 
 
 def resolve(target: str) -> str:
@@ -85,15 +80,7 @@ def capture(args) -> None:
            "mode": "eager" if args.eager else "graphs", "k": args.k,
            "prompts": []}
     for text in PROMPTS:
-        ids = tok.apply_chat_template([{"role": "user", "content": text}],
-                                      tokenize=True, add_generation_prompt=True)
-        # Returns a BatchEncoding for some tokenizers and a plain list for
-        # others; iterating a BatchEncoding yields its *keys*.
-        if hasattr(ids, "input_ids"):
-            ids = ids["input_ids"]
-        if ids and isinstance(ids[0], list):
-            ids = ids[0]
-        ids = [int(i) for i in ids]
+        ids = prompt_ids(tok, text)
         # max_tokens=1 because we only want the prompt scored; prompt_logprobs
         # gives one distribution per prompt position, all at fixed context.
         r = llm.generate({"prompt_token_ids": ids},
@@ -113,52 +100,22 @@ def capture(args) -> None:
     print(f"wrote {args.out}: tp={args.tp} {out['mode']}, {n} scored positions")
 
 
-def kl(p: dict, q: dict) -> float:
-    """KL(P||Q) over P's support, renormalized.
-
-    Both sides are truncated to top-k, so Q may not cover all of P. Restricting
-    to the shared support and renormalizing keeps this finite; it understates
-    divergence when the top-k sets disagree, which is itself reported.
-    """
-    shared = [t for t in p if t in q]
-    if not shared:
-        return float("nan")
-    zp = math.log(sum(math.exp(p[t]) for t in shared))
-    zq = math.log(sum(math.exp(q[t]) for t in shared))
-    total = 0.0
-    for t in shared:
-        lp, lq = p[t] - zp, q[t] - zq
-        total += math.exp(lp) * (lp - lq)
-    return total
-
-
 def compare(args) -> None:
     a = json.load(open(args.a))
     b = json.load(open(args.b))
     print(f"A: tp{a['tp']} {a['mode']}   B: tp{b['tp']} {b['mode']}\n")
     for i, (pa, pb) in enumerate(zip(a["prompts"], b["prompts"])):
-        if pa["ids"] != pb["ids"]:
+        m = compare_prompt(pa, pb)
+        if not m["comparable"]:
             print(f"  prompt {i}: token ids differ, not comparable")
             continue
-        kls, dtop, disagree, n = [], [], 0, 0
-        for sa, sb in zip(pa["steps"], pb["steps"]):
-            if not sa or not sb:
-                continue
-            n += 1
-            kls.append(kl(sa, sb))
-            ta = max(sa, key=sa.get)
-            tb = max(sb, key=sb.get)
-            if ta != tb:
-                disagree += 1
-            if ta in sb:
-                dtop.append(abs(sa[ta] - sb[ta]))
-        finite = [v for v in kls if v == v]
-        print(f"  prompt {i}: {n} positions")
-        print(f"    argmax disagreements : {disagree}/{n}")
-        print(f"    KL(A||B)  max / mean : {max(finite):.3e} / "
-              f"{sum(finite)/len(finite):.3e}")
-        print(f"    |dlogprob| of A top-1: max {max(dtop):.3e} / "
-              f"mean {sum(dtop)/len(dtop):.3e}")
+        print(f"  prompt {i}: {m['positions']} positions")
+        print(f"    argmax disagreements : {m['argmax_disagreements']}"
+              f"/{m['positions']}")
+        print(f"    KL(A||B)  max / mean : {m['kl_max']:.3e} / "
+              f"{m['kl_mean']:.3e}")
+        print(f"    |dlogprob| of A top-1: max {m['dlogprob_max']:.3e} / "
+              f"mean {m['dlogprob_mean']:.3e}")
 
 
 def main() -> None:
