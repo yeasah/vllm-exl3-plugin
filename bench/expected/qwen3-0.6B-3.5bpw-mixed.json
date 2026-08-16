@@ -16,10 +16,10 @@
   "capability": "12.0",
   "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260810",
   "src.plugin": {
-   "describe": "ffeb876-dirty",
-   "head": "ffeb87696d",
-   "dirty_files": 4,
-   "diff_sha": "a1c155baec97",
+   "describe": "e9d7b84-dirty",
+   "head": "e9d7b841ed",
+   "dirty_files": 0,
+   "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {

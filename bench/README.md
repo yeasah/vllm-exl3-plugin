@@ -116,11 +116,38 @@ means — the plugin, vLLM and exllamav3:
              "dirty_files": 9, "diff_sha": "a0f2e5c81d51", "untracked": 0}
 ```
 
-`describe` is the truth the version string missed, and `diff_sha` — a digest of
-`git diff HEAD` — is what distinguishes patch stacks. It identifies a stack
-without describing it; to see what changed, diff the trees. The digest covers
-tracked modifications only, so `untracked` is counted separately, since an
-untracked `.py` inside a package does change behaviour.
+`describe` is the truth the version string missed, and answers only "which
+commit" — `dirty_files` and `diff_sha` answer "what is uncommitted". They are
+kept apart because `git describe` accepts no pathspec, so its `--dirty` flag
+would contradict the two fields beside it (see below).
+
+`diff_sha`, a digest of `git diff HEAD`, is what distinguishes patch stacks. It
+identifies a stack without describing it; to see what changed, diff the trees.
+The digest covers tracked modifications only, so `untracked` is counted
+separately, since an untracked `.py` inside a package does change behaviour.
+
+**The plugin's own provenance excludes `bench/expected/`.** Baselines are this
+suite's output and they live inside the tree being described, so without the
+exclusion a `bless` describes its own side effects: the first entry writes a
+baseline, the second records `dirty_files: 1`, the third `2`, and a full bless
+can never record a clean state however clean the checkout was. Provenance is
+about the code that produced a measurement, not the measurement.
+
+### `verify`
+
+```
+bench/run.py verify
+```
+
+Do all baselines in a set agree about what produced them? A set is meant to be
+one snapshot of one build, and nothing enforces that — `bless` writes entries one
+at a time over most of an hour, and anything changing underneath it splits the
+set silently.
+
+This is not redundant with the dirty-tree warning `bless` prints. That warning
+catches an operator editing mid-run; it could not catch the case above, where the
+suite dirtied its own tree, because no operator discipline was involved. Only
+comparing the finished set across entries finds that class of problem.
 
 Correctness baselines carry the same record but are **not** scoped by it, and
 `check` only warns. Portability is the intent — but "meant to be portable" is not

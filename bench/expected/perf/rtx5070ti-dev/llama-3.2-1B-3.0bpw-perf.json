@@ -9,25 +9,46 @@
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm": "0.27.1.dev0+ge50f7d369.d20260810",
+  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260810",
+  "src.plugin": {
+   "describe": "e9d7b84-dirty",
+   "head": "e9d7b841ed",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "src.vllm": {
+   "describe": "v0.27.0-dirty",
+   "head": "e50f7d3696",
+   "dirty_files": 9,
+   "diff_sha": "a0f2e5c81d51",
+   "untracked": 0
+  },
+  "src.exllamav3": {
+   "describe": "v1.4.2-12-g493a323",
+   "head": "493a323dc7",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
   "driver": "610.57.04"
  },
- "decode": 2746.7,
- "decode_spread_pct": 1.1,
+ "decode": 2746.8,
+ "decode_spread_pct": 0.43,
  "decode_samples": [
-  2738.4,
-  2762.5,
-  2746.7,
-  2732.3,
-  2747.5
+  2737.8,
+  2746.8,
+  2749.6,
+  2749.5,
+  2737.8
  ],
- "prefill": 34307.8,
- "prefill_spread_pct": 1.27,
+ "prefill": 34556.6,
+ "prefill_spread_pct": 0.96,
  "prefill_samples": [
-  34307.8,
-  34676.0,
-  34560.4,
-  34240.9,
-  34295.6
+  34574.9,
+  34243.3,
+  34518.5,
+  34569.5,
+  34556.6
  ]
 }

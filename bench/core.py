@@ -104,7 +104,11 @@ def source_provenance(path: str, exclude: tuple[str, ...] = ()) -> dict | None:
         diff_sha = hashlib.sha256(diff.encode()).hexdigest()[:12]
     untracked = _git(path, "ls-files", "--others", "--exclude-standard") or ""
     return {
-        "describe": _git(path, "describe", "--tags", "--always", "--dirty"),
+        # No `--dirty`: `git describe` takes no pathspec, so it would report the
+        # tree as dirty on the strength of the baselines this suite just wrote --
+        # contradicting `dirty_files: 0` beside it. Let `describe` answer "which
+        # commit" and let the two fields below answer "what is uncommitted".
+        "describe": _git(path, "describe", "--tags", "--always"),
         "head": head[:10],
         "dirty_files": len(dirty),
         "diff_sha": diff_sha,

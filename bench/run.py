@@ -5,6 +5,7 @@
     bench/run.py check [--tier fast]  compare a fresh capture to the baseline
     bench/run.py bless [--tier fast]  record the current build as the baseline
     bench/run.py capture <entry> OUT  one entry, for hand inspection
+    bench/run.py verify               do the baselines agree on what built them
     bench/run.py perf-check  --platform TAG   throughput vs this machine
     bench/run.py perf-bless  --platform TAG   record this machine's throughput
 
@@ -313,6 +314,66 @@ def cmd_perf_check(args) -> int:
     return 1
 
 
+def cmd_verify(args) -> int:
+    """Do all baselines in a set agree about what produced them?
+
+    A baseline set is meant to be one snapshot of one build. Nothing enforces
+    that: `bless` writes entries one at a time over the better part of an hour,
+    and anything that changes underneath it silently splits the set.
+
+    This exists because the per-entry warning could not catch the real case. The
+    suite dirtied its *own* tree -- baselines live inside the repo whose
+    provenance is recorded, so the second entry saw the first one's output --
+    and every entry disagreed with every other about the state it came from. No
+    amount of operator discipline would have prevented that, and only comparing
+    the finished set across entries revealed it.
+    """
+    import glob
+    from collections import defaultdict
+
+    fields = ("src.plugin", "src.vllm", "src.exllamav3")
+    ok = True
+
+    def check(paths, label) -> bool:
+        if not paths:
+            print(f"{label}: no baselines")
+            return True
+        groups, missing = defaultdict(list), []
+        for p in sorted(paths):
+            env = (json.load(open(p)).get("environment") or {})
+            if not env:
+                missing.append(os.path.basename(p))
+                continue
+            key = tuple(json.dumps(env.get(f), sort_keys=True) for f in fields)
+            groups[key].append(os.path.basename(p))
+        good = not missing and len(groups) == 1
+        extra = f" + {len(missing)} with none" if missing else ""
+        print(f"\n{label}: {len(paths)} baselines, {len(groups)} distinct "
+              f"provenance(s){extra}  -> {'OK' if good else 'MIXED'}")
+        for name in missing:
+            print(f"   !! no provenance recorded: {name}")
+        for key, names in groups.items():
+            env = {f: json.loads(v) for f, v in zip(fields, key)}
+            print("   " + "  ".join(
+                f"{f.removeprefix('src.')}={(env[f] or {}).get('describe')}"
+                f"/dirty={(env[f] or {}).get('dirty_files')}" for f in fields))
+            if len(groups) > 1:
+                for n in names:
+                    print(f"      - {n}")
+        return good
+
+    ok &= check(glob.glob(os.path.join(EXPECTED, "*.json")), "correctness")
+    for d in sorted(glob.glob(os.path.join(PERF_EXPECTED, "*"))):
+        if os.path.isdir(d):
+            ok &= check(glob.glob(os.path.join(d, "*.json")),
+                        f"perf [{os.path.basename(d)}]")
+
+    print("\n" + ("ALL CONSISTENT" if ok else
+                  "INCONSISTENT -- this set is a mixture of builds, so a check "
+                  "against it compares against no single thing. Re-bless."))
+    return 0 if ok else 1
+
+
 def cmd_list(args) -> int:
     for e in suite.by_tier(args.tier):
         print(f"{e.name}  [{e.tier}]")
@@ -417,6 +478,8 @@ def main() -> int:
 
     p = sub.add_parser("list"); p.add_argument("--tier", default="all")
     p.set_defaults(func=cmd_list)
+    p = sub.add_parser("verify")
+    p.set_defaults(func=cmd_verify)
     p = sub.add_parser("check"); p.add_argument("--tier", default="fast")
     p.set_defaults(func=cmd_check)
     p = sub.add_parser("bless"); p.add_argument("--tier", default="fast")
