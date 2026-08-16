@@ -55,16 +55,26 @@ take EXL3 from significantly underperforming competing formats on most checkpoin
 advertised. [docs/qbench.md](docs/qbench.md) has the measurement that establishes
 the gap is real on the served path.
 
-## `bench-suite` — Extend the bump gate past the fast tier
+## `bench-suite` — A TP tier for the bump gate
 
 `bench/` gates vLLM and exllamav3 bumps on token ids, per-position logprobs and
-resident weight bytes, with baselines committed against the current pin. The fast
-tier covers uniform K=3, mixed-in-layer bit widths, the `mcg` codebook, tied and
-untied models, and both execution modes — ~12 min on the dev card.
+resident weight bytes, against baselines committed for the current pin. Two tiers
+are populated: `fast` (~15 min) covers uniform K=3, mixed-in-layer bit widths,
+`mcg`, tied and untied, both execution modes, and the Transformers backend on a
+text-only model; `full` adds MoE, `mul1` with the gemma4-style tie, and the
+multimodal Transformers backend.
 
-**Not yet covered**, in rough priority order: MoE (`fused_moe`), the `mul1`
-codebook, the Transformers backend, and TP. The first three fit the dev card;
-TP needs the 8×3090 box, so it wants its own tier rather than blocking the rest.
+**What remains is TP**, which is the one axis the dev card cannot reach. It wants
+its own tier rather than an entry in `full`, because `bless` needs the 8×3090 box
+(`vast`) and the baselines are per-degree. TP=2/4/8 are the degrees already
+validated by hand in [docs/tensor-parallel.md](docs/tensor-parallel.md), so those
+are what a tier should pin; `tools/tp_compare.py` already shares the numerics and
+its eager-vs-graphs floor workflow is the model for setting the tolerance.
+
+Worth doing before the TP tier, and cheaper: nothing currently gates **throughput**.
+A bump that silently costs 30% would pass every entry here, since the gate reads
+what is served and not how fast. `docs/kernels.md` has the benchmark numbers that
+would seed it.
 
 → [bench/README.md](bench/README.md)
 

@@ -73,10 +73,37 @@ never blessed, and `check` reports it without failing the gate. If it starts
 capturing cleanly, `check` fails and tells you to clear the field: that is how a
 fix gets noticed.
 
+## Tiers
+
+`fast` (~15 min on a 16 GiB card) is the one to run casually: uniform K=3,
+mixed-in-layer bit widths, `mcg`, tied and untied, both execution modes, and the
+Transformers backend on a text-only model.
+
+`full` adds what does not fit that budget — MoE, the `mul1` codebook and the
+gemma4-style tie, and the multimodal Transformers backend. Run it before a
+dependency bump.
+
+Not covered at all: **TP**, which needs the 8×3090 box rather than the dev card,
+and wants its own tier.
+
+## Pin `model_impl`, do not let it disperse
+
+The two Transformers-backend entries set `model_impl="transformers"` explicitly
+rather than relying on dispatch. This matters more than it looks: vLLM gains
+native implementations over time — MuseGlimmer gets one in 0.27.2 — and an entry
+that depended on auto-resolution would quietly stop testing the backend the
+moment that happened, while still passing. Pinning means the coverage is of *our
+integration*, not of vLLM's routing, and it survives.
+
+The MiniCPM pair is the useful shape: the same checkpoint on both paths, which
+turns "the backend is token-for-token identical to native" from a claim in
+[docs/transformers-backend.md](../docs/transformers-backend.md) into something
+checked on every run.
+
 ## Adding an entry
 
 An entry earns its place by exercising a plugin surface no other entry reaches;
 put that in `exercises`, because it is the argument for keeping it when the suite
-gets slow and the first thing to read when it fails. Not yet covered, in rough
-priority order: MoE (`fused_moe`), the `mul1` codebook, the Transformers backend,
-and TP — which needs the 8×3090 box, not the dev card.
+gets slow and the first thing to read when it fails. If the entry encodes a
+*prediction* — as the Muse-Glimmer one does about what 0.27.2 will break — put
+that there too. A prediction a gate will test is worth more than one in a doc.

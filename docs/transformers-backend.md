@@ -98,11 +98,20 @@ question about a particular checkpoint.
 | `model_impl="vllm"` | `[8, 220, 608, 5390, 14293, 374, ...]` | *"…The capital of France is Paris"* |
 | `model_impl="transformers"` | identical | identical |
 
-Per-step top-1 logprobs differ by at most ~0.035, on soft-confidence tokens only,
-never changing an argmax — the same tile-shape-dependent fp16 accumulation noise
-already characterized for tensor parallelism in
+Per-step top-1 logprobs over those 24 generated steps differ by at most ~0.035, on
+soft-confidence tokens only, never changing an argmax — the same tile-shape-dependent
+fp16 accumulation noise already characterized for tensor parallelism in
 [tensor-parallel.md](tensor-parallel.md), and expected here because the two backends
 fuse linears differently and so accumulate in a different order.
+
+**Refined once `bench/` gated both paths**, which scores 75 teacher-forced prompt
+positions rather than 24 generated steps: max |Δlogprob| **0.190**, max KL 0.016, and
+**one** argmax disagreement out of 75. The greedy continuations remain identical, so
+the token-for-token claim above stands as written — but the per-position divergence is
+about 5x the generated-step figure, and it is not quite true that an argmax never
+moves. Both entries are in the fast tier (`minicpm5-1B ... mcg` and `... via
+transformers backend`), each gated against its own baseline; the pair is what keeps
+this claim honest as vLLM changes underneath it.
 
 `turboderp/Llama-3.2-1B-Instruct-exl3` @3.0bpw (tied) also generates correctly
 through the backend: *"The capital of France is Paris."*, every logprob >= -0.002,

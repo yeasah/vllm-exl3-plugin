@@ -98,7 +98,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 
     python -m unittest discover -s tests
 
-64 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
+66 tests. The format tests need neither torch, vLLM, nor a GPU; the kernel
 oracles and the end-to-end generations skip themselves without CUDA and
 exllamav3.
 
@@ -106,6 +106,11 @@ The oracle tests import the `exllamav3` package (not just its extension), which
 needs a few small extras the plugin itself does not:
 
     pip install --no-deps kbnf formatron frozendict general-sam
+
+Separately, `bench/run.py check` gates a dependency bump on what the engine
+actually serves — token ids, per-position logprobs and resident weight bytes,
+against baselines committed in `bench/expected/`. Run it before and after moving
+the vLLM or exllamav3 pin. See [bench/README.md](bench/README.md).
 
 ## Gotcha: killing stray GPU processes
 

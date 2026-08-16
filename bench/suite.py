@@ -94,8 +94,71 @@ ENTRIES: list[Entry] = [
         label="minicpm5-1B 3.0bpw mcg",
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
+        model_impl="auto",
         exercises="the mcg codebook, an untied model, and a separately "
-        "quantized 6-bit head -- none of which the Qwen3/Llama entries reach",
+        "quantized 6-bit head -- none of which the Qwen3/Llama entries reach. "
+        "Paired with the transformers-backend entry below: together the two "
+        "are the claim that the backend is token-for-token identical to the "
+        "native implementation",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw via transformers backend",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        model_impl="transformers",
+        exercises="the Transformers backend on a text-only model, which needs "
+        "no patches. `model_impl` is pinned rather than left to dispatch, so "
+        "this keeps testing the backend no matter what vLLM later implements "
+        "natively -- the coverage is of our integration, not of vLLM's routing",
+    ),
+    # ---- full tier: the surfaces the fast tier cannot reach on a 16 GiB card
+    # in a couple of minutes. Same gate, run before a bump rather than casually.
+    Entry(
+        label="qwen3.5-35B-A3B 2.0bpw MoE",
+        model="turboderp/Qwen3.5-35B-A3B-exl3",
+        revision="2.00bpw",
+        tier="full",
+        gpu_memory_utilization=0.92,
+        exercises="the MoE path: exl3_mgemm behind FusedMoE, the w13/w2 "
+        "expert-tensor mapping, and the recovered scale factor. Nothing in the "
+        "fast tier touches fused_moe at all",
+    ),
+    Entry(
+        label="gemma-4-12B 3.0bpw mul1 tied",
+        model="turboderp/gemma-4-12B-it-exl3",
+        revision="3.00bpw_mul1",
+        tier="full",
+        gpu_memory_utilization=0.92,
+        exercises="the mul1 codebook, and the gemma4-style two-module tied "
+        "shape where a separate ParallelLMHead is pointed at the embedding's "
+        "storage -- a different tie path from Llama-3.2-1B's. Also the only "
+        "entry needing patches/vllm-gemma4-transformers-5.15-per-layer.patch, "
+        "so it is what verifies TODO `retire-gemma4-patch` when the pin moves",
+    ),
+    Entry(
+        label="muse-glimmer-30B 2.0bpw via transformers backend",
+        model="turboderp/Muse-Glimmer-30B-exl3",
+        revision="2.00bpw",
+        tier="full",
+        model_impl="transformers",
+        gpu_memory_utilization=0.92,
+        exercises="the multimodal backend path, and the only exerciser of "
+        "three things: the quantized vision tower, the safetensors index as "
+        "ground truth for is_quantized (this checkpoint's tensor_storage omits "
+        "all 303 vision-tower modules), and "
+        "patches/vllm-replicated-linear-weight-loader-v2.patch, which 154 "
+        "unsharded submodules here depend on.\n\n"
+        "Two predictions this entry exists to test at the 0.27.2 bump, both "
+        "from docs/transformers-backend.md. vLLM PR #51247 fixes the dropped "
+        "embed_norm by a *different* mechanism than our patch (rebasing the "
+        "subclass onto VocabParallelEmbedding rather than wrapping it), so "
+        "logprobs should be unchanged -- if they move, the two implementations "
+        "disagree. PR #52173 applies the soft cap but reads only `logit_scale`, "
+        "never MuseGlimmer's `output_multiplier`, and applies its scale after "
+        "the cap rather than before; so this entry is *expected to fail on "
+        "logprobs* after the bump. That failure is the point: it converts an "
+        "analysis into a checked claim. MuseGlimmer goes native in 0.27.2, "
+        "which is exactly why model_impl is pinned here",
     ),
 ]
 
