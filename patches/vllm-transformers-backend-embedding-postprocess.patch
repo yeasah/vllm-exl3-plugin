@@ -24,10 +24,18 @@ contributor.
 
 Detection is structural, and deliberately narrow: a plain nn.Embedding owns no
 submodules and does not override forward, so a subclass doing both is applying
-that submodule to the lookup result. Only the single-submodule shape is
-inferable; anything more elaborate is left alone rather than guessed at, which
-preserves today's behaviour for every model that already worked. It logs when
-it fires, since silently changing a model's arithmetic is the failure mode this
+that submodule to the lookup result. The submodule must not itself be an
+nn.Embedding -- a postprocess consumes vectors where an embedding consumes ids,
+so a subclass owning one is doing a second lookup, not post-processing the
+first. IdeficsDecoupledEmbedding, which splits its vocabulary across a frozen
+`weight` and a trainable `additional_embedding`, is exactly that shape and is
+the reason the guard is there.
+
+Everything else is left alone rather than guessed at, which preserves today's
+behaviour for every model that already worked -- including the whole
+*ScaledWordEmbedding family (Bart, Whisper, M2M100, the Gemmas), which keeps
+embed_scale as a buffer and so owns no submodules at all. It logs when it
+fires, since silently changing a model's arithmetic is the failure mode this
 is fixing.
 
 Nothing here is EXL3-specific -- an unquantized MuseGlimmer served with
@@ -35,10 +43,10 @@ Nothing here is EXL3-specific -- an unquantized MuseGlimmer served with
 contribution.
 
 diff --git a/vllm/model_executor/models/transformers/base.py b/vllm/model_executor/models/transformers/base.py
-index 35e5c9d1a..15c80b773 100644
+index 35e5c9d1a..dc2cd01a9 100644
 --- a/vllm/model_executor/models/transformers/base.py
 +++ b/vllm/model_executor/models/transformers/base.py
-@@ -89,6 +89,39 @@ class ScaledVocabParallelEmbedding(VocabParallelEmbedding):
+@@ -89,6 +89,45 @@ class ScaledVocabParallelEmbedding(VocabParallelEmbedding):
          return super().forward(input_) * self.embed_scale
  
  
@@ -66,11 +74,17 @@ index 35e5c9d1a..15c80b773 100644
 +
 +    Only the single-submodule shape is inferable. Anything more elaborate is
 +    left alone rather than guessed at.
++
++    The submodule must not itself be an `nn.Embedding`: a postprocess consumes
++    the looked-up vectors, while an embedding consumes ids, so a subclass owning
++    one is doing a second lookup rather than post-processing the first.
++    `IdeficsDecoupledEmbedding`, which splits its vocabulary across a frozen
++    `weight` and a trainable `additional_embedding`, is that shape.
 +    """
 +    if type(module).forward is nn.Embedding.forward:
 +        return None
 +    children = list(module.children())
-+    if len(children) != 1:
++    if len(children) != 1 or isinstance(children[0], nn.Embedding):
 +        return None
 +    return children[0]
 +
@@ -78,7 +92,7 @@ index 35e5c9d1a..15c80b773 100644
  class Base(
      nn.Module,
      VllmModel,
-@@ -180,11 +213,23 @@ class Base(
+@@ -180,11 +219,23 @@ class Base(
                  quant_config=self.quant_config,
              )
              embed_scale = getattr(input_embeddings, "embed_scale", None)

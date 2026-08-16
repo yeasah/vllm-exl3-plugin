@@ -184,6 +184,43 @@ so `soft_cap = T/m` with `scale = m`, reducing to the plain cap at `m == 1`. Fix
 `patches/vllm-transformers-backend-logit-softcap.patch`, with no change to
 `LogitsProcessor` itself.
 
+### Who else these hit
+
+Neither defect involves the quantization path, so the population is "whatever goes
+through the Transformers backend" — which means unquantized checkpoints too. Surveyed
+against the installed transformers (5.15.0):
+
+**The dropped embedding norm: Muse-Glimmer only, today.** Of the ~48 `nn.Embedding`
+subclasses in transformers, almost all are the `*ScaledWordEmbedding` family (Bart,
+Whisper, M2M100, MBart, XGLM, MiniCPM3, every Gemma) — already covered by the
+backend's `embed_scale` branch, and invisible to the new detection because
+`embed_scale` is an `nn.Buffer`, not a submodule. `MuseGlimmerTextNormedEmbedding` is
+the only one applying a *module* to the lookup. So the bug class is general but the
+current membership is one architecture — and vLLM has no native implementation of it,
+so **`meta-models/Muse-Glimmer-30B` in plain bf16 is broken on vLLM in exactly the way
+our EXL3 copy was.** Its parent architecture, `kimi_k25`, has neither the normed
+embedding nor the multiplier, and is natively implemented besides.
+
+`IdeficsDecoupledEmbedding` is the one near-miss: one submodule and an overridden
+`forward`, but the submodule is a second `nn.Embedding` for a split vocabulary, not a
+postprocess. Hence the `isinstance(..., nn.Embedding)` guard.
+
+**The dropped logit transform: a real list.** Architectures whose config carries
+`final_logit_softcapping` and which vLLM does *not* implement natively — so the
+backend is the only way to serve them, and it drops the cap silently:
+`vaultgemma`, `nanochat`, `t5gemma`, `t5gemma2`, `muse_glimmer`. Additionally, anyone
+passing `--model-impl transformers` explicitly on gemma-2/3/4 loses it too. Worth
+noting for this project: gemma-4-12B-it carries `final_logit_softcapping: 30.0`, and
+is safe only because vLLM implements `Gemma4UnifiedForConditionalGeneration`
+natively.
+
+**Known remaining gap.** The Granite family (`granite`, `granitemoe`,
+`granitemoeshared`, `granitemoehybrid`, `granitemoe_swa`, `granite4_vision`) scales
+logits under a third spelling, `logits_scaling`, and *divides* rather than multiplies.
+The patch does not cover it — no Granite checkpoint was on hand to verify against, and
+guessing at an inverse is how the original bug got written. Cohere's `logit_scale`
+needs nothing, being the name the backend already reads.
+
 ### Result
 
 With both patches, vLLM matches native exllamav3 on Muse-Glimmer @2.00bpw: 40 greedy

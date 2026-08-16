@@ -33,7 +33,13 @@ embedding-postprocess patch, 40 greedy tokens match token for token, and the
 step-0 top-15 logprobs agree to ~0.03 nats -- the fp16 accumulation noise floor
 already characterized for this backend.
 
-Not EXL3-specific.
+Not EXL3-specific, and not Muse-Glimmer-specific either: vaultgemma, nanochat,
+t5gemma and t5gemma2 all carry final_logit_softcapping and have no native vLLM
+implementation, so the backend is the only way to serve them and it drops the cap.
+
+Known gap: the Granite family spells its scale `logits_scaling` and divides rather
+than multiplies. Not covered here -- no Granite checkpoint was on hand to verify
+against, and guessing at an inverse is how the bug being fixed got written.
 
 diff --git a/vllm/model_executor/models/transformers/causal.py b/vllm/model_executor/models/transformers/causal.py
 index 01a7e4198..3cbc2c381 100644
