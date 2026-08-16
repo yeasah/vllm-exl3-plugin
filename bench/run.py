@@ -5,11 +5,17 @@
     bench/run.py check [--tier fast]  compare a fresh capture to the baseline
     bench/run.py bless [--tier fast]  record the current build as the baseline
     bench/run.py capture <entry> OUT  one entry, for hand inspection
-    bench/run.py perf-check           throughput against its own baseline
-    bench/run.py perf-bless           record throughput baselines
+    bench/run.py perf-check  --platform TAG   throughput vs this machine
+    bench/run.py perf-bless  --platform TAG   record this machine's throughput
 
 `check` reads *what* is served and is blind to how fast; `perf-check` is the
 other half, and a bump wants both.
+
+The two are stored differently on purpose. A correctness baseline is a fact about
+this codebase and its dependencies, so it lives flat in `expected/` and should
+hold anywhere. A perf baseline is that *plus a machine*, so it lives under
+`expected/perf/<platform>/` and is never compared across platforms -- see
+`platform_tag` below for why identification is the operator's job.
 
 Run `check` before and after a vLLM or exllamav3 bump. `bless` only after
 reading a `check` failure and deciding the change is intended -- blessing is how
@@ -125,6 +131,13 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
     tol = {**DEFAULT_TOLERANCE, **entry.tolerance}
     failures = []
 
+    # Reported, never failed on. Different hardware is a legitimate thing to run
+    # a correctness check on -- that is rather the point of a portable baseline
+    # -- but it changes how a failure should be read, so it is surfaced first.
+    for line in core.environment_diff(base.get("environment", {}),
+                                      fresh.get("environment", {})):
+        print(f"     ! environment differs from baseline: {line}")
+
     if fresh.get("weight_gib") is not None and base.get("weight_gib") is not None:
         if fresh["weight_gib"] != base["weight_gib"]:
             failures.append(
@@ -170,11 +183,43 @@ PERF_REGRESSION_PCT = 10.0
 PERF_EXPECTED = os.path.join(HERE, "expected", "perf")
 
 
+def platform_tag(args) -> str:
+    """The operator's name for the machine, and it is deliberately mandatory.
+
+    A correctness baseline is a fact about this codebase and its dependencies. A
+    perf baseline is that *plus a machine*, and the machine cannot be identified
+    from inside it -- firmware, thermals, host contention and the hypervisor are
+    all invisible and all move throughput. Trying to fingerprint it automatically
+    would produce a key that looks authoritative and is not.
+
+    So identification is the operator's job, which also makes it the operator's
+    choice how coarse to be: `rtx5070ti-dev` if one box, `vast-8x3090-a` if
+    several rentals need telling apart. There is no default on purpose. A
+    baseline silently filed under "default" and later compared against a
+    different machine is worse than having no baseline, because it reports a
+    regression that is really a change of computer.
+    """
+    tag = args.platform or os.environ.get("BENCH_PLATFORM")
+    if not tag:
+        env = core.environment()
+        guess = (env.get("gpu") or "unknown").lower().replace(" ", "-")
+        raise SystemExit(
+            "perf baselines are per-machine, so this needs a platform tag.\n"
+            f"  --platform <tag>   or   BENCH_PLATFORM=<tag>\n"
+            f"  this box looks like: {guess}  (gpu_count={env.get('gpu_count')}, "
+            f"driver={env.get('driver')})\n"
+            "The tag is yours to choose; it only has to mean the same machine "
+            "next time.")
+    return tag.strip().replace("/", "-").replace(" ", "-")
+
+
 def run_perf_entry(entry: suite.Entry, out_path: str, timeout: int,
-                   reps: int) -> dict:
+                   reps: int, tag: str) -> dict:
     cmd = [sys.executable, os.path.join(HERE, "perf.py"), entry.name,
            "--out", out_path, "--reps", str(reps)]
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    # Forwarded explicitly: the tag may have come from --platform, which the
+    # child has no other way to see.
+    env = dict(os.environ, PYTHONUNBUFFERED="1", BENCH_PLATFORM=tag)
     print(f"  -- {entry.label}", flush=True)
     proc = subprocess.run(cmd, cwd=ROOT, env=env, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -198,31 +243,53 @@ def run_perf_entry(entry: suite.Entry, out_path: str, timeout: int,
 
 
 def cmd_perf_bless(args) -> int:
-    os.makedirs(PERF_EXPECTED, exist_ok=True)
+    tag = platform_tag(args)
+    target = os.path.join(PERF_EXPECTED, tag)
+    os.makedirs(target, exist_ok=True)
     entries = suite.perf_by_tier(args.tier)
     for e in entries:
-        run_perf_entry(e, os.path.join(PERF_EXPECTED, f"{e.name}.json"),
-                       args.timeout, args.reps)
-    print(f"\nblessed {len(entries)} perf entries into {PERF_EXPECTED}")
+        run_perf_entry(e, os.path.join(target, f"{e.name}.json"),
+                       args.timeout, args.reps, tag)
+    print(f"\nblessed {len(entries)} perf entries into {target}")
+    print(f"these numbers describe platform {tag!r} and nothing else; "
+          "another machine needs its own bless")
     return 0
 
 
 def cmd_perf_check(args) -> int:
     import tempfile
 
+    tag = platform_tag(args)
+    target = os.path.join(PERF_EXPECTED, tag)
+    if not os.path.isdir(target):
+        known = sorted(os.listdir(PERF_EXPECTED)) if os.path.isdir(PERF_EXPECTED) else []
+        print(f"no perf baselines for platform {tag!r}.")
+        print(f"  known platforms: {', '.join(known) or '(none)'}")
+        print("  run perf-bless on this machine first -- comparing against "
+              "another machine's numbers would measure the hardware, not the build.")
+        return 1
+
     failed = {}
     entries = suite.perf_by_tier(args.tier)
     with tempfile.TemporaryDirectory() as tmp:
         for e in entries:
-            baseline_path = os.path.join(PERF_EXPECTED, f"{e.name}.json")
+            baseline_path = os.path.join(target, f"{e.name}.json")
             if not os.path.exists(baseline_path):
-                print(f"  -- {e.label}\n     ! no baseline; run perf-bless")
-                failed[e.name] = ["no baseline recorded"]
+                print(f"  -- {e.label}\n     ! no baseline for {tag!r}; "
+                      "run perf-bless")
+                failed[e.name] = [f"no baseline recorded for platform {tag!r}"]
                 continue
             fresh = run_perf_entry(e, os.path.join(tmp, f"{e.name}.json"),
-                                   args.timeout, args.reps)
+                                   args.timeout, args.reps, tag)
             base = json.load(open(baseline_path))
             problems = []
+            # The tag says these are the same machine. If the machine disagrees,
+            # say so -- a mislabelled baseline turns a hardware change into a
+            # phantom regression, which is the failure this scoping prevents.
+            drift = core.environment_diff(base.get("environment", {}),
+                                          fresh.get("environment", {}))
+            for line in drift:
+                print(f"     ! environment changed under tag {tag!r}: {line}")
             for metric in ("decode", "prefill"):
                 delta = (fresh[metric] - base[metric]) / base[metric] * 100
                 verdict = "ok"
@@ -337,12 +404,14 @@ def main() -> int:
     p.set_defaults(func=cmd_bless)
     p = sub.add_parser("capture"); p.add_argument("entry"); p.add_argument("out")
     p.set_defaults(func=cmd_capture)
-    p = sub.add_parser("perf-check")
-    p.add_argument("--tier", default="fast"); p.add_argument("--reps", type=int, default=5)
-    p.set_defaults(func=cmd_perf_check)
-    p = sub.add_parser("perf-bless")
-    p.add_argument("--tier", default="fast"); p.add_argument("--reps", type=int, default=5)
-    p.set_defaults(func=cmd_perf_bless)
+    for name, fn in (("perf-check", cmd_perf_check), ("perf-bless", cmd_perf_bless)):
+        p = sub.add_parser(name)
+        p.add_argument("--tier", default="fast")
+        p.add_argument("--reps", type=int, default=5)
+        p.add_argument("--platform", default=None,
+                       help="operator's name for this machine; perf baselines "
+                            "are per-machine. Or set BENCH_PLATFORM.")
+        p.set_defaults(func=fn)
 
     args = ap.parse_args()
     return args.func(args)

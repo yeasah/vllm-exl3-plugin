@@ -62,6 +62,15 @@ def main() -> None:
                 "enforce_eager": entry.enforce_eager,
                 "tensor_parallel_size": entry.tensor_parallel_size,
                 "k": args.k,
+                # Correctness baselines are meant to be portable -- they are a
+                # fact about this codebase, not about a machine -- so unlike perf
+                # they are not filed per-platform. But "meant to be" is not
+                # "are": fp16 accumulation depends on tile shapes, which depend
+                # on the GPU, so a check run on different hardware can move
+                # logprobs and occasionally an argmax. Recording this lets
+                # `check` say so instead of reporting a phantom regression.
+                "platform": os.environ.get("BENCH_PLATFORM"),
+                "environment": core.environment(),
                 "prompts": prompts,
             },
             f,

@@ -81,12 +81,19 @@ the fetch is what you want on a fresh box, and the two differ by a flag. The
 entries already carry `model`/`revision`, so this reads the matrix rather than
 duplicating it.
 
-Throughput is now gated separately (`perf-check`/`perf-bless`, baselines in
-`bench/expected/perf/`), reproducing `docs/kernels.md`'s workload shape so that
-note's table stays live. A TP tier wants perf entries too, and there the
-interesting number is not raw throughput but how it *scales* with degree —
+Throughput is gated separately (`perf-check`/`perf-bless`), reproducing
+`docs/kernels.md`'s workload shape so that note's table stays live. Perf
+baselines are per-machine — `bench/expected/perf/<platform>/`, with the tag
+supplied by the operator — because a perf number is a fact about a machine as
+well as about the build. Only `rtx5070ti-dev` is populated.
+
+A TP tier wants perf entries too, and inherits that: `vast` needs its own bless,
+and rentals that are not the same machine need distinct tags. There the
+interesting number is also not raw throughput but how it *scales* with degree —
 a collective-path regression shows up as a scaling change while each degree's
-absolute number still looks plausible against its own baseline.
+absolute number still looks plausible against its own baseline. That comparison
+is cross-entry rather than against a baseline, so it needs something
+`perf-check` does not currently do.
 
 → [bench/README.md](bench/README.md)
 

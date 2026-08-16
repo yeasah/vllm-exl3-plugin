@@ -61,7 +61,7 @@ def main() -> None:
     import sys
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from bench import suite
+    from bench import core, suite
 
     entry = suite.perf_by_name(args.entry)
 
@@ -116,7 +116,15 @@ def main() -> None:
     once()  # discard: autotune, allocator growth and clocks all settle here
     rows = [once() for _ in range(args.reps)]
 
-    result = {"entry": entry.name, "label": entry.label, "reps": args.reps}
+    result = {
+        "entry": entry.name,
+        "label": entry.label,
+        "reps": args.reps,
+        # Not the identity of the platform -- the operator's tag is that, and it
+        # is the directory this lands in. This is the cross-check on the tag.
+        "platform": os.environ.get("BENCH_PLATFORM"),
+        "environment": core.environment(),
+    }
     for name, vals in (
         ("decode", [r[0] for r in rows]),
         ("prefill", [r[1] for r in rows]),

@@ -1,0 +1,33 @@
+{
+ "entry": "qwen3.5-35B-A3B-2.0bpw-MoE-perf",
+ "label": "qwen3.5-35B-A3B 2.0bpw MoE perf",
+ "reps": 5,
+ "platform": "rtx5070ti-dev",
+ "environment": {
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "gpu_count": 1,
+  "capability": "12.0",
+  "vllm": "0.27.1.dev0+ge50f7d369.d20260810",
+  "driver": "610.57.04"
+ },
+ "decode": 547.6,
+ "decode_spread_pct": 0.4,
+ "decode_samples": [
+  548.1,
+  548.8,
+  546.6,
+  547.6,
+  546.6
+ ],
+ "prefill": 960.2,
+ "prefill_spread_pct": 0.15,
+ "prefill_samples": [
+  961.2,
+  960.2,
+  959.8,
+  960.5,
+  960.2
+ ]
+}

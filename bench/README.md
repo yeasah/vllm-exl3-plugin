@@ -7,8 +7,8 @@ bench/run.py list                 what the matrix covers, and why
 bench/run.py check [--tier fast]  compare a fresh capture to the baseline
 bench/run.py bless [--tier fast]  record the current build as the baseline
 bench/run.py capture <entry> OUT  one entry, for hand inspection
-bench/run.py perf-check           throughput against its own baseline
-bench/run.py perf-bless           record throughput baselines
+bench/run.py perf-check  --platform TAG   throughput vs this machine's baseline
+bench/run.py perf-bless  --platform TAG   record this machine's throughput
 ```
 
 `check` reads *what* is served and is blind to how fast; `perf-check` is the
@@ -71,11 +71,41 @@ argmax at fixed context is one a human should look at, and it will occasionally
 fire on something benign — that cost buys a gate that does not quietly absorb the
 next dropped norm.
 
+## Two kinds of baseline, and why they are stored differently
+
+This is the distinction the layout exists to enforce:
+
+- A **correctness** baseline is a fact about this codebase and its dependencies.
+  Run the same build anywhere and it should hold. Stored flat in `expected/`.
+- A **perf** baseline is that *plus a machine*. Stored under
+  `expected/perf/<platform>/`, and `perf-check` refuses to compare across
+  platforms rather than reporting a change of computer as a regression.
+
+**The platform tag is the operator's, and it is mandatory.** There is no default
+and no attempt to fingerprint the machine, because a machine cannot be identified
+from inside it — firmware, host BIOS, thermal headroom, a noisy neighbour on a
+shared host and the hypervisor's own scheduling all move throughput and none are
+visible. Auto-detection would produce a key that looks authoritative and is not.
+So `--platform <tag>` or `BENCH_PLATFORM=<tag>`, at whatever granularity you
+need: one box, or `vast-8x3090-a` and `-b` if rentals need telling apart. It only
+has to mean the same machine next time.
+
+What the machine *will* admit — GPU name, capability, driver, torch, CUDA, vLLM
+version — is recorded as **evidence, not identity**. `perf-check` prints any
+field that changed under a tag, because a mislabelled baseline is exactly the
+failure this scoping prevents.
+
+Correctness baselines carry the same record but are **not** scoped by it, and
+`check` only warns. Portability is the intent — but "meant to be portable" is not
+"is": fp16 accumulation depends on tile shapes, which depend on the GPU, so a
+check on different hardware can move logprobs and occasionally an argmax. The
+warning is there so that reads as hardware rather than as a regression.
+
 ## Throughput
 
-Separate entries, separate baselines (`expected/perf/`), and a different
-configuration: **CUDA graphs on**, because perf measured in eager mode would gate
-a way nobody serves. The workload deliberately reproduces the shape in
+Separate entries, separate baselines, and a different configuration: **CUDA
+graphs on**, because perf measured in eager mode would gate a way nobody serves.
+The workload deliberately reproduces the shape in
 [docs/kernels.md](../docs/kernels.md) — decode 8 concurrent × 128 tokens, prefill
 4 × ~2.2k, fp16, prefix caching off — so that note's recorded numbers and these
 are the same measurement. It reproduces to ~0.1% on decode.

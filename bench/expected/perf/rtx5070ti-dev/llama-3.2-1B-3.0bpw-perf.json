@@ -1,0 +1,33 @@
+{
+ "entry": "llama-3.2-1B-3.0bpw-perf",
+ "label": "llama-3.2-1B 3.0bpw perf",
+ "reps": 5,
+ "platform": "rtx5070ti-dev",
+ "environment": {
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "gpu_count": 1,
+  "capability": "12.0",
+  "vllm": "0.27.1.dev0+ge50f7d369.d20260810",
+  "driver": "610.57.04"
+ },
+ "decode": 2746.7,
+ "decode_spread_pct": 1.1,
+ "decode_samples": [
+  2738.4,
+  2762.5,
+  2746.7,
+  2732.3,
+  2747.5
+ ],
+ "prefill": 34307.8,
+ "prefill_spread_pct": 1.27,
+ "prefill_samples": [
+  34307.8,
+  34676.0,
+  34560.4,
+  34240.9,
+  34295.6
+ ]
+}

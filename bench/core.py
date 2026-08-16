@@ -49,6 +49,61 @@ PROMPTS = [
 ]
 
 
+def environment() -> dict:
+    """What the machine will admit about itself.
+
+    This is **evidence, not identity**. A perf baseline is only meaningful on the
+    platform that produced it, and no amount of introspection identifies a
+    platform reliably: firmware, host BIOS, thermal headroom, a noisy neighbour
+    on a shared host and the hypervisor's own scheduling all move throughput and
+    none of them are visible from in here. So the operator supplies the identity
+    (see `bench/run.py --platform`) and this exists to cross-check it -- if the
+    tag says one box and the GPU name says another, something is mislabelled and
+    the numbers should not be trusted.
+
+    Best-effort throughout: a missing field is recorded as None rather than
+    failing a run, since none of this is load-bearing on its own.
+    """
+    env: dict = {}
+    try:
+        import torch
+
+        env["torch"] = torch.__version__
+        env["cuda"] = torch.version.cuda
+        if torch.cuda.is_available():
+            env["gpu"] = torch.cuda.get_device_name(0)
+            env["gpu_count"] = torch.cuda.device_count()
+            major, minor = torch.cuda.get_device_capability(0)
+            env["capability"] = f"{major}.{minor}"
+    except Exception:  # pragma: no cover - probing must never fail a run
+        pass
+    try:
+        import vllm
+
+        env["vllm"] = vllm.__version__
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        import subprocess
+
+        env["driver"] = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip().splitlines()[0]
+    except Exception:  # pragma: no cover
+        env["driver"] = None
+    return env
+
+
+def environment_diff(a: dict, b: dict) -> list[str]:
+    """Fields that differ between two `environment()` records."""
+    return [
+        f"{k}: {a.get(k)!r} -> {b.get(k)!r}"
+        for k in sorted(set(a) | set(b))
+        if a.get(k) != b.get(k)
+    ]
+
+
 def prompt_ids(tok, text: str) -> list[int]:
     """Chat-templated token ids for one prompt.
 
