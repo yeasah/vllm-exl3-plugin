@@ -90,10 +90,37 @@ So `--platform <tag>` or `BENCH_PLATFORM=<tag>`, at whatever granularity you
 need: one box, or `vast-8x3090-a` and `-b` if rentals need telling apart. It only
 has to mean the same machine next time.
 
-What the machine *will* admit — GPU name, capability, driver, torch, CUDA, vLLM
-version — is recorded as **evidence, not identity**. `perf-check` prints any
-field that changed under a tag, because a mislabelled baseline is exactly the
-failure this scoping prevents.
+What the machine *will* admit — GPU name, capability, driver, torch, CUDA — is
+recorded as **evidence, not identity**. `perf-check` prints any field that
+changed under a tag, because a mislabelled baseline is exactly the failure this
+scoping prevents.
+
+### Do not trust the package version string
+
+`vllm.__version__` reports `0.27.1.dev0+ge50f7d369.d20260810` for a checkout
+detached at **v0.27.0**. The hash and date are right; the base version is not —
+it appears to be whatever was newest when the editable build was made. It is
+recorded as `vllm_reported` and should be read as a hint, never as the answer.
+
+The worse problem is invisible rather than wrong: this project applies
+`patches/` to vLLM as **unstaged working-tree changes**, and no version string
+can see those. Two baselines could carry an identical version field and have been
+produced by different patch stacks — which, for a gate whose entire job is
+spanning a dependency bump, is the difference most likely to matter.
+
+So each capture records `git` provenance for all three trees that decide what it
+means — the plugin, vLLM and exllamav3:
+
+```json
+"src.vllm": {"describe": "v0.27.0-dirty", "head": "e50f7d3696",
+             "dirty_files": 9, "diff_sha": "a0f2e5c81d51", "untracked": 0}
+```
+
+`describe` is the truth the version string missed, and `diff_sha` — a digest of
+`git diff HEAD` — is what distinguishes patch stacks. It identifies a stack
+without describing it; to see what changed, diff the trees. The digest covers
+tracked modifications only, so `untracked` is counted separately, since an
+untracked `.py` inside a package does change behaviour.
 
 Correctness baselines carry the same record but are **not** scoped by it, and
 `check` only warns. Portability is the intent — but "meant to be portable" is not

@@ -49,6 +49,74 @@ PROMPTS = [
 ]
 
 
+def _git(path: str, *args: str) -> str | None:
+    import subprocess
+
+    try:
+        out = subprocess.run(("git", "-C", path) + args, capture_output=True,
+                             text=True, timeout=15)
+        return out.stdout.strip() if out.returncode == 0 else None
+    except Exception:  # pragma: no cover - probing must never fail a run
+        return None
+
+
+def source_provenance(path: str) -> dict | None:
+    """What code a source tree actually held, which its package version may not say.
+
+    Installed version strings are not reliable here and one of ours is actively
+    wrong: vLLM is an editable install off a detached HEAD at `v0.27.0`, and
+    reports `0.27.1.dev0+ge50f7d369.d20260810`. The hash and date are right; the
+    base version is not -- it appears to be whatever was newest when the build
+    was made. `git describe` says `v0.27.0-dirty`, which is the truth.
+
+    The worse problem is invisible rather than wrong. This project applies
+    `patches/` to vLLM as **unstaged working-tree changes**, and no version
+    string can see those. Two baselines could carry an identical `vllm` field
+    and have been produced by different patch stacks -- which, for a gate whose
+    whole job is spanning a dependency bump, is the difference most likely to
+    matter. `diff_sha` is what distinguishes them.
+
+    Limits worth knowing: the digest covers tracked modifications only, so
+    `untracked` is reported separately (an untracked `.py` inside a package
+    does change behaviour), and the digest identifies a patch stack without
+    describing it -- to see what changed, diff the trees.
+    """
+    head = _git(path, "rev-parse", "HEAD")
+    if head is None:
+        return None  # not a git checkout: a wheel install, or a tarball
+    status = _git(path, "status", "--porcelain") or ""
+    dirty = [ln for ln in status.splitlines() if ln.strip()]
+    diff = _git(path, "diff", "HEAD")
+    diff_sha = None
+    if diff:
+        import hashlib
+
+        diff_sha = hashlib.sha256(diff.encode()).hexdigest()[:12]
+    untracked = _git(path, "ls-files", "--others", "--exclude-standard") or ""
+    return {
+        "describe": _git(path, "describe", "--tags", "--always", "--dirty"),
+        "head": head[:10],
+        "dirty_files": len(dirty),
+        "diff_sha": diff_sha,
+        "untracked": len([ln for ln in untracked.splitlines() if ln.strip()]),
+    }
+
+
+def _source_trees() -> dict:
+    """Locate the three trees whose contents decide what a baseline means."""
+    import os
+
+    trees = {"plugin": os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}
+    for name in ("vllm", "exllamav3"):
+        try:
+            module = __import__(name)
+            # <repo>/<package>/__init__.py -> <repo>
+            trees[name] = os.path.dirname(os.path.dirname(os.path.abspath(module.__file__)))
+        except Exception:  # pragma: no cover
+            continue
+    return trees
+
+
 def environment() -> dict:
     """What the machine will admit about itself.
 
@@ -80,9 +148,16 @@ def environment() -> dict:
     try:
         import vllm
 
-        env["vllm"] = vllm.__version__
+        # Kept for continuity, but do not read it as the truth -- see
+        # `source_provenance`. This string says 0.27.1.dev0 for a checkout
+        # detached at v0.27.0, and cannot see our unstaged patches at all.
+        env["vllm_reported"] = vllm.__version__
     except Exception:  # pragma: no cover
         pass
+    for name, path in _source_trees().items():
+        prov = source_provenance(path)
+        if prov is not None:
+            env[f"src.{name}"] = prov
     try:
         import subprocess
 
@@ -96,12 +171,23 @@ def environment() -> dict:
 
 
 def environment_diff(a: dict, b: dict) -> list[str]:
-    """Fields that differ between two `environment()` records."""
-    return [
-        f"{k}: {a.get(k)!r} -> {b.get(k)!r}"
-        for k in sorted(set(a) | set(b))
-        if a.get(k) != b.get(k)
-    ]
+    """Fields that differ between two `environment()` records.
+
+    Descends one level into the `src.*` records, so a changed patch stack reports
+    as `src.vllm.diff_sha: ... -> ...` rather than as two opaque dicts.
+    """
+    lines = []
+    for k in sorted(set(a) | set(b)):
+        av, bv = a.get(k), b.get(k)
+        if av == bv:
+            continue
+        if isinstance(av, dict) and isinstance(bv, dict):
+            for sub in sorted(set(av) | set(bv)):
+                if av.get(sub) != bv.get(sub):
+                    lines.append(f"{k}.{sub}: {av.get(sub)!r} -> {bv.get(sub)!r}")
+        else:
+            lines.append(f"{k}: {av!r} -> {bv!r}")
+    return lines
 
 
 def prompt_ids(tok, text: str) -> list[int]:
