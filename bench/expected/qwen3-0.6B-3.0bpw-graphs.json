@@ -7,6 +7,37 @@
  "enforce_eager": false,
  "tensor_parallel_size": 1,
  "k": 20,
+ "platform": null,
+ "environment": {
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "gpu_count": 1,
+  "capability": "12.0",
+  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260810",
+  "src.plugin": {
+   "describe": "ffeb876-dirty",
+   "head": "ffeb87696d",
+   "dirty_files": 2,
+   "diff_sha": "ea7154ab4747",
+   "untracked": 0
+  },
+  "src.vllm": {
+   "describe": "v0.27.0-dirty",
+   "head": "e50f7d3696",
+   "dirty_files": 9,
+   "diff_sha": "a0f2e5c81d51",
+   "untracked": 0
+  },
+  "src.exllamav3": {
+   "describe": "v1.4.2-12-g493a323",
+   "head": "493a323dc7",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "driver": "610.57.04"
+ },
  "prompts": [
   {
    "ids": [

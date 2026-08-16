@@ -190,6 +190,37 @@ def environment_diff(a: dict, b: dict) -> list[str]:
     return lines
 
 
+def split_environment_diff(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Separate drift worth a warning from drift that is just development.
+
+    The plugin's own tree moves with every commit, so reporting it at the same
+    volume as everything else would put a warning on essentially every run --
+    and a warning that always fires is one you stop reading, which is the
+    failure this whole file is trying to avoid elsewhere.
+
+    So it is still reported, because knowing the baseline came from different
+    plugin code is real context when reading a failure, just not as an alarm.
+    Dependency and machine drift keep the alarm: those are the changes a bump
+    gate exists to notice, and neither should happen quietly.
+    """
+    notable = [ln for ln in lines if not ln.startswith("src.plugin.")]
+    plugin = [ln for ln in lines if ln.startswith("src.plugin.")]
+    return notable, plugin
+
+
+def report_environment_diff(base: dict, fresh: dict, indent: str = "     ") -> None:
+    """Print drift between two `environment()` records, alarming selectively."""
+    notable, plugin = split_environment_diff(environment_diff(base, fresh))
+    for line in notable:
+        print(f"{indent}! {line}")
+    if plugin:
+        summary = "; ".join(
+            ln.split(": ", 1)[0].removeprefix("src.plugin.") for ln in plugin
+        )
+        print(f"{indent}  (plugin tree differs from baseline: {summary} -- "
+              "expected during development)")
+
+
 def prompt_ids(tok, text: str) -> list[int]:
     """Chat-templated token ids for one prompt.
 

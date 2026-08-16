@@ -134,9 +134,8 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
     # Reported, never failed on. Different hardware is a legitimate thing to run
     # a correctness check on -- that is rather the point of a portable baseline
     # -- but it changes how a failure should be read, so it is surfaced first.
-    for line in core.environment_diff(base.get("environment", {}),
-                                      fresh.get("environment", {})):
-        print(f"     ! environment differs from baseline: {line}")
+    core.report_environment_diff(base.get("environment", {}),
+                                 fresh.get("environment", {}))
 
     if fresh.get("weight_gib") is not None and base.get("weight_gib") is not None:
         if fresh["weight_gib"] != base["weight_gib"]:
@@ -243,6 +242,7 @@ def run_perf_entry(entry: suite.Entry, out_path: str, timeout: int,
 
 
 def cmd_perf_bless(args) -> int:
+    warn_if_plugin_dirty()
     tag = platform_tag(args)
     target = os.path.join(PERF_EXPECTED, tag)
     os.makedirs(target, exist_ok=True)
@@ -286,10 +286,8 @@ def cmd_perf_check(args) -> int:
             # The tag says these are the same machine. If the machine disagrees,
             # say so -- a mislabelled baseline turns a hardware change into a
             # phantom regression, which is the failure this scoping prevents.
-            drift = core.environment_diff(base.get("environment", {}),
-                                          fresh.get("environment", {}))
-            for line in drift:
-                print(f"     ! environment changed under tag {tag!r}: {line}")
+            core.report_environment_diff(base.get("environment", {}),
+                                         fresh.get("environment", {}))
             for metric in ("decode", "prefill"):
                 delta = (fresh[metric] - base[metric]) / base[metric] * 100
                 verdict = "ok"
@@ -330,7 +328,28 @@ def cmd_capture(args) -> int:
     return 0
 
 
+def warn_if_plugin_dirty() -> None:
+    """A baseline blessed from a dirty plugin tree records a state that never recurs.
+
+    vLLM being dirty is normal here -- `patches/` lives in its working tree -- so
+    that is not worth a word. The plugin's own tree is different: `diff_sha` then
+    names a working state nobody can return to, and a later `check` cannot tell
+    whether it is comparing against committed code or against a half-finished
+    edit. Worse, editing during a long `bless` gives *different* entries
+    different provenance, which is how this warning came to exist.
+    """
+    prov = core.source_provenance(ROOT) or {}
+    if prov.get("dirty_files"):
+        print(f"  ! plugin tree is dirty ({prov['dirty_files']} files, "
+              f"diff_sha {prov.get('diff_sha')}).")
+        print("    Baselines will record a working state that cannot be "
+              "recovered later; commit first if these are meant to last.")
+        print("    Do not edit the tree while this runs -- entries blessed "
+              "before and after would disagree about what produced them.")
+
+
 def cmd_bless(args) -> int:
+    warn_if_plugin_dirty()
     os.makedirs(EXPECTED, exist_ok=True)
     blessed = 0
     for e in suite.by_tier(args.tier):
