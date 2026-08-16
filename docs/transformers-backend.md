@@ -49,6 +49,13 @@ model is the case that forced the safetensors-index-as-ground-truth decision —
 `tensor_storage` omits all 303 vision-tower modules — and the vision tower is
 separately quantized at `vision_bits: 4`. Both held up.
 
+**This says the tower loads and dispatches, and nothing more.** No image has ever
+been passed through it: every result in this note, and the `bench/` entries built
+from them, uses text-only prompts. That is the same assumption that made this
+model's *text* path look healthy while it emitted confident garbage — see
+[What the backend drops](#what-the-backend-drops), where loading was likewise not
+working. Tracked as TODO `multimodal`.
+
 ## The one blocker: `ReplicatedLinear` has no `weight_loader_v2`
 
 `ColumnParallelLinear` (`linear.py:512`) and `RowParallelLinear` (`:1704`) both pick

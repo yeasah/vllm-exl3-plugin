@@ -269,7 +269,49 @@ graph, so arithmetic living above it or inside a layer it substitutes gets dropp
   `ForCausalLM.forward` against the backend's `compute_logits`, and each
   substituted layer class against its replacement — would catch the whole family.
 - **Breadth.** Three architectures tested through the backend, one of them
-  multimodal and generating correctly. Still no MoE and no TP through the backend.
+  multimodal and generating correctly — on *text* prompts only; no image has been
+  passed through any of it, see `multimodal`. Still no MoE and no TP through the
+  backend.
+
+## `multimodal` — Actually pass an image through, and gate it
+
+**Outcome wanted:** an EXL3 checkpoint demonstrably *understanding an image*
+served through vLLM, plus a `bench/` entry that keeps it that way.
+
+The project's default position is that multimodal does not matter yet, and as a
+sequencing call that is still right. But the practice contradicts the position —
+graphs and screenshots are how people actually hand over context, this project's
+users included — so the honest version is "deferred", not "irrelevant".
+
+**The specific gap is narrower than "no multimodal support", and worse.** The
+vision tower already loads and is quantized correctly: on
+`Muse-Glimmer-30B-exl3`, 567 `EXL3LinearMethod` dispatches cover the whole
+50-layer tower at `vision_bits: 4`, and that checkpoint is what forced the
+safetensors-index-as-ground-truth decision. **But no image has ever been passed
+through it.** Every test to date — the diagnostic, the `bench/` entry, qbench —
+uses text-only prompts. That is exactly the assumption that let Muse's *text*
+path look healthy while it emitted confident garbage: loading is not working,
+and only a comparison against another engine showed the difference.
+
+**Candidate approach: the instrument that already worked.** exllamav3 implements
+this vision path natively (`MuseGlimmerVisionModel`, `examples/imgdesc.py`), so
+the same image and prompt can go through both engines and be compared token for
+token. It is the reference the text case proved worth having, and it is the only
+one available — there is no fp16 Muse-Glimmer on hand to fall back to.
+
+**Two obstacles, both already characterized rather than guessed:**
+
+- **Native vLLM cannot serve the quantized vision adapter at all.** vLLM main
+  builds `vision_adapter.c_fc` as a plain `nn.Linear`, which never reaches
+  `get_quant_method`, so no quantization plugin can touch it. `--model-impl
+  transformers` is the only route; `--language-model-only` bypasses vision
+  entirely and is the reason this stayed invisible.
+- **The gate is text-only.** `bench/core.py`'s prompts are strings, and an image
+  entry needs a different capture shape — the fixture has to be committed with
+  the baseline, since a baseline against an image that later changes is worthless.
+
+→ [docs/transformers-backend.md](docs/transformers-backend.md),
+[bench/README.md](bench/README.md)
 
 ## `exl3-metadata` — Improving the metadata situation
 
