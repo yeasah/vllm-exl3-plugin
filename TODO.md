@@ -258,21 +258,39 @@ given ~2 more bpw than the embedding, which is what our head sweep measured
 independently (the head is ~60x more bit-sensitive). Worth weighing: llama.cpp
 arrived at the same shape by different means.
 
-**What is actually available, checked rather than assumed:**
+**What is actually available, checked rather than assumed. This is the part that
+changes the calculus.** GGUF left vLLM's tree
+([RFC #39583](https://github.com/vllm-project/vllm/issues/39583)) but not the
+ecosystem: it moved to
+[vllm-project/vllm-gguf-plugin](https://github.com/vllm-project/vllm-gguf-plugin),
+an **official out-of-tree quantization plugin with the same architecture as this
+one** — `quantization/config.py`, `linear.py`, `fused_moe.py`, a `plugin.py`
+entry point. Apache-2.0, same as us, and actively developed (pushed 2026-08-16).
 
-- **vLLM's GGUF support is gone.** No `gguf` module in v0.27.0 or main, and it is
-  absent from the registered quantization methods. There is *no* vLLM serving
-  path to reuse — the premise that motivated the question does not hold.
-- **Decoding is free.** `gguf-py` dequantizes every type in pure Python, and the
-  format is stable and well-specified.
-- **Encoding is not.** `gguf-py` quantizes only the simple types; every k-quant
-  raises `NotImplementedError`, because those encoders are C in llama.cpp. A
-  repair tool would have to shell out to `llama-quantize`, bind ggml, or
+- **It already serves embeddings quantized, gathering rows.** Not dequant-at-load
+  — `quantization/vocal_embeds.py` does
+  `torch.index_select(qweight, dim=0, index=x_flat)` then
+  `ops.ggml_dequantize(...)` on just those rows. **That is precisely the untied
+  per-row serving path `quantized-embeddings` is blocked on**, already written.
+- **The gather is far simpler than ours**, because GGUF's row-major block layout
+  makes rows independently sliceable: no Hadamard, none of the 128-block read
+  amplification `embed_rows` has to amortize, and no `torch.unique` — so none of
+  the `embed-rows-compile` capture trouble either.
+- **The GPU decode is not ours to write.** It ships Triton dequant kernels for
+  q2_k..q8_1 and iq1_s..iq4_xs, plus CUDA (`csrc/gguf/dequantize.cuh`).
+- **Decoding off-GPU is free too**: `gguf-py` dequantizes every type in pure
+  Python, which is enough for the offline comparison below.
+- **Encoding is the one real gap.** `gguf-py` quantizes only simple types; every
+  k-quant raises `NotImplementedError`, since those encoders are C in llama.cpp.
+  A repair tool would have to shell out to `llama-quantize`, bind ggml, or
   reimplement.
-- **The GPU gather is ours either way**, and is the same slice-plus-decode the
-  bespoke format would need. Block-scaled formats slice cleanly at superblock
-  granularity; assert `hidden % 256 == 0` rather than assume it.
-- **Licence is MIT**, so unlike `yaqa` there is no reading restriction.
+
+**The honest objection, and it may be weaker than it looks.** Using GGUF for the
+embedding means a hybrid checkpoint: EXL3 trellis body, GGUF-quantized embedding.
+Nothing else would read it — but nothing else would read a bespoke per-row
+embedding either, since exllamav3 does not serve one. So the incompatibility is a
+cost we are paying under either plan, and the question is only which format the
+plugin has to implement.
 
 **The real tension to resolve.** `quantized-embeddings` settled on *bit-pack,
 arbitrary depths 4-8* because measured optima are per-model and rarely
@@ -288,6 +306,16 @@ reconstruction error and downstream KLD against qbench's `fake_quantize` per-row
 simulation at matched bytes — qbench already has the `embed_quant` hook for
 exactly this sweep. No kernel work, no llama.cpp, and it answers the question
 that decides the format.
+
+**Then a second question, which only arises if the first says GGUF: reuse or
+reimplement?** Two Apache-2.0 out-of-tree plugins registering different quant
+methods through `vllm.general_plugins` should coexist, but "should" is doing work
+there and nobody has tried it. The options are to depend on `vllm-gguf-plugin`
+for the embedding path, vendor the pieces we need, or write our own against the
+format. Worth noting the sibling is also simply *worth reading* regardless of the
+outcome here — it is the only other example of this exact plugin shape, and it has
+solved problems we have hit (weight adapters per model family, a generic GGUF
+weight adapter rather than an allowlist).
 
 → [docs/embeddings.md](docs/embeddings.md)
 
