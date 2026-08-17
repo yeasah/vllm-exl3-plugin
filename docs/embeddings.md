@@ -875,8 +875,8 @@ per-model tuning*:
   With the k-shape layout, one setting covers all three models: **4 bits, 4.5 bpw**, at a
   tax of 0.19x / 0.32x / 1.49x the respective noise floors. The per-row scheme needed
   4 / ~5 / 6 bits per model to get there and needed 6 bits (6.02 bpw) as a conservative
-  default. That is 1.5 bpw saved on every untied model — 0.18 GiB on gemma-4-12B's
-  embedding, 0.19 GiB on Qwen3.5-9B's — plus the calibration sweep no longer being
+  default. That is 1.5 bpw saved on every untied model — 0.18 GiB on each of
+  gemma-4-12B's and Qwen3.5-9B's embeddings — plus the calibration sweep no longer being
   required per model.
 - **The 3-bit cliff is a per-row artifact, not a property of the embedding.** Per-row
   3-bit destroys gemma (+0.486) and so does per-blk32 2-bit (+0.295, same 3.0 bpw), but
