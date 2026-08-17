@@ -64,7 +64,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [kernels.md](docs/kernels.md) | fused kernels, reconstruct threshold, CUDA graphs, bf16, benchmarks |
 | [tensor-parallel.md](docs/tensor-parallel.md) | Hadamard-block-128 sharding, what each TP degree admits, hardware results |
 | [moe.md](docs/moe.md) | `exl3_mgemm` behind `FusedMoE`, the Laguna scale factor, the sm_90+ barrier hang |
-| [embeddings.md](docs/embeddings.md) | quantized embeddings, per-row vs. trellis, depth selection, serving under torch.compile |
+| [embeddings.md](docs/embeddings.md) | quantized embeddings, block-scaled vs. trellis, storage format, depth selection, serving under torch.compile |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
 | [exllamav3-arch.md](docs/exllamav3-arch.md) | where exllamav3 branches by GPU architecture |

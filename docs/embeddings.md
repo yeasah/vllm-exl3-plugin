@@ -397,7 +397,8 @@ bits, since the layer curve has to flatten hard (0.0270 is already only 0.025 ab
 buys).
 
 So Phase B should **not** be "quantize the embedding with exllamav3's quantizer". It should
-be a per-row integer scheme at 4-6 bits: better quality per bit by an order of magnitude,
+be a scalar integer scheme (per-row here; block-scaled by the later measurement below) at
+4-6 bits: better quality per bit by an order of magnitude,
 far simpler, no Hadamard, no 128-block read amplification, and a trivially cheap row
 gather.
 
@@ -543,6 +544,11 @@ to that work rather than as an independent goal.
 
 ## Choosing depths: what the repair tool should default to
 
+*Partly superseded by "Is GGUF the right storage format?" below, which changed the storage
+layout from per-row to block-scaled. The marginal-KLD-per-byte criterion and the head/layer
+curves still hold; the per-model depth calibration this section concludes with does not —
+one constant covers every model measured in the block-scaled layout.*
+
 The criterion that makes this well-posed is **equal marginal KLD per byte** -- push a
 component's depth until the next byte buys less there than it would elsewhere. Both curves
 are measured: the embed/head taxes here, and the layer curve from turboderp's own model
@@ -593,6 +599,10 @@ optimization in the from-scratch quantizer, where layer bpw is free and the
 Lagrangian actually binds.
 
 ### Untied models, measured
+
+*The 35x spread below is a property of the per-row scheme, not of the models. See "Is GGUF
+the right storage format?" — under the block-scaled layout the same three models are within
+a factor of 8 of each other and all fit one default.*
 
 Three checkpoints, embedding varied with the trellis head untouched. Two are genuinely
 untied, so this is the first time the embedding is perturbed on models where it is a
@@ -676,3 +686,202 @@ model. See "Choosing depths" and "Untied models, measured".
 What remains open is only the generalization: everything measured is gemma-4-12B,
 MiniCPM5-1B and Qwen3.5-9B. The *shape* of the findings should transfer; the constants
 are theirs.
+
+## Is GGUF the right storage format? Measured, and no — but its *layout* is
+
+*Tracked in TODO as `gguf-embeddings`, and this settles it. Measured 2026-08-17.*
+
+The question was whether a GGUF quantization type should be the storage format for a
+quantized embedding, instead of the bespoke per-row scheme the sweeps above settled on.
+It is a fair question: GGUF's k-quants are the same *family* the per-row result pointed
+at (block-scaled scalar quantization, not a trellis), matured over years, with encoders,
+GPU dequant kernels and an already-written vLLM gather path in the sibling
+`vllm-gguf-plugin`.
+
+Answer: **no.** Not because GGUF is worse — at matched bytes it is roughly a tie — but
+because the entire measurable advantage comes from a structural property that is ~30
+lines to implement ourselves, and none of it comes from the parts that would cost a
+dependency.
+
+### Method
+
+Three models, each with its EXL3 checkpoint's embedding replaced and everything else held
+fixed, scored against that model's own bf16 reference. Two new `Exl3Backend` hooks make
+the arms commensurable: `embed_quant`'s `granularity` gained `block:N` and `kshape:N`, and
+a new `embed_file` option substitutes an embedding matrix from a safetensors file — which
+is how a *real* GGUF encoder's output gets scored on exactly the same footing as the
+simulated precision levels.
+
+The GGUF embeddings are real published ones (unsloth and bartowski quants of the same base
+checkpoints the EXL3 quants came from), dequantized offline with `gguf-py`. Only the
+`token_embd` tensor was fetched — a GGUF's tensor offsets are in its header, so an HTTP
+range request against a sparse local file gets one tensor out of a 5 GiB quant without
+downloading the rest.
+
+The schemes, with what each really costs to store:
+
+| scheme | bpw | what it is |
+|---|---|---|
+| per-row N-bit | N + 32/hidden | fp16 min+max per row — **the bespoke plan** |
+| per-blk{32,64,128} N-bit | N + {1, 0.5, 0.25} | fp16 min+max per block, the naive block scheme |
+| k-shape N-bit | N + 0.5 | **Q4_K's layout, naive encoder** (see below) |
+| GGUF IQ3_S / IQ4_XS / Q4_K / Q5_K | 3.4375 / 4.25 / 4.5 / 5.5 | the real thing |
+
+"k-shape" is the arm that makes the comparison decide something. It is GGUF's own
+structure — superblocks of 256, sub-blocks of 32, each with its own (min, scale), those
+sub-scalars themselves quantized to 6 bits against one fp16 pair per superblock — encoded
+the most naive possible way, from min/max, with no rounding search and no imatrix. At
+4 bits it is 4.5 bpw, *byte-identical to Q4_K*. Whatever separates the two is llama.cpp's
+encoder, not its format, which is precisely the thing worth knowing before taking on a
+dependency to get it.
+
+### The measurements
+
+Tax = KLD above the same checkpoint's fp16-embedding baseline. "x floor" is that tax
+against the model's own self-noise floor, i.e. below 1.0 is not resolvable.
+
+**gemma-4-12B-it @4.00bpw** (baseline 0.026963, floor 0.001759):
+
+| bpw | scheme | tax | x floor |
+|---|---|---|---|
+| 3.0083 | per-row 3-bit | +0.485605 | 276 |
+| 3.0000 | per-blk32 2-bit | +0.295291 | 168 |
+| **3.5000** | **k-shape 3-bit** | **+0.000690** | 0.39 |
+| 4.0000 | per-blk32 3-bit | +0.000742 | 0.42 |
+| 4.0083 | per-row 4-bit | +0.001872 | 1.06 |
+| **4.5000** | **k-shape 4-bit** | **+0.000330** | 0.19 |
+| 4.5000 | per-blk64 4-bit | +0.000399 | 0.23 |
+| 5.0083 | per-row 5-bit | +0.000572 | 0.33 |
+| 5.5000 | **GGUF Q5_K** | +0.000221 | 0.13 |
+| 5.5000 | per-blk64 5-bit | +0.000000 | 0.00 |
+| 6.0083 | per-row 6-bit | +0.000243 | 0.14 |
+
+**Qwen3.5-9B @4.00bpw** (baseline 0.013128, floor 0.001350) — the model that resolves the
+question, because its embedding taxes run to 90x its noise floor where gemma's sit below
+it:
+
+| bpw | scheme | tax | x floor |
+|---|---|---|---|
+| 3.4375 | **GGUF IQ3_S** | +0.006802 | 5.04 |
+| **3.5000** | **k-shape 3-bit** | **+0.003993** | 2.96 |
+| 3.5000 | per-blk64 3-bit | +0.007254 | 5.37 |
+| 4.0000 | per-blk32 3-bit | +0.004181 | 3.10 |
+| 4.0078 | per-row 4-bit | +0.122225 | **90.6** |
+| 4.2500 | **GGUF IQ4_XS** | +0.000845 | 0.63 |
+| 4.2500 | per-blk128 4-bit | +0.003407 | 2.52 |
+| 4.5000 | **GGUF Q4_K** | +0.000308 | 0.23 |
+| **4.5000** | **k-shape 4-bit** | **+0.000428** | 0.32 |
+| 4.5000 | per-blk64 4-bit | +0.000970 | 0.72 |
+| 5.0078 | per-row 5-bit | +0.044159 | 32.7 |
+| 6.0078 | per-row 6-bit | +0.004945 | 3.66 |
+
+**MiniCPM5-1B @3.00bpw** (baseline 0.114097, floor 0.000977) — the case that reverses the
+*naive* block scheme, and the reason the k-shape arm matters:
+
+| bpw | scheme | tax | x floor |
+|---|---|---|---|
+| 3.5000 | k-shape 3-bit | +0.008615 | 8.82 |
+| 4.0000 | per-blk32 3-bit | +0.009376 | 9.59 |
+| 4.0208 | per-row 4-bit | +0.003920 | 4.01 |
+| 4.5000 | k-shape 4-bit | +0.001456 | 1.49 |
+| 5.0000 | per-blk32 4-bit | +0.001458 | 1.49 |
+| 5.0208 | per-row 5-bit | +0.000724 | 0.74 |
+| 5.5000 | k-shape 5-bit | +0.000353 | 0.36 |
+| 6.0208 | per-row 6-bit | +0.000268 | 0.27 |
+
+### What it says
+
+**1. Per-row min/max is dominated, and not narrowly.** At matched bytes on Qwen3.5-9B,
+block-scaled 3-bit costs +0.0042 where per-row 4-bit costs +0.1222 — **29x**, and at
+5 bpw it is 134x. The mechanism is visible in reconstruction: per-row's *worst* rows blow
+up (row-relative L2 p99 0.61 and max 2.25 on gemma at 4 bits, i.e. rows destroyed
+outright) while its median row is fine, because one outlier component sets the scale for
+the whole row. A block scale confines that damage to 32 values. Since an embedding row is
+one *token*, the tail is exactly what matters.
+
+**2. GGUF's k-quants and a naive encoder in GGUF's layout are a tie.** At byte-identical
+4.5 bpw on Qwen3.5-9B: real Q4_K +0.000308 against k-shape +0.000428 — llama.cpp's
+encoder is 1.4x better, and both are 3-4x *below* the noise floor, so the margin is not
+resolvable. At the low end the ordering reverses: at ~3.44-3.5 bpw our naive encoder is
+1.7x **better** than IQ3_S (+0.0040 vs +0.0068), where the difference *is* resolvable. The
+one clear GGUF win is IQ4_XS at 4.25 bpw (+0.00085), which our k-shape does not have a
+byte-matched arm for and which is also below the floor.
+
+**3. So the win is the layout, not the encoder and not the format.** Hierarchical scales
+(6-bit sub-scales against one fp16 pair per superblock) are what buys block granularity at
+0.5 bpw instead of the 1.0 bpw a naive fp16 pair per 32 costs — and that overhead is the
+whole reason `per-blk32` *loses* to per-row on MiniCPM5-1B while `k-shape` does not. Across
+all three models k-shape is never worse than per-row at matched bytes, and is 2.7x better
+on gemma and ~30x on Qwen3.5-9B.
+
+**4. Whether block scaling pays off is predictable from the tensor**, which is worth
+knowing for a repair tool. Per-row range against the median per-32-block range:
+
+| model | p50 | p90 | p99 | block scaling |
+|---|---|---|---|---|
+| gemma-4-12B-it | 1.84 | 2.48 | 15.56 | large win |
+| Qwen3.5-9B | 1.78 | 1.95 | 2.26 | large win |
+| MiniCPM5-1B | 1.63 | 1.81 | 1.98 | a wash |
+
+That statistic explains the *reconstruction* ordering. It does not predict the downstream
+magnitude — Qwen3.5-9B has the least heterogeneous rows of the two winners and by far the
+biggest downstream effect — because downstream damage is heterogeneity times the model's
+own sensitivity to embedding perturbation, and that sensitivity is the 35x spread already
+recorded above.
+
+### Decision
+
+**Do not adopt a GGUF quant type. Adopt its layout, with our own encoder.** Concretely:
+superblocks of 256, sub-blocks of 32, 6-bit quantized (min, scale) per sub-block against
+one fp16 pair per superblock, at a chosen depth of 3-5 bits.
+
+The reasons, in the order they weigh:
+
+- **No quality is given up.** A tie at matched bytes, and a win at the low end.
+- **The encoder gap is the deciding practical fact.** `gguf-py` cannot write k-quants —
+  every k-quant raises `NotImplementedError`, because those encoders are C in llama.cpp.
+  Adopting GGUF means shelling out to `llama-quantize`, binding ggml, or reimplementing
+  the encoder anyway. The naive encoder measured here is ~30 lines of torch and is already
+  written (it is the `kshape:N` arm).
+- **Depth granularity survives.** GGUF offers a fixed menu; this keeps arbitrary depths,
+  which the sweeps above show is worth real bytes since the optimum is per-model.
+- **Row independence is kept, and it was never GGUF-specific.** Verified on real files:
+  every k-quant and IQ type here stores whole blocks per row (`hidden % 256 == 0` on all
+  three models), and dequantizing one row's byte slice alone is bit-identical to the
+  full-tensor decode. Our own layout has the same property by construction — and unlike
+  the trellis, no 128-row block decode.
+- **No cross-plugin dependency, and no serving-path question.** Two out-of-tree
+  quantization plugins registering different methods through `vllm.general_plugins`
+  *should* coexist, but nobody has tried it, and the answer stops mattering: a block-scaled
+  gather is a slice, an unpack and a multiply-add.
+
+What is given up is real but small: llama.cpp's rounding search and imatrix weighting,
+worth ~1.4x at 4.5 bpw and below the noise floor there. If that ever matters, the encoder
+can be improved in place without touching the storage layout or the serving path — which
+is the opposite of the situation adopting GGUF would leave us in.
+
+**The hybrid-checkpoint objection dissolves rather than being answered.** A GGUF-embedded
+EXL3 checkpoint would still be readable by nothing else (the body is trellis), so GGUF
+bought no interoperability to begin with. The sibling `vllm-gguf-plugin` remains worth
+reading for its plugin shape and its generic weight adapter — it is the only other example
+of this exact architecture — but not worth depending on for this.
+
+### Consequences for the rest of this note
+
+Two earlier conclusions are superseded, both in the direction of *fewer bytes and less
+per-model tuning*:
+
+- **"The flat-4-bit rule is false... it cannot ship a constant"** was a per-row finding.
+  With the k-shape layout, one setting covers all three models: **4 bits, 4.5 bpw**, at a
+  tax of 0.19x / 0.32x / 1.49x the respective noise floors. The per-row scheme needed
+  4 / ~5 / 6 bits per model to get there and needed 6 bits (6.02 bpw) as a conservative
+  default. That is 1.5 bpw saved on every untied model — 0.18 GiB on gemma-4-12B's
+  embedding, 0.19 GiB on Qwen3.5-9B's — plus the calibration sweep no longer being
+  required per model.
+- **The 3-bit cliff is a per-row artifact, not a property of the embedding.** Per-row
+  3-bit destroys gemma (+0.486) and so does per-blk32 2-bit (+0.295, same 3.0 bpw), but
+  k-shape 3-bit at 3.5 bpw costs +0.00069 — a third of the noise floor. The usable floor
+  is ~3.5 bpw, not 4.
+
+The head sweep is untouched by any of this: it measured that the trellis wins decisively
+for the head role, and nothing here is a head encoding.

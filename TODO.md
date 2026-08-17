@@ -119,8 +119,8 @@ The open question is whether any surface in that fork could be extended the way 
 llama.cpp changeset extends ggml, for consumer Ampere / Ada / Blackwell.
 
 **Something now hangs off the answer.** gemma-4 is the only tied mid-size family on
-hand, so it is effectively the entire constituency for the shared per-row embed+head
-tensor deferred under `quantized-embeddings`. If this turns out to be a lost cause and
+hand, so it is effectively the entire constituency for the shared embed+head tensor
+deferred under `quantized-embeddings`. If this turns out to be a lost cause and
 gemma-4 is not practically deployable, that optimization loses most of its reason to
 exist; if it lands, the optimization becomes the natural follow-up here.
 
@@ -136,18 +136,20 @@ alone can exceed the whole rest of the model.
 A post-processing tool preserves the very large investment in computation that the
 published EXL3 collection represents, rather than requiring it be redone.
 
-**Candidate approach, settled by measurement.** Emit a **per-row integer** tensor,
-not a re-quantized trellis. As an embedding, per-row beats the trellis by ~89x at
-equal bits on gemma-4-12B, because the trellis optimizes `x @ W.T` for a head rather
-than per-row accuracy — and it is simpler besides: no Hadamard, and row extraction
-is a slice rather than a block decode. For tied models one shared per-row tensor
-serves both roles and dominates both the shared trellis and any two-tensor split.
+**Candidate approach, settled by measurement.** Emit a **block-scaled integer**
+tensor, not a re-quantized trellis. As an embedding, scalar quantization beats the
+trellis by ~89x at equal bits on gemma-4-12B, because the trellis optimizes `x @ W.T`
+for a head rather than per-row accuracy — and it is simpler besides: no Hadamard, and
+row extraction is a slice rather than a block decode. Scale per sub-block of 32 rather
+than per row (the layout is in `quantized-embeddings`): per-row min/max lets one
+outlier component set the scale for a whole token's vector, which costs up to 134x at
+matched bytes. For tied models one shared tensor serves both roles and dominates both
+the shared trellis and any two-tensor split.
 
-Depth cannot be a shipped constant: the 4-bit tax spans 35x across
-gemma-4-12B / MiniCPM5-1B / Qwen3.5-9B. But it is constant in body bpw, so a single
-calibration sweep at any one depth characterizes a model. The interface should be
-that sweep or an explicit override — a size-budget solver belongs to the full
-quantizer, where layer bpw is actually free.
+Depth can be a shipped constant, which per-row could not offer: 4 bits (4.5 bpw) lands
+at or below the noise floor on all three models measured. An override is still worth
+having, and a size-budget solver still belongs to the full quantizer, where layer bpw
+is actually free.
 
 Untied models additionally need the embedding produced from scratch, as a
 constrained optimization: the rest of the model's quantization decisions are already
@@ -171,38 +173,38 @@ that motivate it were done without it.
 
 1. **Untied models have no quantized embedding to reuse**, so one must be produced —
    that is `repair-tool` / `quantize-embeddings-pipeline`.
-2. **There is no per-row serving path.** Everything the plugin can load today is
+2. **There is no scalar-quantized serving path.** Everything the plugin can load is
    trellis: `stored_tensor_names()` is `trellis`/`suh`/`svh` plus a codebook tensor,
    and `EXL3EmbeddingMethod` serves via `ops.embed_rows`, which is trellis row
-   extraction. The per-row scheme that the Phase 4 sweeps showed is ~89x better as
-   an embedding exists **only as simulation** — qbench's `fake_quantize` rounds a
-   resident fp16 tensor to a bits-bit grid and immediately dequantizes it,
+   extraction. The block-scaled scheme that the sweeps showed is orders of magnitude
+   better as an embedding exists **only as simulation** — qbench's `fake_quantize`
+   rounds a resident fp16 tensor to a bits-bit grid and immediately dequantizes it,
    explicitly "in place of dtype/storage changes... without committing to a real
    packed format or a real kernel". Nothing is packed, stored, or loaded.
 
 So the tensor format is decided but unimplemented at both ends. **Both tooling items
-are blocked on this**: a repair tool emitting per-row tensors today would produce
+are blocked on this**: a repair tool emitting such tensors today would produce
 checkpoints nothing can serve.
 
-**Next up, and scoped to untied models: a per-row embedding tensor served alongside
-the checkpoint's existing trellis head.** Needs a storage layout (packed values plus
-per-row scale/zero-point), `create_weights`/`process_weights_after_loading`
-registration, and a gather — which should be markedly simpler than the trellis path,
-since row extraction becomes a slice with no Hadamard and no 128-block read
-amplification. Per-row rows are also independent, so vocab-parallel TP carries none
-of the 128-block alignment arithmetic the trellis path needs.
+**Next up, and scoped to untied models: a block-scaled embedding tensor served
+alongside the checkpoint's existing trellis head.** Needs a storage layout (packed
+values plus the superblock/sub-block scales described below),
+`create_weights`/`process_weights_after_loading` registration, and a gather — which
+should be markedly simpler than the trellis path, since row extraction becomes a slice
+with no Hadamard and no 128-block read amplification. Rows are independent, so
+vocab-parallel TP carries none of the 128-block alignment arithmetic the trellis path
+needs.
 
-Two reasons this shape rather than the shared per-row tensor the frontier table
-favours. It is the **only** shape untied models can use, since their head is a
+Two reasons this shape rather than the shared tensor the frontier table favours. It is the **only** shape untied models can use, since their head is a
 genuinely different matrix. And it needs no new kernel: a shared tensor has to serve
-the head role too, and there is no per-row-integer GEMM anywhere — sharing would mean
+the head role too, and there is no scalar-integer GEMM anywhere — sharing would mean
 either dequantizing to dense fp16 (which gives back the whole saving) or a trip to
 kernel town. Costs ~0.35 GiB against sharing on gemma-4-12B, and is still ~1.4 GiB
 better than native.
 
 It is also where the new value is. Tied models already run with a much improved VRAM
 profile via Phase A; what they carry is a **KLD hit we now know is unnecessary**
-(+0.0216 from the trellis where per-row costs +0.0002 at the same depth). Untied
+(+0.0216 from the trellis where a block-scaled tensor costs +0.0003 at 4.5 bpw). Untied
 models get nothing at all today.
 
 The shared-tensor optimization is deferred, possibly a long way. It only helps tied
@@ -215,107 +217,35 @@ The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
 `tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
 decode underneath it that is trellis-only.
 
-**Bit-pack; arbitrary depths 4-8, not just byte-aligned ones.** *Open: whether to
-adopt a GGUF quant type instead of a bespoke format — see `gguf-embeddings`, which
-should be settled before this gets implemented.* The measured optima
-are per-model and mostly not byte-aligned (4 for gemma untied, ~5 for MiniCPM5-1B, 6
-for Qwen3.5-9B, 7 for tied gemma shared), so restricting to 4/8 would push most models
-to 8 and hand back ~0.24 GiB on Qwen3.5-9B alone — 12-15% of the whole win. Storing a
-6-bit value in an 8-bit slot is never the answer either: same bytes as 8-bit
-quantization, worse quality.
+**The format is block-scaled, not per-row** — settled by measurement in
+`gguf-embeddings`, and this is the one part of the plan above that it changed. Per-row
+min/max is dominated at every matched byte count on every model measured, by up to 134x,
+because one outlier component sets the scale for a whole row and the rows it ruins are
+whole tokens. The layout to emit is GGUF's, with our own encoder: **superblocks of 256,
+sub-blocks of 32, 6-bit quantized (min, scale) per sub-block against one fp16 pair per
+superblock**, at 3-5 bits. That costs 0.5 bpw of scales rather than the 1.0 bpw a naive
+fp16 pair per 32 would, which is the difference between beating per-row everywhere and
+losing to it on MiniCPM5-1B.
 
-The alignment worry does not arise. A row is `hidden x depth` bits and `hidden` is a
-multiple of 8 in every real model (`num_heads x head_dim`, and EXL3 pads to 128
-besides), so rows land on whole bytes at every depth — 3840 x 6 = 2880 B, 4096 x 6 =
-3072 B, 1536 x 5 = 960 B. No row padding, every row independently sliceable, which is
-the property that made per-row attractive in the first place. Only intra-row
-extraction is left. Assert the multiple-of-8 rather than assuming it.
+**Default 4 bits (4.5 bpw), and the per-model calibration sweep is no longer needed.**
+One setting covers gemma-4-12B, Qwen3.5-9B and MiniCPM5-1B at 0.19x / 0.32x / 1.49x their
+noise floors, where the per-row scheme needed a per-model depth and a conservative default
+of 6 bits. Arbitrary depths are still worth keeping (the optimum is per-model, and 3 bits
+is now usable where per-row had a cliff), but they are an optimization rather than a
+requirement.
+
+Row alignment still does not bite, and for a stronger reason than before: a row is a whole
+number of 256-element superblocks in every model measured (3840, 4096 and 1536 are all
+multiples of 256), so rows never share a block and every row stays independently
+sliceable — verified against real GGUF files, where a single row's byte slice decodes
+bit-identically to the full-tensor decode. Assert the divisibility rather than assuming
+it; a model whose `hidden` is not a multiple of 256 needs a smaller superblock, which is
+also what llama.cpp does.
 
 A fused kernel is the obvious highest-performing answer to the remaining per-token
 cost, but is worth weighing against less costly approaches first: it is development
 overhead and likely further pinning on CUDA, and exllamav3 has no ROCm support today
 while talking about adding it.
-
-→ [docs/embeddings.md](docs/embeddings.md)
-
-## `gguf-embeddings` — Adopt a GGUF quant type instead of inventing a format?
-
-**Outcome wanted:** a decision, before `quantized-embeddings` builds a bespoke
-per-row format at both ends — is a GGUF quantization type the better storage
-format for a quantized embedding?
-
-**Why it is a real question rather than a detour.** Our own sweep concluded that
-*block-scaled scalar* quantization beats the trellis by ~89x as an embedding,
-because the trellis optimizes `x @ W.T` for a head while an embedding needs each
-row accurate as a vector. GGUF's k-quants are that exact family, matured over
-years. So this is not a competing bet against the Phase 4 result — it is the
-possibility that we already decided what we want and someone has shipped it.
-
-**Independent confirmation of the head/embedding asymmetry, from another
-lineage.** `bartowski/Muse-Glimmer-30B-GGUF` @IQ2_M stores `token_embd.weight`
-as **IQ3_S** (~3.4 bpw) and `output.weight` as **Q5_K** (~5.5 bpw) — the head
-given ~2 more bpw than the embedding, which is what our head sweep measured
-independently (the head is ~60x more bit-sensitive). Worth weighing: llama.cpp
-arrived at the same shape by different means.
-
-**What is actually available, checked rather than assumed. This is the part that
-changes the calculus.** GGUF left vLLM's tree
-([RFC #39583](https://github.com/vllm-project/vllm/issues/39583)) but not the
-ecosystem: it moved to
-[vllm-project/vllm-gguf-plugin](https://github.com/vllm-project/vllm-gguf-plugin),
-an **official out-of-tree quantization plugin with the same architecture as this
-one** — `quantization/config.py`, `linear.py`, `fused_moe.py`, a `plugin.py`
-entry point. Apache-2.0, same as us, and actively developed (pushed 2026-08-16).
-
-- **It already serves embeddings quantized, gathering rows.** Not dequant-at-load
-  — `quantization/vocal_embeds.py` does
-  `torch.index_select(qweight, dim=0, index=x_flat)` then
-  `ops.ggml_dequantize(...)` on just those rows. **That is precisely the untied
-  per-row serving path `quantized-embeddings` is blocked on**, already written.
-- **The gather is far simpler than ours**, because GGUF's row-major block layout
-  makes rows independently sliceable: no Hadamard, none of the 128-block read
-  amplification `embed_rows` has to amortize, and no `torch.unique` — so none of
-  the `embed-rows-compile` capture trouble either.
-- **The GPU decode is not ours to write.** It ships Triton dequant kernels for
-  q2_k..q8_1 and iq1_s..iq4_xs, plus CUDA (`csrc/gguf/dequantize.cuh`).
-- **Decoding off-GPU is free too**: `gguf-py` dequantizes every type in pure
-  Python, which is enough for the offline comparison below.
-- **Encoding is the one real gap.** `gguf-py` quantizes only simple types; every
-  k-quant raises `NotImplementedError`, since those encoders are C in llama.cpp.
-  A repair tool would have to shell out to `llama-quantize`, bind ggml, or
-  reimplement.
-
-**The honest objection, and it may be weaker than it looks.** Using GGUF for the
-embedding means a hybrid checkpoint: EXL3 trellis body, GGUF-quantized embedding.
-Nothing else would read it — but nothing else would read a bespoke per-row
-embedding either, since exllamav3 does not serve one. So the incompatibility is a
-cost we are paying under either plan, and the question is only which format the
-plugin has to implement.
-
-**The real tension to resolve.** `quantized-embeddings` settled on *bit-pack,
-arbitrary depths 4-8* because measured optima are per-model and rarely
-byte-aligned. GGUF offers a fixed menu instead — but each type is a **better
-encoder at a given size** (hierarchical scales, non-uniform codebooks for the IQ
-types). So the trade is depth granularity against quality-per-byte, and the axis
-that decides it is **quality at matched bytes**, not depth.
-
-**Candidate approach: settle it by measurement before writing any format code.**
-We hold `bartowski/Muse-Glimmer-30B-GGUF` and the EXL3 Muse-Glimmer of the same
-base model. Dequantize the GGUF `token_embd` with `gguf-py`, and compare its
-reconstruction error and downstream KLD against qbench's `fake_quantize` per-row
-simulation at matched bytes — qbench already has the `embed_quant` hook for
-exactly this sweep. No kernel work, no llama.cpp, and it answers the question
-that decides the format.
-
-**Then a second question, which only arises if the first says GGUF: reuse or
-reimplement?** Two Apache-2.0 out-of-tree plugins registering different quant
-methods through `vllm.general_plugins` should coexist, but "should" is doing work
-there and nobody has tried it. The options are to depend on `vllm-gguf-plugin`
-for the embedding path, vendor the pieces we need, or write our own against the
-format. Worth noting the sibling is also simply *worth reading* regardless of the
-outcome here — it is the only other example of this exact plugin shape, and it has
-solved problems we have hit (weight adapters per model family, a generic GGUF
-weight adapter rather than an allowlist).
 
 → [docs/embeddings.md](docs/embeddings.md)
 
@@ -453,24 +383,24 @@ objective mismatch is the reason: the trellis optimizes `x @ W.T` against typica
 activations, which is what a *head* needs, while an embedding needs each individual
 row accurate as a vector. What to emit instead:
 
-- **Tied models**: one shared per-row integer tensor serving both roles. Dominates
-  both the shared trellis and any two-tensor split. Depth is set by the head, which
-  is ~60x more bit-sensitive; the embedding rides along above its own requirement,
-  and that waste is still far cheaper than a second copy of the matrix.
-- **Untied models**: a per-row integer embedding at a lower depth, alongside the
+- **Tied models**: one shared block-scaled integer tensor serving both roles.
+  Dominates both the shared trellis and any two-tensor split. Depth is set by the
+  head, which is ~60x more bit-sensitive; the embedding rides along above its own
+  requirement, and that waste is still far cheaper than a second copy of the matrix.
+- **Untied models**: a block-scaled integer embedding at a lower depth, alongside the
   trellis head exactly as produced today. The head is already right; only the
   embedding changes.
 
-Depths are per-model — the 4-bit tax spans 35x across the three models measured —
-but constant in body bpw, so one calibration sweep at any single depth
-characterizes a model.
+Embedding depth is no longer per-model: 4 bits (4.5 bpw in the block-scaled layout)
+covers every model measured. The head's depth in a shared tensor is a separate
+question and was only ever measured on gemma-4-12B.
 
 Distinct from `repair-tool` in one way that matters: here layer bpw is *free*, so
 trading depth across components becomes a real constrained optimization (the
 Lagrangian actually binds) rather than a one-variable heuristic. This is where the
 size-budget solver belongs.
 
-Depends on `quantized-embeddings` growing a per-row serving path — see there.
+Depends on `quantized-embeddings` growing a block-scaled serving path — see there.
 Nothing can load what this would emit today.
 
 → [docs/embeddings.md](docs/embeddings.md)
@@ -549,6 +479,16 @@ re-verification is already done and the entry will keep doing it.
 
 *One line each, newest first. Prune to ~10 when appending.*
 
+- `gguf-embeddings` — decided 2026-08-17, see
+  [docs/embeddings.md](docs/embeddings.md) "Is GGUF the right storage format?". No:
+  at matched bytes GGUF's k-quants tie a naive encoder in GGUF's own *layout*
+  (+0.000308 vs +0.000428 on Qwen3.5-9B at 4.5 bpw, both below the noise floor) and
+  lose to it at 3.5 bpw. The win is block-scaled granularity with hierarchical
+  scales, which is ~30 lines to encode; adopting GGUF would buy that at the cost of
+  an encoder dependency (`gguf-py` cannot write k-quants), a fixed depth menu, and a
+  cross-plugin runtime dependency, for no interoperability the hybrid checkpoint
+  could use anyway.
+
 - `embed-rows-compile` — done 2026-08-16, see
   [docs/embeddings.md](docs/embeddings.md) "Serving under torch.compile". Tied
   embedding serving did not survive vLLM's *default* execution mode at all;
@@ -556,9 +496,10 @@ re-verification is already done and the entry will keep doing it.
   `EXL3_EMBED_STATIC_MAX`. Found by `bench/` on its first run.
 
 - `embed-head-depth-study` — done 2026-08-15, see
-  [docs/embeddings.md](docs/embeddings.md). Established per-row over trellis for
-  embeddings, trellis for heads, additivity of the two, head-sets-the-depth for a
-  shared tensor, and that no universal depth constant exists.
+  [docs/embeddings.md](docs/embeddings.md). Established scalar quantization over
+  trellis for embeddings, trellis for heads, additivity of the two, and
+  head-sets-the-depth for a shared tensor. Its "no universal depth constant" finding
+  was per-row-specific and is superseded by `gguf-embeddings`.
 - `tied-embedding-serving` — done 2026-08-15, see
   [docs/embeddings.md](docs/embeddings.md) "Phase A result". Tied models serve their
   embedding from the quantized `lm_head`; Qwen3-0.6B 508 → 323 MiB resident,
