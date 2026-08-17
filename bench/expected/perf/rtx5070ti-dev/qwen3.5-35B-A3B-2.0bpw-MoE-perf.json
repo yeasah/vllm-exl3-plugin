@@ -9,10 +9,10 @@
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260810",
+  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260817",
   "src.plugin": {
-   "describe": "c804b1a",
-   "head": "c804b1a53a",
+   "describe": "eaf5605",
+   "head": "eaf5605546",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -33,22 +33,22 @@
   },
   "driver": "610.57.04"
  },
- "decode": 546.2,
- "decode_spread_pct": 1.02,
+ "decode": 548.5,
+ "decode_spread_pct": 1.16,
  "decode_samples": [
-  546.2,
-  545.4,
-  547.0,
-  545.4,
-  551.0
+  547.5,
+  553.1,
+  546.7,
+  548.5,
+  551.4
  ],
- "prefill": 962.3,
- "prefill_spread_pct": 0.42,
+ "prefill": 962.9,
+ "prefill_spread_pct": 0.15,
  "prefill_samples": [
-  962.6,
-  962.6,
-  962.3,
-  960.4,
-  958.6
+  963.7,
+  962.9,
+  963.0,
+  962.4,
+  962.3
  ]
 }

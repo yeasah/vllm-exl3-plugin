@@ -14,10 +14,10 @@
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260810",
+  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260817",
   "src.plugin": {
-   "describe": "c804b1a",
-   "head": "c804b1a53a",
+   "describe": "eaf5605",
+   "head": "eaf5605546",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0

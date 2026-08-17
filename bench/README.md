@@ -195,11 +195,9 @@ There is no common one, so **when adding a model, check
 Templates that do not use these variables ignore them, so passing them
 unconditionally is safe.
 
-**Stale as of 2026-08-17, pending a re-bless on the pinned vLLM:**
-`llama-3.2-1B-3.0bpw-tied` and
-`muse-glimmer-30B-2.0bpw-via-transformers-backend` were blessed before this
-existed, so their ids embed 2026-08-16. Re-bless both from `~/git/vllm`
-(**not** a preview checkout) and they become permanent.
+The two entries this affected — `llama-3.2-1B-3.0bpw-tied` and
+`muse-glimmer-30B-2.0bpw-via-transformers-backend` — were re-blessed on
+2026-08-17 and now embed the pinned date rather than the day they were recorded.
 
 ## Known-broken entries
 
