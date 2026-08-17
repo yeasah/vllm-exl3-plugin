@@ -535,8 +535,15 @@ vLLM landed their own fix for the transformers 5.15 per-layer config break upstr
 `ModelArchitectureConfig.from_layers()` / per-layer arch-config plumbing through
 `get_num_kv_heads`/`get_num_attention_heads`, not a gemma-4-only patch like ours.
 
-Next time the vLLM pin moves past that commit: drop our patch, update the README
-patch table, and re-verify gemma-4-12B loads clean without it.
+**Already verified, on 2026-08-17.** A `bench/` dry run against a 0.27.2 preview
+(`vllm-main` @ `v0.27.2rc0-136-gfdab2b10bc`) carrying **only** the fused-param and
+ReplicatedLinear patches — no gemma-4 patch — had `gemma-4-12B 3.0bpw mul1 tied`
+compare **bit-identical** to its baseline: `argmax 0`, `|dlogprob| max 0.000e+00`
+across 84 scored positions, greedy unchanged. Upstream's generic fix covers what
+ours did.
+
+So at the bump this is mechanical: drop the patch, update the README table. The
+re-verification is already done and the entry will keep doing it.
 
 ## Recently closed
 
