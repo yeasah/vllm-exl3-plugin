@@ -215,7 +215,9 @@ The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
 `tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
 decode underneath it that is trellis-only.
 
-**Bit-pack; arbitrary depths 4-8, not just byte-aligned ones.** The measured optima
+**Bit-pack; arbitrary depths 4-8, not just byte-aligned ones.** *Open: whether to
+adopt a GGUF quant type instead of a bespoke format — see `gguf-embeddings`, which
+should be settled before this gets implemented.* The measured optima
 are per-model and mostly not byte-aligned (4 for gemma untied, ~5 for MiniCPM5-1B, 6
 for Qwen3.5-9B, 7 for tied gemma shared), so restricting to 4/8 would push most models
 to 8 and hand back ~0.24 GiB on Qwen3.5-9B alone — 12-15% of the whole win. Storing a
@@ -233,6 +235,59 @@ A fused kernel is the obvious highest-performing answer to the remaining per-tok
 cost, but is worth weighing against less costly approaches first: it is development
 overhead and likely further pinning on CUDA, and exllamav3 has no ROCm support today
 while talking about adding it.
+
+→ [docs/embeddings.md](docs/embeddings.md)
+
+## `gguf-embeddings` — Adopt a GGUF quant type instead of inventing a format?
+
+**Outcome wanted:** a decision, before `quantized-embeddings` builds a bespoke
+per-row format at both ends — is a GGUF quantization type the better storage
+format for a quantized embedding?
+
+**Why it is a real question rather than a detour.** Our own sweep concluded that
+*block-scaled scalar* quantization beats the trellis by ~89x as an embedding,
+because the trellis optimizes `x @ W.T` for a head while an embedding needs each
+row accurate as a vector. GGUF's k-quants are that exact family, matured over
+years. So this is not a competing bet against the Phase 4 result — it is the
+possibility that we already decided what we want and someone has shipped it.
+
+**Independent confirmation of the head/embedding asymmetry, from another
+lineage.** `bartowski/Muse-Glimmer-30B-GGUF` @IQ2_M stores `token_embd.weight`
+as **IQ3_S** (~3.4 bpw) and `output.weight` as **Q5_K** (~5.5 bpw) — the head
+given ~2 more bpw than the embedding, which is what our head sweep measured
+independently (the head is ~60x more bit-sensitive). Worth weighing: llama.cpp
+arrived at the same shape by different means.
+
+**What is actually available, checked rather than assumed:**
+
+- **vLLM's GGUF support is gone.** No `gguf` module in v0.27.0 or main, and it is
+  absent from the registered quantization methods. There is *no* vLLM serving
+  path to reuse — the premise that motivated the question does not hold.
+- **Decoding is free.** `gguf-py` dequantizes every type in pure Python, and the
+  format is stable and well-specified.
+- **Encoding is not.** `gguf-py` quantizes only the simple types; every k-quant
+  raises `NotImplementedError`, because those encoders are C in llama.cpp. A
+  repair tool would have to shell out to `llama-quantize`, bind ggml, or
+  reimplement.
+- **The GPU gather is ours either way**, and is the same slice-plus-decode the
+  bespoke format would need. Block-scaled formats slice cleanly at superblock
+  granularity; assert `hidden % 256 == 0` rather than assume it.
+- **Licence is MIT**, so unlike `yaqa` there is no reading restriction.
+
+**The real tension to resolve.** `quantized-embeddings` settled on *bit-pack,
+arbitrary depths 4-8* because measured optima are per-model and rarely
+byte-aligned. GGUF offers a fixed menu instead — but each type is a **better
+encoder at a given size** (hierarchical scales, non-uniform codebooks for the IQ
+types). So the trade is depth granularity against quality-per-byte, and the axis
+that decides it is **quality at matched bytes**, not depth.
+
+**Candidate approach: settle it by measurement before writing any format code.**
+We hold `bartowski/Muse-Glimmer-30B-GGUF` and the EXL3 Muse-Glimmer of the same
+base model. Dequantize the GGUF `token_embd` with `gguf-py`, and compare its
+reconstruction error and downstream KLD against qbench's `fake_quantize` per-row
+simulation at matched bytes — qbench already has the `embed_quant` hook for
+exactly this sweep. No kernel work, no llama.cpp, and it answers the question
+that decides the format.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
