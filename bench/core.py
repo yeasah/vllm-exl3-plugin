@@ -237,6 +237,29 @@ def report_environment_diff(base: dict, fresh: dict, indent: str = "     ") -> N
               "expected during development)")
 
 
+#: Chat templates that inject the current date make a baseline expire at
+#: midnight. Muse-Glimmer's does exactly that -- `strftime_now('%Y-%m-%d')` in
+#: its system preamble -- so its ids changed the day after blessing and `check`
+#: correctly refused to compare, for a reason that has nothing to do with the
+#: build under test. A gate that goes red on the calendar is a gate people learn
+#: to ignore.
+#:
+#: The templates that take this offer it as an override (`current_date is
+#: defined`); templates that do not use it ignore the extra context variable, so
+#: passing it unconditionally is safe. The value is arbitrary and only has to
+#: never change.
+#: Spellings differ per family and there is no common one: Muse-Glimmer takes
+#: `current_date`/`knowledge_cutoff`, Llama 3.x takes `date_string`. Both reach
+#: for `strftime_now` when the override is absent, so both were rotting nightly
+#: until this existed. Add the spelling when adding a model whose template does
+#: the same -- `"strftime_now" in tok.chat_template` is the check.
+PINNED_TEMPLATE_VARS = {
+    "current_date": "2026-01-01",
+    "knowledge_cutoff": "2026-01-01",
+    "date_string": "01 Jan 2026",
+}
+
+
 def prompt_ids(tok, text: str) -> list[int]:
     """Chat-templated token ids for one prompt.
 
@@ -248,6 +271,7 @@ def prompt_ids(tok, text: str) -> list[int]:
         [{"role": "user", "content": text}],
         tokenize=True,
         add_generation_prompt=True,
+        **PINNED_TEMPLATE_VARS,
     )
     if not isinstance(ids, list):
         ids = ids["input_ids"]

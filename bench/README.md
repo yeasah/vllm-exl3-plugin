@@ -180,6 +180,27 @@ Deliberately few entries. A throughput regression is broad — a kernel or
 scheduler change lands on any model exercising that path — so covering every
 *path* matters and covering every checkpoint does not.
 
+## Baselines must not depend on the calendar
+
+Some chat templates inject today's date — Muse-Glimmer via
+`strftime_now('%Y-%m-%d')`, Llama 3.x via `date_string`. Left alone, those
+entries' prompt ids change at midnight, `check` correctly refuses to compare, and
+the gate goes red for a reason that has nothing to do with the build. A gate that
+fails on the calendar is one people learn to ignore, which is the same failure
+mode the thresholds are shaped to avoid.
+
+`core.PINNED_TEMPLATE_VARS` passes fixed values for every spelling we have met.
+There is no common one, so **when adding a model, check
+`"strftime_now" in tok.chat_template`** and add its spelling if it is missing.
+Templates that do not use these variables ignore them, so passing them
+unconditionally is safe.
+
+**Stale as of 2026-08-17, pending a re-bless on the pinned vLLM:**
+`llama-3.2-1B-3.0bpw-tied` and
+`muse-glimmer-30B-2.0bpw-via-transformers-backend` were blessed before this
+existed, so their ids embed 2026-08-16. Re-bless both from `~/git/vllm`
+(**not** a preview checkout) and they become permanent.
+
 ## Known-broken entries
 
 An entry that cannot currently be captured keeps its `known_broken` reason and
