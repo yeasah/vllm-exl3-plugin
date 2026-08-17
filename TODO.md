@@ -366,17 +366,53 @@ sequencing call that is still right. But the practice contradicts the position �
 graphs and screenshots are how people actually hand over context, this project's
 users included — so the honest version is "deferred", not "irrelevant".
 
-**The specific gap is narrower than "no multimodal support", and worse.** The
-vision tower already loads and is quantized correctly: on
-`Muse-Glimmer-30B-exl3`, 567 `EXL3LinearMethod` dispatches cover the whole
-50-layer tower at `vision_bits: 4`, and that checkpoint is what forced the
-safetensors-index-as-ground-truth decision. **But no image has ever been passed
-through it.** Every test to date — the diagnostic, the `bench/` entry, qbench —
-uses text-only prompts. That is exactly the assumption that let Muse's *text*
-path look healthy while it emitted confident garbage: loading is not working,
-and only a comparison against another engine showed the difference.
+**Images work.** Verified 2026-08-17 through a real chat client (Jan, chosen over
+`vllm chat` because mainstream clients default to tens of thousands of tokens of
+tool preamble): **gemma-4-12B, Qwen3.6-9B and Qwen3.8** all describe images
+accurately, including fine detail like reading text in the image. That closes the
+gap this item was opened for — the vision path is not merely loading.
 
-**Candidate approach: the instrument that already worked.** exllamav3 implements
+**Still open, and now specific:**
+
+- **No gate.** All three results are hand-run. `bench/core.py`'s prompts are
+  strings, and an image entry needs the fixture committed beside the baseline,
+  since a baseline against an image that later changes is worthless.
+- **Audio is broken, probably not ours.** gemma-4-12B insists every clip is
+  chirping birds. It is a unified model with no audio encoder — sound goes into
+  the same token space as text — so there is no EXL3-quantized audio component to
+  get wrong, which makes a pipeline fault upstream of us the likely cause. Cheap
+  way to settle it rather than assume: the same clip through native exllamav3,
+  the instrument that settled Muse's text path.
+- **Muse-Glimmer remains the one blocked checkpoint**, for two unrelated reasons
+  already characterized: native vLLM cannot serve its quantized vision adapter
+  (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
+  plugin), and the Transformers backend route is degraded on vLLM ≥ main by the
+  upstream soft-cap gap, which wrecks sampled output while leaving greedy intact.
+
+**The VRAM link, which is the reason this item is not merely nice-to-have.**
+Multimodal is where headroom runs out first: Qwen3.8 only fits an image budget at
+`--limit-mm-per-prompt '{"image": {"count": 1, "width": 512, "height": 512}}'`,
+and its encoder cache allocation is what OOMs otherwise. The embedding this model
+carries is ~2 GiB — **larger by itself than the entire post-weights headroom that
+test was squeezing into**. So `quantized-embeddings` is not just a size win in the
+abstract; on a 16 GiB card it is the difference between usable and unusable image
+budgets. That makes multimodal a *beneficiary* of the embedding work rather than a
+competitor for attention.
+
+Note also that vLLM's multimodal knobs churn: `--max-num-encoder-input-tokens` has
+been removed with no obvious replacement, `--mm-processor-cache-gb 0` does *not*
+bound the encoder cache, and `--limit-mm-per-prompt` now carries feature-size as
+well as counts. Check flags against the pinned tree rather than from memory.
+
+**A first-quantization target worth noting: gemma-4 E2B/E4B.** Among common
+general-purpose models it is one of very few with a genuinely *separate* audio
+encoder, and the EXL3 collection skips it entirely. Small, capable for its size,
+and structurally different from anything handled so far — a separate encoder
+exercises the multimodal path deliberately rather than incidentally, which is
+exactly what a first target should do.
+
+**Candidate approach for the parts still open: the instrument that already worked.**
+exllamav3 implements
 this vision path natively (`MuseGlimmerVisionModel`, `examples/imgdesc.py`), so
 the same image and prompt can go through both engines and be compared token for
 token. It is the reference the text case proved worth having, and it is the only
