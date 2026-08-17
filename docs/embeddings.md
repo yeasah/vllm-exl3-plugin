@@ -885,3 +885,101 @@ per-model tuning*:
 
 The head sweep is untouched by any of this: it measured that the trellis wins decisively
 for the head role, and nothing here is a head encoding.
+
+## Build or adopt: costed, and the answer flipped the cheap-looking option
+
+*Follow-on to the section above, which established that GGUF wins nothing on quality.
+That left a fair question — GGUF's encoder, kernels and gather path all exist and are
+proven, so adopting them could still be cheaper than writing ours, even at equal quality.
+Measured 2026-08-17.*
+
+### A simpler format than Q4_K, measured before committing to either
+
+The `k-shape` arm above replicated Q4_K's structure, including its 6-bit sub-scales packed
+against one fp16 pair per 256-element superblock. That packing is the fiddliest part of the
+layout, so the first question is whether it is load-bearing. `blockq32` drops it: per-block
+(min, scale) for blocks of 32, both **quantized to int8 against one fp16 range per row**.
+Same 0.5 bpw of scale overhead, no superblock, and every field byte-aligned — 4-bit values
+are nibbles, scales are two `uint8` arrays, and a row carries four fp16 scalars.
+
+Tax over each model's fp16-embedding baseline, at 4.5 bpw for all three schemes:
+
+| model | noise floor | blockq32 4-bit (4.52) | k-shape 4-bit (4.50) | GGUF Q4_K (4.50) |
+|---|---|---|---|---|
+| Qwen3.5-9B | 0.001350 | **+0.000225** | +0.000428 | +0.000308 |
+| gemma-4-12B-it | 0.001759 | **+0.000297** | +0.000330 | +0.000221 (Q5_K @5.5) |
+| MiniCPM5-1B | 0.000977 | **+0.001435** | +0.001456 | — |
+
+The simplest of the three is the best of the three on the model that resolves differences,
+and a tie elsewhere — all comfortably under the noise floor. Q4_K's scale packing buys
+nothing here. Lower depths behave the same way: blockq32 3-bit (3.52 bpw) costs +0.004046
+on Qwen3.5-9B against IQ3_S's +0.006802 at 3.4375.
+
+### What adopting GGUF would actually cost, checked rather than assumed
+
+`vllm-gguf-plugin` publishes a prebuilt `cp310-abi3-manylinux_2_28` wheel, so there is no
+build step, and its dequant works **today** against this environment's torch: gathering
+rows out of a real Q4_K `token_embd` and calling `ops.ggml_dequantize` on the gathered rows
+reproduces `gguf-py` to fp16 rounding (max abs diff 6.2e-05 for Q4_K, 3.1e-05 for IQ4_XS,
+3.3e-03 for IQ3_S). So the sibling plugin's serving path is real and usable as a library.
+Three things turned up alongside that, and they are what decide it.
+
+**1. Installing it monkeypatches vLLM globally.** Its `vllm.general_plugins` entry point
+runs on *every* vLLM start, and `register()` patches `EngineArgs.create_model_config`,
+`maybe_override_with_speculators` and the diffusers loader — whether or not GGUF is in use.
+Entry points activate by installation, not by import, so depending on the package cannot
+opt out of that. This project's standing property is that all its hooks are sanctioned
+extension points and nothing is monkeypatched; a dependency would import someone else's
+patching of engine-argument parsing into every user's process, for one tensor.
+
+**2. Only the kernel is reusable, and the kernel is not the work.** The loader, config
+parser, weight adapters and `GGUFEmbeddingMethod` are all built around a checkpoint that
+*is* a GGUF. Ours is an EXL3 checkpoint with one GGUF-encoded tensor in it, so none of that
+machinery applies: what carries over is `ggml_dequantize` and four lines of `index_select`.
+Every remaining piece — checkpoint keys, `create_weights`,
+`process_weights_after_loading`, vocab-parallel sharding, capture safety, the repair tool's
+CLI — has to be written either way. "All those pieces already exist" is true of the kernel
+and false of the integration, and the integration is nearly all of the work.
+
+**3. The kernel is not even a performance argument.** Both paths gather whole rows out of a
+`[vocab, row_bytes]` uint8 tensor, so their memory traffic is identical and only the decode
+differs. In eager mode the CUDA kernel wins on launch overhead, but under the mode that
+actually ships — inductor-compiled inside a CUDA graph — a plain-torch unpack fuses and an
+opaque custom op cannot:
+
+| tokens | GGUF + CUDA kernel | blockq32, plain torch | blockq32, compiled |
+|---|---|---|---|
+| 1 | 4.2 us | 16.6 us | **2.1 us** |
+| 8 | 6.2 us | 26.8 us | **2.2 us** |
+| 64 | 6.2 us | 22.8 us | **4.2 us** |
+| 512 | 14.5 us | 49.4 us | **10.3 us** |
+
+(CUDA-graph replay, RTX 5070 Ti, Qwen3.5-9B's 248320 x 4096 embedding. Eager, the same
+comparison runs 13.6 us against 74.2 us at one token — which is the number to quote if the
+serving path ever cannot be compiled.)
+
+### Decision: build it
+
+**blockq32, 4-bit, as the default and initially the only depth.** The constant-depth result
+above is what makes that scope defensible: 4 bits covers every model measured, so the
+encoder and the unpack only ever have to handle nibbles, and 3- and 5-bit packing can wait
+until something demands them.
+
+Against adopting GGUF: equal quality (better at 3.5 bpw), faster on the path that ships,
+no dependency that monkeypatches vLLM, no vendored CUDA kernel in a project that ships no
+compiled extensions today, no second toolchain for encoding (`gguf-py` cannot write
+k-quants; emitting real Q4_K bytes would mean binding libggml or implementing its packed
+6-bit scales ourselves — strictly more work than implementing our own byte-aligned layout),
+and it keeps working anywhere torch does, which matters while exllamav3 has no ROCm support
+and this is one of the few paths that would not need a kernel port.
+
+What is genuinely given up: llama.cpp's rounding search and imatrix weighting, worth ~1.4x
+at 4.5 bpw against `k-shape` and *negative* against `blockq32` on the model that can resolve
+it; and other people's testing of a mature codec. The second is the real one, and it is
+bounded by the format being small enough to test exhaustively — an encoder/unpack round-trip
+is exactly invertible by construction, which is a stronger test than any of this note's
+statistical comparisons.
+
+**The dependency stays worth having as a reference, not as a runtime.** `vocal_embeds.py`
+is a good short model of the gather-and-dequantize shape, and this plugin remains the only
+other example of this exact out-of-tree architecture.

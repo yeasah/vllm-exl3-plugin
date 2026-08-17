@@ -217,30 +217,34 @@ The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
 `tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
 decode underneath it that is trellis-only.
 
-**The format is block-scaled, not per-row** — settled by measurement in
-`gguf-embeddings`, and this is the one part of the plan above that it changed. Per-row
-min/max is dominated at every matched byte count on every model measured, by up to 134x,
-because one outlier component sets the scale for a whole row and the rows it ruins are
-whole tokens. The layout to emit is GGUF's, with our own encoder: **superblocks of 256,
-sub-blocks of 32, 6-bit quantized (min, scale) per sub-block against one fp16 pair per
-superblock**, at 3-5 bits. That costs 0.5 bpw of scales rather than the 1.0 bpw a naive
-fp16 pair per 32 would, which is the difference between beating per-row everywhere and
-losing to it on MiniCPM5-1B.
+**The format is block-scaled, not per-row, and it is ours rather than GGUF's** — both
+settled by measurement in `gguf-embeddings`. Per-row min/max is dominated at every matched
+byte count on every model measured, by up to 134x, because one outlier component sets the
+scale for a whole row and the rows it ruins are whole tokens. What to emit:
+**blocks of 32 with (min, scale) per block, both quantized to int8 against one fp16 range
+per row** — 0.5 bpw of scales, the same overhead a k-quant carries, but every field
+byte-aligned and no superblock. At 4 bits that measured better than real Q4_K on the one
+model able to resolve the difference, and it is simpler on both ends than Q4_K's packed
+6-bit sub-scales.
 
-**Default 4 bits (4.5 bpw), and the per-model calibration sweep is no longer needed.**
-One setting covers gemma-4-12B, Qwen3.5-9B and MiniCPM5-1B at 0.19x / 0.32x / 1.49x their
-noise floors, where the per-row scheme needed a per-model depth and a conservative default
-of 6 bits. Arbitrary depths are still worth keeping (the optimum is per-model, and 3 bits
-is now usable where per-row had a cliff), but they are an optimization rather than a
-requirement.
+**4 bits (4.52 bpw) is the default, and initially the only depth.** One setting covers
+gemma-4-12B, Qwen3.5-9B and MiniCPM5-1B at 0.17x / 0.17x / 1.47x their noise floors, where
+the per-row scheme needed a per-model depth and a conservative default of 6 bits. That is
+what makes the scope small: values are nibbles, so neither the encoder nor the unpack ever
+handles a non-byte-aligned width. 3- and 5-bit packing waits until something demands it
+(3 bits is now usable, at ~3.5 bpw, where per-row had a cliff).
 
-Row alignment still does not bite, and for a stronger reason than before: a row is a whole
-number of 256-element superblocks in every model measured (3840, 4096 and 1536 are all
-multiples of 256), so rows never share a block and every row stays independently
-sliceable — verified against real GGUF files, where a single row's byte slice decodes
-bit-identically to the full-tensor decode. Assert the divisibility rather than assuming
-it; a model whose `hidden` is not a multiple of 256 needs a smaller superblock, which is
-also what llama.cpp does.
+**No kernel, and no dependency on `vllm-gguf-plugin`.** The unpack is plain torch —
+`index_select` on packed rows, nibble split, int8 scales, multiply-add — which under
+inductor + CUDA graphs measured *faster* than that plugin's CUDA dequant (2.1 vs 4.2 us at
+one token), because it fuses where an opaque custom op cannot. Depending on the plugin
+would also import its global monkeypatching of `EngineArgs` into every vLLM process, and
+would still leave the encoder to write, since `gguf-py` cannot emit k-quants.
+
+Row alignment does not bite: `hidden` is a multiple of 32 in every real model, so rows are
+a whole number of blocks, never share one, and stay independently sliceable — the property
+that makes both the gather and vocab-parallel TP a plain row slice. Assert the divisibility
+rather than assuming it.
 
 A fused kernel is the obvious highest-performing answer to the remaining per-token
 cost, but is worth weighing against less costly approaches first: it is development
