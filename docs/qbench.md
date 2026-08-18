@@ -175,6 +175,16 @@ as TODO `qbench-noise-floor`.
 
 **No GGUF through `vllm-gguf-plugin`**, as above.
 
+**The `vllm` engine mis-scores at least one hybrid-Mamba model.** Qwen3.5-9B's
+unmodified EXL3 checkpoint measures ppl 248076 / KLD 10.26 through it, against
+ppl 12.15 / KLD 0.0131 for the same checkpoint through the `exllamav3` engine --
+and the same checkpoint generates coherent text through plain `LLM.generate`, so
+the model and the plugin are fine and the fault is in the teacher-forced
+full-prompt scoring path. Mamba state across a scored prompt is the obvious
+suspect and is untested. Until it is understood, cross-checking a `vllm`-engine
+number against the `exllamav3` engine is the cheap guard, and it is worth doing
+for any architecture with recurrent state.
+
 Closing both, in that order, would turn this engine into something qualitatively
 different rather than merely more complete: every measurement could run inside one
 engine, against a reference produced by that same engine. Worth being clear about

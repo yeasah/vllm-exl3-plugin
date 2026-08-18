@@ -1,0 +1,38 @@
+Pass quant_config to VocabParallelEmbedding in qwen3_5.py.
+
+Without it vLLM never asks the quantization config for an embedding method, so a
+quantized embedding cannot be served no matter what the checkpoint contains:
+
+  - a *tied* EXL3 model silently keeps its dense fp16 embedding, losing the
+    entire Phase A saving (1.88 GiB on gemma-4-12B-scale models) with no error;
+  - an untied checkpoint carrying the block-quantized embedding of
+    `vllm_exl3_plugin/blockq.py` fails to load outright, with a message about
+    `embed_tokens.bq_q` not existing that points nowhere near the cause.
+
+This is not specific to this plugin or to one model file. On vLLM main (checked
+2026-08-17) **86 of 131** model files that construct a `VocabParallelEmbedding`
+omit `quant_config`, including `qwen3_5.py`, `qwen3_next.py`, `minicpm.py` and
+`mixtral.py`; `llama.py`, `gemma4.py`, `qwen2.py`, `qwen3_moe.py` and
+`deepseek_v2.py` pass it. Any out-of-tree quantization plugin that serves
+embeddings hits the same wall -- `vllm-gguf-plugin`'s `GGUFEmbeddingMethod` is
+equally unreachable on those architectures -- so this is worth upstreaming
+rather than carrying.
+
+Patched here only for `qwen3_5.py`, which covers two of this project's census
+models (Qwen3.5-9B and Qwen3.5-35B-A3B) and is the one the fix was verified on:
+with it, Qwen3.5-9B's embedding goes from 1940 MiB dense to 549 MiB, and the
+served rows are bit-identical to what the encoder wrote.
+
+diff --git a/vllm/model_executor/models/qwen3_5.py b/vllm/model_executor/models/qwen3_5.py
+index 50b47f16fe..0d35514660 100644
+--- a/vllm/model_executor/models/qwen3_5.py
++++ b/vllm/model_executor/models/qwen3_5.py
+@@ -243,6 +243,8 @@ class Qwen3_5Model(Qwen3NextModel):
+         self.embed_tokens = VocabParallelEmbedding(
+             self.vocab_size,
+             config.hidden_size,
++            quant_config=self.quant_config,
++            prefix=f"{prefix}.embed_tokens",
+         )
+ 
+         def get_layer(prefix: str):

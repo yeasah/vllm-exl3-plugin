@@ -129,31 +129,25 @@ exist; if it lands, the optimization becomes the natural follow-up here.
 Every existing EXL3 checkpoint is handicapped by two pipeline mistakes, badly enough
 to more than erase its efficiency advantage against other formats: a separate output
 head is emitted for tied models (entirely redundant, and not small), and the
-embeddings are skipped entirely and left at full resolution. The second is
-significant at any size and painful at aggressive quantization, where the embedding
-alone can exceed the whole rest of the model.
+embeddings are skipped entirely and left at full resolution. A post-processing tool
+preserves the very large investment in computation the published EXL3 collection
+represents, rather than requiring it be redone.
 
-A post-processing tool preserves the very large investment in computation that the
-published EXL3 collection represents, rather than requiring it be redone.
+**Half of this now exists.** `tools/quantize_embedding.py` rewrites one checkpoint's
+embedding into the block-scaled 4-bit format the measurements chose, hardlinking every
+shard it does not touch — 12 seconds and 1.36 GiB saved on Qwen3.5-9B. What it does
+*not* do is the rest of a repair tool:
 
-**Candidate approach, settled by measurement.** Emit a **block-scaled integer**
-tensor, not a re-quantized trellis. As an embedding, scalar quantization beats the
-trellis by ~89x at equal bits on gemma-4-12B, because the trellis optimizes `x @ W.T`
-for a head rather than per-row accuracy — and it is simpler besides: no Hadamard, and
-row extraction is a slice rather than a block decode. Scale per sub-block of 32 rather
-than per row (the layout is in `quantized-embeddings`): per-row min/max lets one
-outlier component set the scale for a whole token's vector, which costs up to 134x at
-matched bytes. For tied models one shared tensor serves both roles and dominates both
-the shared trellis and any two-tensor split.
+- **Drop a tied model's redundant `lm_head`.** The other pipeline mistake, untouched.
+  The plugin already ignores those bytes at load, so this is purely a file-size fix —
+  which is exactly what a downloader cares about.
+- **Take a Hub repo rather than a local directory**, and write something publishable:
+  a model card noting what changed, and the revision it was derived from.
+- **Batch**, since the value is in repairing a collection, not one checkpoint.
 
-Depth can be a shipped constant, which per-row could not offer: 4 bits (4.5 bpw) lands
-at or below the noise floor on all three models measured. An override is still worth
-having, and a size-budget solver still belongs to the full quantizer, where layer bpw
-is actually free.
-
-Untied models additionally need the embedding produced from scratch, as a
-constrained optimization: the rest of the model's quantization decisions are already
-made and fixed.
+Depth stays a shipped constant (4 bits) unless something argues otherwise; an override
+is worth having, and a size-budget solver belongs to the full quantizer, where layer
+bpw is actually free rather than fixed.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
@@ -163,93 +157,43 @@ Serving the embedding quantized rather than dequantizing it at load. Dequantizin
 load proves the math and saves file storage and I/O, but leaves VRAM — the thing
 this project cares about most — completely unchanged.
 
-Tied models are **shipped**: `EXL3EmbeddingMethod` serves a tied model's embedding
-from its existing quantized `lm_head`, with the fp16 `embed_tokens` never loaded.
-Works on published checkpoints as they are, no repair tool and no quantizer work.
-All hooks are sanctioned vLLM extension points; nothing is monkeypatched.
+**Both shapes now serve.** Tied models come from the checkpoint's existing quantized
+`lm_head`, with the fp16 `embed_tokens` never loaded and no tooling needed. Untied
+models — which have no quantized copy to reuse — get one from
+`tools/quantize_embedding.py` in the block-scaled 4-bit format of
+`vllm_exl3_plugin/blockq.py`, served by `EXL3BlockQEmbeddingMethod`: Qwen3.5-9B goes
+1940 -> 549 MiB resident and 6.72 -> 5.36 GiB on disk, at a KLD tax at or below the
+model's own noise floor. All hooks are sanctioned vLLM extension points; nothing is
+monkeypatched.
 
-**Two things are open**, and the second is easy to overlook because the measurements
-that motivate it were done without it.
+Four things remain, in rough order of how much they would cost to discover late.
 
-1. **Untied models have no quantized embedding to reuse**, so one must be produced —
-   that is `repair-tool` / `quantize-embeddings-pipeline`.
-2. **There is no scalar-quantized serving path.** Everything the plugin can load is
-   trellis: `stored_tensor_names()` is `trellis`/`suh`/`svh` plus a codebook tensor,
-   and `EXL3EmbeddingMethod` serves via `ops.embed_rows`, which is trellis row
-   extraction. The block-scaled scheme that the sweeps showed is orders of magnitude
-   better as an embedding exists **only as simulation** — qbench's `fake_quantize`
-   rounds a resident fp16 tensor to a bits-bit grid and immediately dequantizes it,
-   explicitly "in place of dtype/storage changes... without committing to a real
-   packed format or a real kernel". Nothing is packed, stored, or loaded.
+1. **Most architectures never ask for an embedding quant method.** vLLM's model files
+   decide this individually and 86 of 131 omit `quant_config` when constructing their
+   `VocabParallelEmbedding`, so neither shape can serve there — silently dense for a
+   tied model, a load failure for a block-quantized one.
+   `patches/vllm-embed-quant-config.patch` covers `qwen3_5.py`; the rest is an
+   upstream contribution worth making, since every out-of-tree plugin that serves
+   embeddings hits it.
+2. **Tensor parallelism is written but unproven.** All three stored tensors slice on
+   dim 0, so `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row
+   Hadamard alignment rule — which is why it is a handful of lines. It has never run
+   on more than one GPU. Needs the `vast` box, alongside `moe-tp` and the TP tier of
+   `bench-suite`.
+3. **`bench/` does not gate any of it.** The bump gate pulls checkpoints from the Hub
+   and no repaired checkpoint is published, so covering this needs either a published
+   fixture or a bench step that produces one from a checkpoint it already pulls. Until
+   then a vLLM or exllamav3 bump can break the block-quantized path silently.
+4. **Only 4 bits is packed.** That is deliberate — one depth covers every model
+   measured, and nibbles keep both ends byte-aligned — but 3 bits is usable at ~3.5
+   bpw and would want the packing if a checkpoint ever calls for it.
 
-So the tensor format is decided but unimplemented at both ends. **Both tooling items
-are blocked on this**: a repair tool emitting such tensors today would produce
-checkpoints nothing can serve.
-
-**Next up, and scoped to untied models: a block-scaled embedding tensor served
-alongside the checkpoint's existing trellis head.** Needs a storage layout (packed
-values plus the superblock/sub-block scales described below),
-`create_weights`/`process_weights_after_loading` registration, and a gather — which
-should be markedly simpler than the trellis path, since row extraction becomes a slice
-with no Hadamard and no 128-block read amplification. Rows are independent, so
-vocab-parallel TP carries none of the 128-block alignment arithmetic the trellis path
-needs.
-
-Two reasons this shape rather than the shared tensor the frontier table favours. It is the **only** shape untied models can use, since their head is a
-genuinely different matrix. And it needs no new kernel: a shared tensor has to serve
-the head role too, and there is no scalar-integer GEMM anywhere — sharing would mean
-either dequantizing to dense fp16 (which gives back the whole saving) or a trip to
-kernel town. Costs ~0.35 GiB against sharing on gemma-4-12B, and is still ~1.4 GiB
-better than native.
-
-It is also where the new value is. Tied models already run with a much improved VRAM
-profile via Phase A; what they carry is a **KLD hit we now know is unnecessary**
-(+0.0216 from the trellis where a block-scaled tensor costs +0.0003 at 4.5 bpw). Untied
-models get nothing at all today.
-
-The shared-tensor optimization is deferred, possibly a long way. It only helps tied
-models, and gemma-4 is the only tied mid-size family on hand — so if gemma-4 proves
-impractical to deploy, which currently rides on `fa-head-dim-512`, there is almost
-nothing left for it to apply to. Natural follow-up to that item rather than an
-independent one.
-
-The lookup *plumbing* is built and de-risked by Phase A — the vLLM hooks,
-`tie_weights`, the tied-skip mapper — and that part is encoding-agnostic. It is the
-decode underneath it that is trellis-only.
-
-**The format is block-scaled, not per-row, and it is ours rather than GGUF's** — both
-settled by measurement in `gguf-embeddings`. Per-row min/max is dominated at every matched
-byte count on every model measured, by up to 134x, because one outlier component sets the
-scale for a whole row and the rows it ruins are whole tokens. What to emit:
-**blocks of 32 with (min, scale) per block, both quantized to int8 against one fp16 range
-per row** — 0.5 bpw of scales, the same overhead a k-quant carries, but every field
-byte-aligned and no superblock. At 4 bits that measured better than real Q4_K on the one
-model able to resolve the difference, and it is simpler on both ends than Q4_K's packed
-6-bit sub-scales.
-
-**4 bits (4.52 bpw) is the default, and initially the only depth.** One setting covers
-gemma-4-12B, Qwen3.5-9B and MiniCPM5-1B at 0.17x / 0.17x / 1.47x their noise floors, where
-the per-row scheme needed a per-model depth and a conservative default of 6 bits. That is
-what makes the scope small: values are nibbles, so neither the encoder nor the unpack ever
-handles a non-byte-aligned width. 3- and 5-bit packing waits until something demands it
-(3 bits is now usable, at ~3.5 bpw, where per-row had a cliff).
-
-**No kernel, and no dependency on `vllm-gguf-plugin`.** The unpack is plain torch —
-`index_select` on packed rows, nibble split, int8 scales, multiply-add — which under
-inductor + CUDA graphs measured *faster* than that plugin's CUDA dequant (2.1 vs 4.2 us at
-one token), because it fuses where an opaque custom op cannot. Depending on the plugin
-would also import its global monkeypatching of `EngineArgs` into every vLLM process, and
-would still leave the encoder to write, since `gguf-py` cannot emit k-quants.
-
-Row alignment does not bite: `hidden` is a multiple of 32 in every real model, so rows are
-a whole number of blocks, never share one, and stay independently sliceable — the property
-that makes both the gather and vocab-parallel TP a plain row slice. Assert the divisibility
-rather than assuming it.
-
-A fused kernel is the obvious highest-performing answer to the remaining per-token
-cost, but is worth weighing against less costly approaches first: it is development
-overhead and likely further pinning on CUDA, and exllamav3 has no ROCm support today
-while talking about adding it.
+**The shared tied-model tensor stays deferred**, on the same grounds as before: one
+tensor serving both roles needs a scalar-integer GEMM for the head, which does not
+exist anywhere, and sharing would otherwise mean dequantizing to dense fp16 and giving
+back the whole saving. It also only helps tied models, and gemma-4 is nearly its whole
+constituency — so it is best read as a follow-up to `fa-head-dim-512` rather than an
+independent goal.
 
 → [docs/embeddings.md](docs/embeddings.md)
 

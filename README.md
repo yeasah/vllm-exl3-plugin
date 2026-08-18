@@ -42,11 +42,16 @@ folded into history once the fork existed to hold it), making that path
 opt-in, which clears the hangs on Hopper/Blackwell and unlocks CUDA graphs for
 MoE — Laguna-XS goes from 35 to 172 tok/s. See [docs/moe.md](docs/moe.md).
 
-**Quantized embeddings** are served for tied models: the fp16 `embed_tokens` is
-never loaded, and lookups come from the checkpoint's existing quantized `lm_head`.
-Qwen3-0.6B goes 508 -> 323 MiB resident; gemma-4-12B gains 1.15 GiB of KV headroom,
-for ~3% decode cost. Untied models still load a dense embedding — they have no
-quantized one to reuse. See [docs/embeddings.md](docs/embeddings.md).
+**Quantized embeddings** are served for both tied and untied models. A tied model
+needs no tooling: the fp16 `embed_tokens` is never loaded and lookups come from the
+checkpoint's existing quantized `lm_head` — Qwen3-0.6B goes 508 -> 323 MiB resident,
+gemma-4-12B gains 1.15 GiB of KV headroom, for ~3% decode cost. An untied model has
+no quantized copy to reuse, so `tools/quantize_embedding.py` adds one in a
+block-scaled 4-bit format (~4.53 bpw, at or below the model's own noise floor):
+Qwen3.5-9B's embedding goes 1940 -> 549 MiB resident and its checkpoint 6.72 -> 5.36
+GiB. See [docs/embeddings.md](docs/embeddings.md).
+
+    tools/quantize_embedding.py <checkpoint-dir> <output-dir>
 
 [docs/exllamav3-arch.md](docs/exllamav3-arch.md) indexes where exllamav3
 changes behaviour by GPU architecture — worth consulting first when something
@@ -164,6 +169,7 @@ produces garbage without it. Drive models through their chat template
 | `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend |
 | `vllm-transformers-backend-embedding-postprocess.patch` | the Transformers backend substitutes the input embedding wholesale, silently dropping normalization the model applied inside it (MuseGlimmer's `embed_norm`) |
 | `vllm-transformers-backend-logit-softcap.patch` | the Transformers backend applies neither `final_logit_softcapping` nor a pre-scale under a non-standard name (MuseGlimmer's `output_multiplier`) |
+| `vllm-embed-quant-config.patch` | `qwen3_5.py` never passes `quant_config` to its `VocabParallelEmbedding`, so no quantized embedding can be served on that architecture -- silently dense for a tied model, a load failure for a block-quantized one. 86 of 131 model files upstream have the same gap |
 
 ## Environment variables
 

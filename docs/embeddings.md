@@ -983,3 +983,106 @@ statistical comparisons.
 **The dependency stays worth having as a reference, not as a runtime.** `vocal_embeds.py`
 is a good short model of the gather-and-dequantize shape, and this plugin remains the only
 other example of this exact out-of-tree architecture.
+
+## Phase B result: the format, built and serving
+
+*Tracked in TODO as `quantized-embeddings`. Built 2026-08-17, immediately after the
+decision above.*
+
+Untied models now serve a quantized embedding. `vllm_exl3_plugin/blockq.py` holds the
+format, `tools/quantize_embedding.py` produces it, and `EXL3BlockQEmbeddingMethod` serves
+it. The stored layout is what the measurements chose:
+
+    <key>.bq_q   uint8   [vocab, hidden // 2]        4-bit values, two per byte
+    <key>.bq_s   uint8   [vocab, 2, hidden // 32]    per-block scale codes, then min codes
+    <key>.bq_r   fp32    [vocab, 4]                  one affine range per row, for each
+
+A value is `q * scale + min`; the per-block `scale` and `min` are 8-bit codes against
+`bq_r`'s per-row ranges. 4.5 bpw of values and scales, plus 128 bits per row for the
+ranges — 4.531 bpw at `hidden = 4096`, 4.583 at 1536.
+
+### Measured on two real checkpoints
+
+| | checkpoint | embedding | resident embedding |
+|---|---|---|---|
+| MiniCPM5-1B @3.00bpw | 771 → 508 MiB | 0.374 → 0.107 GiB | 382 → 109.6 MiB |
+| Qwen3.5-9B @4.00bpw | 6.72 → 5.36 GiB | 1.895 → 0.537 GiB | — |
+
+Encoding a 248320 x 4096 embedding and rewriting the checkpoint takes 12 seconds on CPU.
+
+### The end-to-end check that matters
+
+Every number that justified this format came from qbench's `blockq:32` *simulation*, which
+packs nothing. So the question the implementation has to answer is not "does it run" but
+"is the thing now running the thing that was measured". Both arms through the vllm engine,
+so the engine difference cancels in the delta:
+
+| MiniCPM5-1B | dense embed | blockq32 4-bit | tax |
+|---|---|---|---|
+| simulated (exllamav3 engine) | 0.114097 | 0.115532 | +0.001435 |
+| real packed format (vllm engine) | 0.114369 | 0.115928 | **+0.001559** |
+
+Within 9% of the simulated tax, against a noise floor of 0.000977 — engine and
+fp16-decode differences, not a scale bug, which would show up as orders of magnitude
+rather than percent.
+
+Three things are asserted in tests rather than left to inspection: the shipped encoder
+reproduces an independent transcription of the simulated arithmetic; a row's storage
+decodes identically whether gathered alone or as part of the whole tensor (the property
+the serving path and vocab-parallel TP both rest on); and the decode agrees across eager,
+`torch.compile` and CUDA-graph replay — the modes that have caught real defects here
+before.
+
+Two floating-point caveats found while writing those tests, both benign and both now
+documented where they bite. Encoding is reproducible *per device*, not across devices:
+`.round()` breaks ties differently on CPU and GPU, so a handful of codes per vocabulary
+land one step apart — a byte-reproducibility caveat for the tool, not a correctness one
+for the model. And compiled output differs from eager by up to one fp16 ulp on the odd
+element, because inductor may fuse the multiply-add; exactness is required of graph
+*replay*, and holds there.
+
+### Two things validation turned up, neither of them in this format
+
+**vLLM only asks for an embedding quant method on about a third of its
+architectures.** `qwen3_5.py` constructs its `VocabParallelEmbedding` without
+`quant_config`, so `get_quant_method` is never called for it and no quantized
+embedding can be served there at all. On vLLM main, **86 of 131** model files that
+construct one omit it; `llama.py`, `gemma4.py`, `qwen2.py`, `qwen3_moe.py` and
+`deepseek_v2.py` pass it, which is why every model this feature had been tried on
+before happened to work.
+
+The failure modes differ in nastiness. A *tied* model silently keeps its dense
+embedding — Phase A quietly does nothing, and has been able to quietly do nothing
+since it shipped. A *block-quantized* checkpoint fails to load, complaining that
+`embed_tokens.bq_q` does not exist, which points nowhere near the cause.
+`patches/vllm-embed-quant-config.patch` fixes `qwen3_5.py`, the file covering two
+census models. It is worth upstreaming rather than carrying: any out-of-tree
+plugin serving embeddings hits it, and `vllm-gguf-plugin`'s `GGUFEmbeddingMethod`
+is equally unreachable on those architectures.
+
+With the patch, Qwen3.5-9B serves its embedding from 549 MiB instead of 1940, and
+the served rows are **bit-identical** to what the encoder wrote — checked through
+the whole load path (vLLM's weight loading, vocabulary padding, parameter
+registration) rather than inferred from output looking reasonable.
+
+**qbench's `vllm` engine cannot score Qwen3.5-9B.** Its dense, unmodified
+checkpoint measures ppl 248076 / KLD 10.26 through that engine, while the same
+checkpoint generates coherent text through plain `LLM.generate` and scores
+normally through the `exllamav3` engine. So it is the teacher-forced full-prompt
+scoring path, not the model or the plugin; Qwen3.5 is a hybrid Mamba architecture
+and the interaction with per-request state is the obvious suspect, but the
+mechanism is unestablished. It is why the end-to-end KLD validation above is
+MiniCPM5-1B's rather than the more sensitive model's.
+
+### What this does not cover yet
+
+- **Tensor parallelism is implemented but untested.** All three tensors slice on dim 0, so
+  `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row Hadamard
+  alignment rule — which is why it is a small amount of code. It still needs a real
+  multi-GPU run before it is believed.
+- **`bench/` does not gate it.** The bump gate pulls checkpoints from the Hub, and no
+  repaired checkpoint is published, so covering this needs either a published fixture or a
+  bench step that produces one.
+- **Tied models are unchanged**, and remain served from their existing quantized `lm_head`.
+  The shared-tensor optimization stays deferred on the same grounds as before: it needs an
+  integer GEMM for the head role, and gemma-4 is nearly its whole constituency.
