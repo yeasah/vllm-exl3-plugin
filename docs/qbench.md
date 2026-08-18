@@ -179,23 +179,32 @@ accounting has been quietly wrong (after the dead `bpw_head` fallback and the un
 classic GPTQ/AWQ checkpoints), and all three failed silently in the direction of a
 *plausible* number.
 
-So there is now a standing guard: `check_against_disk` compares the counted bytes against
-the checkpoint's actual on-disk tensor bytes and reports `accounted_share`, warning when a
-bucket is impossible (zero) or the shortfall is too large for a legitimate exclusion. It is
-the formalization of what has always been done by hand here — go look at the file sizes on
-the hub — and it needs no second implementation to compare against, which is what makes it
-applicable to every path rather than only the two that happen to compute the same figure
-twice.
+So there is now a standing guard: `check_against_disk` compares the tally against the
+checkpoint's actual on-disk tensor bytes. It is the formalization of what has always been
+done by hand here — go look at the file sizes on the hub — and it needs no second
+implementation to compare against, which is what makes it applicable to every path rather
+than only the two that happen to compute the same figure twice.
 
-Two thresholds, because the callers differ: a checkpoint-header scan counts everything and
-should land near 1.0, while the streamed engine walks the text model alone and legitimately
-omits whole vision towers. And it guards *under*-counting only — whether a tensor that
-exists on disk is one the engine will really load is a separate, policy question, which the
-scope section below addresses.
+**It is deliberately not a ratio against a threshold**, which was the first design and is
+worse than it looks. The models with the most legitimately-absent bytes — a 50-layer vision
+tower, an MTP head — are exactly the ones where a real gap has the most room to hide in the
+slack, so any threshold loose enough not to fire on them is loose enough to miss a dropped
+embedding. Calibrating the threshold on real models makes it worse, not better.
 
-It was checked against the bug that motivated it rather than assumed to work: with the
-`bq_*` suffixes removed from the table again, a repaired MiniCPM5-1B reports `vram_gb`
-0.3789 against a true 0.4859, `bpw_embed` 0.0, 78% accounted, and the warning fires.
+Instead every on-disk tensor is classified: **counted** (its module key is one the caller
+tallied), **expected absent** (a multimodal tower, an MTP head, a norm, a bias, a router
+gate, or a tied model's redundant `lm_head`), or **unexplained**. Only the last matters,
+and it should be exactly zero on any checkpoint however much apparatus the model carries —
+so there is nothing to calibrate. The warning names the offending module keys, which turns
+"some number looks off" into "these tensors were dropped".
+
+Demonstrated both ways rather than assumed. With the `bq_*` suffixes removed from the table
+again, a repaired MiniCPM5-1B reports `vram_gb` 0.3789 against a true 0.4859, `bpw_embed`
+0.0, and **0.107 GiB unexplained**, naming `model.embed_tokens.bq_q/bq_s/bq_r`. And on
+Muse-Glimmer, whose vision tower puts 0.90 GiB legitimately out of scope, silently dropping
+the embedding surfaces as **2.505 GiB unexplained** naming
+`model.language_model.embed_tokens` — where the ratio version would have read ~75%, at the
+threshold, and would have missed it entirely on a model with more apparatus.
 
 ## Known limitations, and what closing them would unlock
 
