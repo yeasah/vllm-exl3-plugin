@@ -1,38 +1,59 @@
-Pass quant_config to VocabParallelEmbedding in qwen3_5.py.
+Reach the quantized-embedding path on every architecture, in one place.
 
-Without it vLLM never asks the quantization config for an embedding method, so a
-quantized embedding cannot be served no matter what the checkpoint contains:
+`VocabParallelEmbedding.__init__` only consults a quantization config if its
+caller passed one, and most model files do not: on vLLM main (checked 2026-08-17)
+**86 of 131** model files that construct one omit `quant_config`, including
+qwen3_5.py, qwen3_next.py, minicpm.py and mixtral.py. `llama.py`, `gemma4.py`,
+`qwen2.py`, `qwen3_moe.py` and `deepseek_v2.py` pass it, which is why quantized
+embeddings appeared to work -- every architecture they had been tried on happened
+to be in the passing third.
 
-  - a *tied* EXL3 model silently keeps its dense fp16 embedding, losing the
-    entire Phase A saving (1.88 GiB on gemma-4-12B-scale models) with no error;
-  - an untied checkpoint carrying the block-quantized embedding of
-    `vllm_exl3_plugin/blockq.py` fails to load outright, with a message about
-    `embed_tokens.bq_q` not existing that points nowhere near the cause.
+The consequences are silent in the worst direction. A *tied* EXL3 model keeps its
+dense fp16 embedding and loses the whole saving with no error at all. A checkpoint
+carrying the block-quantized embedding of `vllm_exl3_plugin/blockq.py` fails to
+load, complaining that `embed_tokens.bq_q` does not exist -- which points nowhere
+near the cause.
 
-This is not specific to this plugin or to one model file. On vLLM main (checked
-2026-08-17) **86 of 131** model files that construct a `VocabParallelEmbedding`
-omit `quant_config`, including `qwen3_5.py`, `qwen3_next.py`, `minicpm.py` and
-`mixtral.py`; `llama.py`, `gemma4.py`, `qwen2.py`, `qwen3_moe.py` and
-`deepseek_v2.py` pass it. Any out-of-tree quantization plugin that serves
-embeddings hits the same wall -- `vllm-gguf-plugin`'s `GGUFEmbeddingMethod` is
-equally unreachable on those architectures -- so this is worth upstreaming
-rather than carrying.
+Rather than patch 86 model files, default the config from the one being built
+under. `get_current_vllm_config()` is already how `linear.py` and
+`logits_processor.py` read ambient construction state, so this is the established
+idiom rather than a new mechanism.
 
-Patched here only for `qwen3_5.py`, which covers two of this project's census
-models (Qwen3.5-9B and Qwen3.5-35B-A3B) and is the one the fix was verified on:
-with it, Qwen3.5-9B's embedding goes from 1940 MiB dense to 549 MiB, and the
-served rows are bit-identical to what the encoder wrote.
+**This does not change behavior for configs that do not quantize embeddings**:
+they return None from `get_quant_method` for a VocabParallelEmbedding and land on
+`UnquantizedEmbeddingMethod` exactly as before. Verified on this box: AWQ on
+qwen3_5 (the same architecture the fix unblocks) still gets
+UnquantizedEmbeddingMethod and a dense 1940 MiB embedding, bitsandbytes on
+Qwen3-0.6B likewise, and the plugin's own end-to-end suite (tied Llama and gemma4,
+both of which already passed quant_config) is unchanged. With it, Qwen3.5-9B
+serves its embedding from 549 MiB instead of 1940.
 
-diff --git a/vllm/model_executor/models/qwen3_5.py b/vllm/model_executor/models/qwen3_5.py
-index 50b47f16fe..0d35514660 100644
---- a/vllm/model_executor/models/qwen3_5.py
-+++ b/vllm/model_executor/models/qwen3_5.py
-@@ -243,6 +243,8 @@ class Qwen3_5Model(Qwen3NextModel):
-         self.embed_tokens = VocabParallelEmbedding(
-             self.vocab_size,
-             config.hidden_size,
-+            quant_config=self.quant_config,
-+            prefix=f"{prefix}.embed_tokens",
+Worth upstreaming rather than carrying: any out-of-tree quantization plugin that
+serves embeddings hits this, and `vllm-gguf-plugin`'s GGUFEmbeddingMethod is
+equally unreachable on those 86 architectures today.
+
+diff --git a/vllm/model_executor/layers/vocab_parallel_embedding.py b/vllm/model_executor/layers/vocab_parallel_embedding.py
+index 6eed2b5249..3a6e23e06b 100644
+--- a/vllm/model_executor/layers/vocab_parallel_embedding.py
++++ b/vllm/model_executor/layers/vocab_parallel_embedding.py
+@@ -281,6 +281,20 @@ class VocabParallelEmbedding(PluggableLayer):
          )
+         self.embedding_dim = embedding_dim
  
-         def get_layer(prefix: str):
++        # Most model files never pass `quant_config` here (86 of 131 that build a
++        # VocabParallelEmbedding omit it), so a quantization method that serves
++        # embeddings is simply unreachable on those architectures. Fall back to the
++        # config being built under, the way linear.py and logits_processor.py already
++        # read ambient state. Configs that do not quantize embeddings return None from
++        # get_quant_method and land on UnquantizedEmbeddingMethod exactly as before.
++        if quant_config is None:
++            from vllm.config import get_current_vllm_config
++
++            try:
++                quant_config = get_current_vllm_config().quant_config
++            except Exception:
++                quant_config = None
++
+         quant_method = None
+         if quant_config is not None:
+             quant_method = quant_config.get_quant_method(self, prefix=prefix)

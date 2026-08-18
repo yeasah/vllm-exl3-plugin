@@ -168,13 +168,15 @@ monkeypatched.
 
 Four things remain, in rough order of how much they would cost to discover late.
 
-1. **Most architectures never ask for an embedding quant method.** vLLM's model files
-   decide this individually and 86 of 131 omit `quant_config` when constructing their
+1. **Most architectures never ask for an embedding quant method**, and the fix is
+   carried in `patches/vllm-embed-quant-config.patch` rather than upstream. 86 of 131
+   vLLM model files omit `quant_config` when constructing their
    `VocabParallelEmbedding`, so neither shape can serve there — silently dense for a
-   tied model, a load failure for a block-quantized one.
-   `patches/vllm-embed-quant-config.patch` covers `qwen3_5.py`; the rest is an
-   upstream contribution worth making, since every out-of-tree plugin that serves
-   embeddings hits it.
+   tied model, a load failure for a block-quantized one. The patch is one file
+   (default the config from `get_current_vllm_config()`, as `linear.py` already
+   does), verified not to disturb configs that do not quantize embeddings.
+   **Worth offering upstream**: `vllm-gguf-plugin` is blocked by exactly the same
+   thing, so it is an ecosystem fix and not only ours.
 2. **Tensor parallelism is written but unproven.** All three stored tensors slice on
    dim 0, so `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row
    Hadamard alignment rule — which is why it is a handful of lines. It has never run

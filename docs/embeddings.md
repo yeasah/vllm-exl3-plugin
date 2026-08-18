@@ -1055,24 +1055,34 @@ The failure modes differ in nastiness. A *tied* model silently keeps its dense
 embedding — Phase A quietly does nothing, and has been able to quietly do nothing
 since it shipped. A *block-quantized* checkpoint fails to load, complaining that
 `embed_tokens.bq_q` does not exist, which points nowhere near the cause.
-`patches/vllm-embed-quant-config.patch` fixes `qwen3_5.py`, the file covering two
-census models. It is worth upstreaming rather than carrying: any out-of-tree
-plugin serving embeddings hits it, and `vllm-gguf-plugin`'s `GGUFEmbeddingMethod`
-is equally unreachable on those architectures.
+**The fix is one file, not 86.** `VocabParallelEmbedding.__init__` only consults a
+config its caller passed, so `patches/vllm-embed-quant-config.patch` defaults it
+from the config being built under — `get_current_vllm_config()`, already how
+`linear.py` and `logits_processor.py` read ambient construction state. Every
+architecture is reached at once, and configs that do not quantize embeddings are
+unaffected, because they already return `None` for a `VocabParallelEmbedding` and
+land on `UnquantizedEmbeddingMethod` exactly as before. Checked rather than
+assumed: AWQ on `qwen3_5` (the very architecture the patch unblocks) still gets
+the dense 1940 MiB path, bitsandbytes on Qwen3-0.6B likewise, and the plugin's own
+end-to-end suite is unchanged.
+
+Worth upstreaming rather than carrying: `vllm-gguf-plugin` has the identical
+limitation — its `GGUFEmbeddingMethod` is unreachable on the same 86
+architectures, and nothing in that package works around it — so this is an
+ecosystem gap rather than ours.
 
 With the patch, Qwen3.5-9B serves its embedding from 549 MiB instead of 1940, and
 the served rows are **bit-identical** to what the encoder wrote — checked through
 the whole load path (vLLM's weight loading, vocabulary padding, parameter
 registration) rather than inferred from output looking reasonable.
 
-**qbench's `vllm` engine cannot score Qwen3.5-9B.** Its dense, unmodified
-checkpoint measures ppl 248076 / KLD 10.26 through that engine, while the same
-checkpoint generates coherent text through plain `LLM.generate` and scores
-normally through the `exllamav3` engine. So it is the teacher-forced full-prompt
-scoring path, not the model or the plugin; Qwen3.5 is a hybrid Mamba architecture
-and the interaction with per-request state is the obvious suspect, but the
-mechanism is unestablished. It is why the end-to-end KLD validation above is
-MiniCPM5-1B's rather than the more sensitive model's.
+**qbench's `vllm` engine cannot score Qwen3.5-9B**, which is why the end-to-end KLD
+validation above is MiniCPM5-1B's rather than the more sensitive model's. Its
+dense, unmodified checkpoint measures ppl 248076 through that engine while
+generating coherent text through plain `LLM.generate`. Not a hybrid-Mamba
+teacher-forcing limitation, which is what it first looked like: scoring through
+vLLM's public `prompt_logprobs` API is self-consistent on these very models (see
+[qbench.md](qbench.md)), so the fault is in that engine's own scoring path.
 
 ### What this does not cover yet
 

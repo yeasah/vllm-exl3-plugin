@@ -169,7 +169,7 @@ produces garbage without it. Drive models through their chat template
 | `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend |
 | `vllm-transformers-backend-embedding-postprocess.patch` | the Transformers backend substitutes the input embedding wholesale, silently dropping normalization the model applied inside it (MuseGlimmer's `embed_norm`) |
 | `vllm-transformers-backend-logit-softcap.patch` | the Transformers backend applies neither `final_logit_softcapping` nor a pre-scale under a non-standard name (MuseGlimmer's `output_multiplier`) |
-| `vllm-embed-quant-config.patch` | `qwen3_5.py` never passes `quant_config` to its `VocabParallelEmbedding`, so no quantized embedding can be served on that architecture -- silently dense for a tied model, a load failure for a block-quantized one. 86 of 131 model files upstream have the same gap |
+| `vllm-embed-quant-config.patch` | 86 of 131 model files never pass `quant_config` to their `VocabParallelEmbedding`, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from the config being built under, in one place rather than 86 |
 
 ## Environment variables
 

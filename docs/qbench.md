@@ -175,15 +175,27 @@ as TODO `qbench-noise-floor`.
 
 **No GGUF through `vllm-gguf-plugin`**, as above.
 
-**The `vllm` engine mis-scores at least one hybrid-Mamba model.** Qwen3.5-9B's
-unmodified EXL3 checkpoint measures ppl 248076 / KLD 10.26 through it, against
-ppl 12.15 / KLD 0.0131 for the same checkpoint through the `exllamav3` engine --
-and the same checkpoint generates coherent text through plain `LLM.generate`, so
-the model and the plugin are fine and the fault is in the teacher-forced
-full-prompt scoring path. Mamba state across a scored prompt is the obvious
-suspect and is untested. Until it is understood, cross-checking a `vllm`-engine
-number against the `exllamav3` engine is the cheap guard, and it is worth doing
-for any architecture with recurrent state.
+**The `vllm` engine mis-scores Qwen3.5.** Qwen3.5-9B's unmodified EXL3 checkpoint
+measures ppl 248076 / KLD 10.26 through it, against ppl 12.15 / KLD 0.0131 for the
+same checkpoint through the `exllamav3` engine, while generating coherent text
+through plain `LLM.generate`.
+
+**It is this engine's own scoring path, not teacher forcing on hybrid-Mamba
+models**, which is what it first looked like. Teacher-forced scoring through
+vLLM's *public* `prompt_logprobs` API is self-consistent on exactly these models:
+generate greedily, re-score prompt+continuation, and every generated token comes
+back top-1 at its position -- 16/16 on Qwen3.5-9B and 16/16 on Qwen3.5-35B-A3B,
+matching a non-Mamba control (Llama-3.2-1B), and still 8/8 at 512 and 1024 tokens.
+
+So the fault lies in what this engine does differently at its own scale: 2048-token
+rows, `max_num_seqs=1`, and the `compute_topk_scores` patch it installs to dodge
+the full-vocabulary `torch.topk` blowup. That blowup is real and worth noting on
+its own -- the public API OOMs at 2048 positions on a 248320 vocabulary, since the
+logprobs tensor alone is 2.0 GiB -- so the patched path is load-bearing rather than
+optional, and is the first place to look.
+
+The self-consistency probe above is the cheap guard, needs no reference model, and
+is worth running against any engine change here.
 
 Closing both, in that order, would turn this engine into something qualitatively
 different rather than merely more complete: every measurement could run inside one
