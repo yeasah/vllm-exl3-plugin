@@ -18,7 +18,9 @@ were measured, and the note has the tables:
     dequant kernel that is *slower* here, because an opaque custom op cannot fuse
     into the graph the way the plain-torch decode below does.
 
-Layout, per embedding, alongside the checkpoint's existing tensors:
+docs/blockq-format.md is the format reference, written for someone implementing
+against it from outside this codebase. Layout, per embedding, alongside the
+checkpoint's existing tensors:
 
     <key>.bq_q   uint8   [vocab, hidden // 2]   two 4-bit values per byte
     <key>.bq_s   uint8   [vocab, 2, hidden // BLOCK]   scale codes, then min codes

@@ -991,7 +991,9 @@ decision above.*
 
 Untied models now serve a quantized embedding. `vllm_exl3_plugin/blockq.py` holds the
 format, `tools/quantize_embedding.py` produces it, and `EXL3BlockQEmbeddingMethod` serves
-it. The stored layout is what the measurements chose:
+it. [blockq-format.md](blockq-format.md) is the format reference — layout, decode and
+encode in full, and what may be assumed about it. In brief, the stored layout is what the
+measurements chose:
 
     <key>.bq_q   uint8   [vocab, hidden // 2]        4-bit values, two per byte
     <key>.bq_s   uint8   [vocab, 2, hidden // 32]    per-block scale codes, then min codes
