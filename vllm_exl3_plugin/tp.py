@@ -45,16 +45,28 @@ ROLE_TRELLIS = "trellis"
 ROLE_SUH = "suh"
 ROLE_SVH = "svh"
 ROLE_SCALAR = "scalar"  # mcg / mul1, replicated everywhere
+#: The block-quantized embedding's tensors (`blockq.py`). All three are indexed by
+#: vocabulary on dim 0 and slice identically, which is the whole reason that format
+#: was chosen: a vocabulary-parallel split is a row slice with no alignment rule to
+#: satisfy, where the trellis needs whole 128-row Hadamard blocks.
+ROLE_VOCAB = "vocab"
+
+#: Storage suffixes that carry `ROLE_VOCAB`.
+_VOCAB_TENSORS = ("bq_q", "bq_s", "bq_r")
 
 
 def role_of(name: str) -> str:
     if name in (ROLE_TRELLIS, ROLE_SUH, ROLE_SVH):
         return name
+    if name in _VOCAB_TENSORS:
+        return ROLE_VOCAB
     return ROLE_SCALAR
 
 
 def shard_column(role: str, t: torch.Tensor, first: int, last: int) -> torch.Tensor:
     """Take this rank's slice for an output-dimension (column-parallel) split."""
+    if role == ROLE_VOCAB:
+        return t[first:last].contiguous()
     if role == ROLE_TRELLIS:
         return t[:, first // TILE : last // TILE, :].contiguous()
     if role == ROLE_SVH:
@@ -65,6 +77,8 @@ def shard_column(role: str, t: torch.Tensor, first: int, last: int) -> torch.Ten
 
 def shard_row(role: str, t: torch.Tensor, first: int, last: int) -> torch.Tensor:
     """Take this rank's slice for an input-dimension (row-parallel) split."""
+    if role == ROLE_VOCAB:
+        return t[first:last].contiguous()
     if role == ROLE_TRELLIS:
         return t[first // TILE : last // TILE].contiguous()
     if role == ROLE_SUH:

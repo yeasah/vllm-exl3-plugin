@@ -41,8 +41,12 @@ from __future__ import annotations
 
 import torch
 
-from .. import format, ops
+from torch.nn import Parameter
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+from .. import blockq, format, ops, tp
 from ..log import init_logger
+from .linear import EXL3Parameter
 from .lm_head import EXL3LMHeadMethod
 
 logger = init_logger(__name__)
@@ -131,3 +135,146 @@ class EXL3TiedLMHeadMethod(EXL3EmbeddingMethod):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return super().apply(layer.exl3_tied_source, x, bias)
+
+
+def _blockq_weight_loader(param, loaded_weight: torch.Tensor) -> None:
+    """`VocabParallelEmbedding` calls weight loaders with two positional args.
+
+    Every block-quantized tensor is indexed by vocabulary on dim 0, so one rule
+    covers all three: take this rank's rows. Compare the trellis path, where the
+    same split has to respect 128-row Hadamard blocks and each sub-tensor slices
+    on a different axis.
+    """
+    param.store(param._take_row(loaded_weight, param.row_shard_size, param.tp_rank))
+
+
+class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
+    """Token embedding served from block-scaled 4-bit storage (`blockq.py`).
+
+    This is the untied-model answer, and the one that needed a format: a tied
+    model is served from its existing quantized `lm_head` by
+    `EXL3EmbeddingMethod` above, with no new tensors at all, but an untied
+    model's head is a genuinely different matrix and there is nothing to reuse.
+    The three tensors this loads are produced by `tools/quantize_embedding.py`.
+
+    Nothing here is a custom op. The decode is plain torch so that inductor can
+    fuse it into the surrounding graph, which is what made it *faster* than
+    calling a hand-written dequant kernel (docs/embeddings.md, "Build or adopt").
+    """
+
+    def __init__(self, quant_config):
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        # For an embedding vLLM passes the vocabulary as the output dimension and
+        # the hidden size as the input: (embedding_dim, [rows_per_partition],
+        # embedding_dim, num_embeddings_padded).
+        del input_size, output_size
+
+        indices = layer.shard_indices
+        rows_per_rank = (
+            indices.padded_org_vocab_end_index - indices.padded_org_vocab_start_index
+        )
+
+        # The layer's own loader cannot drive this layout; dropped as elsewhere.
+        extra_weight_attrs.pop("weight_loader", None)
+
+        device = torch.empty(0).device
+        for name in format.BLOCKQ_SUFFIXES:
+            suffix = name.removeprefix(".")
+            layer.register_parameter(
+                suffix,
+                EXL3Parameter(
+                    num_shards=1,
+                    device=device,
+                    weight_loader=_blockq_weight_loader,
+                    role=tp.role_of(suffix),
+                    row_shard_size=rows_per_rank,
+                ),
+            )
+
+        layer.exl3_hidden_size = input_size_per_partition
+        layer.exl3_params_dtype = params_dtype
+        layer.exl3_real_rows = (
+            indices.org_vocab_end_index - indices.org_vocab_start_index
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        names = [n.removeprefix(".") for n in format.BLOCKQ_SUFFIXES]
+        params = {n: getattr(layer, n) for n in names}
+        stored = {}
+        for name, param in params.items():
+            if 0 not in param.shards:
+                raise format.EXL3FormatError(
+                    f"{getattr(layer, 'prefix', '<embedding>')}: no '{name}' "
+                    "tensor was loaded for the block-quantized embedding"
+                )
+            stored[name] = param.shards[0]
+
+        hidden = format.blockq_hidden_from_shape(stored["bq_q"].shape)
+        if hidden != layer.exl3_hidden_size:
+            raise format.EXL3FormatError(
+                f"block-quantized embedding stores hidden size {hidden}, but the "
+                f"model's is {layer.exl3_hidden_size}"
+            )
+        rows = stored["bq_q"].shape[0]
+        for name, want in format.blockq_shapes(rows, hidden).items():
+            if tuple(stored[name].shape) != tuple(want):
+                raise format.EXL3FormatError(
+                    f"block-quantized embedding tensor '{name}' has shape "
+                    f"{list(stored[name].shape)}, expected {list(want)}"
+                )
+
+        # vLLM pads the vocabulary partition (to a multiple of 64) beyond the rows
+        # a checkpoint stores. Those ids are masked before the lookup and zeroed
+        # after it, but the gather still indexes with them, so the storage has to
+        # cover them. Zero rows decode to zero vectors, which is what the masking
+        # would have produced anyway.
+        target = layer.num_embeddings_per_partition
+        if rows > target:
+            raise format.EXL3FormatError(
+                f"block-quantized embedding has {rows} rows but vLLM allocated "
+                f"only {target}"
+            )
+        if rows < target:
+            # F.pad counts dimensions from the last backwards, so padding dim 0
+            # means zeros for every trailing dimension first.
+            stored = {
+                name: torch.nn.functional.pad(
+                    t, (0,) * (2 * (t.dim() - 1)) + (0, target - rows)
+                )
+                for name, t in stored.items()
+            }
+
+        for name, t in stored.items():
+            layer.register_parameter(name, Parameter(t, requires_grad=False))
+        for param in params.values():
+            param.release()
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        """Row gather, replacing `F.embedding(input_, layer.weight)`.
+
+        `input_` is already this rank's local row index -- `VocabParallelEmbedding`
+        has subtracted the shard offset and masked out-of-range ids -- which is
+        exactly what the loader stored, so no index arithmetic is needed here.
+        """
+        return blockq.gather(
+            input_, layer.bq_q, layer.bq_s, layer.bq_r, layer.exl3_params_dtype
+        )
+
+    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+        # Reached only if something routed a linear through the embedding's
+        # method. An untied model's lm_head has its own.
+        raise format.EXL3FormatError(
+            "the block-quantized embedding has no matmul path: it stores an "
+            "embedding, not a weight matrix a GEMM can consume"
+        )

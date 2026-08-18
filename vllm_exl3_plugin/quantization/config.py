@@ -73,6 +73,9 @@ class EXL3Config(QuantizationConfig):
         self.out_scales = out_scales
         # Populated by maybe_update_config when quantization_config.json exists.
         self.tensor_storage: dict[str, Any] | None = None
+        # Module keys carrying a block-quantized embedding, from the safetensors
+        # index when there is one.
+        self._blockq_modules: set[str] = set()
         # Modules the *checkpoint* quantizes, from the safetensors index. Takes
         # precedence over tensor_storage, which can omit some (see
         # _load_index_modules). None means "no index was readable".
@@ -235,6 +238,7 @@ class EXL3Config(QuantizationConfig):
             # the only map we have, so leave this unset and fall back to it.
             return
         self.quantized_modules = format.quantized_module_keys(weight_map)
+        self._blockq_modules = format.blockq_module_keys(weight_map)
         self._ancestors = None
 
     def _load_tensor_storage(self, model_name: str, revision: str | None) -> None:
@@ -335,6 +339,37 @@ class EXL3Config(QuantizationConfig):
         if self._dense_embed:
             return False
         return bool(self.tie_word_embeddings) and self._head_storage_exists()
+
+    def embedding_is_blockq(self) -> bool:
+        """Whether the checkpoint carries a block-quantized `embed_tokens`.
+
+        This is the *untied* answer to the same problem `embedding_is_quantized`
+        solves for tied models, and the two are mutually exclusive: a tied model
+        is served from its `lm_head` and needs no new tensors, while an untied
+        model has no quantized copy of its embedding until
+        `tools/quantize_embedding.py` makes one.
+
+        Both sources are consulted for the same reason `is_quantized` consults
+        both: the safetensors index names every tensor that exists and is ground
+        truth, but single-file checkpoints have no index, leaving the storage map
+        as the only evidence.
+        """
+        stored = bool(self._blockq_modules) or any(
+            entry.get("quant_format") == "exl3_blockq"
+            for entry in (self.tensor_storage or {}).values()
+        )
+        if stored and self._dense_embed:
+            # EXL3_DENSE_EMBED exists to isolate a *tied* model's embedding from
+            # everything else by loading the dense copy instead. A repaired
+            # checkpoint has no dense copy -- removing it is the point -- so
+            # honoring the flag here would fail later, on a missing
+            # `embed_tokens.weight`, far from the cause.
+            logger.warning(
+                "EXL3_DENSE_EMBED is set, but this checkpoint stores a "
+                "block-quantized embedding and no dense one. Serving it "
+                "quantized; the flag only applies to tied models."
+            )
+        return stored
 
     def get_cache_scale_mapper(self):
         """Route a tied model's `lm_head.*` onto the embedding module.
@@ -510,6 +545,13 @@ class EXL3Config(QuantizationConfig):
                 return EXL3TiedLMHeadMethod(self)
             return EXL3LMHeadMethod(self) if self.head_is_quantized() else None
         if isinstance(layer, VocabParallelEmbedding):
+            if self.embedding_is_blockq():
+                # Untied, with a block-quantized embedding produced by
+                # tools/quantize_embedding.py. Nothing is renamed onto this
+                # module: the tensors are its own.
+                from .embedding import EXL3BlockQEmbeddingMethod
+
+                return EXL3BlockQEmbeddingMethod(self)
             # EXL3 never quantizes the input embedding -- `embed_tokens.weight`
             # is dense in every checkpoint inspected -- but a *tied* model ships
             # a quantized lm_head covering the same matrix, which can serve as

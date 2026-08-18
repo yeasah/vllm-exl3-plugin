@@ -44,6 +44,19 @@ PAD_TO = 128
 MIN_BITS = 1
 MAX_BITS = 8
 
+#: Block size and value width of the block-scaled embedding format (`blockq.py`).
+#: Duplicated there as torch-facing constants; these are the torch-free copies the
+#: shape arithmetic below uses.
+BLOCKQ_BLOCK = 32
+BLOCKQ_BITS = 4
+
+#: Tensors a block-quantized embedding stores, alongside the model's own.
+BLOCKQ_SUFFIXES = (".bq_q", ".bq_s", ".bq_r")
+
+#: Subset that must be present for an embedding to count as block-quantized.
+BLOCKQ_REQUIRED_SUFFIXES = (".bq_q",)
+
+
 #: Suffixes that belong to an EXL3-quantized linear rather than to the model.
 EXL3_SUFFIXES = (
     ".trellis",
@@ -261,6 +274,67 @@ def fused_shard_bounds(
         bounds.append((index, first, first + per_rank))
         offset += per_rank * tp_size
     return bounds
+
+
+def check_blockq_hidden(hidden: int, block: int = BLOCKQ_BLOCK) -> None:
+    """Validate a hidden size against the block-scaled embedding layout.
+
+    Two conditions, both cheap and both silently wrong if skipped: a row has to be
+    a whole number of scale blocks, or rows would share a block and stop being
+    independently sliceable -- which is the property the gather and vocab-parallel
+    TP both rest on -- and it has to be even, since values are packed two per byte.
+
+    `hidden` is a multiple of 32 in every real model (`num_heads x head_dim`), so
+    this asserts rather than accommodates.
+    """
+    if hidden % block:
+        raise EXL3FormatError(
+            f"hidden size {hidden} is not a multiple of the block-quantized "
+            f"embedding's block size ({block}); rows would share a scale block"
+        )
+    if hidden % 2:
+        raise EXL3FormatError(
+            f"hidden size {hidden} is odd; 4-bit values pack two per byte"
+        )
+
+
+def blockq_shapes(vocab: int, hidden: int, block: int = BLOCKQ_BLOCK):
+    """Shapes of the three stored tensors, as `{suffix: shape}`."""
+    check_blockq_hidden(hidden, block)
+    return {
+        "bq_q": (vocab, hidden // 2),
+        "bq_s": (vocab, 2, hidden // block),
+        "bq_r": (vocab, 4),
+    }
+
+
+def blockq_hidden_from_shape(shape) -> int:
+    """Recover the hidden size from the packed value tensor's shape."""
+    if len(shape) != 2:
+        raise EXL3FormatError(f"bq_q must be 2-dimensional, got shape {list(shape)}")
+    return shape[1] * 2
+
+
+def blockq_bpw(hidden: int, block: int = BLOCKQ_BLOCK) -> float:
+    """Stored bits per weight, including both levels of scale metadata.
+
+    >>> round(blockq_bpw(4096), 4)      # Qwen3.5-9B
+    4.5312
+    >>> round(blockq_bpw(1536), 4)      # MiniCPM5-1B
+    4.5833
+    """
+    check_blockq_hidden(hidden, block)
+    return BLOCKQ_BITS + 2 * 8 / block + 4 * 32 / hidden
+
+
+def blockq_module_keys(tensor_names) -> set[str]:
+    """Module keys carrying a block-quantized embedding, given checkpoint names."""
+    keys: set[str] = set()
+    for name in tensor_names:
+        for suffix in BLOCKQ_REQUIRED_SUFFIXES:
+            if name.endswith(suffix):
+                keys.add(name[: -len(suffix)])
+    return keys
 
 
 def module_key_for_tensor(name: str) -> str | None:
