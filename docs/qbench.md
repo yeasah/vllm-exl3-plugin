@@ -177,10 +177,25 @@ table, as the docstring instructs.
 Worth noting the pattern rather than just the fix: this is the third time storage
 accounting has been quietly wrong (after the dead `bpw_head` fallback and the unaccounted
 classic GPTQ/AWQ checkpoints), and all three failed silently in the direction of a
-*plausible* number. The check that catches them is cheap and worth doing whenever a new
-format first goes through: compute the same figure two independent ways — here the
-streamed engine's per-module tally against the checkpoint-header scan — and require them
-to agree.
+*plausible* number.
+
+So there is now a standing guard: `check_against_disk` compares the counted bytes against
+the checkpoint's actual on-disk tensor bytes and reports `accounted_share`, warning when a
+bucket is impossible (zero) or the shortfall is too large for a legitimate exclusion. It is
+the formalization of what has always been done by hand here — go look at the file sizes on
+the hub — and it needs no second implementation to compare against, which is what makes it
+applicable to every path rather than only the two that happen to compute the same figure
+twice.
+
+Two thresholds, because the callers differ: a checkpoint-header scan counts everything and
+should land near 1.0, while the streamed engine walks the text model alone and legitimately
+omits whole vision towers. And it guards *under*-counting only — whether a tensor that
+exists on disk is one the engine will really load is a separate, policy question, which the
+scope section below addresses.
+
+It was checked against the bug that motivated it rather than assumed to work: with the
+`bq_*` suffixes removed from the table again, a repaired MiniCPM5-1B reports `vram_gb`
+0.3789 against a true 0.4859, `bpw_embed` 0.0, 78% accounted, and the warning fires.
 
 ## Known limitations, and what closing them would unlock
 
