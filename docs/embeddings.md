@@ -1086,6 +1086,37 @@ teacher-forcing limitation, which is what it first looked like: scoring through
 vLLM's public `prompt_logprobs` API is self-consistent on these very models (see
 [qbench.md](qbench.md)), so the fault is in that engine's own scoring path.
 
+### Native exllamav3 can load these checkpoints too
+
+*Added 2026-08-18, prompted by the triattention calibration question.*
+
+exllamav3 originally refused a repaired checkpoint outright — `Required tensor
+model.embed_tokens.weight not found` — which also put it out of reach of every `eval/`
+harness and of anything else driving a model natively. `Embedding.load()` in the fork now
+materializes the dense matrix from the packed tensors when they are present.
+
+The served path never builds that matrix; it decodes only the rows a batch touches. But
+the *values* are identical either way, so this is not a fictional configuration: it is
+the shipped one, materialized for measurement convenience. The one thing materializing
+does change is memory, which is why the size accounting had to learn the format in both
+places it lives — `Embedding.stored_bytes` for the streamed engine, and
+`safetensors_storage_info`'s suffix table for the checkpoint path, which was silently
+omitting the entire embedding from `vram_gb` (bpw_embed 0.0). Both now report 4.5833 bpw
+and 0.4859 GiB on MiniCPM5-1B and agree with each other.
+
+**This tightens the end-to-end validation above considerably.** The repaired checkpoint
+scored through the *same* engine as the simulation gives KLD 0.115528 against 0.115532 —
+a 4e-6 difference, where the vllm engine differs by 4e-4. So the packed format reproduces
+the measured scheme essentially exactly, and yesterday's 9% gap was the engine, as
+suspected but not then demonstrated.
+
+**One trap worth knowing if anything else ever decodes at load time.** The decode must ask
+for its tensors with `no_defer`: under `begin_deferred_load()` a tensor's contents arrive
+*after* `load()` returns, so arithmetic at load time reads an unfilled buffer and yields a
+plausible-looking wrong matrix rather than an error. Every other module defers safely only
+because none of them compute at load. It was caught by comparing against the plugin's own
+decoder — the reason to keep two implementations of a format that must agree.
+
 ### What this does not cover yet
 
 - **Tensor parallelism is implemented but untested.** All three tensors slice on dim 0, so

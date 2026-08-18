@@ -165,6 +165,23 @@ their own calculator. Keep the two apart: **qbench answers "how big is this weig
 the appliance answers "will this configuration run on this hardware".** Capacity planning
 is a separate component, not a qbench flag.
 
+## A third accounting bug, of the kind this file keeps finding
+
+`safetensors_storage_info` buckets a tensor whose suffix it does not recognize under its
+own full name and then drops it, which its docstring correctly warns "undercounts rather
+than crashing". Block-quantized embeddings (`bq_q`/`bq_s`/`bq_r`) were the first format to
+exercise that: the `vllm` engine reported `bpw_embed = 0.0` and a `vram_gb` missing the
+entire embedding — 0.3789 GiB where the truth is 0.4859. Fixed by extending the suffix
+table, as the docstring instructs.
+
+Worth noting the pattern rather than just the fix: this is the third time storage
+accounting has been quietly wrong (after the dead `bpw_head` fallback and the unaccounted
+classic GPTQ/AWQ checkpoints), and all three failed silently in the direction of a
+*plausible* number. The check that catches them is cheap and worth doing whenever a new
+format first goes through: compute the same figure two independent ways — here the
+streamed engine's per-module tally against the checkpoint-header scan — and require them
+to agree.
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)
