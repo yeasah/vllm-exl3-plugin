@@ -1098,3 +1098,46 @@ vLLM's public `prompt_logprobs` API is self-consistent on these very models (see
 - **Tied models are unchanged**, and remain served from their existing quantized `lm_head`.
   The shared-tensor optimization stays deferred on the same grounds as before: it needs an
   integer GEMM for the head role, and gemma-4 is nearly its whole constituency.
+
+## The axis nobody has swept: vector quantization
+
+*Speculative, and deliberately marked so — nothing below is measured, unlike the rest of
+this note. Recorded because the last four design reversals all came from adding one arm
+to an existing sweep, and this is the arm that is conspicuously missing.*
+
+Every scheme compared here is **scalar**: uniform grids at various granularities (per
+tensor, per row, per block of 32/64/128, k-quant-shaped), plus llama.cpp's IQ types,
+which are non-uniform *scalar* codebooks with block scales. What has never been on the
+axis is **vector quantization** — split a row into subvectors, fit a codebook, store an
+index per subvector. Product quantization, in the FAISS sense.
+
+Three things make it the plausible next winner rather than an idle suggestion:
+
+- **Its objective is the one this job actually has.** A codebook fitted over rows
+  minimizes reconstruction error of rows *as vectors*, which is the criterion the whole
+  note turns on. Every scalar scheme approximates that criterion with a grid; this one
+  optimizes it directly.
+- **The codebook is free at this scale.** The thing that usually makes VQ awkward — a
+  codebook to store and amortize — costs nothing against a 130k-262k row matrix, where
+  it is rounding error on the total.
+- **Row independence survives.** A lookup stays a gather of codes plus codebook
+  indexing, so the serving path, the slice-ability and the vocabulary-parallel TP story
+  are unchanged. It would slot into the same three-tensor shape.
+
+**What the prize actually is, and it is not "beat blockq at 4.5 bpw".** There is nothing
+left to win there: the tax is already at or below the noise floor on all three models,
+so a better encoder buys unmeasurable quality. The prize is **the low end** — making 2.5
+to 3 bpw usable, where blockq's tax is resolvable and where an appliance running an
+aggressive configuration would spend the saving on layer bits or KV cache.
+
+**What would have to be true for it to be worth it.** Two costs land squarely on things
+this project just escaped. The encoder stops being closed-form arithmetic and becomes a
+fitting procedure (k-means over a vocabulary-sized matrix), and the codebook is
+model-specific, which reintroduces exactly the per-model calibration step the
+constant-depth result removed. So the bar is not "wins" but "wins enough at 2.5-3 bpw to
+justify a fitted encoder", and it should be held to that.
+
+**Cost to find out: one `embed_quant` granularity and a re-run.** The harness, the
+reference logits, the three models and every comparison arm already exist; simulating a
+PQ scheme needs no storage format and no serving path, exactly as `blockq:32` needed
+none before it earned one.
