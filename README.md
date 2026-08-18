@@ -161,6 +161,12 @@ produces garbage without it. Drive models through their chat template
 
 ## Patches
 
+`tools/checkpoint_survey.py` screens a checkpoint before you spend the bandwidth: it
+sorts every stored tensor into what this plugin serves, what it never loads, and what it
+does not recognize — the last being a reliable predictor of real work. `--remote` answers
+the same question from Hub metadata, without downloading. It screens *storage*, not
+architecture support.
+
 `patches/` holds changes to *vLLM*, applied to a source checkout:
 
 | patch | why |
