@@ -407,6 +407,32 @@ to borrow a noise floor from another engine.
 
 → [docs/qbench.md](docs/qbench.md)
 
+## `capability-suite` — Measuring capability through the served path
+
+**Outcome wanted:** task-level numbers for a configuration as it is actually served —
+quantized weights, quantized embedding, quantized KV — so quality claims stop being
+divergence figures plus personal impressions.
+
+**Why it is the missing instrument.** qbench answers "how far is this distribution from
+the reference", which ranks encodings well and says nothing about whether a 3.0bpw model
+with a 4-bit KV cache still writes working code, follows a long agentic trace, or recalls
+something from 40K tokens back. Those are the questions the appliance actually ships
+against, and the two newest axes — block-quantized embeddings and KV compression — are
+precisely where divergence is least informative, since KV damage surfaces as retrieval
+failure deep in the window rather than as perplexity at a position.
+
+**Candidate approach: give exllamav3's existing task harnesses a vLLM execution path.**
+`eval/` already has `mmlu.py`, `humaneval.py`, `ifbench.py`, `bbeh_mini.py`, `longctx.py`
+and `spec_decode.py`, with prompts, graders and datasets solved. But every one drives
+native exllamav3 (`model_init.init` / `Generator` / `Job`), so none can see a
+block-quantized embedding (exllamav3 cannot load the format) or vLLM-side KV
+quantization. This is the same move qbench made for scoring: keep the task definitions,
+add an engine. `longctx.py` first — it is the probe for the least understood axis, and it
+already works on whole documents with altered variants rather than synthetic needles.
+
+→ [docs/qbench.md](docs/qbench.md) (scope: why divergence is deliberately all qbench
+measures), [docs/embeddings.md](docs/embeddings.md)
+
 ## `retire-gemma4-patch` — Retire `patches/vllm-gemma4-transformers-5.15-per-layer.patch`
 
 vLLM landed their own fix for the transformers 5.15 per-layer config break upstream:
