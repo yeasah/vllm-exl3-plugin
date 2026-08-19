@@ -429,6 +429,21 @@ block-quantized embedding (exllamav3 cannot load the format) or vLLM-side KV
 quantization. This is the same move qbench made for scoring: keep the task definitions,
 add an engine. `longctx.py` first — it is the probe for the least understood axis, and it
 already works on whole documents with altered variants rather than synthetic needles.
+It is also the least sampling-sensitive task in the set, being a retrieval probe, so the
+engine path can land greedy-only and the tiering below can wait for `humaneval`/`ifbench`.
+
+**Sampling is an axis of the suite, not a setting.** Greedy is the primary tier, since most
+knobs are distribution-relative — `top_p` cuts at a mass threshold and quantization fattens
+the tail, so one setting admits more junk from a 3.0bpw model than from the reference, and
+part of any reported gap is then the sampler rather than the encoding; penalties are worse,
+being cumulative over a trace. But greedy alone is a known blind spot — the soft-cap gap
+under `multimodal` wrecks sampled output while leaving greedy intact — so a second tier
+runs each model's recommended parameters, which is also the tier that answers what the
+appliance ships. There, **snapshot the parameters into the suite config** with the model
+card revision and date they came from rather than reading the card at run time: cards get
+edited silently, and a baseline that follows one stops meaning what it said. Thinking and
+non-thinking are separate entries, carrying different recommendations. Whichever tier
+produced a number belongs in the artifact beside the vLLM pin.
 
 → [docs/qbench.md](docs/qbench.md) (scope: why divergence is deliberately all qbench
 measures), [docs/embeddings.md](docs/embeddings.md)
