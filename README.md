@@ -169,14 +169,17 @@ architecture support.
 
 `patches/` holds changes to *vLLM*, applied to a source checkout:
 
-| patch | why |
-|---|---|
-| `vllm-fused-param-capability-check.patch` | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it |
-| `vllm-gemma4-transformers-5.15-per-layer.patch` | gemma-4 on transformers >= 5.15, which moves `head_dim`/`num_key_value_heads` into per-layer configs |
-| `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend |
-| `vllm-transformers-backend-embedding-postprocess.patch` | the Transformers backend substitutes the input embedding wholesale, silently dropping normalization the model applied inside it (MuseGlimmer's `embed_norm`) |
-| `vllm-transformers-backend-logit-softcap.patch` | the Transformers backend applies neither `final_logit_softcapping` nor a pre-scale under a non-standard name (MuseGlimmer's `output_multiplier`) |
-| `vllm-embed-quant-config.patch` | 86 of 131 model files never pass `quant_config` to their `VocabParallelEmbedding`, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from the config being built under, in one place rather than 86 |
+Status against **v0.28.0rc1** is from a static scan of upstream sources on
+2026-08-20, not a runtime check — confirm at the bump.
+
+| patch | why | v0.28.0rc1 |
+|---|---|---|
+| `vllm-fused-param-capability-check.patch` | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it | keep — no `handles_fused_shards` upstream |
+| `vllm-gemma4-transformers-5.15-per-layer.patch` | gemma-4 on transformers >= 5.15, which moves `head_dim`/`num_key_value_heads` into per-layer configs | **retire** — `ModelArchitectureConfig` landed; `Gemma4Config` reads `model_arch_config` |
+| `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend | keep — still absent upstream |
+| `vllm-transformers-backend-embedding-postprocess.patch` | the Transformers backend substitutes the input embedding wholesale, silently dropping normalization the model applied inside it (MuseGlimmer's `embed_norm`) | **likely retire** — upstream stopped substituting the embedding; `embed_input_ids` calls the model's own. Verify: the same change may remove the seam a quantized embedding needs on that backend |
+| `vllm-transformers-backend-logit-softcap.patch` | the Transformers backend applies neither `final_logit_softcapping` nor a pre-scale under a non-standard name (MuseGlimmer's `output_multiplier`) | **halve** — `soft_cap=final_logit_softcapping` landed; the `output_multiplier` pre-scale did not |
+| `vllm-embed-quant-config.patch` | 86 of 131 model files never pass `quant_config` to their `VocabParallelEmbedding`, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from the config being built under, in one place rather than 86 | keep — still absent upstream; still worth filing |
 
 ## Environment variables
 

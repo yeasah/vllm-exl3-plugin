@@ -81,6 +81,13 @@ the fetch is what you want on a fresh box, and the two differ by a flag. The
 entries already carry `model`/`revision`, so this reads the matrix rather than
 duplicating it.
 
+**No longer hypothetical.** On 2026-08-20 the local cache lost
+`Muse-Glimmer-30B-exl3@2.00bpw`, replaced by `2.50bpw` for unrelated reasons, while
+`full` still pins the 2.00 baseline. Nothing broke — `bench` fetches by revision and
+the branch is still published — but the next run would have discovered a multi-GiB
+download midstream. `deps` is what turns that into a line of output beforehand, and
+the failure it prevents is not confined to rental boxes.
+
 Throughput is gated separately (`perf-check`/`perf-bless`), reproducing
 `docs/kernels.md`'s workload shape so that note's table stays live. Perf
 baselines are per-machine — `bench/expected/perf/<platform>/`, with the tag
@@ -230,8 +237,16 @@ graph, so arithmetic living above it or inside a layer it substitutes gets dropp
 
 **What remains open:**
 
-- **Upstreaming the three patches.** All read as backend gaps rather than EXL3
-  special cases, so all are plausible contributions. For
+- **Upstreaming the three patches — now one and a half.** A static scan of
+  `v0.28.0rc1` on 2026-08-20 found upstream had already closed most of it:
+  `soft_cap=final_logit_softcapping` is passed to `LogitsProcessor` (so the softcap
+  patch reduces to its `output_multiplier` half), and the backend appears to have
+  stopped substituting the input embedding at all — `embed_input_ids` now calls the
+  model's own — which would retire the postprocess patch by construction. **Check the
+  cost of that second one**: if the backend's embedding is no longer a
+  `VocabParallelEmbedding` it can carry no quantization method, which removes the seam
+  `quantized-embeddings` would need on this path. Only
+  `vllm-replicated-linear-weight-loader-v2.patch` is untouched upstream. For
   `vllm-replicated-linear-weight-loader-v2.patch`, check the
   `RowvLLMParameter`-narrowing edge noted in the doc first. For
   `vllm-transformers-backend-embedding-postprocess.patch`, the detection is
@@ -566,12 +581,19 @@ vLLM landed their own fix for the transformers 5.15 per-layer config break upstr
 `ModelArchitectureConfig.from_layers()` / per-layer arch-config plumbing through
 `get_num_kv_heads`/`get_num_attention_heads`, not a gemma-4-only patch like ours.
 
-**Already verified, on 2026-08-17.** A `bench/` dry run against a 0.27.2 preview
+**0.27.2 was abandoned; the bump is 0.28.** Upstream tagged `v0.28.0rc1` on
+2026-08-20, ~596 commits past v0.27.0, and a static scan of that tag confirms the fix
+is still present: `ModelArchitectureConfig` in `vllm/config/model.py`, with
+`Gemma4Config.verify_and_update_config` reading `model_config.model_arch_config`.
+
+**Already verified, on 2026-08-17**, against what was then the next release. A
+`bench/` dry run against a 0.27.2 preview
 (`vllm-main` @ `v0.27.2rc0-136-gfdab2b10bc`) carrying **only** the fused-param and
 ReplicatedLinear patches — no gemma-4 patch — had `gemma-4-12B 3.0bpw mul1 tied`
 compare **bit-identical** to its baseline: `argmax 0`, `|dlogprob| max 0.000e+00`
 across 84 scored positions, greedy unchanged. Upstream's generic fix covers what
-ours did.
+ours did — evidence about the *commit*, which 0.28 carries, rather than about a
+release that never happened.
 
 So at the bump this is mechanical: drop the patch, update the README table. The
 re-verification is already done and the entry will keep doing it.
