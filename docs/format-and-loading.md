@@ -330,7 +330,7 @@ the cooperative-launch lock buffer and the on-disk autotune cache under
 multi-process workers.
 
 
-## CPU offload: why vLLM's UVA offloader skips EXL3 entirely
+## CPU offload: why vLLM's offloaders skip EXL3 entirely
 
 *Traced from TODO, where it had accumulated as an investigation log. The work
 itself is open — TODO `cpu-offload`.*
@@ -383,15 +383,157 @@ does: pin the tensor, wrap it with `get_accelerator_view_from_cpu_tensor`, and
 register that instead of a plain on-device `Parameter` — updating the offloader's
 own byte counter so later layers' budget accounting stays correct.
 Bits-agnostic, checkpoint-vintage-agnostic, no vLLM changes, no plugin storage-path
-refactor. Covers only the UVA backend, not `PrefetchOffloader` (a different
-per-layer streaming design), which is acceptable since UVA is close to universal on
-the CUDA-only stack this project already requires.
+refactor. Written against the UVA backend, but the diagnosis turns out to cover
+`PrefetchOffloader` unchanged -- see below.
 
 **Known cost, going in with eyes open.** This reaches into a vLLM internal —
 `get_offloader()` / `UVAOffloader` are not public API — which is one more surface
 that can silently break on a vLLM version bump, the same standing risk already
 taken on with `exl3_mgemm`'s call sites across the exllamav3 fork transition. Worth
 it here: it is the only way to make CPU offload work for EXL3 at all.
+
+### The prefetch backend: same cause, louder failure, and pinning is all that is left
+
+*Measured 2026-08-19.*
+
+vLLM has a second weight-offload backend, selected by `--offload-group-size` rather
+than `--cpu-offload-gb`. `PrefetchOffloader` groups layers, offloads
+`offload_num_in_group` of every `offload_group_size`, and issues async H2D copies
+`offload_prefetch_step` groups ahead on a dedicated `copy_stream` with CUDA events.
+
+That overlap is why the distinction matters. **UVA is zero-copy, so a weight read
+during a forward pass stalls on PCIe inline; prefetch can hide the transfer behind
+compute of preceding layers.** For weights read on every forward pass -- the case
+where offload buys bits-per-weight rather than merely making a model load at all --
+prefetch is the correct backend and UVA is not. UVA stays right for *sparsely* read
+tensors such as a vision tower, where paying only on the passes that touch it beats
+prefetching it on every pass. Only one backend is active per process
+(`create_offloader` returns a singleton), so the two cannot currently be mixed.
+
+**It fails for exactly the reason UVA does.** `--offload-group-size 8
+--offload-num-in-group 2` on an EXL3 checkpoint reports
+
+    [PrefetchOffloader] Initialized 10 modules. Total GPU memory saved: 0.0123 GB
+
+and then asserts. The 12 MB is the diagnosis: `wrap_modules` builds its whitelist from
+`module.named_parameters()` at construction, so it selected and sized the same empty
+placeholders UVA skips, and `_ModuleOffloader.__init__` set up per-parameter storage
+against them. By onload time `process_weights_after_loading` has substituted different
+`Parameter` objects. So neither cause above is a UVA quirk: both are
+construction-time-versus-post-load, and both backends lose to it.
+
+The symptom differs, and prefetch's is the better one -- UVA offloads 0.01 GiB and
+says nothing, while prefetch names the tensor:
+
+    AssertionError: CPU storage for linear_attn.in_proj_qkvz.trellis is not pinned!
+
+**Everything past the assert works.** With
+`VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY=1` the assert clears and the next failure
+is CUDA graph capture -- `Cannot copy between CPU and CUDA tensors during CUDA graph
+capture unless the CPU tensor is pinned` -- which is PyTorch's constraint, not vLLM's.
+Adding `--enforce-eager` runs. So pinning is required twice over, and it is the *only*
+remaining obstacle: nothing else in the prefetch path is incompatible with EXL3
+tensors. That makes the outstanding problem materially smaller than the section above
+implies on its own.
+
+**What an evaluation should use.** Added time per token is roughly
+`offloaded_bytes / PCIe bandwidth`, against ~16 ms to read 14 GiB of resident weights
+at ~900 GB/s -- so a 2 GiB offload costs tens of milliseconds per token and dominates
+compute, and prefetch can only mask the compute-sized slice of it. Dense models
+therefore degrade fast, because every offloaded byte is re-read every token, and
+batching makes it worse rather than better. Sparse models are where the trade is
+good, but **only under UVA**: `PrefetchOffloader` is routing-blind -- nothing in
+`prefetch.py` consults the router, and `start_onload_to_static` copies every
+whitelisted parameter each forward pass -- so prefetching experts pays PCIe for all
+of them regardless of which are selected. UVA's zero-copy laziness is what makes a
+routed model pay for only the experts it actually reads. This inverts the usual
+ordering, and it is measured, not reasoned: see below.
+
+### What offload is actually worth, measured on a real MoE
+
+*Measured 2026-08-20 on `Intel/Qwen3.6-35B-A3B-int2-mixed-CT-AutoRound` -- 11.88 GiB
+of checkpoint, 73.9% of it experts, stored per-expert unfused and fused by vLLM at
+load. RTX 5070 Ti 16 GiB, `--max-num-seqs 1 --max-model-len 1024
+--gpu-memory-utilization 0.95`, nightly wheel. Deliberately **not** an EXL3
+checkpoint: it is a routed MoE that fits the card with and without offload, so the
+two backends can be compared against each other on one model. Throughput figures are
+the operator's; the memory sweep is reproduced in `bench`-free scratch runs.*
+
+| config | offloader claims | resident | actually freed | tok/s |
+|---|---|---|---|---|
+| baseline | -- | 12.02 | -- | 198 |
+| UVA `experts`, gb=2 | 2.07 | 11.81 | 0.21 | |
+| UVA `experts`, gb=4 | 4.01 | 11.60 | 0.42 | |
+| UVA `experts`, gb=8 | 8.11 | 11.15 | 0.87 | 175 |
+| UVA `experts`, gb=14 | 8.63 | 11.08 | 0.94 | |
+| prefetch `experts`, group=8 in-group=2 | 0.25 | 11.79 | 0.23 | 125 |
+| prefetch `experts`, group=1 (all layers) | 1.01 | 11.08 | 0.94 | 42 |
+| UVA all params, gb=8 | -- | 10.59 | 1.43 | 47 |
+| UVA all params, gb=14 | 9.35 | 10.36 | 1.66 | |
+
+**Access pattern dominates, by 4x, at matched bytes.** UVA-`experts` and
+prefetch-`experts` both settle at 11.08 GiB resident -- the same 0.94 GiB off the
+card -- and differ by 175 vs 42 tok/s. Nothing else varies, so this isolates
+laziness: prefetch copies every offloaded expert each forward pass regardless of
+routing, while UVA's zero-copy reads pull only the experts the router selects. For
+routed experts UVA is the right backend, which inverts the ordering that holds for
+densely-read weights.
+
+**UVA's reported figure is inflated ~9x here -- but only for the MoE.** Claimed
+2.07/4.01/8.11/8.63 GiB delivered 0.21/0.42/0.87/0.94, a flat ~10.4%. Three
+independent metrics agree on the real figure: peak allocated during load (12.02 ->
+11.15), KV cache headroom (0.27 -> 1.19 GiB, a delta of 0.92), and throughput -- a
+35B-A3B genuinely reading 8 GiB of host-resident experts would land nearer 40 tok/s
+than the 175 measured. `PrefetchOffloader`'s own number is honest by comparison: 1.01
+claimed, 0.94 freed.
+
+Dense models do not do this. Measured the same way on 2026-08-20:
+
+| model | method | claimed | baseline | offloaded | freed |
+|---|---|---|---|---|---|
+| Qwen3.5-9B | compressed-tensors, dense | 2.01 | 8.43 | 6.40 | 2.03 |
+| Qwen3-0.6B | awq | 0.21 | 0.52 | 0.30 | 0.22 |
+| Qwen3-0.6B | gptq | 0.21 | 0.52 | 0.30 | 0.22 |
+| Qwen3.6-35B-A3B | compressed-tensors WNA16, MoE | 8.11 | 12.02 | 11.15 | 0.87 |
+
+So dense offload is honest across three quantization methods -- which incidentally
+**validates the 3.63 GiB AWQ figure** this section opens with, on the same
+Qwen3.5-9B. The ~90% loss is specific to the one MoE tested.
+
+**The mechanism is not established, and the obvious explanation is wrong.** The
+natural hypothesis is that `process_weights_after_loading` re-registers weights under
+new names, so `device_loading_context`'s repair pass (`model_loader/utils.py`, which
+re-offloads UVA parameters that came back to device) fails to match them -- its own
+comment says it is "ignoring new parameters". But the prevailing pattern across
+vLLM's quantization methods is `replace_parameter(layer, "w13_weight", ...)`:
+**same** name, new tensor, which that pass handles correctly and which is presumably
+why the dense rows above work. Something else accounts for the MoE shortfall. Worth
+pinning down before relying on any of it, since MoE is exactly where offload is
+otherwise most attractive.
+
+**A metric caveat for anyone reproducing this.** "Model loading took X GiB" is
+`torch.cuda.max_memory_allocated()` over the load scope -- a *peak* over
+allocator-managed memory, and a UVA host-mapped tensor is not allocator-managed at
+all. It happens to agree with KV headroom here, but it is not a steady-state resident
+figure and should not be read as one.
+
+**The ceiling is about 1 GiB, and it is eligibility-bound rather than budget-bound.**
+Raising the budget from 8 to 14 GiB moved the claim only from 8.11 to 8.63 and the
+saving from 0.87 to 0.94: it had run out of expert parameters to offload, not out of
+budget. Dropping the `experts` filter reaches 1.66 GiB, but those are weights read on
+every token, which is what the 47 tok/s row costs. So on this model offload buys
+roughly a gigabyte at ~12% throughput -- valuable on the margin, and nowhere near
+enough to fund a step up the bpw curve on its own.
+
+**Why EXL3's fix should do better than 10%.** The plan under TODO `cpu-offload` is to
+register from `process_weights_after_loading`, i.e. after all replacement has already
+happened and with the final tensors in hand. Nothing repacks them afterwards, so the
+name-matching failure above cannot occur and the offloaded bytes are the bytes that
+stay offloaded. It also means EXL3 misses the existing mitigation twice over rather
+than once: `create_weights` registers its placeholders at `torch.empty(0).device`
+(CPU), so UVA's `device == cpu` early return skips the module before any name is
+recorded, and the post-load tensors carry different names (`exl3_trellis_N` against
+the checkpoint's `trellis`) so they would not match even if it had.
 
 ## transformers 5.15: heterogeneous configs
 

@@ -371,6 +371,32 @@ data would be useful — significantly tempered by the fact that existing checkp
 keep their incomplete metadata regardless, unless we repair and republish them
 (license permitting).
 
+**Candidate approach: declare rules, not instances.** `tensor_storage` enumerates one
+entry per module, which is why it is untrustworthy — absence is ambiguous between "not
+quantized" and "we failed to record it", and `Muse-Glimmer-30B-exl3` omits 303
+quantized modules with no way to tell from the file. compressed-tensors solves the
+same problem with `config_groups`: named groups whose `targets` are regexes over
+module names, plus an explicit `ignore` list for exceptions. Two regexes describe a
+whole mixed-precision 35B MoE where our map needs 667 entries for gemma-4-12B, and a
+rule cannot omit a module because it is not listing them. Worth recording `provider`
+and a format name alongside, as that checkpoint does — knowing which quantizer and
+version produced a file is free and we do not store it.
+
+**What it unblocks, which is the reason to care.** Per-module bit width becomes
+knowable at `create_weights` time, reliably and for every module. That is the exact
+precondition `cpu-offload` had to reject the AWQ preallocate-and-mutate pattern over
+— see that item, and [docs/format-and-loading.md](docs/format-and-loading.md) "CPU
+offload", where the objection is recorded.
+
+**It reaches existing checkpoints too, via `repair-tool`.** A rule map can be
+*derived* from a checkpoint's actual tensor shapes at repair time rather than trusted
+from its config, so the published collection gains the property as it is repaired
+instead of waiting on re-quantization. That is also a cheap consistency check on the
+metadata already there: derive the groups, compare against `tensor_storage`, and any
+disagreement is a bug in one of them.
+
+→ [docs/format-and-loading.md](docs/format-and-loading.md)
+
 ## `quantize-embeddings-pipeline` — Quantizing embeddings in the pipeline
 
 Stop shipping a full fp16 embedding, and stop emitting a redundant head for tied
@@ -434,34 +460,50 @@ parameters, not more GPU time.
 ## `cpu-offload` — CPU offload for EXL3 weights
 
 `vllm serve --cpu-offload-gb` silently offloads nothing for EXL3 — 0.01 GiB against
-3.63 GiB for the same model as AWQ. Two independent causes, both traced: the UVA
-offloader decides eligibility at construction time when our parameters are still
-empty CPU placeholders, and `process_weights_after_loading` then replaces those
-parameters with objects the offloader never sees.
+3.63 GiB for the same model as AWQ. Two independent causes, both traced: the offloader
+decides eligibility at construction time when our parameters are still empty CPU
+placeholders, and `process_weights_after_loading` then replaces those parameters with
+objects the offloader never sees. **Both causes hit both backends** — `PrefetchOffloader`
+fails identically, just louder.
+
+**Why this is worth doing, and it is not capacity.** With `quantized-embeddings` and
+`repair-tool` landed, these models now fit 16 GiB — but only at 2.0-2.5bpw, well past
+the knee of the KLD curve. Offload trades PCIe bandwidth for bits per weight, which is
+a quality lever rather than a fallback. **Sized on 2026-08-20, and the answer splits.** On the
+one routed MoE measured, vLLM frees only ~1 GiB of a claimed 8 and the reason is not
+yet understood; on dense models it offloads honestly, verified against awq, gptq and
+compressed-tensors. So the ceiling is not a general property — but dense is also where
+every offloaded byte is re-read every token, so the good ceiling and the good
+throughput are on opposite sides. Valuable on the margin either way, not a step up the
+bpw curve on its own.
 
 **Candidate approach.** Register the offload ourselves from
 `process_weights_after_loading`, where the finished tensors already exist at final
-shape: reach `get_offloader()`, and if it is a `UVAOffloader` with budget left, pin
-and wrap the tensor as `uva.py` would, updating its byte counter. Bits-agnostic,
+shape: reach `get_offloader()` and hand it the real tensor as the backend would have,
+**pinned** — pinning is required both by `PrefetchOffloader`'s own assert and by
+PyTorch, which refuses unpinned H2D during CUDA graph capture. Bits-agnostic,
 checkpoint-vintage-agnostic, no vLLM changes. Accepts a known cost — it depends on a
 vLLM internal that can break on a version bump.
 
-**Honor `--cpu-offload-params` in that registration.** The UVA offloader takes a set
-of parameter-name segments and offloads *only* the parameters that match (exact
-dot-delimited segments, `f".{param}." in f".{name}."` in
-`vllm/model_executor/offloader/uva.py`); registering our tensors without that check
-makes the EXL3 path silently non-selective, which nobody notices until someone tries
-the selective form and gets the whole model offloaded. Four lines at the time, an
-irritation to retrofit.
+**Scope note: which backend wins depends on access pattern, and MoE inverts the
+obvious answer.** Prefetch overlaps transfer with compute, so it suits dense weights
+read every pass. But it is routing-blind — it copies every offloaded parameter each
+forward pass — while UVA's zero-copy reads touch only what the kernel actually reads.
+For routed experts, and for sparsely-read tensors like a vision tower, UVA therefore
+wins decisively; measured on 2026-08-20. Only one backend is active per process, so if weights are being
+offloaded the tower stays resident; at 0.3-0.6 GiB that is the cheap end of the
+trade. Verified 2026-08-19 that the prefetch path is otherwise fully functional with
+EXL3 tensors, so pinning is the only outstanding requirement.
 
-The selective form is the one worth having. UVA is zero-copy from pinned host memory
-— a fixed assignment at load, no cache and no eviction — so an offloaded tensor costs
-PCIe only on the forward passes that actually read it. Offloading just a vision tower
-therefore frees its bytes at no cost to text-only requests, which is the case
-`multimodal` runs out of headroom on. Static is the right design there: a residency
-cache would thrash on that bimodal access pattern. (vLLM's other backend,
-`--offload-group-size` with async H2D prefetch, is the opposite tool — for weights
-read every pass, where the transfer hides behind compute.)
+**Honor the parameter selectors in that registration.** Both backends take a set of
+parameter-name segments and offload *only* what matches — `--cpu-offload-params` for
+UVA, `--offload-params` for prefetch, both exact dot-delimited segments
+(`f".{param}." in f".{name}."`). Registering our tensors without that check makes the
+EXL3 path silently non-selective, which nobody notices until someone tries the
+selective form and gets the whole model offloaded. Four lines at the time, an
+irritation to retrofit — and selectivity is what makes the sparse case work at all:
+`--cpu-offload-params experts` is why a routed model pays PCIe for only the experts it
+actually reads.
 
 → [docs/format-and-loading.md](docs/format-and-loading.md) "CPU offload"
 
