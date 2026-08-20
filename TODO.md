@@ -190,6 +190,19 @@ Four things remain, in rough order of how much they would cost to discover late.
    measured, and nibbles keep both ends byte-aligned — but 3 bits is usable at ~3.5
    bpw and would want the packing if a checkpoint ever calls for it.
 
+**A tied model with a block-quantized embedding crashes** (found 2026-08-19). The
+two predicates in `quantization/config.py` treat the cases as mutually exclusive —
+`embedding_is_blockq()` says so in as many words — but a tied checkpoint whose
+embedding has been repaired makes both true. It loads without complaint and dies at
+logits time: `EXL3TiedLMHeadMethod` reads a trellis off the embedding module, which
+now holds `bq_*` instead. Worse, `get_cache_scale_mapper` still fires with
+`embed_prefix` at its `"model.embed_tokens"` default, routing 755 MiB of trellis to a
+module path that does not exist on a nested model, and nothing objects — so the
+silent weight loss wants a guard of its own. The fix is to make both predicates
+per-module rather than per-checkpoint, and to point the rename at the head's own
+prefix, which still defeats the loader's `lm_head` skip. Not hypothetical:
+`gemma4-e2b` is tied *and* needs blockq for its per-layer embedding.
+
 **The shared tied-model tensor stays deferred**, on the same grounds as before: one
 tensor serving both roles needs a scalar-integer GEMM for the head, which does not
 exist anywhere, and sharing would otherwise mean dequantizing to dense fp16 and giving
@@ -262,7 +275,10 @@ gap this item was opened for — the vision path is not merely loading.
   the same token space as text — so there is no EXL3-quantized audio component to
   get wrong, which makes a pipeline fault upstream of us the likely cause. Cheap
   way to settle it rather than assume: the same clip through native exllamav3,
-  the instrument that settled Muse's text path.
+  the instrument that settled Muse's text path. The other instrument is
+  gemma-4 E2B/E4B, the only model on hand with a genuinely *separate* audio
+  encoder and so the only one where a quantized audio component could be blamed
+  at all — blocked on `gemma4-e2b`.
 - **Muse-Glimmer remains the one blocked checkpoint**, for two unrelated reasons
   already characterized: native vLLM cannot serve its quantized vision adapter
   (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
@@ -284,13 +300,6 @@ been removed with no obvious replacement, `--mm-processor-cache-gb 0` does *not*
 bound the encoder cache, and `--limit-mm-per-prompt` now carries feature-size as
 well as counts. Check flags against the pinned tree rather than from memory.
 
-**A first-quantization target worth noting: gemma-4 E2B/E4B.** Among common
-general-purpose models it is one of very few with a genuinely *separate* audio
-encoder, and the EXL3 collection skips it entirely. Small, capable for its size,
-and structurally different from anything handled so far — a separate encoder
-exercises the multimodal path deliberately rather than incidentally, which is
-exactly what a first target should do.
-
 **Candidate approach for the parts still open: the instrument that already worked.**
 exllamav3 implements
 this vision path natively (`MuseGlimmerVisionModel`, `examples/imgdesc.py`), so
@@ -311,6 +320,48 @@ one available — there is no fp16 Muse-Glimmer on hand to fall back to.
 
 → [docs/transformers-backend.md](docs/transformers-backend.md),
 [bench/README.md](bench/README.md)
+
+## `gemma4-e2b` — Quantizing gemma-4 E2B/E4B
+
+**Outcome wanted:** an EXL3 E2B checkpoint serving through vLLM with both of its
+embeddings quantized. It is the sharpest available demonstration that the embedding
+tax is real: 54% of this model is embeddings, the pipeline as it stands saves 27% on
+a model sold as 2B, and the repaired one projects 65%.
+
+**Explicitly not a priority.** The thesis is already proven on Qwen3.5-9B with
+measured KLD; E2B makes the argument undeniable rather than more true, and the cost
+is architecture work in the exllamav3 fork — the most expensive category here, with
+no cheap gate for correctness. What would raise it: the appliance wanting a small
+vision-capable model, or the audio question under `multimodal` blocking something.
+
+**vLLM already serves it.** The BF16 model runs and describes images correctly
+(2026-08-19), so nothing is blocked on the serving side. The gap is entirely
+conversion.
+
+**The blocker chain, in order:**
+
+1. **exllamav3 refuses the architecture.** `Config.from_directory` raises
+   `NotImplementedError("Gemma4 per-layer inputs are not implemented yet")` —
+   a bare guard in `architecture/gemma4.py`, no partial implementation behind it.
+   What it is guarding is small: six tensor patterns
+   (`per_layer_model_projection`, `per_layer_projection_norm`, and per-layer
+   `per_layer_projection` / `per_layer_input_gate` / `post_per_layer_input_norm`),
+   77 MiB, 0.8% of the model.
+2. **`tools/quantize_embedding.py` handles one embedding suffix**, and this model
+   has two.
+3. **Tied + blockq crashes**, which is a live defect recorded under
+   `quantized-embeddings` rather than here. E2B is tied *and* needs blockq for its
+   per-layer tensor, so it cannot serve until that is fixed.
+
+**Text-only is the version worth building.** E2B's vision tower is a full ViT encoder
+and its audio tower a conformer with depthwise conv — both unrelated to anything
+exllamav3 handles today, and together only 0.88 GiB. Pass them through dense and
+serve with `--language-model-only`. One trap if either is ever quantized: every
+linear in both towers carries `input_max`/`input_min`/`output_max`/`output_min`
+siblings alongside `X.linear.weight`. Those are QAT ranges, not weights, and have to
+be recognized as such.
+
+→ [docs/embeddings.md](docs/embeddings.md) "The most extreme case found"
 
 ## `exl3-metadata` — Improving the metadata situation
 
@@ -394,6 +445,23 @@ shape: reach `get_offloader()`, and if it is a `UVAOffloader` with budget left, 
 and wrap the tensor as `uva.py` would, updating its byte counter. Bits-agnostic,
 checkpoint-vintage-agnostic, no vLLM changes. Accepts a known cost — it depends on a
 vLLM internal that can break on a version bump.
+
+**Honor `--cpu-offload-params` in that registration.** The UVA offloader takes a set
+of parameter-name segments and offloads *only* the parameters that match (exact
+dot-delimited segments, `f".{param}." in f".{name}."` in
+`vllm/model_executor/offloader/uva.py`); registering our tensors without that check
+makes the EXL3 path silently non-selective, which nobody notices until someone tries
+the selective form and gets the whole model offloaded. Four lines at the time, an
+irritation to retrofit.
+
+The selective form is the one worth having. UVA is zero-copy from pinned host memory
+— a fixed assignment at load, no cache and no eviction — so an offloaded tensor costs
+PCIe only on the forward passes that actually read it. Offloading just a vision tower
+therefore frees its bytes at no cost to text-only requests, which is the case
+`multimodal` runs out of headroom on. Static is the right design there: a residency
+cache would thrash on that bimodal access pattern. (vLLM's other backend,
+`--offload-group-size` with async H2D prefetch, is the opposite tool — for weights
+read every pass, where the transfer hides behind compute.)
 
 → [docs/format-and-loading.md](docs/format-and-loading.md) "CPU offload"
 

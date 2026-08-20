@@ -1172,3 +1172,45 @@ justify a fitted encoder", and it should be held to that.
 reference logits, the three models and every comparison arm already exist; simulating a
 PQ scheme needs no storage format and no serving path, exactly as `blockq:32` needed
 none before it earned one.
+
+## The most extreme case found: gemma-4 E2B, 54% embeddings
+
+Measured 2026-08-19 against `google/gemma-4-E2B-it` (BF16, 9.54 GiB).
+
+E2B and E4B carry *two* embedding tensors. The usual `embed_tokens` is
+[262144, 1536] at 0.750 GiB; alongside it sits `embed_tokens_per_layer`,
+[262144, 8960] — 35 layers × 256, one conditioning vector per layer per token —
+at 4.375 GiB.
+
+| subtree | size | share |
+|---|---|---|
+| `embed_tokens_per_layer` | 4.375 GiB | 45.8% |
+| language model (rest) | 3.455 GiB | 36.2% |
+| `embed_tokens` | 0.750 GiB | 7.9% |
+| audio tower | 0.568 GiB | 5.9% |
+| vision tower | 0.312 GiB | 3.3% |
+| per-layer input plumbing | 0.077 GiB | 0.8% |
+| **embeddings, both** | **5.125 GiB** | **53.7%** |
+
+The model is tied (`tie_word_embeddings: true`, and no `lm_head` tensor in the
+checkpoint), so the main embedding is free from the quantized head. The per-layer
+tensor has no tied counterpart and no quantized copy anywhere — exactly the case
+`blockq` exists for, and 85% of the embedding bytes.
+
+**Why this is the sharpest statement of the tax.** Quantizing only what EXL3
+quantizes today leaves both embeddings at BF16, so a 4bpw E2B lands near 6.95 GiB
+against 9.54 BF16: a 27% saving on a model sold as 2B. Serving the tied embedding
+from the head and the per-layer tensor at blockq 4-bit projects ~3.3 GiB — 2.1×
+better than the naive conversion, 2.9× against BF16. Qwen3.5-9B's 6.72 -> 5.36 GiB
+is the same argument at a tenth the amplitude.
+
+**Two things the projection assumes and has not measured.** The 4-bit constant was
+established on standard token embeddings, whose rows feed the residual stream; the
+per-layer tensor is consumed inside each block as conditioning — a different
+functional role carrying 85% of the bytes, so it wants its own depth sweep rather
+than the inherited constant. And blockq's 32-wide blocks divide the 256-wide
+per-layer slice exactly, so no block straddles a layer boundary; that is luck, not
+design, and would not hold for a per-layer width that is not a multiple of 32.
+
+None of it is measurable end to end yet — exllamav3 cannot convert the
+architecture (TODO: `gemma4-e2b`).
