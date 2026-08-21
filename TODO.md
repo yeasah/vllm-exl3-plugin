@@ -180,10 +180,26 @@ Four things remain, in rough order of how much they would cost to discover late.
    vLLM model files omit `quant_config` when constructing their
    `VocabParallelEmbedding`, so neither shape can serve there — silently dense for a
    tied model, a load failure for a block-quantized one. The patch is one file
-   (default the config from `get_current_vllm_config()`, as `linear.py` already
-   does), verified not to disturb configs that do not quantize embeddings.
+   (default the config from `get_current_vllm_config()`), verified not to disturb
+   configs that do not quantize embeddings.
    **Worth offering upstream**: `vllm-gguf-plugin` is blocked by exactly the same
    thing, so it is an ecosystem fix and not only ours.
+
+   **But not as written — it breaks speculative decoding** (found 2026-08-20). A
+   drafter is built under the *target's* `quant_config`, so the patch hands the
+   drafter's embedding an EXL3 method and it is asked for a `bq_q` it never had.
+   Nothing about that is EXL3-specific; filed as-is it breaks any quantized target
+   with a differently quantized or unquantized drafter. Two candidate fixes, and the
+   choice decides what gets filed: condition the ambient default on the module
+   belonging to the model the config describes (which
+   `VocabParallelEmbedding.__init__` cannot know), or fix the drafter's config
+   instead so it stops misdescribing what is being built — a cleaner contribution
+   than an 86-file workaround, and it makes this patch safe as a side effect.
+   The same ad-hoc plumbing fails in the opposite direction too
+   (`DFlashQwen3Model.fc`, gemma-4's `vision_adapter.c_fc`): any fix worth filing
+   should be judged against both. →
+   [docs/format-and-loading.md](docs/format-and-loading.md) "Ambient `quant_config`"
+
 2. **Tensor parallelism is written but unproven.** All three stored tensors slice on
    dim 0, so `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row
    Hadamard alignment rule — which is why it is a handful of lines. It has never run
@@ -297,7 +313,8 @@ gap this item was opened for — the vision path is not merely loading.
 - **Muse-Glimmer remains the one blocked checkpoint**, for two unrelated reasons
   already characterized: native vLLM cannot serve its quantized vision adapter
   (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
-  plugin), and the Transformers backend route is degraded on vLLM ≥ main by the
+  plugin — the same class of gap as `DFlashQwen3Model.fc`, see
+  `quantized-embeddings` item 1), and the Transformers backend route is degraded on vLLM ≥ main by the
   upstream soft-cap gap, which wrecks sampled output while leaving greedy intact.
 
 **The VRAM link, which is the reason this item is not merely nice-to-have.**

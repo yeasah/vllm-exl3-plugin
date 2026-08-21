@@ -535,6 +535,65 @@ than once: `create_weights` registers its placeholders at `torch.empty(0).device
 recorded, and the post-load tensors carry different names (`exl3_trellis_N` against
 the checkpoint's `trellis`) so they would not match even if it had.
 
+## Ambient `quant_config`: what `vllm-embed-quant-config.patch` costs
+
+*Found 2026-08-20 while testing speculative decoding. The work is open — TODO
+`quantized-embeddings` item 1.*
+
+The patch exists because 86 of 131 vLLM model files never pass `quant_config` to
+their `VocabParallelEmbedding`, leaving the quantized-embedding path unreachable on
+those architectures. Rather than touch 86 files it defaults the config from
+`get_current_vllm_config()`. That works for a single model and breaks for two.
+
+**The drafter is built under a config that describes a different model.**
+`LLMBaseProposer._get_model` calls
+
+    get_model(vllm_config=draft_vllm_config,
+              model_config=self.speculative_config.draft_model_config)
+
+so the *model* config is the drafter's, while `_create_draft_vllm_config` derives
+`draft_vllm_config` from the target's and replaces only `kernel_config`,
+`attention_config` and `cache_config`. `quant_config` stays the target's. With the
+patch applied, the drafter's embedding therefore takes the target's EXL3 config,
+`embedding_is_blockq()` answers for the *target* checkpoint, and loading demands a
+tensor the drafter never had:
+
+    EXL3FormatError: <embedding>: no 'bq_q' tensor was loaded for the
+    block-quantized embedding
+
+Nothing there is EXL3-specific. Any quantized target paired with a differently
+quantized or unquantized drafter hits it, which makes this review-blocking for the
+upstream offer rather than a local annoyance.
+
+**Two claims in the patch's own justification do not survive checking.** It cites
+`linear.py` as precedent for reading ambient construction state; `linear.py` does
+that only for `parallel_config.decode_context_parallel_size`, never for
+`quant_config`. Across the tree the single read of
+`get_current_vllm_config().quant_config` is in `qwen3_5_mtp.py`, and it is a
+compatibility *check* on an already-chosen config, not a construction-time default
+deciding which quant method a module receives. Reading `quant_config` ambiently is a
+new mechanism, and the drafter case is why nobody had needed it.
+
+**The same plumbing fails in the opposite direction, which is the real target.** An
+EXL3-quantized DFlash drafter fails the other way -- `DFlashQwen3Model` builds `fc`
+as a plain `ReplicatedLinear` with no `quant_config`, so no plugin method attaches
+and the checkpoint's tensors have nowhere to go:
+
+    ValueError: There is no module or parameter named 'fc.mul1' in DFlashQwen3Model.
+    The available parameters belonging to fc (ReplicatedLinear) are: {'fc.weight'}
+
+That is structurally identical to gemma-4's `vision_adapter.c_fc` (TODO
+`multimodal`). Per-module `quant_config` plumbing is ad hoc in both directions: it
+reaches modules it should not and misses modules it should, and a fix is only worth
+filing if it is judged against both.
+
+**Which suggests filing the other fix.** Narrowing the ambient default needs the
+module to know which model it belongs to, and `VocabParallelEmbedding.__init__` has
+no way to. Making `_create_draft_vllm_config` carry the drafter's own `model_config`
+and `quant_config` fixes the misdescription at its source, is a smaller and more
+defensible upstream change than an 86-file workaround, and makes the embedding patch
+safe as a side effect.
+
 ## transformers 5.15: heterogeneous configs
 
 transformers 5.15 formalised per-layer configuration. Attributes that differ
