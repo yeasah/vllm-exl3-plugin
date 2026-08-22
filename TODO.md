@@ -456,8 +456,43 @@ question and was only ever measured on gemma-4-12B.
 
 Distinct from `repair-tool` in one way that matters: here layer bpw is *free*, so
 trading depth across components becomes a real constrained optimization (the
-Lagrangian actually binds) rather than a one-variable heuristic. This is where the
-size-budget solver belongs.
+Lagrangian actually binds) rather than a one-variable heuristic.
+
+**The solver arrived upstream, so this item is no longer about building one**
+(exllamav3 `dev`, seen 2026-08-22: `doc/optimize.md`, `util/{measure,optimize}.py`,
+`exllamav3/conversion/{allocation,calibration_data,measure_model,optimize_model}.py`).
+It measures per-tensor sensitivity by injecting LDLQ-shaped noise into the
+*unquantized* model and taking KLD — one measurement serving every target bitrate —
+then solves the allocation exactly. What it does **not** budget is precisely what
+this item cares about: `--bitrate` is a mean "over the budgeted (non-head) tensors",
+`--head_bits` is a fixed integer merely recorded in the recipe, and the embedding is
+absent entirely because nothing upstream quantizes one. So the work here becomes
+*adding the missing terms to their optimizer*, not writing a second one.
+
+**Blocked on evidence, deliberately.** Adding an embedding term means proposing a
+storage *format* upstream, and the bar for that is higher than "serves this plugin's
+targets". The load-bearing assumption is that a fixed 4 bits stays good enough
+across the useful range — call it 2-6 bpw of body weights — on the full range of
+architectures exllamav3 supports, and it has only been measured near one operating
+point on a handful of models. Widening that is the prerequisite, not the optimizer
+work. Until then `repair-tool`'s post-processing is the right shape: it commits
+nobody else to the format.
+
+**A format wrinkle to know before proposing anything.** The recipe is a flat
+`{tensor: bits}` map, which assumes one encoding. The whole finding above is that
+trellis is the wrong encoding for an embedding by ~two orders of magnitude, so an
+embedding row cannot be `bits: 4` — the recipe needs an encoding field beside depth.
+That is a format change rather than an added row.
+
+**The cheap test needs no upstream code.** `sc_optimize.py -t/--table` dumps the full
+predicted (tensor x K) KLD table as JSON, explicitly for external solvers. Bolt the
+embedding and head sensitivities already measured here onto that table, solve the
+joint allocation offline, and the question of whether including them moves the
+frontier is answered before a line is written.
+
+**Head allocation: wait.** Excluding the head is odd for the one tensor everybody
+knows has different sensitivity, and it is also the riskiest thing to hand a freshly
+built optimizer. Upstream will likely add it; pre-empting them is wasted work.
 
 Depends on `quantized-embeddings` growing a block-scaled serving path — see there.
 Nothing can load what this would emit today.
@@ -586,6 +621,33 @@ card revision and date they came from rather than reading the card at run time: 
 edited silently, and a baseline that follows one stops meaning what it said. Thinking and
 non-thinking are separate entries, carrying different recommendations. Whichever tier
 produced a number belongs in the artifact beside the vLLM pin.
+
+**Four design rules, established by a 23-problem SWE-bench-Lite pilot on 2026-08-21**
+(3.00bpw + block-quantized embedding + tq4 KV against an fp8 cloud baseline; 12/23
+against 10/23, and local reproduced 9 of the baseline's 10 successes):
+
+- **Compare paired, never marginal.** The runs agreed on 19 of 23, so the signal lives
+  in the disagreements. Marginal statistics actively mislead here: aggregate turn
+  medians said the quantized model used *fewer* turns while the paired comparison said
+  the opposite, on the same data.
+- **The effective sample size is the discordant count, not the problem count.** At ~17%
+  discordance, 23 problems bought four informative pairs — so that pilot could not have
+  produced a significant result whatever happened, since even a clean 4-0 split gives
+  p=0.125.
+- **Budget ~150 problems minimum, 300 for comfort**, which is ~25 and ~50 discordant
+  pairs. A cloud baseline for full Lite costs about $90; wall time is the binding
+  constraint, not money.
+- **Capture turns-to-failure, not only pass/fail.** In the pilot the baseline's
+  unresolved trajectories ran *longer* than its resolved ones while the quantized
+  model's ran shorter — a model that knows it is stuck behaves differently from one
+  that does not, and the pass/fail column cannot see it.
+
+**The comparator is the weak instrument, and fixing it is a hardware problem.** A cloud
+baseline is uncontrolled — advertised "fp8, 256K" says nothing about KV dtype,
+speculative decoding or sampling defaults, and providers differ. That uncontrolled
+variance inflates disagreement, so the pilot's agreement is a *conservative* reading;
+but a real result wants the same model unquantized on the same stack, and Qwen3.8-27B
+needs ~27 GiB even at fp8. That puts it on `vast`, alongside the TP tier and `moe-tp`.
 
 → [docs/qbench.md](docs/qbench.md) (scope: why divergence is deliberately all qbench
 measures), [docs/embeddings.md](docs/embeddings.md)
