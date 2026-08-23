@@ -469,6 +469,25 @@ this item cares about: `--bitrate` is a mean "over the budgeted (non-head) tenso
 absent entirely because nothing upstream quantizes one. So the work here becomes
 *adding the missing terms to their optimizer*, not writing a second one.
 
+**And the solver's output is only as general as its calibration data** — measured
+2026-08-23, see the note. exllamav3's published `EXL3-SC` recipe for Qwen3.8-27B is
+**1.30x better than uniform allocation on the trace it was calibrated on and 1.17x worse
+on neutral text**, at matched size and with head bits held constant. So "add the missing
+terms to their optimizer" inherits a live question with no good answer on the shelf:
+*what should the added terms be fitted on?* The bundled corpus is what the new pipeline
+exists to replace; a self-generated trace overfits, now demonstrably; and a task-specific
+trace has to be built and carries the same specialization risk one level down.
+
+**But the embedding term is probably immune to that, and the head term is not.** An
+embedding is a lookup, not a contraction — there is no activation distribution to fit, so
+its optimal depth should be near distribution-independent. The measured
+constant-depth result is evidence for exactly that: 4 bits covered every model tested,
+which is what you would expect of a term whose sensitivity does not depend on what the
+model is being asked. The head is an ordinary contraction and inherits the whole problem
+— which matters most for the tied-model shared tensor, where **the head sets the depth**.
+So the embedding term can be proposed on its own evidence; anything touching the head
+waits on the calibration question being answered upstream.
+
 **Blocked on evidence, deliberately.** Adding an embedding term means proposing a
 storage *format* upstream, and the bar for that is higher than "serves this plugin's
 targets". The load-bearing assumption is that a fixed 4 bits stays good enough
