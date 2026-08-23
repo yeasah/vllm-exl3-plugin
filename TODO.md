@@ -643,10 +643,13 @@ Evidence for each is in the note; the rules themselves are what shapes the build
 
 **The comparator is the weak instrument, and a controlled one needs `vast`** —
 Qwen3.8-27B is ~27 GiB even at fp8, so the same-model-unquantized arm cannot run on
-the dev card. **Still unsolved above that: comparability across rentals**, since vLLM
-autoselects backends by GPU architecture and a spot market never gives the same
-machine twice. Pinning the execution path explicitly is the cheap half of an answer;
-named instance types at a large provider are the expensive half. See the note.
+the dev card. **Comparability across rentals is a preflight problem, not a procurement one** —
+what can move tokens is GPU architecture, driver, count (via TP degree), VRAM and
+uncorrected ECC, all checkable on contact; the rest of the host moves only the
+stopwatch. `tools/host_survey.py` screens a box on arrival and classifies differences
+against a recorded one. Named instance types stay the answer for *perf*
+comparability. What remains genuinely open is survival: a multi-day run on a spot
+rental needs to resume from where it stopped.
 
 → [docs/capability-suite.md](docs/capability-suite.md) (the two runs, the statistics
 and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why

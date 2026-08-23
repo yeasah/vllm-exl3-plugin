@@ -118,28 +118,51 @@ instance count needed for the same number of informative pairs rises several-fol
 right choice is the most diverse suite on which the model still lands near half, not
 the hardest one available.
 
-## Unsolved: comparative runs on rented hardware
+## Comparative runs on rented hardware: a preflight problem, not a procurement one
 
 `bench/` makes the operator name the platform, because a throughput number is a fact
-about a machine as well as about a build. A *capability* number ought not to be --
-same weights, same sampling, same answer -- but in practice it is, because vLLM
-autoselects attention and MoE backends by GPU architecture, so an identical checkpoint
-takes a different execution path on a different rental. Comparing capability runs
-across months therefore needs something a spot market cannot supply: every future box
-is grossly similar and differently detailed.
+about a machine as well as about a build. The first draft of this note assumed a
+capability number inherits that problem and concluded the answer was expensive --
+named instance types at a large provider, where hardware is classified and a run
+months later is genuinely the same machine.
 
-Two directions, neither free, and only the second is cheap:
+That is the wrong scope, and `bench/`'s own layout already says so: perf baselines
+live under `expected/perf/<platform>/` with an operator-supplied tag, while the
+token-and-logprob baselines sit flat in `expected/` with no platform in the path. The
+design already asserts that *output* is portable across machines and throughput is
+not.
 
-- **Named instance types at a large provider** (AWS, GCP, Azure), where hardware is
-  classified and homogeneous and a run months later is genuinely the same machine.
-  Expensive, and the honest candidate today.
-- **Pin the execution path rather than the hardware.** Fix and record the attention
-  backend, MoE backend, dtype and cudagraph configuration instead of letting them be
-  autoselected. This does not make numerics identical across architectures, but it
-  removes the largest source of silent variation, costs nothing, and is worth doing
-  under either strategy.
+**What can actually move the tokens is a short, checkable list.** GPU architecture and
+driver decide which attention and MoE backends vLLM autoselects. GPU *count* decides
+the tensor-parallel degree and therefore cross-rank reduction order -- which is the
+easy one to miss, because card count reads as a capacity property rather than a
+numerical one. VRAM decides KV cache size and so the scheduling that batches requests.
+Uncorrected ECC errors corrupt weights silently. Everything else about a host -- PCIe
+width, clocks, CPU, RAM, cooling, network -- moves the stopwatch and leaves the tokens
+alone.
 
-Run length is the other half of the problem. A 33-hour run on a spot rental carries
-real probability of dying partway, so a suite that cannot resume from where it stopped
-loses everything -- and one whose instance order is unshuffled loses its
-representativeness as well.
+Every item on that list is either checkable in seconds on contact with a box or fixed
+by the container, which is under our control. So the rental market is fine for
+capability work: screen on arrival, refuse and re-rent if the box does not match.
+Named instance types remain the answer for *perf* comparability, where the host really
+is part of the measurement.
+
+**`tools/host_survey.py` is that screen.** Stdlib-only and single-file so it runs on a
+bare box before torch or vLLM are installed -- `scp` it and run it, which is exactly
+when a bad box is still cheap to reject. It reports the survey split into
+output-relevant and throughput-only fields, prints a fingerprint over the
+output-relevant subset (equal fingerprints should give equal tokens), and
+`--compare box.json` diffs two boxes while *classifying* each difference, so a PCIe
+generation change reads as comparable and a GPU count change does not. Exit status is
+the machine-readable form: 0 usable, 2 usable with warnings, 1 refuse.
+
+It refuses uncorrected ECC outright and warns on corrected errors, which is the check
+that might have caught the card that died mid-run -- corrected counts climbing is what
+a degrading card looks like before it takes the host with it. It also warns when the
+GPU has no ECC at all, because "no errors reported" and "errors cannot be reported"
+are different answers and only one of them is reassuring.
+
+The remaining half of the problem is not comparability but *survival*: a 33-hour run on
+a spot rental carries real probability of dying partway. A suite that cannot resume
+from where it stopped loses everything, and one whose instance order is unshuffled
+loses its representativeness as well.

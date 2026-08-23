@@ -167,6 +167,12 @@ does not recognize — the last being a reliable predictor of real work. `--remo
 the same question from Hub metadata, without downloading. It screens *storage*, not
 architecture support.
 
+`tools/host_survey.py` screens a *host* before you spend the rental: stdlib-only and
+single-file so it runs on a bare box, it reports GPU/driver/ECC split into fields that
+can change model output and fields that only change throughput, and `--compare` diffs
+two boxes while classifying each difference. Exit 1 refuses a box (uncorrected ECC,
+mismatched GPUs, or an output-relevant difference from the baseline).
+
 `patches/` holds changes to *vLLM*, applied to a source checkout:
 
 Status against **v0.28.0rc1** is from a static scan of upstream sources on
