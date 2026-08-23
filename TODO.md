@@ -622,35 +622,36 @@ edited silently, and a baseline that follows one stops meaning what it said. Thi
 non-thinking are separate entries, carrying different recommendations. Whichever tier
 produced a number belongs in the artifact beside the vLLM pin.
 
-**Four design rules, established by a 23-problem SWE-bench-Lite pilot on 2026-08-21**
-(3.00bpw + block-quantized embedding + tq4 KV against an fp8 cloud baseline; 12/23
-against 10/23, and local reproduced 9 of the baseline's 10 successes):
+**Six design rules, established by two SWE-bench runs and painful to retrofit.**
+Evidence for each is in the note; the rules themselves are what shapes the build:
 
-- **Compare paired, never marginal.** The runs agreed on 19 of 23, so the signal lives
-  in the disagreements. Marginal statistics actively mislead here: aggregate turn
-  medians said the quantized model used *fewer* turns while the paired comparison said
-  the opposite, on the same data.
-- **The effective sample size is the discordant count, not the problem count.** At ~17%
-  discordance, 23 problems bought four informative pairs — so that pilot could not have
-  produced a significant result whatever happened, since even a clean 4-0 split gives
-  p=0.125.
-- **Budget ~150 problems minimum, 300 for comfort**, which is ~25 and ~50 discordant
-  pairs. A cloud baseline for full Lite costs about $90; wall time is the binding
-  constraint, not money.
-- **Capture turns-to-failure, not only pass/fail.** In the pilot the baseline's
-  unresolved trajectories ran *longer* than its resolved ones while the quantized
-  model's ran shorter — a model that knows it is stuck behaves differently from one
-  that does not, and the pass/fail column cannot see it.
+- **Compare paired, never marginal** — on the same data, marginal turn medians said
+  the opposite of the paired comparison.
+- **The effective sample size is the discordant count**, not the problem count. At
+  ~17% discordance, 23 problems bought four informative pairs.
+- **Budget ~150 problems minimum, 300 for comfort.** A cloud baseline for full Lite
+  is ~$90; wall time binds, not money.
+- **Capture turns-to-failure, not only pass/fail.** A model that knows it is stuck
+  behaves differently from one that does not, and the pass/fail column cannot see it.
+- **Shuffle the instance list with a fixed seed, shared across arms.** Lite is ordered
+  by repo, so a truncated run samples one codebase — the killed cloud run's 92 results
+  are 93% django. Truncation is not an edge case, and a shuffle also composes with
+  resuming.
+- **Pick the suite where the model lands nearest 50% resolved**, not the hardest one.
+  Discordance carries the signal, so detectability peaks at half — that is the cost
+  side of choosing a harder, more diverse set.
 
-**The comparator is the weak instrument, and fixing it is a hardware problem.** A cloud
-baseline is uncontrolled — advertised "fp8, 256K" says nothing about KV dtype,
-speculative decoding or sampling defaults, and providers differ. That uncontrolled
-variance inflates disagreement, so the pilot's agreement is a *conservative* reading;
-but a real result wants the same model unquantized on the same stack, and Qwen3.8-27B
-needs ~27 GiB even at fp8. That puts it on `vast`, alongside the TP tier and `moe-tp`.
+**The comparator is the weak instrument, and a controlled one needs `vast`** —
+Qwen3.8-27B is ~27 GiB even at fp8, so the same-model-unquantized arm cannot run on
+the dev card. **Still unsolved above that: comparability across rentals**, since vLLM
+autoselects backends by GPU architecture and a spot market never gives the same
+machine twice. Pinning the execution path explicitly is the cheap half of an answer;
+named instance types at a large provider are the expensive half. See the note.
 
-→ [docs/qbench.md](docs/qbench.md) (scope: why divergence is deliberately all qbench
-measures), [docs/embeddings.md](docs/embeddings.md)
+→ [docs/capability-suite.md](docs/capability-suite.md) (the two runs, the statistics
+and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why
+divergence is deliberately all qbench measures),
+[docs/embeddings.md](docs/embeddings.md)
 
 ## `retire-gemma4-patch` — Retire `patches/vllm-gemma4-transformers-5.15-per-layer.patch`
 
