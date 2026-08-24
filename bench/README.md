@@ -265,6 +265,49 @@ Eager and graphs differ by ~0.30 nats / 0.028 KL and 3 argmax flips of 75 on
 this model, so — as with the Qwen3-0.6B pair — each mode keeps its own baseline
 and the difference is execution mode, not the embedding.
 
+### Both guards were watched failing
+
+A guard nobody has seen fire is a comment. Each was proven by reintroducing the
+defect it exists for and running the entry against its committed baseline
+(2026-08-24):
+
+**The weight gate, against a silent fall back to dense.** Injected the realistic
+regression — `process_weights_after_loading` decoding once at load and keeping
+the dense table, as a future refactor might. Result:
+
+```
+prompt 0: 15 pos, argmax 0, |dlogprob| max 0.000e+00, KL max 0.000e+00, greedy ok
+prompt 1: 60 pos, argmax 0, |dlogprob| max 0.000e+00, KL max 0.000e+00, greedy ok
+FAIL - weight bytes 0.52 -> 0.9 GiB
+```
+
+All 75 positions byte-identical, greedy unchanged, not one argmax flip. The
+entire logit half of the suite passes it without a murmur, and the resident-bytes
+number is the only thing that notices — which is the argument for the entry.
+
+**The fixture digest, against a changed derived checkpoint.** Flipped one nibble
+of one row in the cached fixture (the cache is keyed on the encoder's source, so
+a fixture altered underneath it is reused). Result:
+
+```
+prompt 0: 15 pos, argmax 0, |dlogprob| max 0.000e+00, KL max 0.000e+00, greedy ok
+prompt 1: 60 pos, argmax 0, |dlogprob| max 0.000e+00, KL max 0.000e+00, greedy ok
+FAIL - fixture blockq content changed: 2fd4685d5c65139c -> b58e6bc537e54d61
+```
+
+The perturbed row was not one the prompts look up, so the served logits are
+identical and the digest is the only evidence the checkpoint changed at all.
+That is the case the record exists for, and it argues for keeping the digest
+even though a *typical* fixture change would also move logprobs.
+
+Restored, both entries return exactly 0.0 — the documented same-build floor.
+
+`bench/fixtures.py`'s cache key is the one part with no runtime guard, because
+its failure is silent in the other direction: a key that does not change when
+the encoder does yields a gate that passes while serving a checkpoint the
+current code would not produce. `tests/test_bench_fixtures.py` pins that
+property.
+
 ## Tiers
 
 `fast` (~15 min on a 16 GiB card) is the one to run casually: uniform K=3,
