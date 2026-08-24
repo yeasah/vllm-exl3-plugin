@@ -205,11 +205,7 @@ Four things remain, in rough order of how much they would cost to discover late.
    Hadamard alignment rule — which is why it is a handful of lines. It has never run
    on more than one GPU. Needs the `vast` box, alongside `moe-tp` and the TP tier of
    `bench-suite`.
-3. **`bench/` does not gate any of it.** The bump gate pulls checkpoints from the Hub
-   and no repaired checkpoint is published, so covering this needs either a published
-   fixture or a bench step that produces one from a checkpoint it already pulls. Until
-   then a vLLM or exllamav3 bump can break the block-quantized path silently.
-4. **Only 4 bits is packed.** That is deliberate — one depth covers every model
+3. **Only 4 bits is packed.** That is deliberate — one depth covers every model
    measured, and nibbles keep both ends byte-aligned — but 3 bits is usable at ~3.5
    bpw and would want the packing if a checkpoint ever calls for it.
 

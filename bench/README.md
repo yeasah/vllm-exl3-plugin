@@ -207,6 +207,64 @@ never blessed, and `check` reports it without failing the gate. If it starts
 capturing cleanly, `check` fails and tells you to clear the field: that is how a
 fix gets noticed.
 
+## Fixtures: entries whose checkpoint nobody publishes
+
+Every entry but two names a `repo@revision` and lets the Hub resolve it. The
+block-quantized embedding has no such checkpoint —
+`tools/quantize_embedding.py` derives one from a published checkpoint, and no
+output of it has been published. Those entries set `fixture="blockq"`, and
+`bench/fixtures.py` builds the derived checkpoint into
+`~/.cache/vllm-exl3-plugin/bench-fixtures/` (override with `BENCH_FIXTURES`)
+before capture.
+
+**Derived rather than published, and the reasons are not close.** Building the
+MiniCPM5-1B fixture takes 3.1s, against a ~500 MB download; it needs no account,
+so the gate stays runnable by anyone with the repo; and it is byte-reproducible
+— the encoder runs on CPU, and two builds a week apart in different processes
+agreed on the sha256 of all three tensors. The deciding reason is the last one:
+a derived fixture puts **`tools/quantize_embedding.py` under the gate**, which
+nothing else does. A published fixture would freeze the producer's output at
+upload time and never exercise the producer again — and the producer is what
+rewrites real checkpoints.
+
+The tool is run as a subprocess rather than imported, so what is gated is the
+command line a user runs.
+
+**Caching is keyed on what decides the contents**: the base `repo@revision`, the
+recipe version, and a digest of the encoder's own source (`blockq.py`,
+`format.py`, the tool). Edit the encoder and the next run builds a new fixture
+rather than serving the old one — the alternative being a gate that passes
+while testing a checkpoint the current code would not produce. Builds are staged
+and renamed, so an interrupted build cannot leave a half-written checkpoint for
+the next run to serve.
+
+**The capture records a content digest of what the recipe added**, and `check`
+reports a change to it *before* the logprob comparison. This is the distinction
+that makes a fixture entry readable: without it, "the derived checkpoint
+changed" and "the build regressed" look identical, and every logprob difference
+downstream is a consequence rather than a finding. It is the same separation
+`src.*.diff_sha` draws for the patch stack.
+
+### What the blockq pair is for
+
+The weight-bytes gate carries most of the value. `minicpm5-1B-3.0bpw-mcg` and
+`minicpm5-1B-3.0bpw-blockq-eager` are the same checkpoint differing only in the
+embedding, at **0.79 and 0.52 GiB** resident — so a blockq path that quietly
+fell back to loading dense bf16 would serve every logit correctly and give back
+the entire 0.27 GiB saving, and only this number would notice. Same shape as the
+`llama-3.2-1B-3.0bpw-tied` entry, for the same reason.
+
+The graphs entry is not redundant with the eager one. The decode is written as
+plain torch precisely so inductor can fuse it into the surrounding graph, so the
+compiled path is a different computation reaching the same answer, and a gather
+whose indices got baked into a replayed graph would return the previous batch's
+rows while failing nothing else. `tests/test_blockq.py` makes that claim at the
+unit level; these entries make it through vLLM.
+
+Eager and graphs differ by ~0.30 nats / 0.028 KL and 3 argmax flips of 75 on
+this model, so — as with the Qwen3-0.6B pair — each mode keeps its own baseline
+and the difference is execution mode, not the embedding.
+
 ## Tiers
 
 `fast` (~15 min on a 16 GiB card) is the one to run casually: uniform K=3,

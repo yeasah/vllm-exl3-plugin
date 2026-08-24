@@ -36,6 +36,11 @@ class Entry:
     #: Per-entry threshold overrides; see bench/run.py for the defaults and the
     #: reasoning behind them.
     tolerance: dict = field(default_factory=dict)
+    #: Recipe for a checkpoint the Hub does not hold, derived from `model`
+    #: at `revision` before capture. Only "blockq" exists: a block-quantized
+    #: token embedding produced by `tools/quantize_embedding.py`. See
+    #: bench/fixtures.py for why these are derived rather than published.
+    fixture: str | None = None
     #: Why this configuration cannot currently be captured. An entry is kept and
     #: kept running rather than deleted -- deleting it loses the coverage and the
     #: knowledge -- but it cannot be blessed, and `check` reports it as a known
@@ -110,6 +115,39 @@ ENTRIES: list[Entry] = [
         "no patches. `model_impl` is pinned rather than left to dispatch, so "
         "this keeps testing the backend no matter what vLLM later implements "
         "natively -- the coverage is of our integration, not of vLLM's routing",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw blockq eager",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="blockq",
+        exercises="the block-quantized embedding end to end: "
+        "EXL3BlockQEmbeddingMethod gathering rows out of the packed table "
+        "without ever materializing it. Same base checkpoint as the mcg entry "
+        "above, so the pair isolates the embedding -- and the weight-bytes "
+        "gate is what makes it worth running, because a blockq path that "
+        "silently fell back to loading dense bf16 would serve every logit "
+        "correctly while giving back the entire saving.\n\n"
+        "It also gates tools/quantize_embedding.py, which nothing else does: "
+        "the fixture is derived from the published checkpoint and rebuilt "
+        "whenever the producer's own source changes, so a producer that starts "
+        "writing a different (or unloadable) checkpoint fails here rather than "
+        "in someone's repaired model",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw blockq graphs",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="blockq",
+        enforce_eager=False,
+        exercises="the same packed embedding under torch.compile and CUDA "
+        "graph replay. Not redundant with the eager entry: the decode is plain "
+        "torch precisely so inductor can fuse it into the surrounding graph, "
+        "which means the compiled path is a different computation reaching the "
+        "same answer, and a gather whose indices got baked into a replayed "
+        "graph would return the previous batch's rows while failing nothing "
+        "else. tests/test_blockq.py covers this at the unit level; this is the "
+        "same claim through vLLM's own graph handling",
     ),
     # ---- full tier: the surfaces the fast tier cannot reach on a 16 GiB card
     # in a couple of minutes. Same gate, run before a bump rather than casually.

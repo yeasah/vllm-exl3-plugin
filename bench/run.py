@@ -138,6 +138,22 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
     core.report_environment_diff(base.get("environment", {}),
                                  fresh.get("environment", {}))
 
+    # A fixture entry serves a checkpoint this run derived rather than one the
+    # Hub pinned, so "the checkpoint changed" is a live possibility that it is
+    # not for other entries -- and it looks exactly like a model regression if
+    # not named. Reported before the logprob comparison for that reason; it is
+    # the thing to read first when a fixture entry fails.
+    fb, ff = base.get("fixture"), fresh.get("fixture")
+    if (fb or ff) and fb != ff:
+        if fb and ff and fb.get("digest") != ff.get("digest"):
+            failures.append(
+                f"fixture {ff.get('kind')} content changed: "
+                f"{fb.get('digest')} -> {ff.get('digest')} (the derived "
+                f"checkpoint differs, so every difference below follows from "
+                f"it; re-bless if the producer change was intended)")
+        else:
+            failures.append(f"fixture record changed: {fb} -> {ff}")
+
     if fresh.get("weight_gib") is not None and base.get("weight_gib") is not None:
         if fresh["weight_gib"] != base["weight_gib"]:
             failures.append(
@@ -377,8 +393,10 @@ def cmd_verify(args) -> int:
 def cmd_list(args) -> int:
     for e in suite.by_tier(args.tier):
         print(f"{e.name}  [{e.tier}]")
+        derived = f" fixture={e.fixture}" if e.fixture else ""
         print(f"    {e.model}@{e.revision}  impl={e.model_impl} "
-              f"{'eager' if e.enforce_eager else 'graphs'} tp={e.tensor_parallel_size}")
+              f"{'eager' if e.enforce_eager else 'graphs'} "
+              f"tp={e.tensor_parallel_size}{derived}")
         print(f"    {e.exercises}")
     return 0
 

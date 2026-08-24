@@ -1134,9 +1134,15 @@ decoder — the reason to keep two implementations of a format that must agree.
   `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row Hadamard
   alignment rule — which is why it is a small amount of code. It still needs a real
   multi-GPU run before it is believed.
-- **`bench/` does not gate it.** The bump gate pulls checkpoints from the Hub, and no
-  repaired checkpoint is published, so covering this needs either a published fixture or a
-  bench step that produces one.
+- ~~**`bench/` does not gate it.**~~ *Closed 2026-08-24.* The gate now derives the
+  checkpoint instead of pulling one: `bench/fixtures.py` runs
+  `tools/quantize_embedding.py` on the already-pinned `MiniCPM5-1B-exl3@3.00bpw` (3.1s,
+  byte-reproducible) and two `fast`-tier entries serve the result, eager and under CUDA
+  graphs. The number that earns them is resident weight bytes — **0.79 GiB against 0.52**
+  for the same checkpoint with and without the packed embedding, so a silent fall back to
+  dense bf16 fails the gate while every logit stays correct. Deriving rather than
+  publishing also puts the producer under the gate, which nothing else did. See
+  [bench/README.md](../bench/README.md), "Fixtures".
 - **Tied models are unchanged**, and remain served from their existing quantized `lm_head`.
   The shared-tensor optimization stays deferred on the same grounds as before: it needs an
   integer GEMM for the head role, and gemma-4 is nearly its whole constituency.

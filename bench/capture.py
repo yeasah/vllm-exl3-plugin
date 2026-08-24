@@ -25,9 +25,26 @@ def main() -> None:
     import sys
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from bench import core, suite
+    from bench import core, fixtures, suite
 
     entry = suite.by_name(args.entry)
+
+    # A fixture entry serves a checkpoint derived from `model@revision` rather
+    # than that checkpoint itself, so the model argument becomes a local path
+    # and the revision no longer applies -- vLLM rejects a revision alongside
+    # one. The base repo/revision stay in the record: they are what the fixture
+    # was derived *from*, and dropping them would lose what the entry covers.
+    fixture = None
+    if entry.fixture:
+        model_arg = fixtures.ensure(entry.fixture, entry.model, entry.revision)
+        revision_arg = None
+        fixture = {
+            "kind": entry.fixture,
+            "base": f"{entry.model}@{entry.revision}",
+            "digest": fixtures.digest(model_arg),
+        }
+    else:
+        model_arg, revision_arg = entry.model, entry.revision
 
     # Set before vLLM starts its engine core.
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -40,8 +57,8 @@ def main() -> None:
     from vllm import LLM
 
     llm = LLM(
-        model=entry.model,
-        revision=entry.revision,
+        model=model_arg,
+        revision=revision_arg,
         model_impl=entry.model_impl,
         enforce_eager=entry.enforce_eager,
         tensor_parallel_size=entry.tensor_parallel_size,
@@ -58,6 +75,11 @@ def main() -> None:
                 "label": entry.label,
                 "model": entry.model,
                 "revision": entry.revision,
+                # None for a plain entry. For a fixture entry this identifies
+                # the derived checkpoint that was actually served, so `check`
+                # can attribute a difference to the fixture rather than to the
+                # build -- see bench/fixtures.py.
+                "fixture": fixture,
                 "model_impl": entry.model_impl,
                 "enforce_eager": entry.enforce_eager,
                 "tensor_parallel_size": entry.tensor_parallel_size,
