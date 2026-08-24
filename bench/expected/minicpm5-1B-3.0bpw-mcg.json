@@ -17,8 +17,8 @@
   "capability": "12.0",
   "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260820",
   "src.plugin": {
-   "describe": "427d2dc",
-   "head": "427d2dce3a",
+   "describe": "f47f2a1",
+   "head": "f47f2a195a",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
