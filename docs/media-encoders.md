@@ -54,6 +54,21 @@ default. exllamav3 is in fact the only pipeline of the group that *offers* the c
 (`--vision_bits`, defaulting to 16); `compile.py` writes the key only when it is not 16,
 so **an absent `vision_bits` means the default was taken**, not that the value is unknown.
 
+**And bf16 is not obviously the wrong call**, which is worth stating because the rest of
+this note reads like an indictment and is not one. The two largest encoders here belong to
+*vision-first* models: nobody reaches for `Qwen3-VL-8B` or `Step-3.7-Flash` unless image
+accuracy is the point, and spending a fifth of the package on the encoder may be precisely
+the allocation wanted. Sizing that properly is a solver problem with a vision objective —
+KLD against a text corpus, the instrument this project uses everywhere else, would measure
+nothing relevant to it. Nothing here proposes touching that.
+
+**The offload argument is untouched by any of it, because eviction is lossless.** Whatever
+depth an encoder is stored at, moving it to host memory costs zero accuracy, one PCIe pass
+per image, and nothing at all for a text-only request. The quantization question is
+contested and model-dependent; the eviction question is not, and the two do not trade
+against each other. That is why the upstream fix below is the half worth pursuing: it
+serves the reader who wants bf16 vision quality and the one who does not.
+
 **3. It is a fixed cost over a shrinking denominator, so it is worst on the smallest
 model.** The Qwen3-VL family ships essentially one encoder at every size — 1.074 GiB at
 8B and 1.074 GiB at 235B, identical — so the share runs 1.27% → 7.91% → 14.27% →
