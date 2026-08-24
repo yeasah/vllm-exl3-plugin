@@ -1248,10 +1248,17 @@ separates them by 16x. That is the same shape as every other result in this note
 model with the sensitive embedding is the one that decides, and it decides for the affine
 layout.
 
-**5. Their conservative setting is honest.** "W8 channel, effectively lossless" holds on
-all three — 0.12x / 0.04x / 0.10x of the floor. It costs 8 bpw, which is still half of
-fp16 and would fix most of the tax measured at the top of this note. A checkpoint
-published that way would be a real improvement over what everyone ships today.
+**5. Their conservative setting is honest, and `blockq` claims it at 57% of the bits.**
+"W8 channel, effectively lossless" holds on all three — 0.12x / 0.04x / 0.10x of the
+floor on Qwen3.5-9B / MiniCPM5-1B / gemma-4-12B. It costs 8 bpw, which is still half of
+fp16 and would fix most of the tax measured at the top of this note; a checkpoint
+published that way would be a real improvement over what everyone ships today. But the
+same standard applied to `blockq32` at 4 bits reaches it on two of the three at 4.53 bpw
+(0.17x on Qwen3.5-9B, 0.17x on gemma-4-12B, both unresolvable against the floor), and on
+all three at 5 bits / 5.54 bpw (0.26x on MiniCPM5-1B, the one model where 4 bits is
+resolvable at 1.47x). MiniCPM is the same holdout the flat-4-bit rule already carries at
+1.49x, so this adds no new exception — "effectively lossless" is available at 57% of
+their bits on the models where the phrase means anything, and at 69% everywhere.
 
 **6. Their accuracy evidence cannot see any of this.** The README validates on
 `pythia-1.4b` and reports W4 group-64 at 14.752 wikitext ppl against a 14.733 baseline.
