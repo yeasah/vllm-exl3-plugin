@@ -195,9 +195,39 @@ layers and leaving them alone. **vLLM already has that mechanism**:
   group. **Settle this before reporting anything upstream.**
 
 So the `key=int` collision is a real, small, reportable bug on the path that matters,
-but fixing it alone would not get gemma-4 to turboquant — global backend selection
-and the multimodal blocker sit behind it. Laguna, being text-only, may be a shorter
-path and is the one to test next.
+but fixing it alone would not get gemma-4 to turboquant — the multimodal blocker sits
+behind it.
+
+**Laguna is the better playground, and it gets furthest.** Text-only (no multimodal
+blocker), `head_dim` 128 (no triton pin, so no head-dim confound), and 10 full / 30
+sliding layers at a 512-token window — half gemma's. That layout makes the bypass
+*more* attractive, not less: the ten full-attention layers are 73% of KV bytes at 4k,
+84% at 8k, **95.5% at 32k** and 98.8% at 128k, so compressing only them captures ~95%
+of the theoretical maximum.
+
+Measured 2026-08-24 on `Laguna-XS-2.1-exl3@3.00bpw`:
+
+- `--kv-cache-dtype turboquant_4bit_nc` alone: `No valid attention backend found for
+  cuda` — turboquant is the only backend accepting the dtype and it rejects the
+  sliding window, so nothing is left.
+- **Skipping the 30 sliding layers by index passes backend selection** and fails much
+  deeper, in KV cache group construction:
+  `get_kv_cache_groups -> unify_kv_cache_spec_page_size -> assert
+  self.page_size_padded >= self.unpadded_page_size_bytes` (`kv_cache_utils.py:1118`,
+  `kv_cache_interface.py:207`).
+
+That is the real wall, and it is one function rather than a missing feature. The
+unifier reconciles differing page sizes by scaling `block_size` by the ratio,
+`replace(layer_spec, block_size=new_block_size)`, leaving `page_size_padded`
+untouched — but turboquant sets that field for its packed `slot_size_aligned` layout,
+so scaling the block size grows `unpadded_page_size_bytes` past the now-stale padded
+value and the property's own assert fires. *Inferred from the traceback and the
+source, not proven by instrumenting it* — confirm before reporting.
+
+**Next step is therefore narrow**: make the block-size-scaling branch padded-aware (or
+have turboquant's spec take the padding branch), and see whether Laguna serves. That
+is a materially smaller question than "teach TurboQuant sliding window", and Laguna is
+where to ask it.
 
 → [docs/kernels.md](docs/kernels.md)
 
