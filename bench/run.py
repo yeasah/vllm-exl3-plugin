@@ -305,6 +305,12 @@ def cmd_perf_check(args) -> int:
             # phantom regression, which is the failure this scoping prevents.
             core.report_environment_diff(base.get("environment", {}),
                                          fresh.get("environment", {}))
+            # As for correctness entries: a fixture entry serves a checkpoint
+            # this run derived, so "the checkpoint changed" has to be separable
+            # from "throughput regressed".
+            fb, ff = base.get("fixture"), fresh.get("fixture")
+            if (fb or ff) and fb != ff:
+                problems.append(f"fixture record changed: {fb} -> {ff}")
             for metric in ("decode", "prefill"):
                 delta = (fresh[metric] - base[metric]) / base[metric] * 100
                 verdict = "ok"

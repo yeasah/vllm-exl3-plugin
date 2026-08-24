@@ -198,6 +198,51 @@ Deliberately few entries. A throughput regression is broad — a kernel or
 scheduler change lands on any model exercising that path — so covering every
 *path* matters and covering every checkpoint does not.
 
+### What the blockq perf entry guards, and what it cannot
+
+`minicpm5-1B 3.0bpw blockq perf` exists so a served path in the throughput
+record actually uses the packed embedding. Its scope is narrower than it looks,
+and the measurement that establishes this is worth not re-deriving
+(2026-08-24, dev card, this workload):
+
+| gather repeated | decode | vs 1× | prefill | vs 1× |
+|---|---|---|---|---|
+| 1× | 2998.2 | — | 43070.6 | — |
+| 4× | 2990.3 | −0.3% | 43327.8 | +0.6% |
+| 16× | 2999.6 | +0.05% | 43325.9 | +0.6% |
+| 64× | 2891.9 | −3.5% | 36943.3 | −14.2% |
+
+Running the decode **sixteen times over is invisible**; it takes 64× before
+anything clears run noise. The path is ~0.06% of a decode step and ~0.23% of
+prefill here, and a *smaller* share on the larger models this project targets.
+So the −10% gate resolves roughly a 25× regression in the gather and nothing
+finer.
+
+**A same-run dense companion does not fix that**, which is worth recording
+because it is the obvious next idea. The ratio should cancel whole-engine
+drift, but the two sides are separate engine processes with independent
+autotune and allocator state, so their drift compounds instead: across three
+pairs the prefill ratio spread 2.50pp (0.9849 / 1.0099 / 1.0093), *worse* than
+either absolute number, while decode managed 0.51pp. Both land back at ~25×.
+
+**That argues for keeping the entry, not for dropping it or replacing it with a
+microbenchmark.** A regression this instrument cannot see is, by the same
+measurement, one nobody serving the model would feel. The condition that *is*
+relevant in practice is an interaction between the engine and the embedding
+path costing real throughput — unlikely, not impossible, and precisely what the
+existing gate catches now that an entry serves blockq. An op-level
+microbenchmark would resolve the gather far better and would miss interaction
+regressions entirely, which is the likelier direction for this path to break,
+blockq being ours to change.
+
+**A note on the dense-embedding entries.** Their value as *gates* has fallen
+since blockq shipped: nobody would serve an untied model that way with the
+packed embedding available. They remain useful for discrimination — the llama
+anchor is what says whether a regression is blockq's or everything's, besides
+holding `docs/kernels.md`'s numbers live — but the gate does not need to
+discriminate everything. It needs to get attention when something that matters
+moves.
+
 ## Baselines must not depend on the calendar
 
 Some chat templates inject today's date — Muse-Glimmer via

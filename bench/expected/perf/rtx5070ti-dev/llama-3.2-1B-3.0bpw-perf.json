@@ -3,52 +3,53 @@
  "label": "llama-3.2-1B 3.0bpw perf",
  "reps": 5,
  "platform": "rtx5070ti-dev",
+ "fixture": null,
  "environment": {
   "torch": "2.13.0+cu130",
   "cuda": "13.0",
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260817",
+  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260820",
   "src.plugin": {
-   "describe": "eaf5605",
-   "head": "eaf5605546",
-   "dirty_files": 0,
-   "diff_sha": null,
+   "describe": "52be9a2",
+   "head": "52be9a2159",
+   "dirty_files": 3,
+   "diff_sha": "185c7f804344",
    "untracked": 0
   },
   "src.vllm": {
    "describe": "v0.27.0",
    "head": "e50f7d3696",
-   "dirty_files": 9,
-   "diff_sha": "a0f2e5c81d51",
-   "untracked": 0
+   "dirty_files": 12,
+   "diff_sha": "1604047f7221",
+   "untracked": 1
   },
   "src.exllamav3": {
-   "describe": "v1.4.2-12-g493a323",
-   "head": "493a323dc7",
+   "describe": "v1.4.2-19-ga4e0179",
+   "head": "a4e01792f6",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "driver": "610.57.04"
  },
- "decode": 2747.4,
- "decode_spread_pct": 0.91,
+ "decode": 2742.1,
+ "decode_spread_pct": 0.69,
  "decode_samples": [
+  2738.8,
+  2737.7,
+  2742.1,
   2756.6,
-  2731.5,
-  2744.1,
-  2747.4,
-  2750.0
+  2742.8
  ],
- "prefill": 34289.7,
- "prefill_spread_pct": 1.36,
+ "prefill": 34352.9,
+ "prefill_spread_pct": 1.13,
  "prefill_samples": [
-  34713.1,
-  34289.7,
-  34286.4,
-  34245.9,
-  34626.1
+  34352.9,
+  34260.5,
+  34650.2,
+  34540.0,
+  34320.1
  ]
 }

@@ -224,6 +224,34 @@ PERF_ENTRIES: list[Entry] = [
         "which are the two paths a throughput regression would land on",
     ),
     Entry(
+        label="minicpm5-1B 3.0bpw blockq perf",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="blockq",
+        enforce_eager=False,
+        exercises="a served path that actually uses the packed embedding, so "
+        "the throughput gate covers blockq at all. What it guards is narrow "
+        "and deliberately so: an interaction between the engine and the "
+        "embedding path large enough to matter in practice.\n\n"
+        "It does not resolve the decode itself, and no whole-engine entry "
+        "could -- measured 2026-08-24, repeating the gather 16x per lookup is "
+        "invisible (+0.05% decode, +0.6% prefill, both inside run noise) and it "
+        "takes 64x before anything clears it. The path is ~0.06% of a decode "
+        "step and ~0.23% of prefill here, and a smaller share on the larger "
+        "models this project targets. A same-run dense companion does not "
+        "rescue it either: the two sides are separate engine processes, so "
+        "their drift compounds rather than cancelling (prefill ratio spread "
+        "2.5pp across three pairs, worse than either absolute number).\n\n"
+        "That is a reason to keep the entry rather than to drop it. A "
+        "regression this instrument cannot see is, by the same measurement, "
+        "one nobody serving the model would feel -- while the condition that "
+        "*is* relevant in practice, an engine/blockq interaction costing real "
+        "throughput, is exactly what the -10% gate catches. Fine-grained "
+        "protection of the gather belongs to a microbenchmark, which would "
+        "miss interaction regressions entirely and is the likelier direction "
+        "for this path to break, blockq being ours to change",
+    ),
+    Entry(
         label="qwen3.5-35B-A3B 2.0bpw MoE perf",
         model="turboderp/Qwen3.5-35B-A3B-exl3",
         revision="2.00bpw",

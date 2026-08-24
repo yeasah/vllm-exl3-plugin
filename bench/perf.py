@@ -61,9 +61,23 @@ def main() -> None:
     import sys
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from bench import core, suite
+    from bench import core, fixtures, suite
 
     entry = suite.perf_by_name(args.entry)
+
+    # Same resolution as capture.py: a fixture entry serves a checkpoint derived
+    # from `model@revision` rather than that checkpoint itself.
+    fixture = None
+    if entry.fixture:
+        model_arg = fixtures.ensure(entry.fixture, entry.model, entry.revision)
+        revision_arg = None
+        fixture = {
+            "kind": entry.fixture,
+            "base": f"{entry.model}@{entry.revision}",
+            "digest": fixtures.digest(model_arg),
+        }
+    else:
+        model_arg, revision_arg = entry.model, entry.revision
 
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
@@ -82,8 +96,8 @@ def main() -> None:
               f"{entry.max_model_len} -> {max_model_len} for the prefill shape")
 
     llm = LLM(
-        model=entry.model,
-        revision=entry.revision,
+        model=model_arg,
+        revision=revision_arg,
         model_impl=entry.model_impl,
         enforce_eager=entry.enforce_eager,
         tensor_parallel_size=entry.tensor_parallel_size,
@@ -123,6 +137,7 @@ def main() -> None:
         # Not the identity of the platform -- the operator's tag is that, and it
         # is the directory this lands in. This is the cross-check on the tag.
         "platform": os.environ.get("BENCH_PLATFORM"),
+        "fixture": fixture,
         "environment": core.environment(),
     }
     for name, vals in (

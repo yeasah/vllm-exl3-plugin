@@ -1,9 +1,13 @@
 {
- "entry": "qwen3.5-35B-A3B-2.0bpw-MoE-perf",
- "label": "qwen3.5-35B-A3B 2.0bpw MoE perf",
+ "entry": "minicpm5-1B-3.0bpw-blockq-perf",
+ "label": "minicpm5-1B 3.0bpw blockq perf",
  "reps": 5,
  "platform": "rtx5070ti-dev",
- "fixture": null,
+ "fixture": {
+  "kind": "blockq",
+  "base": "turboderp/MiniCPM5-1B-exl3@3.00bpw",
+  "digest": "2fd4685d5c65139c"
+ },
  "environment": {
   "torch": "2.13.0+cu130",
   "cuda": "13.0",
@@ -34,22 +38,22 @@
   },
   "driver": "610.57.04"
  },
- "decode": 548.3,
- "decode_spread_pct": 1.42,
+ "decode": 2996.5,
+ "decode_spread_pct": 0.29,
  "decode_samples": [
-  553.3,
-  548.3,
-  549.1,
-  545.5,
-  547.4
+  2990.7,
+  2999.5,
+  2998.6,
+  2996.5,
+  2995.5
  ],
- "prefill": 964.0,
- "prefill_spread_pct": 0.35,
+ "prefill": 43129.5,
+ "prefill_spread_pct": 2.45,
  "prefill_samples": [
-  965.1,
-  964.0,
-  964.6,
-  963.2,
-  961.7
+  42811.7,
+  43129.5,
+  43169.5,
+  42739.8,
+  43797.9
  ]
 }
