@@ -306,6 +306,13 @@ gap this item was opened for — the vision path is not merely loading.
   gemma-4 E2B/E4B, the only model on hand with a genuinely *separate* audio
   encoder and so the only one where a quantized audio component could be blamed
   at all — blocked on `gemma4-e2b`.
+- **`--language-model-only` is doing more work than it looks.** It is the flag
+  reached for whenever headroom runs short, and the reason is now priced: the
+  encoder is 0.83-1.07 GiB across every checkpoint surveyed, 4.7-12.7% of the
+  package and worst at low bpw. It should not have to be a capability trade —
+  evicting the encoder to host memory costs one PCIe pass per image and nothing at
+  all for text — except that vLLM cannot offload an encoder at all
+  (`report-encoder-offload`). → [docs/media-encoders.md](docs/media-encoders.md)
 - **Muse-Glimmer remains the one blocked checkpoint**, for two unrelated reasons
   already characterized: native vLLM cannot serve its quantized vision adapter
   (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
@@ -528,15 +535,26 @@ PyTorch, which refuses unpinned H2D during CUDA graph capture. Bits-agnostic,
 checkpoint-vintage-agnostic, no vLLM changes. Accepts a known cost — it depends on a
 vLLM internal that can break on a version bump.
 
+**A third cause, and it is upstream's.** `get_offloader().wrap_modules()` has exactly
+one call site in vLLM, inside `make_layers()` — the helper that builds a *text
+decoder's* `ModuleList`. A vision tower builds its own, so **no encoder is offered to
+either backend on any model in any format**. This is not reachable from here for the
+common case: our `process_weights_after_loading` hook sees only quantized modules, and
+nine of ten surveyed checkpoints ship a bf16 tower. Split out as
+`report-encoder-offload`, since the fix that matters is a few lines upstream and helps
+every multimodal model in vLLM. Sizes and evidence in
+[docs/media-encoders.md](docs/media-encoders.md).
+
 **Scope note: which backend wins depends on access pattern, and MoE inverts the
 obvious answer.** Prefetch overlaps transfer with compute, so it suits dense weights
 read every pass. But it is routing-blind — it copies every offloaded parameter each
 forward pass — while UVA's zero-copy reads touch only what the kernel actually reads.
-For routed experts, and for sparsely-read tensors like a vision tower, UVA therefore
-wins decisively; measured on 2026-08-20. Only one backend is active per process, so if weights are being
-offloaded the tower stays resident; at 0.3-0.6 GiB that is the cheap end of the
-trade. Verified 2026-08-19 that the prefetch path is otherwise fully functional with
-EXL3 tensors, so pinning is the only outstanding requirement.
+For routed experts UVA therefore wins decisively; measured on 2026-08-20. *(An earlier
+version of this note extended that to "sparsely-read tensors like a vision tower" at
+0.3-0.6 GiB. Both halves were wrong: a tower cannot be offered to either backend at
+all, and the real sizes are 0.83-1.07 GiB bf16, or 0.90 GiB for Muse-Glimmer's 1.92B
+parameters at 4 bpw.)* Verified 2026-08-19 that the prefetch path is otherwise fully
+functional with EXL3 tensors, so pinning is the only outstanding requirement.
 
 **Honor the parameter selectors in that registration.** Both backends take a set of
 parameter-name segments and offload *only* what matches — `--cpu-offload-params` for
@@ -548,7 +566,33 @@ irritation to retrofit — and selectivity is what makes the sparse case work at
 `--cpu-offload-params experts` is why a routed model pays PCIe for only the experts it
 actually reads.
 
-→ [docs/format-and-loading.md](docs/format-and-loading.md) "CPU offload"
+**What our own registration buys on a quantized tower is bandwidth, not capacity.**
+Muse-Glimmer's tower moves 0.89 GiB per image batch instead of the 3.57 GiB the same
+weights would be at bf16 — a 4x cut in the per-image cost of having evicted it. That is
+the difference between an eviction you tolerate and one you leave in place. It applies
+to one checkpoint today and to anything this project quantizes with `--vision_bits`
+later.
+
+→ [docs/format-and-loading.md](docs/format-and-loading.md) "CPU offload",
+[docs/media-encoders.md](docs/media-encoders.md)
+
+## `report-encoder-offload` — Report that vLLM cannot offload a media encoder
+
+`--cpu-offload-gb` offloads no vision or audio encoder on any model, in any format,
+because `get_offloader().wrap_modules()` is called only from `make_layers()` and a
+vision tower does not go through it. Every multimodal model in vLLM loses the same
+0.83-1.07 GiB of optional headroom, and no cross-format comparison can reveal it
+because all formats lose it equally.
+
+**Worth reporting on its own merit, and not ours to fix.** The encoder is the one
+offload target whose economics are not a compromise — read once per image, never for a
+text-only request — so this is the cheapest headroom in a multimodal deployment and it
+is unreachable. Nine of ten surveyed checkpoints ship a bf16 tower, which no
+quantization plugin can see, so the fix has to be upstream. Same shape of finding as
+`report-ct-channel-embed`: small, general, independent of adopting anything of ours.
+
+Numbers, method and the reproducing tool in
+[docs/media-encoders.md](docs/media-encoders.md).
 
 ## `qbench-noise-floor` — Self-noise-floor support for qbench's `vllm` engine
 
