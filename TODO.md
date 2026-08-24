@@ -144,37 +144,60 @@ exist; if it lands, the optimization becomes the natural follow-up here.
 ## `turboquant-sliding-window` — TurboQuant cannot serve a sliding-window model
 
 `TurboQuantAttentionBackend` never overrides `supports_sliding_window`, so it takes
-the base class's `return False` and is rejected outright for any model with a
-sliding window. That is **gemma-4 and Laguna both** — two families, and the reason
-turboquant is out of reach for each is identical rather than model-specific.
+the base class's `return False` and is rejected for any model with a sliding window.
+That is **gemma-4 and Laguna both** — one reason, two families.
 
 **Bigger than the FA miss it was mistaken for.** `fa-head-dim-512` buys gemma-4 a
-flash-attention path; this buys gemma-4 *and* Laguna a quantized KV cache, which on
-a 16 GiB card is the difference between a usable context and a token one. Whether it
-is any more attainable than extending FA to head dim 512 is unknown — both look
-unlikely — but it is the same order of work against twice the constituency.
+flash-attention path; this buys gemma-4 *and* Laguna a quantized KV cache, which on a
+16 GiB card decides whether the context is usable.
 
-**Two things get in the way of even measuring it, both characterized 2026-08-24:**
+**The economics are better than the layer count suggests**, which is what makes it
+worth pursuing rather than filing as impossible. gemma-4 is mostly sliding layers
+(12B: 40 sliding / 8 full; 26B-A4B: 25 / 5), so compressing only the full-attention
+layers sounds like giving up most of the prize. It is not: a sliding layer's cache is
+capped at `sliding_window` (1024) while a full-attention layer grows with context, so
+the five-or-eight full layers *dominate* KV bytes exactly where pressure is real —
+~62% of KV at 8k on the 26B, ~86% at 32k, ~96% at 128k. Compressing only those
+reaches ~65% total KV reduction at 32k against ~75% for compressing everything.
 
-- **`--disable-sliding-window` fails on gemma-4** with `TypeError: Field
-  'sliding_window' expected int, got NoneType`. vLLM's disable path assigns
-  `hf_text_config.sliding_window = None` (`config/model.py:804`), but transformers
-  5.x declares `sliding_window: int = 512` on `Gemma4TextConfig`
-  (`configuration_gemma4.py:171`) as a non-optional annotated field and rejects it.
-  Laguna's config permits the assignment, which is why the same flag works there.
-  A vLLM/transformers mismatch, not ours, and small.
-- **TurboQuant then rejects its own cache dtype**, reporting
-  `['kv_cache_dtype not supported', 'sliding window not supported']` for a
-  `--kv-cache-dtype turboquant_4bit_nc` that is listed in its own
-  `supported_kv_cache_dtypes`. The sliding-window half is fully explained by the
-  base-class default above; **the dtype half is not explained** — `supports_kv_cache_dtype`
-  returns true for anything `turboquant_*` and false only for `None`, so something is
-  presenting a different value at that check (a per-group or skip-layer path is the
-  suspicion, not a finding). Worth pinning down before reporting anything upstream.
+**There is precedent for the approach, and it is bypass rather than support.** The
+external `turboquant-vllm` project ([alberto.codes,
+2026-03-31](https://alberto.codes/blog/2026-03-31-from-one-model-to-seven-making-turboquant-model-portable))
+reached Gemma-2/Gemma-3 by *declining to compress* sliding layers — "compressing a
+sliding window layer's cache breaks the eviction semantics" — keeping layer indices
+aligned with `None` padding. Not teaching the cache sliding window; detecting sliding
+layers and leaving them alone. **vLLM already has that mechanism**:
+`--kv-cache-dtype-skip-layers` takes the literal keyword `sliding_window`
+(`layers/attention/attention.py:306`) and sets those layers to `kv_cache_dtype="auto"`.
 
-Even if both were cleared, a 1024-token context ceiling would not be acceptable, so
-turboquant stays out of reach for these families until the sliding-window support
-itself lands.
+**Measured 2026-08-24 on gemma-4-12B@3.00bpw_mul1, and it does not currently work:**
+
+- **Unforced, the failure looks FA-related and is not.** `TRITON_ATTN is not valid
+  ... ['kv_cache_dtype not supported']` — gemma-4 is pinned to triton by head dim
+  512, triton rejects the turboquant dtype, and nothing mentions sliding window. This
+  is the message that produced the original wrong diagnosis.
+- **`--kv-cache-dtype-skip-layers sliding_window` crashes**, and it is one line:
+  turboquant merges its own boundary skips with `sorted(existing | set(boundary),
+  key=int)` (`engine/arg_utils.py:1985`), so the documented keyword raises
+  `ValueError: invalid literal for int() with base 10: 'sliding_window'`. The exact
+  invocation implementing the blog's approach cannot be typed.
+- **Skipping the same layers by numeric index changes nothing**, because backend
+  selection is global: vLLM picks one backend for the model and that backend must
+  accept the configuration. Per-layer dtype skipping cannot route around it.
+- **Forced to turboquant, three blockers, not one:** `['kv_cache_dtype not
+  supported', 'partial multimodal token full attention not supported', 'sliding
+  window not supported']`. The third is the known one. The second is
+  multimodal-specific and means gemma-4 needs more than sliding-window support. **The
+  first is unexplained** — `supports_kv_cache_dtype` returns true for anything
+  `turboquant_*` and the full `turboquant_4bit_nc` reaches the backend. Suspicion, not
+  a finding: turboquant auto-adds boundary layers to the skip list, those become
+  `"auto"`, and global selection then validates turboquant against a native-dtype
+  group. **Settle this before reporting anything upstream.**
+
+So the `key=int` collision is a real, small, reportable bug on the path that matters,
+but fixing it alone would not get gemma-4 to turboquant — global backend selection
+and the multimodal blocker sit behind it. Laguna, being text-only, may be a shorter
+path and is the one to test next.
 
 → [docs/kernels.md](docs/kernels.md)
 
