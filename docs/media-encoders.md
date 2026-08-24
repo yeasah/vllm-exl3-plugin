@@ -70,6 +70,17 @@ from the encoder's, and not one offload addresses. Verified 2026-08-24 on
 consistent — MTP lives in separate model classes (`deepseek_mtp.py`, `gemma4_mtp.py`,
 `ernie_mtp.py`) instantiated only when a speculative config asks.
 
+**The skip is unconditional, which is what makes it robust.** No `skip_prefixes=["mtp."]`
+anywhere is gated on the speculative config, so the base model never loads those tensors
+under *any* configuration — when MTP drafting is enabled it is the separate drafter
+instance that loads them. The plausible-sounding failure (exclude the built-in head
+because `--speculative-config` is present, then load an external drafter as well, and end
+up with both) needs a conditional skip that does not exist. It is also blocked
+independently at the architecture level: an external drafter resolves through its own repo
+(`registry.py`: `"DFlashDraftModel" -> ("qwen3_dflash", "DFlashQwen3ForCausalLM")`),
+which cannot reach the base model's loader. With an external drafter the built-in head is
+therefore pure dead download.
+
 **And the failure mode is loud rather than silent.** `AutoWeightsLoader` raises on a
 checkpoint tensor matching no parameter, so an implementation that forgot to skip errors
 at load; it cannot quietly allocate. That is why this needs no per-model audit.
