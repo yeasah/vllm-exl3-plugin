@@ -262,6 +262,123 @@ asymmetry the non-EXL3 arms do not get.
 
 Projects and raw results: `~/qbench/qwen38-27b-sc-{neutral,indomain}.yaml`.
 
+## Per-tensor bit allocation does not compose (2026-08-23)
+
+The section above separated `EXL3-SC`'s two changes and found the *calibration* half to be
+distribution-bound. This one tests the other half on its own: **does per-tensor allocation
+help when calibration is held constant?** Both arms below draw calibration from the same
+bundled corpus mix, target 3.0 bpw with a 6-bit head, and differ only in whether bits are
+uniform or assigned by a solved recipe. phi-4-mini is small enough that the reference is
+genuine bf16, so these are absolute KLD figures.
+
+| arm | bpw | KLD | ppl |
+|---|---|---|---|
+| noise floor | -- | 0.005258 | 13.967 |
+| uniform | 4.00 | 0.029408 | 14.230 |
+| **uniform** | **3.00** | **0.098907** | **15.065** |
+| recipe (`sc_optimize`, defaultmix) | 3.00 | 0.097198 | 14.892 |
+| recipe from measured marginal deltas | 3.00 | 0.103185 | 15.088 |
+| uniform | 2.00 | 0.440018 | 20.401 |
+
+**The solved recipe is worth 1.7%** against a solver prediction of 13.3%, and a second
+recipe built from a strictly better measurement is *worse than uniform*. The rest of this
+section is why, because most of the obvious explanations are wrong.
+
+### What the ceiling actually is
+
+With reconstruction error near-constant across tensors (see below), optimal allocation
+reduces to replacing the size-weighted arithmetic mean of per-parameter sensitivity with
+its geometric mean. For this model that ratio is **21.8%** -- so the null is not "there is
+nothing to gain".
+
+### Four explanations that were measured and rejected
+
+**Calibration size.** 50 -> 250 trace rows and 40 -> 200 Hessian-capture rows moved the
+sensitivity ranking by Spearman **0.987**, magnitude by 1.05x. Not it.
+
+**Per-tensor error anchors.** `sc_rfn_probe` against the real 3.0 bpw checkpoint gives
+measured rfn spanning 0.1441-0.1790 across all 224 body tensors -- an interquartile width
+of 1.8%. `sc_optimize`'s default global anchor (`2:0.292`, 1.96/bit) already predicts
+0.1490 against a measured median of 0.1483. There was never differentiating signal on the
+error side for anchors to supply.
+
+**The error model at low K.** Predicted from the shortfall arithmetic that demotions must
+cost ~2x more than modelled, implying rfn(K=2) ~ 0.388. Converting a real 2.0 bpw
+checkpoint and probing it gives **0.2942** against a modelled 0.2907, with a per-tensor
+K=2/K=3 error ratio of **1.985** against the assumed 1.96. Refuted. Measured rfn by K:
+
+| K | 2 | 3 | 4 | 6 (head) |
+|---|---|---|---|---|
+| median rfn | 0.2942 | 0.1483 | 0.0751 | 0.0224 |
+
+**The shaped-noise surrogate.** Built a probe that substitutes each tensor's *real*
+dequantized K=2 weight one at a time (`sc_realsens.py`), giving sensitivities directly
+comparable to injected noise at rfn 0.29. Agreement is good -- median ratio 1.05, Spearman
+0.959 -- and, decisively, **feeding the real measured sensitivities to the same solver
+still predicts a 20.1% gain**. The surrogate was never the problem.
+
+### An fp16 measurement floor, worth fixing regardless
+
+Every KLD reading in `sc_measure` carries a constant additive floor of **~6.1e-5**: flat at
+5.85-6.31e-5 across quintiles spanning 51x in sensitivity (log-log correlation with
+sensitivity 0.088), and reproducible at 5.3e-5 in an independent run with different rows,
+trace and noise levels. It is not a restart artifact -- the tool's own control asserts an
+exact-zero unperturbed KLD and passes. It is the model computing logits in fp16: reference
+and perturbed logits each carry independent rounding, so their difference has a noise
+component that does not shrink as the perturbation does. Caching in fp32 would not help;
+the rounding happens inside the forward pass.
+
+The consequence is a biased exponent. Subtracting the floor moves `sc_optimize`'s fitted
+alpha from **1.791 to 1.996** -- the exact square law that theory predicts in the
+small-error limit. Correcting it changes 20 of 224 assignments and moves the predicted gain
+from 16.2% to 17.6%, so it is a real methodology bug but not the explanation.
+
+### The actual finding: deltas do not compose
+
+Measuring one tensor at a time against an *otherwise-clean* model systematically
+under-counts what it costs to push that tensor deep, because the surrounding tensors are
+not quantized. The fix is to measure marginally -- in the model as it will actually be. So:
+materialise the 3.0 bpw checkpoint as plain fp16 (`dequantize.py`, validated at KLD
+0.098579 against the trellis checkpoint's 0.098907), use it as the base, and measure each
+tensor's whole-model KLD delta when moved to K=2 or K=4 in context (`sc_marginal.py`).
+
+That confirmed the under-count: summed over all tensors, demotion costs **1.23x** more
+in-context than the clean baseline predicts, with per-tensor ratios spanning 0.50-1.80.
+29 of 224 tensors get *worse* when given an extra bit.
+
+The recipe solved from those measured deltas scored **0.103185** -- worse than uniform,
+against a predicted 0.0663. Assembling the identical allocation by mixing dequantized
+weights from the uniform-2/3/4 checkpoints (`mix_recipe.py`), which is exactly what the
+per-tensor framework assumes a recipe *is*, scores **0.105270**. So the conversion process
+is not to blame; the deltas themselves do not superpose:
+
+| treatment | sum-of-deltas | measured | error |
+|---|---|---|---|
+| promote all 224 to K=4 | 38.4% | 29.7% | -23% |
+| demote all 224 to K=2 | 462.5% | 444.9% | -4% |
+| **marginal recipe (29 down, 42 up)** | **64.7%** | **106.8%** | **+65%** |
+
+(as a fraction of the K=3 baseline, so the two evaluation sets are comparable.)
+
+**Superposition holds reasonably when every tensor moves the same direction and collapses
+when they move in opposite directions.** That is the regime every allocation solver
+operates in, and it is why the objective being minimised -- a sum of independently measured
+per-tensor terms -- has little relationship to the KLD that results.
+
+### What this licenses
+
+On this model at this bitrate, per-tensor allocation is worth ~1.7% at best, and the
+apparent 13-22% available to a first-order solver is an artifact of assuming
+independence. This says nothing about larger models, other bitrates, or allocation schemes
+that optimise the combined objective directly rather than a sum of parts -- which is the
+only direction these results suggest is worth taking. It also does not touch the *head*,
+which the solver never allocates and which measurement puts 15x above any body tensor in
+sensitivity.
+
+Project and raw results: `~/qbench/phi4mini-alloc.yaml`. Measurement JSONs in
+`~/qbench/sens/`, recipes in `~/qbench/recipes/`, and the tools built for this in
+`~/qbench/tools/` (all derived from exllamav3 `dev`; the pinned fork is untouched).
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)

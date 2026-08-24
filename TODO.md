@@ -503,6 +503,26 @@ trellis is the wrong encoding for an embedding by ~two orders of magnitude, so a
 embedding row cannot be `bits: 4` — the recipe needs an encoding field beside depth.
 That is a format change rather than an added row.
 
+**The first-order objective does not predict outcomes, which changes what "adding terms"
+can buy** — measured 2026-08-23, see the qbench note. At 3.0 bpw on phi-4-mini the solved
+recipe is worth **1.7%** against its own 13.3% prediction, and a recipe built from
+*measured marginal deltas taken in the already-quantized model* — a strictly better
+measurement — scores **worse than uniform**. Summing independently measured per-tensor
+deltas under-states the result by 23% when every tensor moves the same way and over-states
+it by **65%** when they move in opposite directions, which is the regime any allocator
+works in. The measurement is not at fault: calibration size (Spearman 0.987), per-tensor
+error anchors (1.8% IQR), the low-K error model (predicted rfn(K=2) 0.388, measured
+0.2942) and the shaped-noise surrogate (real substituted weights still predict 20.1%) were
+each measured and cleared.
+
+**What that does and does not block.** It does not invalidate adding an embedding term:
+the case for it rests on a single large tensor with a distribution-independent optimum,
+not on trading small opposing moves across 224 body tensors, and the composability failure
+was specifically about the latter. But it does undercut the premise that a better *body*
+allocation is available to be unlocked — so the embedding term should be argued on its own
+measured merit, and any joint solve should be validated by converting and scoring rather
+than trusted from predicted KLD. Budget for that: the prediction was wrong by 65% here.
+
 **The cheap test needs no upstream code.** `sc_optimize.py -t/--table` dumps the full
 predicted (tensor x K) KLD table as JSON, explicitly for external solvers. Bolt the
 embedding and head sensitivities already measured here onto that table, solve the
@@ -674,6 +694,33 @@ rental needs to resume from where it stopped.
 and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why
 divergence is deliberately all qbench measures),
 [docs/embeddings.md](docs/embeddings.md)
+
+## `sc-measure-kld-floor` — An fp16 measurement floor in exllamav3's sensitivity tool
+
+`util/sc_measure.py` (exllamav3 `dev`) reports a per-tensor KLD that carries a constant
+additive floor of **~6.1e-5**, measured 2026-08-23 on phi-4-mini. Evidence it is a floor
+and not curve shape: it is flat at 5.85-6.31e-5 across sensitivity quintiles spanning 51x,
+its log-log correlation with sensitivity is 0.088, and it reproduces at 5.3e-5 in an
+independent run with different rows, trace, and noise levels.
+
+**Cause.** The model computes logits in fp16, so the reference and perturbed logit sets
+each carry independent rounding; their difference has a noise component that does not
+shrink as the perturbation shrinks. It is *not* a restart artifact — the tool's own control
+asserts an exact-zero unperturbed KLD and that assertion passes. Caching the reference in
+fp32 does not help, because the rounding happens inside the forward pass.
+
+**Why it matters.** The floor biases the fitted scaling exponent: subtracting it moves
+`sc_optimize`'s alpha from **1.791 to 1.996**, the exact square law theory predicts in the
+small-error limit. It also inflates the apparent sensitivity of the least-sensitive
+tensors, whose true KLD sits at or below the floor (5 of 225 here).
+
+**Fix.** Fit `kld = c + s * rfn^2` rather than a pure power law. With alpha pinned at 2.0
+two noise levels suffice to solve for both, so no extra measurement passes are needed:
+`c = (4*kld_lo - kld_hi)/3`. Worth reporting upstream on its own merit — it is a small,
+well-evidenced correction independent of whether per-tensor allocation is worth doing
+(see `quantize-embeddings-pipeline`, where measurement says it largely is not).
+
+→ [docs/qbench.md](docs/qbench.md)
 
 ## `retire-gemma4-patch` — Retire `patches/vllm-gemma4-transformers-5.15-per-layer.patch`
 
