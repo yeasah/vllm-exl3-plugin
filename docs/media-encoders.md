@@ -17,8 +17,8 @@ at all. This note is the census, and the structural reason none of it is reachab
 
 Safetensors metadata off the Hub, no weights fetched (`tools/encoder_census.py
 --defaults` reproduces it). "Encoder" is the tower plus the projector feeding the text
-model; MTP and draft heads are counted separately as `spec`, because they are also never
-loaded for text but *are* read per token, so they are not part of the same trade.
+model; MTP and draft heads are counted separately as `spec`, because they are not the
+same kind of cost at all — see below.
 
 | checkpoint | total | encoder | share | stored |
 |---|---|---|---|---|
@@ -57,6 +57,36 @@ quantizer change, and no quality argument, because eviction is lossless.
 space, with no tower to evict. Its EXL3 checkpoint holds `model.vision_embedder` (9
 tensors, 0.093 GiB) and nothing else — 1,665 tensors against the 26B-A4B sibling's 47,652.
 Any accounting that treats "multimodal" as one class will get this wrong.
+
+### The `spec` column is download, not VRAM
+
+Built-in MTP and draft heads are **never resident** unless speculative decoding is
+configured, so their bytes cost disk and bandwidth but not headroom — a different problem
+from the encoder's, and not one offload addresses. Verified 2026-08-24 on
+`Qwen3_5ForConditionalGeneration`: the model class never constructs an `mtp` submodule
+(the only occurrence of the name in the file is the skip), and `AutoWeightsLoader` filters
+`skip_prefixes` out of the weight stream before any parameter lookup
+(`models/utils.py:421`), so the tensors are never read. Across vLLM the pattern is
+consistent — MTP lives in separate model classes (`deepseek_mtp.py`, `gemma4_mtp.py`,
+`ernie_mtp.py`) instantiated only when a speculative config asks.
+
+**And the failure mode is loud rather than silent.** `AutoWeightsLoader` raises on a
+checkpoint tensor matching no parameter, so an implementation that forgot to skip errors
+at load; it cannot quietly allocate. That is why this needs no per-model audit.
+
+Do not try to settle this from the memory report. On the run above vLLM logged
+`Model loading took 11.24 GiB` for a checkpoint totalling 11.172 GiB — *more than the
+whole file* — because that number is a GPU memory delta across loading and includes
+allocator reservation and kernel scratch (exl3's `A_had` buffer among them). Expected
+if skipped was 10.974 GiB; the ~0.27 GiB difference is overhead, not tensors. The number
+cannot separate the two cases and should not be asked to.
+
+Worth knowing anyway, because the download is not small: Intel's
+`Qwen3.6-35B-A3B-int2-mixed-CT-AutoRound` carries **1.573 GiB** of it, and
+`Qwen/Qwen3.5-9B` 0.453 GiB.
+
+*External* draft models (DFlash, DFlash2) ship as their own repos, so they are opt-in by
+construction and strand nothing.
 
 ### Muse-Glimmer: what a quantized tower looks like
 
