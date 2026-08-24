@@ -12,10 +12,10 @@
   "capability": "12.0",
   "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260820",
   "src.plugin": {
-   "describe": "52be9a2",
-   "head": "52be9a2159",
-   "dirty_files": 3,
-   "diff_sha": "185c7f804344",
+   "describe": "f7adfb0",
+   "head": "f7adfb0cd8",
+   "dirty_files": 0,
+   "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
@@ -34,22 +34,22 @@
   },
   "driver": "610.57.04"
  },
- "decode": 2742.1,
- "decode_spread_pct": 0.69,
+ "decode": 2747.8,
+ "decode_spread_pct": 0.62,
  "decode_samples": [
-  2738.8,
-  2737.7,
-  2742.1,
-  2756.6,
-  2742.8
+  2747.8,
+  2744.7,
+  2736.4,
+  2753.3,
+  2752.6
  ],
- "prefill": 34352.9,
- "prefill_spread_pct": 1.13,
+ "prefill": 34464.9,
+ "prefill_spread_pct": 1.04,
  "prefill_samples": [
-  34352.9,
-  34260.5,
-  34650.2,
-  34540.0,
-  34320.1
+  34476.1,
+  34489.7,
+  34161.1,
+  34464.9,
+  34132.8
  ]
 }
