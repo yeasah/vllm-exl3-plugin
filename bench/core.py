@@ -88,7 +88,9 @@ def source_provenance(path: str, exclude: tuple[str, ...] = ()) -> dict | None:
     Limits worth knowing: the digest covers tracked modifications only, so
     `untracked` is reported separately (an untracked `.py` inside a package
     does change behaviour), and the digest identifies a patch stack without
-    describing it -- to see what changed, diff the trees.
+    describing it -- to see what changed, diff the trees. All three respect
+    `exclude`; a field that did not would let the suite describe its own
+    output, which is what the exclusion exists to prevent.
     """
     head = _git(path, "rev-parse", "HEAD")
     if head is None:
@@ -102,7 +104,16 @@ def source_provenance(path: str, exclude: tuple[str, ...] = ()) -> dict | None:
         import hashlib
 
         diff_sha = hashlib.sha256(diff.encode()).hexdigest()[:12]
-    untracked = _git(path, "ls-files", "--others", "--exclude-standard") or ""
+    # Scoped like `status` and `diff` above, and for the same reason -- the
+    # exclusion is not only about *modified* baselines. A bless that creates
+    # entries writes files that are untracked at the moment they are counted
+    # (capture opens its output before recording the environment), so an
+    # unscoped count climbs 1, 2, ... across the new entries of one run and
+    # bakes into their baselines a number no clean checkout can reproduce.
+    # Found 2026-08-24, on the first bless to add entries rather than overwrite
+    # them, which is why it had never shown.
+    untracked = _git(path, "ls-files", "--others", "--exclude-standard",
+                     *scope) or ""
     return {
         # No `--dirty`: `git describe` takes no pathspec, so it would report the
         # tree as dirty on the strength of the baselines this suite just wrote --

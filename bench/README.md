@@ -133,6 +133,24 @@ baseline, the second records `dirty_files: 1`, the third `2`, and a full bless
 can never record a clean state however clean the checkout was. Provenance is
 about the code that produced a measurement, not the measurement.
 
+The exclusion has to reach **every** field that counts uncommitted state, and
+until 2026-08-24 it did not: `dirty_files` and `diff_sha` were scoped,
+`untracked` was not. That gap is invisible on a bless that overwrites existing
+baselines — they are tracked, so nothing is untracked — and appears only on one
+that *adds* entries, where each new baseline is untracked at the moment it is
+counted (a capture opens its output file before recording the environment). The
+blockq pair caught it on their first bless, recording `untracked: 1` and `2`:
+numbers describing the run itself, which no clean checkout could ever reproduce,
+so those two entries would have warned on every `check` forever.
+`tests/test_bench_provenance.py` pins the scoping in both directions — baselines
+excluded, an untracked `.py` in the package still counted.
+
+**The three fields are not disjoint**, which matters when reading a baseline.
+`dirty_files` counts porcelain status lines, untracked ones included, so it is
+the total; `diff_sha` digests tracked modifications only; `untracked` is the
+remainder, the part no diff can see. One modified source plus one untracked
+source reads `dirty_files: 2, untracked: 1`.
+
 ### `verify`
 
 ```
