@@ -452,86 +452,27 @@ row accurate as a vector. What to emit instead:
 
 Embedding depth is no longer per-model: 4 bits (4.5 bpw in the block-scaled layout)
 covers every model measured. The head's depth in a shared tensor is a separate
-question and was only ever measured on gemma-4-12B.
+question, only ever measured on gemma-4-12B, and is now `head-bits` — which prices it
+directly, since the shared tensor's depth is the head's.
 
-Distinct from `repair-tool` in one way that matters: here layer bpw is *free*, so
-trading depth across components becomes a real constrained optimization (the
-Lagrangian actually binds) rather than a one-variable heuristic.
+**Not urgent: `repair-tool`'s post-processing covers this today.** All this item adds
+is that checkpoints built here would be right from the start instead of needing a pass.
+Strictly as a quantization problem the embedding is the least interesting one on the
+map — a lookup with a distribution-independent optimum that measurement has already
+pinned at a flat 4 bits across every model tested. There is no allocation question here
+worth solving; depth is a constant.
 
-**The solver arrived upstream, so this item is no longer about building one**
-(exllamav3 `dev`, seen 2026-08-22: `doc/optimize.md`, `util/{measure,optimize}.py`,
-`exllamav3/conversion/{allocation,calibration_data,measure_model,optimize_model}.py`).
-It measures per-tensor sensitivity by injecting LDLQ-shaped noise into the
-*unquantized* model and taking KLD — one measurement serving every target bitrate —
-then solves the allocation exactly. What it does **not** budget is precisely what
-this item cares about: `--bitrate` is a mean "over the budgeted (non-head) tensors",
-`--head_bits` is a fixed integer merely recorded in the recipe, and the embedding is
-absent entirely because nothing upstream quantizes one. So the work here becomes
-*adding the missing terms to their optimizer*, not writing a second one.
+**The format question is no longer blocked on upstream.** It previously waited on the
+bar for proposing a storage format to exllamav3, which is higher than "serves this
+plugin's targets", plus a wrinkle: the recipe is a flat `{tensor: bits}` map, so an
+embedding needing a different *encoding* rather than a different depth cannot be
+expressed in it. Now that checkpoints are built here rather than consumed, that bar is
+just "does it work for us", and the wrinkle is nobody else's design decision to wait
+on. What gates the work now is the serving path, not the format.
 
-**And the solver's output is only as general as its calibration data** — measured
-2026-08-23, see the note. exllamav3's published `EXL3-SC` recipe for Qwen3.8-27B is
-**1.30x better than uniform allocation on the trace it was calibrated on and 1.17x worse
-on neutral text**, at matched size and with head bits held constant. So "add the missing
-terms to their optimizer" inherits a live question with no good answer on the shelf:
-*what should the added terms be fitted on?* The bundled corpus is what the new pipeline
-exists to replace; a self-generated trace overfits, now demonstrably; and a task-specific
-trace has to be built and carries the same specialization risk one level down.
-
-**But the embedding term is probably immune to that, and the head term is not.** An
-embedding is a lookup, not a contraction — there is no activation distribution to fit, so
-its optimal depth should be near distribution-independent. The measured
-constant-depth result is evidence for exactly that: 4 bits covered every model tested,
-which is what you would expect of a term whose sensitivity does not depend on what the
-model is being asked. The head is an ordinary contraction and inherits the whole problem
-— which matters most for the tied-model shared tensor, where **the head sets the depth**.
-So the embedding term can be proposed on its own evidence; anything touching the head
-waits on the calibration question being answered upstream.
-
-**Blocked on evidence, deliberately.** Adding an embedding term means proposing a
-storage *format* upstream, and the bar for that is higher than "serves this plugin's
-targets". The load-bearing assumption is that a fixed 4 bits stays good enough
-across the useful range — call it 2-6 bpw of body weights — on the full range of
-architectures exllamav3 supports, and it has only been measured near one operating
-point on a handful of models. Widening that is the prerequisite, not the optimizer
-work. Until then `repair-tool`'s post-processing is the right shape: it commits
-nobody else to the format.
-
-**A format wrinkle to know before proposing anything.** The recipe is a flat
-`{tensor: bits}` map, which assumes one encoding. The whole finding above is that
-trellis is the wrong encoding for an embedding by ~two orders of magnitude, so an
-embedding row cannot be `bits: 4` — the recipe needs an encoding field beside depth.
-That is a format change rather than an added row.
-
-**The first-order objective does not predict outcomes, which changes what "adding terms"
-can buy** — measured 2026-08-23, see the qbench note. At 3.0 bpw on phi-4-mini the solved
-recipe is worth **1.7%** against its own 13.3% prediction, and a recipe built from
-*measured marginal deltas taken in the already-quantized model* — a strictly better
-measurement — scores **worse than uniform**. Summing independently measured per-tensor
-deltas under-states the result by 23% when every tensor moves the same way and over-states
-it by **65%** when they move in opposite directions, which is the regime any allocator
-works in. The measurement is not at fault: calibration size (Spearman 0.987), per-tensor
-error anchors (1.8% IQR), the low-K error model (predicted rfn(K=2) 0.388, measured
-0.2942) and the shaped-noise surrogate (real substituted weights still predict 20.1%) were
-each measured and cleared.
-
-**What that does and does not block.** It does not invalidate adding an embedding term:
-the case for it rests on a single large tensor with a distribution-independent optimum,
-not on trading small opposing moves across 224 body tensors, and the composability failure
-was specifically about the latter. But it does undercut the premise that a better *body*
-allocation is available to be unlocked — so the embedding term should be argued on its own
-measured merit, and any joint solve should be validated by converting and scoring rather
-than trusted from predicted KLD. Budget for that: the prediction was wrong by 65% here.
-
-**The cheap test needs no upstream code.** `sc_optimize.py -t/--table` dumps the full
-predicted (tensor x K) KLD table as JSON, explicitly for external solvers. Bolt the
-embedding and head sensitivities already measured here onto that table, solve the
-joint allocation offline, and the question of whether including them moves the
-frontier is answered before a line is written.
-
-**Head allocation: wait.** Excluding the head is odd for the one tensor everybody
-knows has different sensitivity, and it is also the riskiest thing to hand a freshly
-built optimizer. Upstream will likely add it; pre-empting them is wasted work.
+**The solver is no longer part of this item.** It was only ever second-order here —
+embedding depth is fixed, so there is nothing for an allocator to trade. What remains
+of the allocation question is the head, which is `head-bits`.
 
 Depends on `quantized-embeddings` growing a block-scaled serving path — see there.
 Nothing can load what this would emit today.
@@ -695,6 +636,47 @@ and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why
 divergence is deliberately all qbench measures),
 [docs/embeddings.md](docs/embeddings.md)
 
+## `head-bits` — Head allocation, the one bit-allocation question that survives
+
+Per-tensor allocation across *body* tensors is measured dead (see
+`sc-measure-kld-floor` and the qbench note): summing independently measured deltas
+over-states the result by 65% once tensors move in opposite directions, because EXL3's
+sequential error compensation makes the errors cancel. **The head is structurally
+immune to that failure.** It is one tensor traded against a uniform body — a 1-D sweep
+with a single cross term — so it can be answered by converting at each head bitrate and
+scoring, with no superposition assumption anywhere. That is exactly the assumption that
+broke; nothing else about the finding transfers.
+
+**Reasons to expect the answer is not 6.** `lm_head` measures **15x more sensitive than
+any body tensor** (3.83e-01 against a body max of 2.58e-02 at matched injected error).
+It is also large — 614M params on phi-4-mini, ~28% of body bytes at 6 bits — so head
+depth is a real size lever, not a rounding error. And the one comparison on record says
+the current default is not obviously right in either direction: a 4-bit head was a mild
+pessimization against 6-bit on *both* in-domain and neutral text, which prices 4 as too
+few but says nothing about 7 or 8. Upstream never allocates the head at all;
+`--head_bits` is a fixed integer merely recorded in the recipe.
+
+**The experiment is budget-neutral and cheap.** Hold total checkpoint size constant and
+sweep the head against a compensating body bitrate — head 4/5/6/7/8 with body adjusted
+to match bytes — then convert and score each. phi-4-mini is the right first target: it
+is small, it already has a validated bf16 reference and a scored uniform baseline, and
+the whole surrounding toolchain is built.
+
+**It also prices the tied-model plan directly.** Under
+`quantize-embeddings-pipeline`'s proposal a tied model emits one shared block-scaled
+tensor whose depth is set by the head. So whatever this sweep says the head is worth is
+the same number that decides what that shared tensor costs — the two questions are one
+measurement.
+
+**Lower priority, same area: generalize the body null.** The composability result is one
+4B model at one bitrate. The mechanism is present at any size, but the magnitude of the
+error cancellation is not known to be, and "allocation cannot work in this form" is a
+stronger claim than one model licenses. A second model at a different bitrate would
+settle whether that is a general property of sequential-LDLQ quantizers or a phi-4-mini
+result. Worth doing before the finding is stated anywhere load-bearing.
+
+→ [docs/qbench.md](docs/qbench.md)
+
 ## `sc-measure-kld-floor` — An fp16 measurement floor in exllamav3's sensitivity tool
 
 `util/sc_measure.py` (exllamav3 `dev`) reports a per-tensor KLD that carries a constant
@@ -718,7 +700,7 @@ tensors, whose true KLD sits at or below the floor (5 of 225 here).
 two noise levels suffice to solve for both, so no extra measurement passes are needed:
 `c = (4*kld_lo - kld_hi)/3`. Worth reporting upstream on its own merit — it is a small,
 well-evidenced correction independent of whether per-tensor allocation is worth doing
-(see `quantize-embeddings-pipeline`, where measurement says it largely is not).
+(see `head-bits`, where measurement says it largely is not).
 
 → [docs/qbench.md](docs/qbench.md)
 
