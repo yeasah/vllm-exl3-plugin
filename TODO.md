@@ -109,7 +109,17 @@ is cross-entry rather than against a baseline, so it needs something
 vLLM has no FA path for head dim 512, and does not allow mixed attention layers
 (over real, demonstrated instability concerns) that could otherwise cover the
 majority of layers at dim 256. So the attention backend falls back to triton, which
-carries a number of performance costs — not least taking turboquant off the table.
+carries real performance costs.
+
+**Correction 2026-08-24: it does *not* take turboquant off the table, and that
+claim confused two independent limits.** The pin to triton is FA-related and the
+turboquant miss looked like a consequence of it; it is not. TurboQuant's
+`supports_head_size` returns `head_size > 0` — it accepts any head dim — while it
+never overrides `supports_sliding_window`, inheriting the base class's blanket
+`False`. gemma-4's blocker for turboquant is the **sliding window**, and closing
+`fa-head-dim-512` would buy flash attention without buying turboquant. Split out as
+`turboquant-sliding-window`, which is the larger of the two prizes and covers two
+model families rather than one.
 
 This looks at first glance like a bad complexity-to-payoff trade, and probably is
 not: it is close to the difference between an entire model family (Gemma 4 among
@@ -130,6 +140,43 @@ hand, so it is effectively the entire constituency for the shared embed+head ten
 deferred under `quantized-embeddings`. If this turns out to be a lost cause and
 gemma-4 is not practically deployable, that optimization loses most of its reason to
 exist; if it lands, the optimization becomes the natural follow-up here.
+
+## `turboquant-sliding-window` — TurboQuant cannot serve a sliding-window model
+
+`TurboQuantAttentionBackend` never overrides `supports_sliding_window`, so it takes
+the base class's `return False` and is rejected outright for any model with a
+sliding window. That is **gemma-4 and Laguna both** — two families, and the reason
+turboquant is out of reach for each is identical rather than model-specific.
+
+**Bigger than the FA miss it was mistaken for.** `fa-head-dim-512` buys gemma-4 a
+flash-attention path; this buys gemma-4 *and* Laguna a quantized KV cache, which on
+a 16 GiB card is the difference between a usable context and a token one. Whether it
+is any more attainable than extending FA to head dim 512 is unknown — both look
+unlikely — but it is the same order of work against twice the constituency.
+
+**Two things get in the way of even measuring it, both characterized 2026-08-24:**
+
+- **`--disable-sliding-window` fails on gemma-4** with `TypeError: Field
+  'sliding_window' expected int, got NoneType`. vLLM's disable path assigns
+  `hf_text_config.sliding_window = None` (`config/model.py:804`), but transformers
+  5.x declares `sliding_window: int = 512` on `Gemma4TextConfig`
+  (`configuration_gemma4.py:171`) as a non-optional annotated field and rejects it.
+  Laguna's config permits the assignment, which is why the same flag works there.
+  A vLLM/transformers mismatch, not ours, and small.
+- **TurboQuant then rejects its own cache dtype**, reporting
+  `['kv_cache_dtype not supported', 'sliding window not supported']` for a
+  `--kv-cache-dtype turboquant_4bit_nc` that is listed in its own
+  `supported_kv_cache_dtypes`. The sliding-window half is fully explained by the
+  base-class default above; **the dtype half is not explained** — `supports_kv_cache_dtype`
+  returns true for anything `turboquant_*` and false only for `None`, so something is
+  presenting a different value at that check (a per-group or skip-layer path is the
+  suspicion, not a finding). Worth pinning down before reporting anything upstream.
+
+Even if both were cleared, a 1024-token context ceiling would not be acceptable, so
+turboquant stays out of reach for these families until the sliding-window support
+itself lands.
+
+→ [docs/kernels.md](docs/kernels.md)
 
 ## `repair-tool` — Repair tool for existing EXL3 checkpoints
 
