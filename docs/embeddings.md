@@ -78,6 +78,17 @@ hardware where every byte mattered, while the GPU-serving formats grew up where 
 hundred MB against a 70B+ model was noise. Fixing it puts this project ahead of the
 entire GPU-quantization ecosystem outside GGUF, not merely at parity with one competitor.
 
+*Amended 2026-08-24: "GGUF is the only widely used format" is now true of published
+checkpoints but no longer of the tooling.* `llm-compressor` can quantize an embedding
+(`QuantizationModifier(targets=["Embedding"])`, weight-only and data-free), and vLLM has
+served those checkpoints since v0.27.0 — `CompressedTensorsEmbeddingWNA16Int`, a Triton
+fused gather+dequant on the same `VocabParallelEmbedding` hook this plugin uses, landed
+in PR #44340 within weeks of the work below. So the census above still describes every
+checkpoint anyone has published, but the gap is now a question of what producers *do* by
+default rather than of what the formats *can* express. What their scheme costs at matched
+bytes is measured in ["What llm-compressor's embedding quantization
+costs"](#what-llm-compressors-embedding-quantization-costs-and-where-its-menu-is-a-trap).
+
 ## Feasibility: can a row be read without dequantizing the tensor?
 
 This is the gate on the whole idea. If an embedding lookup needs the full dense matrix,
@@ -1129,6 +1140,145 @@ decoder — the reason to keep two implementations of a format that must agree.
 - **Tied models are unchanged**, and remain served from their existing quantized `lm_head`.
   The shared-tensor optimization stays deferred on the same grounds as before: it needs an
   integer GEMM for the head role, and gemma-4 is nearly its whole constituency.
+
+## What llm-compressor's embedding quantization costs, and where its menu is a trap
+
+*Measured 2026-08-24, after the amendment at the top of this note. Every embedding arm
+swept above is **affine** — a (min, max) pair per row or per block. compressed-tensors is
+**symmetric**: one scale per group, no min, codes over `[-8, 7]` at 4 bits. That is half
+an affine arm's metadata at the same block size (16/N bpw against 32/N), so their default
+recipe is 4.25 bpw where `blockq32` is 4.53. Whether the missing min is worth those bytes
+was the one axis the sweeps never touched.*
+
+### Method
+
+A `sym:N` / `sym_row` granularity in qbench's `fake_quantize`, scored on the same three
+models against the same cached references as every table above, so the numbers drop
+straight into the existing frontier.
+
+The arm is not a transcription: it is checked bit-identical against `compressed_tensors`'
+own `calculate_qparams` + `fake_quantize` at 3/4/5/8 bits, group and channel, in
+fp32/fp16/bf16 (`tools/ct_sym_check.py` in the qbench working dir; `llm-compressor`
+itself is not needed, the quantization math lives in `compressed-tensors`, which is
+already a vLLM dependency). Two details it would have been easy to get wrong by writing
+from the README, both of which the check pins down:
+
+- The scale is `max|v| / ((2^b - 1) / 2)` — denominator 7.5 at 4 bits, not 7. The most
+  *positive* value in every group therefore rounds to 8, clips to 7, and comes back ~7%
+  low, while the most negative one is exact. That asymmetry is their format.
+- The arithmetic stays in the weight dtype. compressed-tensors stores `weight_scale` in
+  `params_dtype` (vLLM allocates it that way), so promoting to fp32 the way the affine
+  arms do would measure a scheme nobody serves.
+
+`sym:N` is `strategy="group"`, `sym_row` is `strategy="channel"` — the two settings the
+README offers.
+
+### The measurements
+
+Only the rows that bear on the comparison; the full tables are above.
+
+**Qwen3.5-9B @4.00bpw** (baseline 0.013128, floor 0.001350) — again the only one of the
+three with the dynamic range to resolve anything:
+
+| bpw | scheme | tax | x floor |
+|---|---|---|---|
+| 3.2500 | **ct group-64 3-bit** | +0.011688 | **8.66** |
+| 3.5156 | blockq32 3-bit | +0.004046 | 3.00 |
+| 4.0039 | **ct channel 4-bit** | +0.243952 | **180.74** |
+| 4.0083 | per-row 4-bit (affine) | +0.122225 | 90.55 |
+| 4.2500 | **ct group-64 4-bit** (their default) | +0.004637 | **3.44** |
+| 4.2500 | per-blk128 4-bit | +0.003407 | 2.52 |
+| 4.2656 | blockq64 4-bit | +0.001567 | 1.16 |
+| 4.5000 | **ct group-32 4-bit** | +0.003561 | **2.64** |
+| 4.5156 | blockq32 4-bit | +0.000225 | 0.17 |
+| 8.0039 | **ct channel 8-bit** | +0.000160 | **0.12** |
+
+**MiniCPM5-1B @3.00bpw** (baseline 0.114097, floor 0.000977):
+
+| bpw | scheme | tax | x floor |
+|---|---|---|---|
+| 4.0083 | per-row 4-bit (affine) | +0.003920 | 4.01 |
+| 4.0104 | **ct channel 4-bit** | +0.006053 | **6.19** |
+| 4.2500 | **ct group-64 4-bit** | +0.002903 | **2.97** |
+| 4.2917 | blockq64 4-bit | +0.002649 | 2.71 |
+| 4.5000 | **ct group-32 4-bit** | +0.002503 | **2.56** |
+| 4.5000 | per-blk64 4-bit | +0.002526 | 2.59 |
+| 4.5417 | blockq32 4-bit | +0.001435 | 1.47 |
+| 8.0104 | **ct channel 8-bit** | +0.000043 | **0.04** |
+
+**gemma-4-12B-it @4.00bpw** (baseline 0.026963, floor 0.001759) — every group arm sits
+below its floor, as everything else here does:
+
+| bpw | scheme | tax | x floor |
+|---|---|---|---|
+| 4.0042 | **ct channel 4-bit** | +0.049119 | **27.93** |
+| 4.0083 | per-row 4-bit (affine) | +0.001872 | 1.06 |
+| 4.2500 | **ct group-64 4-bit** | +0.000343 | **0.20** |
+| 4.2667 | blockq64 4-bit | +0.000383 | 0.22 |
+| 4.5000 | **ct group-32 4-bit** | +0.000141 | **0.08** |
+| 4.5156 | blockq32 4-bit | +0.000298 | 0.17 |
+| 8.0042 | **ct channel 8-bit** | +0.000174 | **0.10** |
+
+### What it says
+
+**1. `strategy: "channel"` is a trap for embeddings, and the README hands it over as a
+neutral alternative.** It is worse than the affine per-row scheme this note already
+rejected — 2.0x worse on Qwen3.5-9B, 1.5x on MiniCPM5-1B, **26x** on gemma-4-12B, which
+is the one place gemma resolves anything at all. Symmetric makes the per-row failure mode
+worse rather than better, because a row that needs an offset now cannot have one *and*
+loses half its codes to the side of zero that has no mass. "Use `strategy: channel` (and
+drop `group_size`) for per-row channel scales" is presented as a size/quality dial; at
+4 bits on an embedding it is 28-181x the noise floor and it should not be offered.
+
+**2. At the only resolving datapoint, symmetric costs ~16x at matched bytes.** Qwen3.5-9B,
+group-32 4-bit (4.50 bpw) +0.003561 against `blockq32` (4.53 bpw) +0.000225. Their own
+default, group-64 at 4.25 bpw, is 3.44x the floor where `blockq64` at 4.27 bpw is 1.16x.
+So the missing min is not paid for by the bytes it saves.
+
+**3. And the min outranks block resolution.** Still on Qwen3.5-9B: affine per-blk128 at
+4.25 bpw (2.52x floor) beats symmetric group-32 at 4.50 bpw (2.64x). Blocks 4x coarser
+and a quarter-bit cheaper, and it still wins — the offset is doing more work than the
+scale granularity is.
+
+**4. The direction is model-dependent, and gemma flips it.** There, group-32 symmetric
+(0.08x floor) measures *better* than `blockq32` (0.17x) — but both are 6-12x below the
+model's own noise floor, so the ordering is not resolvable and neither is a tax. MiniCPM
+is a near-tie leaning `blockq` (1.47x vs 2.56x). Only Qwen3.5-9B separates them, and it
+separates them by 16x. That is the same shape as every other result in this note: the
+model with the sensitive embedding is the one that decides, and it decides for the affine
+layout.
+
+**5. Their conservative setting is honest.** "W8 channel, effectively lossless" holds on
+all three — 0.12x / 0.04x / 0.10x of the floor. It costs 8 bpw, which is still half of
+fp16 and would fix most of the tax measured at the top of this note. A checkpoint
+published that way would be a real improvement over what everyone ships today.
+
+**6. Their accuracy evidence cannot see any of this.** The README validates on
+`pythia-1.4b` and reports W4 group-64 at 14.752 wikitext ppl against a 14.733 baseline.
+That is the gemma case: a model whose embedding sensitivity is below what the measurement
+can resolve, reported as "near-lossless" without a noise floor to compare against. It is
+not wrong about pythia; it is evidence about one model in the class that cannot
+distinguish schemes, generalized to a default.
+
+### Consequences
+
+**Nothing changes in the format.** `blockq32` stays as measured — this is the third
+alternative layout scored against it (GGUF k-quants, k-shape, now compressed-tensors) and
+the first two tied where this one loses on the model that resolves.
+
+**It does change what is worth saying upstream.** Finding 1 is not about us: it is a
+default in a widely used tool that damages any large-vocabulary model with a sensitive
+embedding, it reproduces on three models, and it does not depend on adopting anything of
+ours. Finding 2 is the argument for an affine group scheme in compressed-tensors, but it
+needs a format change on their side (their `weight_zero_point` exists for linears, and
+their embedding kernel simply does not read one) and would still be 0.5 bpw of metadata
+at block 32 without the double-quantized scales that make `blockq` cheap. The first is
+worth reporting on its own; the second is only worth raising if someone wants it.
+
+**The load-time idea this came from survives.** Their embedding recipe being data-free is
+the load-relevant fact — no calibration, so the same is available to any bf16 checkpoint
+at startup — and nothing measured here argues against doing it, only against doing it
+symmetrically. That remains unbuilt and untracked.
 
 ## The axis nobody has swept: vector quantization
 
