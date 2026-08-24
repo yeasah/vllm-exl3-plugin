@@ -3,6 +3,7 @@
  "label": "llama-3.2-1B 3.0bpw tied",
  "model": "turboderp/Llama-3.2-1B-Instruct-exl3",
  "revision": "3.0bpw",
+ "fixture": null,
  "model_impl": "auto",
  "enforce_eager": true,
  "tensor_parallel_size": 1,
@@ -14,10 +15,10 @@
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260817",
+  "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260820",
   "src.plugin": {
-   "describe": "eaf5605",
-   "head": "eaf5605546",
+   "describe": "af22839",
+   "head": "af228398e9",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -25,13 +26,13 @@
   "src.vllm": {
    "describe": "v0.27.0",
    "head": "e50f7d3696",
-   "dirty_files": 9,
-   "diff_sha": "a0f2e5c81d51",
-   "untracked": 0
+   "dirty_files": 12,
+   "diff_sha": "1604047f7221",
+   "untracked": 1
   },
   "src.exllamav3": {
-   "describe": "v1.4.2-12-g493a323",
-   "head": "493a323dc7",
+   "describe": "v1.4.2-19-ga4e0179",
+   "head": "a4e01792f6",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
