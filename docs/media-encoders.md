@@ -30,8 +30,15 @@ same kind of cost at all — see below.
 | Qwen3.6-27B exl3 @3.00 | 12.87 G | 0.858 G | 6.67% | bf16 |
 | Qwen3.6-35B-A3B int2 AutoRound | 13.46 G | 0.832 G | 6.18% | bf16 |
 | Qwen3.5-35B-A3B exl3 @2.00 | 10.16 G | 0.832 G | 8.19% | bf16 |
-| gemma-4-26B-A4B-it exl3 @2.54 | 10.92 G | **1.067 G** | 9.77% | bf16 |
+| gemma-4-26B-A4B-it exl3 @2.54 | 10.92 G | 1.067 G | 9.77% | bf16 |
 | Muse-Glimmer-30B exl3 @2.00 | 10.22 G | 0.904 G | 8.85% | **4.00 bpw** |
+| gemma-3-27b-it exl3 @4.0 | 16.33 G | 0.788 G | 4.82% | bf16 |
+| Qwen3-VL-235B-A22B exl3 @3.00 | 84.80 G | 1.074 G | 1.27% | bf16 |
+| Qwen3-VL-32B exl3 @3.0 | 14.02 G | 1.109 G | 7.91% | bf16 |
+| Qwen3-VL-30B-A3B exl3 @3.00 | 12.36 G | 1.003 G | 8.11% | bf16 |
+| Qwen3-VL-8B exl3 @6.0 | 7.52 G | 1.074 G | 14.27% | bf16 |
+| **Qwen3-VL-8B exl3 @3.0** | 5.10 G | 1.074 G | **21.05%** | bf16 |
+| **Step-3.7-Flash exl3 @3.05** | 75.18 G | **3.643 G** | 4.85% | bf16 |
 
 ### What it says
 
@@ -47,12 +54,22 @@ default. exllamav3 is in fact the only pipeline of the group that *offers* the c
 (`--vision_bits`, defaulting to 16); `compile.py` writes the key only when it is not 16,
 so **an absent `vision_bits` means the default was taken**, not that the value is unknown.
 
-**3. The prize is the same order as the embedding work.** `blockq` recovered 1.18 GiB on
-gemma-4-12B; an encoder is 0.83–1.07 GiB. On a 16 GiB card that is 5–7% of the whole card
-converting directly into KV headroom — and unlike the embedding it needs no format, no
-quantizer change, and no quality argument, because eviction is lossless.
+**3. It is a fixed cost over a shrinking denominator, so it is worst on the smallest
+model.** The Qwen3-VL family ships essentially one encoder at every size — 1.074 GiB at
+8B and 1.074 GiB at 235B, identical — so the share runs 1.27% → 7.91% → 14.27% →
+**21.05%** as the model shrinks and the bit rate drops. A fifth of the entire package of
+`Qwen3-VL-8B @3.0bpw` is an encoder, on the checkpoint chosen by whoever had the least
+VRAM to start with. This is point 1 sharpened: not merely a constant, but a constant
+*shared across a family*.
 
-**4. Unified models have no prize at all.** gemma-4-12B-it is
+**4. The prize is the same order as the embedding work, and sometimes larger.** `blockq`
+recovered 1.18 GiB on gemma-4-12B; an encoder is 0.79–1.11 GiB across most of the table
+and **3.64 GiB** on Step-3.7-Flash — more than the entire non-encoder weight of
+Qwen3-VL-8B @3.0. On a 16 GiB card that is 5–7% of the whole card in the typical case,
+converting directly into KV headroom, and unlike the embedding it needs no format, no
+quantizer change and no quality argument, because eviction is lossless.
+
+**5. Unified models have no prize at all.** gemma-4-12B-it is
 `Gemma4UnifiedForConditionalGeneration`: it consumes images directly into the text token
 space, with no tower to evict. Its EXL3 checkpoint holds `model.vision_embedder` (9
 tensors, 0.093 GiB) and nothing else — 1,665 tensors against the 26B-A4B sibling's 47,652.
@@ -146,7 +163,7 @@ comparison — every format loses the same bytes.
 ### Two fixes, and they compound rather than overlap
 
 **Upstream: offer the tower to the offloader.** Small, general, format-agnostic — every
-multimodal model in vLLM gains ~0.85 GiB of optional headroom regardless of quantization.
+multimodal model in vLLM gains 0.8-3.6 GiB of optional headroom regardless of quantization.
 This is the one that matters for the table above, because in nine of ten rows the tower is
 bf16 and therefore invisible to any quantization plugin. Tracked as
 `report-encoder-offload`.

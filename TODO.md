@@ -308,8 +308,9 @@ gap this item was opened for — the vision path is not merely loading.
   at all — blocked on `gemma4-e2b`.
 - **`--language-model-only` is doing more work than it looks.** It is the flag
   reached for whenever headroom runs short, and the reason is now priced: the
-  encoder is 0.83-1.07 GiB across every checkpoint surveyed, 4.7-12.7% of the
-  package and worst at low bpw. It should not have to be a capability trade —
+  encoder is 0.79-3.64 GiB across every checkpoint surveyed and up to **21% of
+  the package** (Qwen3-VL-8B @3.0bpw), worst on exactly the small, low-bpw
+  checkpoints picked for small cards. It should not have to be a capability trade —
   evicting the encoder to host memory costs one PCIe pass per image and nothing at
   all for text — except that vLLM cannot offload an encoder at all
   (`report-encoder-offload`). → [docs/media-encoders.md](docs/media-encoders.md)
@@ -552,8 +553,8 @@ forward pass — while UVA's zero-copy reads touch only what the kernel actually
 For routed experts UVA therefore wins decisively; measured on 2026-08-20. *(An earlier
 version of this note extended that to "sparsely-read tensors like a vision tower" at
 0.3-0.6 GiB. Both halves were wrong: a tower cannot be offered to either backend at
-all, and the real sizes are 0.83-1.07 GiB bf16, or 0.90 GiB for Muse-Glimmer's 1.92B
-parameters at 4 bpw.)* Verified 2026-08-19 that the prefetch path is otherwise fully
+all, and the real sizes are 0.79-3.64 GiB bf16 — 3.64 on Step-3.7-Flash alone — or
+0.90 GiB for Muse-Glimmer's 1.92B parameters at 4 bpw.)* Verified 2026-08-19 that the prefetch path is otherwise fully
 functional with EXL3 tensors, so pinning is the only outstanding requirement.
 
 **Honor the parameter selectors in that registration.** Both backends take a set of
@@ -581,7 +582,7 @@ later.
 `--cpu-offload-gb` offloads no vision or audio encoder on any model, in any format,
 because `get_offloader().wrap_modules()` is called only from `make_layers()` and a
 vision tower does not go through it. Every multimodal model in vLLM loses the same
-0.83-1.07 GiB of optional headroom, and no cross-format comparison can reveal it
+0.79-3.64 GiB of optional headroom, and no cross-format comparison can reveal it
 because all formats lose it equally.
 
 **Worth reporting on its own merit, and not ours to fix.** The encoder is the one

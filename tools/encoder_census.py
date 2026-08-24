@@ -102,6 +102,14 @@ DEFAULTS = [
     ("turboderp/Qwen3.5-35B-A3B-exl3", "2.00bpw"),
     ("turboderp/gemma-4-26B-A4B-it-exl3", "2.54bpw"),
     ("turboderp/Muse-Glimmer-30B-exl3", "2.00bpw"),
+    # The vision-first family: one encoder across every model size, so the share is
+    # a fixed cost over a shrinking denominator.
+    ("turboderp/Qwen3-VL-8B-Instruct-exl3", "3.0bpw"),
+    ("turboderp/Qwen3-VL-8B-Instruct-exl3", "6.0bpw"),
+    ("turboderp/Qwen3-VL-32B-Instruct-exl3", "3.0bpw"),
+    ("turboderp/Qwen3-VL-235B-A22B-Thinking-exl3", "3.00bpw"),
+    ("turboderp/gemma-3-27b-it-exl3", "4.0bpw"),
+    ("turboderp/Step-3.7-Flash-exl3", "3.05bpw"),
 ]
 
 
