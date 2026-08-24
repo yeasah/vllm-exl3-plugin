@@ -21,11 +21,11 @@
   "capability": "12.0",
   "vllm_reported": "0.27.1.dev0+ge50f7d369.d20260820",
   "src.plugin": {
-   "describe": "af22839",
-   "head": "af228398e9",
+   "describe": "427d2dc",
+   "head": "427d2dce3a",
    "dirty_files": 0,
    "diff_sha": null,
-   "untracked": 2
+   "untracked": 0
   },
   "src.vllm": {
    "describe": "v0.27.0",
