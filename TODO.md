@@ -399,7 +399,13 @@ logits time: `EXL3TiedLMHeadMethod` reads a trellis off the embedding module, wh
 now holds `bq_*` instead. Worse, `get_cache_scale_mapper` still fires with
 `embed_prefix` at its `"model.embed_tokens"` default, routing 755 MiB of trellis to a
 module path that does not exist on a nested model, and nothing objects — so the
-silent weight loss wants a guard of its own. The fix is to make both predicates
+silent weight loss wants a guard of its own. **Observed 2026-08-25**, and it is
+exactly as predicted: running tied `gemma-4-12B-it-exl3` with
+`vllm-embed-quant-config` reverted leaves `embed_prefix` at its default, the
+`lm_head.*` rename targets a path the nested model does not have, the trellis is
+dropped without complaint, and the model loads, runs and emits garbage. The
+guard is worth building on the strength of that: nothing in the failure is
+loud. The fix is to make both predicates
 per-module rather than per-checkpoint, and to point the rename at the head's own
 prefix, which still defeats the loader's `lm_head` skip. Not hypothetical:
 `gemma4-e2b` is tied *and* needs blockq for its per-layer embedding.

@@ -105,12 +105,31 @@ misdescribing what is being built. The second remains the cleaner contribution.
 **And the patch is load-bearing for correctness, not only for loading.** The same run
 without it produced `'1111.11.11.1.11.'` from `turboderp/gemma-4-12B-it-exl3` — it loads,
 runs, and emits garbage, where the `bench/` entry with the patch captures correct output.
-That is the "silently dense for a tied model" case this patch exists to prevent, observed
-directly for the first time rather than argued from the 86-file count. *The exact path
-from missing quant method to wrong output is not traced* — the tied checkpoint has no
-dense `embed_tokens.weight` for `UnquantizedEmbeddingMethod` to have loaded, so something
-supplied one — and that is worth knowing before the patch is offered, since a reviewer
-will ask.
+The path is now traced, and it is not the "silently dense" case at all — it is *our own*
+predicted silent weight loss, observed for the first time.
+
+Nothing leaked: the tied EXL3 checkpoint really does carry a dense
+`model.language_model.embed_tokens.weight` `(262144, 3840)` BF16 *alongside*
+`lm_head.trellis`, which is the pipeline defect [embeddings.md](embeddings.md) records —
+the quantizer writes a full embedding regardless of tying. So
+`UnquantizedEmbeddingMethod` loaded a real tensor and the embedding was fine. The head
+was not:
+
+1. with no quant method requested for the embedding, `config.py:566`
+   (`self.embed_prefix = prefix`) never runs, so `embed_prefix` keeps its
+   `"model.embed_tokens"` default from `:101`;
+2. gemma-4 nests the embedding at `model.language_model.embed_tokens`;
+3. `get_cache_scale_mapper` therefore renames `lm_head.*` onto a path that does not
+   exist (`:406`), and `embedding_is_quantized()` is true so the rename does fire;
+4. the trellis lands nowhere, **nothing objects**, and the tied head is left with no
+   weights — hence plausible-looking garbage rather than an error.
+
+That is verbatim the hazard TODO `quantized-embeddings` predicted: *"`get_cache_scale_mapper`
+still fires with `embed_prefix` at its `model.embed_tokens` default, routing 755 MiB of
+trellis to a module path that does not exist on a nested model, and nothing objects — so
+the silent weight loss wants a guard of its own."* This run is the first observation of
+it, and the argument for building that guard: the failure is completely silent and the
+model keeps serving.
 
 ### Reports, not patches
 
