@@ -97,11 +97,27 @@ fixture are `bq_*` — so method and tensors match. DFlash2 has no embedding mod
 whatsoever. The break needs a drafter carrying its *own* embedding in a *different*
 format, and no such checkpoint is available here.
 
-**So the first task is not building a reproduction, it is re-verifying the claim.** It
-was recorded 2026-08-20 against v0.27.0 and has not been retested since the bump. Either
-it still fires by some path not enumerated above, or it was specific to a
-drafter/version combination that has moved. Filing a bug whose reproduction we cannot
-produce would be worse than not filing.
+**The candidate the table misses is `google/gemma-4-12B-it-assistant`** — gemma-4-12B's
+external draft model, and the survey above was too narrow for looking only at
+vLLM-native drafter classes. Verified 2026-08-25:
+
+- it carries **its own** `model.embed_tokens.weight` `[262144, 1024]` BF16, at hidden
+  size 1024 against the target's 3840, so it cannot share the target's embedding the way
+  MTP and DFlash do;
+- vLLM implements `Gemma4UnifiedAssistantForCausalLM` in neither 0.27.0 nor 0.28.0, but
+  **transformers 5.15 does** (`model_type: gemma4_unified_assistant`, no remote code) —
+  so the loading path is the Transformers backend;
+- and that backend calls `replace_embedding_class(input_embeddings, self.quant_config)`
+  with the *ambient* config, which is exactly the mechanism the break describes.
+
+Target `turboderp/gemma-4-12B-it-exl3` is tied, so the ambient config would hand the
+drafter's bf16 embedding an `EXL3EmbeddingMethod` and send it looking for trellis
+tensors it does not have.
+
+**Untested**: whether the drafter actually loads through the backend under a speculative
+config, which is the one step between this and a filed bug. Worth running before
+anything is sent — and note the claim itself is dated 2026-08-20 against v0.27.0 and has
+not been retested since the bump, so the run settles two questions at once.
 
 ### Reports, not patches
 
