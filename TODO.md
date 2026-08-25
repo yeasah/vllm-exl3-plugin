@@ -255,20 +255,61 @@ slot_size_aligned` through a backend hook. Page size then computes as
 `num_heads * storage_block_size * state_content_size_bytes` — a **per-cell** quantity,
 so it scales linearly with `block_size` where the old padded value did not.
 
-That dissolves both walls above by construction: nothing goes stale when `block_size`
-is scaled because turboquant no longer sets `page_size_padded`, and the scaling branch
-can reconcile the page rather than falling through to the un-paddable case. *Read from
-the commits, not run* — the v0.27.0 reproduction cannot test it.
+**Re-run on v0.28.0, 2026-08-25, and the prediction was half right.** TurboQuant does
+stop setting `page_size_padded` — it publishes `state_content_bytes` only. But the
+walls did not dissolve, and 0.28 turns out to have built *first-class machinery for
+this exact case* with a gap in it:
 
-**So do not patch v0.27.0 for this.** Both measurements above are against a structure
-0.28 replaces. Re-run the three-step reproduction (dtype alone → keyword → explicit
-numeric skip) on 0.28 and see where it stops; the expected outcomes at each stage are
-recorded above, which makes it a short check rather than a fresh investigation.
+- **Stages 1 and 2 fail exactly as on 0.27.0** — bare dtype gives no valid backend, the
+  `sliding_window` keyword still raises `ValueError: invalid literal for int()`.
+- **Stage 3 progresses further, then hits the same assert** (`page_size_padded >=
+  unpadded_page_size_bytes`), now reached through cudagraph memory profiling rather
+  than direct KV init. The staleness bug moved rather than vanishing: in 0.28 it is the
+  *sliding* spec that carries a padded page (`page_size_padded=shared_page`) while the
+  unifier's block-scaling branch still leaves it stale. Same one-line fix, different
+  spec.
+- **With that patched, the divisibility wall returns**, and instrumenting the unifier
+  says why — there are **three** page-size classes, not two:
 
-*This is the fourth time staleness has cost more than churn would have — see
-`check-upstream-before-patching-vllm`. The patch-and-revert experiment was worth
-running for what it confirmed, but the wall it found had already been restructured
-away upstream before it was measured.*
+```
+layer 0: FullAttentionSpec   block=32 page=131072 padded=None   content=None quant=0
+layer 1: SlidingWindowSpec   block=16 page=65536  padded=65536  content=None quant=0
+layer 4: FullAttentionSpec   block=32 page=34304  padded=None   content=134  quant=7
+max_page_size=131072  distinct=[34304, 65536, 131072]
+```
+
+Layer 0 is *native full attention* because TurboQuant auto-adds its own boundary skip
+layers (`get_boundary_skip_layers`, first/last N) on top of the operator's list. So the
+pool holds native-full, native-sliding and turboquant-full, and 34304 does not divide
+131072.
+
+**`--kv-cache-dtype-skip-layers` is a supported configuration in 0.28**, not a hack:
+`CacheConfig.skip_page_size_padded` is documented as "the page size of layers skipped
+from KV cache quantization ... so unquantized skip layers pad up to the quantized
+primary's page", and `Platform._align_..._block_size` bumps `block_size` so the primary
+page covers the padded one. It handles **one** padded class. Upstream marked the gap
+itself, twice, in that same function:
+
+```python
+# To add the first/last-N sibling:
+#   padded_pages.append(per_token_page_bytes(<sibling_dtype>, "auto"))
+# To add the first/last-N sibling:
+#   cache_config.sibling_page_size_padded = shared_page
+```
+
+The first/last-N sibling *is* TurboQuant's boundary protection. So what blocks Laguna
+is a case upstream has already identified and left unimplemented, plus the block-scaling
+staleness bug — two narrow, reportable things rather than a missing capability.
+
+**Next step is a bounded upstream question**, not an investigation: does adding the
+sibling page class (the two commented lines) plus scaling `page_size_padded` with
+`block_size` let Laguna serve? Both are small enough to try, and the instrumented spec
+dump above is the diagnostic that tells you immediately whether the classes reconciled.
+
+Worth pairing with the quality question before investing: tq4 on a trellis-quantized
+model has field experience and a capability-benchmark lower bound behind it, but no
+`qbench` numbers. That is the measurement that decides whether this is *practical*
+rather than merely running.
 
 → [docs/kernels.md](docs/kernels.md)
 
