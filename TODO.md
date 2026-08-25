@@ -879,7 +879,8 @@ divergence is deliberately all qbench measures),
 ## `head-bits` — Head allocation, the one bit-allocation question that survives
 
 Per-tensor allocation across *body* tensors is measured dead (see
-`sc-measure-kld-floor` and the qbench note): summing independently measured deltas
+[docs/qbench.md](docs/qbench.md), "Per-tensor bit allocation does not compose"):
+summing independently measured deltas
 over-states the result by 65% once tensors move in opposite directions, because EXL3's
 sequential error compensation makes the errors cancel. **The head is structurally
 immune to that failure.** It is one tensor traded against a uniform body — a 1-D sweep
@@ -917,37 +918,15 @@ result. Worth doing before the finding is stated anywhere load-bearing.
 
 → [docs/qbench.md](docs/qbench.md)
 
-## `sc-measure-kld-floor` — An fp16 measurement floor in exllamav3's sensitivity tool
-
-`util/sc_measure.py` (exllamav3 `dev`) reports a per-tensor KLD that carries a constant
-additive floor of **~6.1e-5**, measured 2026-08-23 on phi-4-mini. Evidence it is a floor
-and not curve shape: it is flat at 5.85-6.31e-5 across sensitivity quintiles spanning 51x,
-its log-log correlation with sensitivity is 0.088, and it reproduces at 5.3e-5 in an
-independent run with different rows, trace, and noise levels.
-
-**Cause.** The model computes logits in fp16, so the reference and perturbed logit sets
-each carry independent rounding; their difference has a noise component that does not
-shrink as the perturbation shrinks. It is *not* a restart artifact — the tool's own control
-asserts an exact-zero unperturbed KLD and that assertion passes. Caching the reference in
-fp32 does not help, because the rounding happens inside the forward pass.
-
-**Why it matters.** The floor biases the fitted scaling exponent: subtracting it moves
-`sc_optimize`'s alpha from **1.791 to 1.996**, the exact square law theory predicts in the
-small-error limit. It also inflates the apparent sensitivity of the least-sensitive
-tensors, whose true KLD sits at or below the floor (5 of 225 here).
-
-**Fix.** Fit `kld = c + s * rfn^2` rather than a pure power law. With alpha pinned at 2.0
-two noise levels suffice to solve for both, so no extra measurement passes are needed:
-`c = (4*kld_lo - kld_hi)/3`. Queued for upstream in [docs/upstream.md](docs/upstream.md);
-it is a small,
-well-evidenced correction independent of whether per-tensor allocation is worth doing
-(see `head-bits`, where measurement says it largely is not).
-
-→ [docs/qbench.md](docs/qbench.md)
-
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `sc-measure-kld-floor` — retired unfiled 2026-08-25 at the exllamav3 v1.4.3 bump.
+  The tools it described (`util/sc_measure.py`, `sc_optimize`'s power-law fit) no
+  longer exist: upstream deprecated `measure.py`/`optimize.py` and replaced them
+  with `conversion/measure_model.py` + `optimize_model.py`, which fits no alpha
+  for a constant floor to bias. See [docs/upstream.md](docs/upstream.md).
 
 - `retire-gemma4-patch` — done 2026-08-25 at the v0.28.0 bump. Upstream landed
   generic per-layer arch config (`ModelArchitectureConfig.from_layers`), so

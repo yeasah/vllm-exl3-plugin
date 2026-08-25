@@ -313,18 +313,24 @@ and it is only worth raising if there is appetite. Evidence in
 bar is higher: changes we make for ourselves do not need offering, only ones that are
 right for everyone.*
 
-**`sc_measure.py` reports a KLD with a constant additive floor** of ~6.1e-5, measured on
-phi-4-mini. Evidence it is a floor rather than curve shape: flat across sensitivity
-quintiles spanning 51x, log-log correlation with sensitivity 0.088, and it reproduces at
-5.3e-5 in an independent run with different rows, trace and noise levels. Cause is fp16
-logits carrying independent rounding in reference and perturbed passes.
+**~~`sc_measure.py` reports a KLD with a constant additive floor~~ — retired 2026-08-25,
+unfiled.** The report targeted `util/sc_measure.py` and `sc_optimize`'s power-law fit.
+Both are **gone**: upstream's v1.4.3 deprecates `measure.py`/`optimize.py` and replaces
+the whole thing with a new pipeline (`conversion/measure_model.py`,
+`conversion/optimize_model.py`, `abf4911`), and the `sc_*` tools no longer exist in the
+tree at all.
 
-*Why it matters to them, not just to us*: subtracting it moves `sc_optimize`'s fitted
-alpha from **1.791 to 1.996** — the exact square law theory predicts in the small-error
-limit. Fix is to fit `kld = c + s·rfn²`; with alpha pinned at 2.0, two noise levels
-solve for both and no extra passes are needed: `c = (4·kld_lo − kld_hi)/3`.
-Independent of whether per-tensor allocation is worth doing, which measurement says it
-largely is not. Detail in [qbench.md](qbench.md).
+The half of the finding that was about *consequence* is moot with them: the new optimizer
+fits no alpha, so there is nothing for a constant floor to bias from 1.791 to 1.996. The
+half about *cause* — fp16 logits carrying independent rounding in reference and perturbed
+passes — is not obviously fixed or obviously still harmful; `measure_model.kldiv`
+upcasts to float for the softmax but the logits reaching it are whatever the model
+produced. Deciding whether a version of this applies to the replacement is fresh analysis
+against different code, not a rewrite of the old report.
+
+*Recorded rather than deleted because the retirement is the useful part*: this is the
+standing check below catching a stale item **before** it was sent, rather than after —
+which is the first time round that has happened.
 
 ---
 
