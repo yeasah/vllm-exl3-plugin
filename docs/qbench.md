@@ -264,6 +264,15 @@ Projects and raw results: `~/qbench/qwen38-27b-sc-{neutral,indomain}.yaml`.
 
 ## Per-tensor bit allocation does not compose (2026-08-23)
 
+*Survives the exllamav3 v1.4.3 bump unrevisited, and provably.* The study ran from
+`~/git/exllamav3-dev`, cloned at `2398c05` on 2026-08-23 and never fetched since — its
+reflog holds a single `clone:` entry. Upstream then tagged **v1.4.3 at that same
+commit**, so the "new optimization pipeline" that release ships is byte-identically the
+code these measurements were taken against. Nothing below needs re-running, including the
+`sc_optimize` alpha of 1.791 that [upstream.md](upstream.md) reports as biased by the
+fp16 KLD floor.
+
+
 The section above separated `EXL3-SC`'s two changes and found the *calibration* half to be
 distribution-bound. This one tests the other half on its own: **does per-tensor allocation
 help when calibration is held constant?** Both arms below draw calibration from the same

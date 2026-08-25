@@ -673,6 +673,11 @@ of the allocation question is the head, which is `head-bits`.
 Depends on `quantized-embeddings` growing a block-scaled serving path — see there.
 Nothing can load what this would emit today.
 
+**The v1.4.3 bump changes nothing here.** Upstream's "new optimization pipeline" was
+tagged at `2398c05`, the same commit the 2026-08-23 allocation study was run against, so
+the pipeline this item would build on is the one already measured — see
+[docs/qbench.md](docs/qbench.md).
+
 → [docs/embeddings.md](docs/embeddings.md)
 
 ## `yaqa` — YAQA-quality rounding in the quantizer
