@@ -110,6 +110,13 @@ Added 2026-08-25 after a near miss: a dry-run install of `llm-compressor` wanted
 run, logprobs could have moved with nothing in the record to explain it. Reported
 like the rest of `environment()`, never gated.
 
+**And `pkg.digest` covers the rest**, because naming two packages only catches the
+two already thought of — these were picked *after* the near miss, and the next
+surprise is as likely to be `numpy`, `triton` or `tokenizers`. It is a sha256 over
+every installed distribution and version (`pkg.count` alongside it, 480 here). The
+digest says *something* moved; `bench/expected/environment.txt`, written by the
+same `bless`, says *what* — diff it against a fresh `pip freeze`.
+
 *(The lesson generalises: `llm-compressor` is a checkpoint **producer** and does
 not belong in the serving environment. Install it in its own venv and hand the
 checkpoint over.)*

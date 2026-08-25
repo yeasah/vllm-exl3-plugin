@@ -506,6 +506,21 @@ def cmd_bless(args) -> int:
             continue
         run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout)
         blessed += 1
+    # The manifest behind `environment()`'s pkg.digest: a digest says something
+    # moved, this says what. One per bless, since a bless is one snapshot.
+    try:
+        import importlib.metadata as _md
+
+        manifest = sorted(
+            f"{d.metadata['Name']}=={d.version}"
+            for d in _md.distributions()
+            if d.metadata and d.metadata["Name"]
+        )
+        with open(os.path.join(EXPECTED, "environment.txt"), "w") as f:
+            f.write("\n".join(manifest) + "\n")
+    except Exception as exc:  # pragma: no cover
+        print(f"     ! could not write environment manifest: {exc}")
+
     print(f"\nblessed {blessed} entries into {EXPECTED}")
     print("review the diff before committing -- blessing a real regression "
           "is how a gate stops working")

@@ -188,6 +188,26 @@ def environment() -> dict:
     # is a vLLM dependency in its own right. Found missing 2026-08-25, when a
     # dry-run install of llm-compressor turned out to want transformers
     # *downgraded* 5.15.0 -> 5.14.1 underneath a freshly blessed set.
+    # A digest of *everything* installed, because hand-picking packages only
+    # catches the ones already thought of -- these two were chosen after a near
+    # miss, and the next surprise could be numpy, triton or tokenizers. The
+    # digest says "something moved"; `bench/expected/environment.txt`, written
+    # by the same bless, says what. Cheap enough to be unconditional.
+    try:
+        import hashlib
+        import importlib.metadata as _md
+
+        dists = sorted(
+            f"{d.metadata['Name']}=={d.version}"
+            for d in _md.distributions()
+            if d.metadata and d.metadata["Name"]
+        )
+        env["pkg.digest"] = hashlib.sha256(
+            "\n".join(dists).encode()
+        ).hexdigest()[:12]
+        env["pkg.count"] = len(dists)
+    except Exception:  # pragma: no cover - probing must never fail a run
+        env["pkg.digest"] = None
     for pkg in ("transformers", "compressed-tensors"):
         try:
             import importlib.metadata as _md
