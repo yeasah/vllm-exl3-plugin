@@ -1332,6 +1332,25 @@ It still depends on `vllm-embed-quant-config` (86 of 131 architectures never pas
 `quant_config` at all), which is the same blocker in the same place. See
 [upstream.md](upstream.md).
 
+**There is a fourth option, and it is better than the three above.** compressed-tensors
+is *itself* a composing config: one `quant_config` that dispatches per `config_groups`,
+with non-uniform recipes a documented and supported feature — mixed precisions, mixed
+strategies, even different modifiers per module family, running directly in vLLM. An
+embedding scheme expressed there therefore composes with any weight quantization, on any
+architecture llm-compressor supports, through a serving path that already exists.
+
+What stands in the way is not composition but *quality*: their embedding kernel is
+symmetric-only, which this note measured at 2.64x the noise floor against `blockq32`'s
+0.17x. The enabling change is small and is not ours — teach
+`CompressedTensorsEmbeddingWNA16Int` the zero point its linear sibling already reads.
+Asymmetric group-64 would be ~4.31 bpw, *cheaper* than `blockq32`, and in the affine
+league the per-block arms above measured. Filed in [upstream.md](upstream.md) as the
+highest-value llm-compressor item.
+
+That reorders the cross-format question: the route is not "carry blockq to other
+formats", it is "make the format everyone already uses good enough that carrying is
+unnecessary".
+
 ## The axis nobody has swept: vector quantization
 
 *Speculative, and deliberately marked so — nothing below is measured, unlike the rest of

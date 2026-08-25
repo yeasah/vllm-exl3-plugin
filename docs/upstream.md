@@ -193,6 +193,43 @@ removal. The arm that produced the numbers is verified bit-identical to
 `compressed_tensors`' own encoder (`tools/ct_sym_check.py` in the qbench working dir),
 so the measurement is of their scheme and not our transcription.
 
+**The embedding kernel cannot do asymmetric, and does not say so.** This is the item
+that matters most, and it is smaller than it looks.
+
+vLLM's *linear* WNA16 scheme handles asymmetry properly: it takes `symmetric`, validates
+it against `WNA16_ZP_SUPPORTED_TYPES_MAP`, raises a clear error for unsupported widths,
+and passes `zero_points=not self.symmetric`. `CompressedTensorsEmbeddingWNA16Int` does
+none of that. Its Triton kernel hardcodes a symmetric offset and reads no zero point:
+
+```python
+q = ((packed >> shift) & ((1 << NUM_BITS) - 1)) - (1 << (NUM_BITS - 1))
+out = q.to(tl.float32) * scale.to(tl.float32)
+```
+
+and its `__init__` reads `num_bits`, `strategy` and `group_size` but never
+`weight_quant.symmetric` — so it neither supports asymmetric nor refuses it, where the
+linear path next door refuses cleanly.
+
+*The ask, in two parts*: bring the embedding kernel to parity with the linear one
+(register `weight_zero_point`, apply it), and in the interim **raise** rather than
+silently mis-dequantize, exactly as `compressed_tensors_wNa16.py` already does.
+
+*Why it is worth doing rather than just correct*: symmetric is what makes their current
+embedding support mediocre. Measured on Qwen3.5-9B, symmetric group-32 costs 2.64x the
+model's noise floor where an affine scheme at comparable bytes costs 0.17x — and their
+own default, group-64, is 3.44x. Asymmetric group-64 with a packed zero point would be
+**~4.31 bpw, cheaper than `blockq32`'s 4.53**, while landing in roughly the affine
+league our per-block arms measured. The fix does not need blockq, or us, or any format
+change: the storage exists, the compressor writes it, the linear path reads it.
+
+*And this is the piece that makes composition work.* compressed-tensors is one
+`quant_config` that dispatches per `config_groups`, and non-uniform recipes are a
+documented, supported feature — mixed precisions, mixed strategies, even different
+modifiers per module family (AWQ on `self_attn`, GPTQ on `mlp`), all running directly in
+vLLM. So an embedding scheme expressed *there* composes with any weight quantization on
+any supported architecture, which is precisely what a plugin-side format cannot do. See
+[embeddings.md](embeddings.md), "blockq on non-EXL3 checkpoints".
+
 *The bigger finding is deliberately not offered*: their **group** strategy costs ~16x at
 matched bytes against `blockq32` on the model with enough dynamic range to resolve it.
 That would need a zero-point their embedding kernel does not read, i.e. a format change,
