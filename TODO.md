@@ -216,18 +216,35 @@ Measured 2026-08-24 on `Laguna-XS-2.1-exl3@3.00bpw`:
   self.page_size_padded >= self.unpadded_page_size_bytes` (`kv_cache_utils.py:1118`,
   `kv_cache_interface.py:207`).
 
-That is the real wall, and it is one function rather than a missing feature. The
-unifier reconciles differing page sizes by scaling `block_size` by the ratio,
-`replace(layer_spec, block_size=new_block_size)`, leaving `page_size_padded`
-untouched — but turboquant sets that field for its packed `slot_size_aligned` layout,
-so scaling the block size grows `unpadded_page_size_bytes` past the now-stale padded
-value and the property's own assert fires. *Inferred from the traceback and the
-source, not proven by instrumenting it* — confirm before reporting.
+**That first wall is a one-line staleness bug, confirmed by patching it.** The unifier
+scales `block_size` by the ratio via `replace(layer_spec, block_size=new_block_size)`
+and leaves `page_size_padded` untouched; turboquant sets that field for its packed
+`slot_size_aligned` layout, so the recomputed `unpadded_page_size_bytes` overtakes the
+stale padded value. Scaling both cleared it.
 
-**Next step is therefore narrow**: make the block-size-scaling branch padded-aware (or
-have turboquant's spec take the padding branch), and see whether Laguna serves. That
-is a materially smaller question than "teach TurboQuant sliding window", and Laguna is
-where to ask it.
+**Behind it is a second wall that is not small.** With the assert gone, the same run
+fails on a full-attention (turboquant) layer:
+
+    NotImplementedError: Layer model.layers.4.self_attn.attn: page size is not
+    divisible by the maximum page size and cannot be padded.
+
+Padding is gated on `indexes_kv_by_block_stride`, which is *derived* from the
+backend's `get_kv_cache_stride_order()` (`gpu_model_runner.py:7833`) — a property of
+the memory layout, not a flag to set. TurboQuant packs K+V into a single interleaved
+slot per head per position, so its page size is neither divisible into a native
+layer's nor paddable to match it.
+
+**So the accurate statement is narrower than "TurboQuant cannot do sliding window" and
+wider than "one function":** TurboQuant's packed KV page layout cannot currently
+coexist with native-dtype layers in one cache. That is precisely the bookkeeping the
+external project wrote by hand *outside* vLLM, and it is the thing any bypass approach
+has to solve — the sliding-window rejection is only the first gate.
+
+Whether that is tractable is unmeasured. The honest read is that it needs either a
+commensurate page layout for the mixed case or a paddable one, and neither is a patch
+someone lands on a Sunday. Worth re-checking against 0.28 before any further effort:
+`unify_kv_cache_spec_page_size` and the stride-order plumbing are exactly the kind of
+internals that move.
 
 → [docs/kernels.md](docs/kernels.md)
 
