@@ -17,10 +17,10 @@
   "capability": "12.0",
   "vllm_reported": "0.28.1.dev0+g2cf0a6915.d20260825",
   "src.plugin": {
-   "describe": "316b371",
-   "head": "316b371cc9",
-   "dirty_files": 0,
-   "diff_sha": null,
+   "describe": "ba853e1",
+   "head": "ba853e14e1",
+   "dirty_files": 2,
+   "diff_sha": "20a3d51b8891",
    "untracked": 0
   },
   "src.vllm": {
@@ -1864,5 +1864,7 @@
    "generated_text": "<think>\nOkay, so the user wants to compare three approaches for quantizing large language models: trellis coding,"
   }
  ],
- "weight_gib": 0.28
+ "weight_gib": 0.28,
+ "attn_backend": "FLASH_ATTN",
+ "kv_cache_gib": 12.2
 }

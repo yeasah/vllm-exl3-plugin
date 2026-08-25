@@ -249,9 +249,11 @@ ENTRIES: list[Entry] = [
         gpu_memory_utilization=0.92,
         known_broken="vLLM's native MuseGlimmer builds the vision adapter as a "
         "plain `nn.Linear` (`muse_glimmer.py`: `self.c_fc = nn.Linear(...)`), "
-        "which never reaches `get_quant_method`, so no quantization plugin can "
-        "serve this checkpoint's quantized adapter. Confirmed still true at "
-        "v0.28.0, where MuseGlimmer went native.",
+        "which never reaches `get_quant_method`, so the checkpoint's trellis "
+        "tensors have nowhere to land. Measured at v0.28.0: `ValueError: There "
+        "is no module or parameter named 'vision_adapter.c_fc.mul1' in "
+        "MuseGlimmerForCausalLM. The available parameters belonging to "
+        "vision_adapter.c_fc (Linear) are: {'vision_adapter.c_fc.weight'}`.",
         exercises="the native implementation of a checkpoint the matrix already "
         "serves through the Transformers backend -- the pair the MiniCPM "
         "entries make for a text-only model, which nothing makes for a "
@@ -291,12 +293,28 @@ ENTRIES: list[Entry] = [
         kv_cache_dtype="fp8",
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
         language_model_only=True,
-        max_model_len=4096,
-        gpu_memory_utilization=0.90,
-        exercises="two paths at once, and they belong together because MTP "
-        "cannot currently be combined with turboquant (see the sibling entry "
-        "below): the fp8 KV cache, which no other entry uses, and an MTP "
-        "drafter.\n\n"
+        # Tight on a 16 GiB card, and the requirement is mostly a *constant*:
+        # halving max_model_len 4096 -> 2048 moved it only 0.93 -> 0.88 GiB,
+        # because 48 of this model's 64 layers are linear-attention whose state
+        # does not scale with context. So headroom comes from utilization, not
+        # from a shorter context -- the same 0.95 the tight-fit line in
+        # ~/ckpt/run-qwen3.8-27b.sh uses.
+        max_model_len=2048,
+        gpu_memory_utilization=0.95,
+        exercises="the fp8 KV cache, which no other entry uses. Originally "
+        "paired with MTP on the belief that MTP could not use turboquant; that "
+        "belief was wrong (see the sibling), so the MTP half is redundant and "
+        "the fp8 half is what this entry is for.\n\n"
+        "**It is also the entry that found a silent environment dependency.** "
+        "vLLM selects FlashInfer for fp8 KV on this model (head_dim 256, "
+        "hybrid), and FlashInfer needs either the `flashinfer_cubin` package or "
+        "`nvcc` to JIT. Neither was reachable -- `flashinfer` 0.6.16 was "
+        "installed but PyPI's `flashinfer-cubin` stops at 0.6.13, and nvcc was "
+        "present at /usr/local/cuda/bin but not on PATH -- so this failed with "
+        "`RuntimeError: FlashInfer backend is not available` on a build where "
+        "it had previously served. `run.py` now puts nvcc on the child's PATH "
+        "when it can find it, and every entry records the backend actually "
+        "selected, so the next such change is reported rather than mysterious.\n\n"
         "The drafter is the real prize. It is a *second model instance*, built "
         "by vLLM's speculative machinery from the same checkpoint, whose "
         "modules go through `get_quant_method` independently of the main "
@@ -314,18 +332,29 @@ ENTRIES: list[Entry] = [
         kv_cache_dtype="turboquant_4bit_nc",
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
         language_model_only=True,
-        max_model_len=4096,
-        gpu_memory_utilization=0.90,
-        known_broken="MTP and TurboQuant do not currently combine. Recorded "
-        "from practice rather than characterized here; the failure mode is "
-        "expected to be the same KV-cache-spec class the drafter introduces "
-        "against the quantized primary's page. Replace this reason with the "
-        "measured one the first time it runs.",
-        exercises="the combination the entry above works around. Both halves "
-        "are separately covered -- turboquant by the tq4 entries, MTP by the "
-        "fp8 one -- so this exists only to notice when their intersection "
-        "starts working, which is the cheapest way to learn that a KV-cache "
-        "refactor upstream has unblocked it",
+        # Tight on a 16 GiB card, and the requirement is mostly a *constant*:
+        # halving max_model_len 4096 -> 2048 moved it only 0.88 -> 0.83 GiB,
+        # because 48 of this model's 64 layers are linear-attention whose state
+        # does not scale with context. So headroom comes from utilization, not
+        # from a shorter context -- the same 0.95 the tight-fit line in
+        # ~/ckpt/run-qwen3.8-27b.sh uses.
+        max_model_len=2048,
+        gpu_memory_utilization=0.95,
+        exercises="an MTP drafter, which is the coverage nothing else has: a "
+        "*second model instance* built by vLLM's speculative machinery from the "
+        "same checkpoint, whose modules go through `get_quant_method` "
+        "independently of the main model's. This checkpoint's MTP head is "
+        "genuinely EXL3-quantized (8 trellis modules, 202.5 MiB), so a plugin "
+        "that mishandled a secondary model would fail here and nowhere else.\n\n"
+        "It also stacks four lossy schemes -- blockq embedding, trellis "
+        "weights, turboquant KV, and speculative drafting -- on top of the "
+        "deployed `--language-model-only` shape.\n\n"
+        "**This entry was added as `known_broken` on the belief that MTP and "
+        "TurboQuant do not combine. They do.** The first two runs failed on KV "
+        "cache sizing (0.88 GiB needed against 0.28 available) rather than on "
+        "any spec conflict, and given utilization headroom it captures cleanly. "
+        "Worth remembering when the next `known_broken` is written from "
+        "recollection rather than from a message",
     ),
 ]
 

@@ -1,6 +1,6 @@
 {
- "entry": "minicpm5-1B-3.0bpw-mcg",
- "label": "minicpm5-1B 3.0bpw mcg",
+ "entry": "minicpm5-1B-3.0bpw-tq4",
+ "label": "minicpm5-1B 3.0bpw tq4",
  "model": "turboderp/MiniCPM5-1B-exl3",
  "revision": "3.00bpw",
  "fixture": null,
@@ -1870,6 +1870,9 @@
   }
  ],
  "weight_gib": 0.79,
- "attn_backend": "FLASH_ATTN",
+ "attn_backend": [
+  "FLASH_ATTN",
+  "TURBOQUANT"
+ ],
  "kv_cache_gib": 11.63
 }

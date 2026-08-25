@@ -69,6 +69,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -90,12 +91,47 @@ DEFAULT_TOLERANCE = {
 #: this exists to catch.
 WEIGHT_RE = re.compile(r"Model loading took ([\d.]+) GiB")
 
+#: Which attention backend vLLM *chose*. Nothing in an entry names it: it is
+#: derived from head dim, dtype, KV dtype, sliding window and what is installed,
+#: so it can change silently under a bump or an environment difference and take
+#: the meaning of the entry with it. `qwen3.8-27B ... MTP fp8` is the worked
+#: example -- it served once, then stopped, because selection landed on
+#: FlashInfer and FlashInfer was unreachable. Recorded, and compared.
+BACKEND_RE = re.compile(
+    r"Using (?:AttentionBackendEnum\.)?(\w+)(?: attention)? backend"
+)
+
+#: What was left for the KV cache after weights and activations. Reported rather
+#: than gated: it is a graded VRAM-efficiency signal where `weight_gib` is exact,
+#: and it is the number that moves when something upstream quietly inflates.
+KVMEM_RE = re.compile(r"Available KV cache memory: ([-\d.]+) GiB")
+
+
+#: Standard CUDA toolkit locations, searched only when `nvcc` is not already on
+#: PATH. FlashInfer needs either the `flashinfer_cubin` package or `nvcc` to JIT,
+#: and vLLM selects FlashInfer for some (model, KV dtype) combinations -- so
+#: without this an entry's fate depends on the operator's shell rather than on
+#: the build. The `qwen3.8-27B ... MTP fp8` entry is the case that found it.
+_CUDA_BIN_CANDIDATES = ("/usr/local/cuda/bin", "/opt/cuda/bin")
+
+
+def _env_with_nvcc() -> dict:
+    """Child environment, with `nvcc` made discoverable if it is installed."""
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    if shutil.which("nvcc") is not None:
+        return env
+    for cand in _CUDA_BIN_CANDIDATES:
+        if os.path.exists(os.path.join(cand, "nvcc")):
+            env["PATH"] = cand + os.pathsep + env.get("PATH", "")
+            return env
+    return env
+
 
 def run_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
     """Capture one entry in its own process, returning the measurement."""
     cmd = [sys.executable, os.path.join(HERE, "capture.py"), entry.name,
            "--out", out_path]
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = _env_with_nvcc()
     print(f"  -- {entry.label}", flush=True)
     proc = subprocess.run(cmd, cwd=ROOT, env=env, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -122,6 +158,10 @@ def run_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
     data["weight_gib"] = round(sum(float(v) for v in found), 2) if found else None
     if data["weight_gib"] is None:
         print("     ! no weight line found; weight gate inactive for this entry")
+    backends = sorted(set(BACKEND_RE.findall(proc.stdout)))
+    data["attn_backend"] = backends[0] if len(backends) == 1 else (backends or None)
+    kvmem = KVMEM_RE.findall(proc.stdout)
+    data["kv_cache_gib"] = round(float(kvmem[-1]), 2) if kvmem else None
     with open(out_path, "w") as f:
         json.dump(data, f, indent=1)
     return data
@@ -153,6 +193,22 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
                 f"it; re-bless if the producer change was intended)")
         else:
             failures.append(f"fixture record changed: {fb} -> {ff}")
+
+    # The chosen backend is not something an entry asks for -- it is derived.
+    # A change means this entry is measuring a different code path than the
+    # baseline did, which invalidates the comparison rather than failing it on
+    # numbers, so it is gated rather than reported.
+    if base.get("attn_backend") and fresh.get("attn_backend") != base.get("attn_backend"):
+        failures.append(
+            f"attention backend {base['attn_backend']} -> {fresh['attn_backend']} "
+            f"(selection is derived from head dim, dtypes, sliding window and "
+            f"what is installed; this entry is no longer testing the same path)")
+    # Reported, never failed on: a graded VRAM signal, noisy by nature.
+    if base.get("kv_cache_gib") is not None and fresh.get("kv_cache_gib") is not None:
+        delta = fresh["kv_cache_gib"] - base["kv_cache_gib"]
+        if abs(delta) >= 0.05:
+            print(f"     kv cache headroom {base['kv_cache_gib']:.2f} -> "
+                  f"{fresh['kv_cache_gib']:.2f} GiB ({delta:+.2f})")
 
     if fresh.get("weight_gib") is not None and base.get("weight_gib") is not None:
         if fresh["weight_gib"] != base["weight_gib"]:
@@ -235,7 +291,7 @@ def run_perf_entry(entry: suite.Entry, out_path: str, timeout: int,
            "--out", out_path, "--reps", str(reps)]
     # Forwarded explicitly: the tag may have come from --platform, which the
     # child has no other way to see.
-    env = dict(os.environ, PYTHONUNBUFFERED="1", BENCH_PLATFORM=tag)
+    env = dict(_env_with_nvcc(), BENCH_PLATFORM=tag)
     print(f"  -- {entry.label}", flush=True)
     proc = subprocess.run(cmd, cwd=ROOT, env=env, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
