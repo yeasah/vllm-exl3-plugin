@@ -181,7 +181,7 @@ comparison — every format loses the same bytes.
 multimodal model in vLLM gains 0.8-3.6 GiB of optional headroom regardless of quantization.
 This is the one that matters for the table above, because in nine of ten rows the tower is
 bf16 and therefore invisible to any quantization plugin. Tracked as
-`report-encoder-offload`.
+`upstream-queue`; framing and priority in [upstream.md](upstream.md).
 
 **Ours: register offload from `process_weights_after_loading`.** The approach already
 proposed under `cpu-offload` reaches only *quantized* modules, so today it covers exactly

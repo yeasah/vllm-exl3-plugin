@@ -498,7 +498,8 @@ gap this item was opened for — the vision path is not merely loading.
   checkpoints picked for small cards. It should not have to be a capability trade —
   evicting the encoder to host memory costs one PCIe pass per image and nothing at
   all for text — except that vLLM cannot offload an encoder at all
-  (`report-encoder-offload`). → [docs/media-encoders.md](docs/media-encoders.md)
+  (`upstream-queue`). → [docs/media-encoders.md](docs/media-encoders.md),
+  [docs/upstream.md](docs/upstream.md)
 - **Muse-Glimmer remains the one blocked checkpoint**, for two unrelated reasons
   already characterized: native vLLM cannot serve its quantized vision adapter
   (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
@@ -727,7 +728,7 @@ decoder's* `ModuleList`. A vision tower builds its own, so **no encoder is offer
 either backend on any model in any format**. This is not reachable from here for the
 common case: our `process_weights_after_loading` hook sees only quantized modules, and
 nine of ten surveyed checkpoints ship a bf16 tower. Split out as
-`report-encoder-offload`, since the fix that matters is a few lines upstream and helps
+`upstream-queue`, since the fix that matters is a few lines upstream and helps
 every multimodal model in vLLM. Sizes and evidence in
 [docs/media-encoders.md](docs/media-encoders.md).
 
@@ -762,23 +763,30 @@ later.
 → [docs/format-and-loading.md](docs/format-and-loading.md) "CPU offload",
 [docs/media-encoders.md](docs/media-encoders.md)
 
-## `report-encoder-offload` — Report that vLLM cannot offload a media encoder
+## `upstream-queue` — Findings other projects should hear about
 
-`--cpu-offload-gb` offloads no vision or audio encoder on any model, in any format,
-because `get_offloader().wrap_modules()` is called only from `make_layers()` and a
-vision tower does not go through it. Every multimodal model in vLLM loses the same
-0.79-3.64 GiB of optional headroom, and no cross-format comparison can reveal it
-because all formats lose it equally.
+Ten items across vLLM, llm-compressor and exllamav3: two patches ready to offer, one
+blocked on a design decision that is not ours, six reports, and one question we cannot
+yet phrase honestly. They were scattered across TODO items, patch headers and subject
+notes, which made the queue invisible *as* a queue -- what is ready, what is blocked,
+what is worth doing first.
 
-**Worth reporting on its own merit, and not ours to fix.** The encoder is the one
-offload target whose economics are not a compromise — read once per image, never for a
-text-only request — so this is the cheapest headroom in a multimodal deployment and it
-is unreachable. Nine of ten surveyed checkpoints ship a bf16 tower, which no
-quantization plugin can see, so the fix has to be upstream. Same shape of finding as
-`report-ct-channel-embed`: small, general, independent of adopting anything of ours.
+**The whole inventory, with evidence, framing and a priority order, is in
+[docs/upstream.md](docs/upstream.md).** This item exists so the work has a slug; it
+deliberately does not duplicate the contents.
 
-Numbers, method and the reproducing tool in
-[docs/media-encoders.md](docs/media-encoders.md).
+**What is next**, per that note's ordering: llm-compressor's `strategy: "channel"`
+default (finished evidence, purely their benefit, nothing to negotiate), then
+TurboQuant's `key=int` collision, then the halved softcap patch.
+
+**One reproduction is missing and blocks the highest-value item.**
+`vllm-embed-quant-config` cannot be filed until the speculative-decoding breakage it
+introduces has a demonstration, and the two MTP entries in `bench/` do not provide one:
+an MTP drafter shares the target's embedding, so the mismatch never arises. It wants an
+*external* drafter against a quantized target -- `turboderp/Qwen3.6-27B-DFlash-exl3` is
+the checkpoint, and it would make a good `full`-tier entry regardless.
+
+→ [docs/upstream.md](docs/upstream.md)
 
 ## `qbench-noise-floor` — Self-noise-floor support for qbench's `vllm` engine
 
@@ -924,32 +932,12 @@ tensors, whose true KLD sits at or below the floor (5 of 225 here).
 
 **Fix.** Fit `kld = c + s * rfn^2` rather than a pure power law. With alpha pinned at 2.0
 two noise levels suffice to solve for both, so no extra measurement passes are needed:
-`c = (4*kld_lo - kld_hi)/3`. Worth reporting upstream on its own merit — it is a small,
+`c = (4*kld_lo - kld_hi)/3`. Queued for upstream in [docs/upstream.md](docs/upstream.md);
+it is a small,
 well-evidenced correction independent of whether per-tensor allocation is worth doing
 (see `head-bits`, where measurement says it largely is not).
 
 → [docs/qbench.md](docs/qbench.md)
-
-## `report-ct-channel-embed` — Report llm-compressor's channel-strategy embedding default
-
-`llm-compressor`'s embedding example offers `"strategy": "channel"` as a plain
-alternative to `"group"`. On the three models swept here it costs 6-181x the model's own
-noise floor at 4 bits — worse in every case than the affine per-row scheme this project
-measured and rejected. A large-vocabulary model quantized with the documented alternative
-setting is damaged well past anything the README's `pythia-1.4b` evidence could show.
-
-**Worth reporting because it costs them nothing to act on.** No format change, no
-adoption of anything of ours, no argument about affine-vs-symmetric: one documented option
-that should carry a warning or be dropped. The related finding — that their *group*
-strategy costs ~16x at matched bytes against `blockq32` — is a bigger claim needing a
-zero-point their embedding kernel does not read, and is only worth raising if there is
-appetite for it.
-
-Reproduce with the `compressed-tensors` arms in the qbench embedding projects; the arm is
-verified bit-identical to their own encoder by `tools/ct_sym_check.py`.
-
-→ [docs/embeddings.md](docs/embeddings.md) "What llm-compressor's embedding quantization
-costs, and where its menu is a trap"
 
 ## Recently closed
 
