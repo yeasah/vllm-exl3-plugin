@@ -68,56 +68,61 @@ embedding can be served on those architectures — silently dense for a tied mod
 failure for a block-quantized one. Our patch defaults it from
 `get_current_vllm_config()` in one place.
 
-**Not fileable as written: it breaks speculative decoding.** A drafter is built under
-the *target's* `quant_config`, so the ambient default hands the drafter's embedding a
-method describing weights it does not have. Nothing about that is EXL3-specific — filed
-as-is it breaks any quantized target with a differently quantized drafter. Two candidate
-fixes, and the choice decides what gets filed:
+*Strength*: an ecosystem fix rather than ours alone — `vllm-gguf-plugin` is blocked by
+exactly the same gap.
 
-1. condition the ambient default on the module belonging to the model the config
-   describes — which `VocabParallelEmbedding.__init__` cannot know; or
-2. fix the drafter's config so it stops misdescribing what is being built. A cleaner
-   contribution than an 86-file workaround, and it makes our patch safe as a side
-   effect.
+*The speculative-decoding objection is withdrawn.* It was recorded 2026-08-20 as "the
+patch hands the drafter's embedding an EXL3 method", and reproducing it on v0.28.0
+(below) showed the patch is not involved: `gemma4_mtp.py` passes `quant_config`
+**explicitly**, from `get_draft_quant_config(vllm_config)`, so the ambient default never
+fires. The breakage is upstream's own and is filed separately as the next item. What
+remains before offering the patch is ordinary review work — it should still be judged
+against the plain-`nn.Linear` gap below, which is the same problem in a different place.
 
-*Strength*: this is an ecosystem fix rather than ours alone — `vllm-gguf-plugin` is
-blocked by exactly the same gap.
+### Reports, not patches
 
-*And the reproduction may not exist.* Checked 2026-08-25 against every drafter on hand:
+**A separate-checkpoint drafter inherits the target's quantization.** Reproduced on
+v0.28.0, 2026-08-25, and this one is pure upstream — no plugin, no patch, and any
+quantization format hits it.
 
-| drafter class | constructs a `VocabParallelEmbedding`? | ships embedding weights? |
-|---|---|---|
-| `qwen3_dflash2.py` | **no — none at all** | no |
-| `qwen3_dflash.py` | yes (`:422`) | no |
-| `qwen3_5_mtp.py` | yes (`:82`) | no — loads the target's |
+```
+vllm serve turboderp/gemma-4-12B-it-exl3 --revision 4.00bpw_mul1 \
+  --speculative-config '{"model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":4}'
 
-None of them can show the bug. The two MTP entries in `bench/` pass precisely because
-MTP constructs an embedding *and* loads the target's `embed_tokens`, which in our blockq
-fixture are `bq_*` — so method and tensors match. DFlash2 has no embedding module
-whatsoever. The break needs a drafter carrying its *own* embedding in a *different*
-format, and no such checkpoint is available here.
+ValueError: There is no module or parameter named 'model.embed_tokens.weight' in
+Gemma4MTP. The available parameters belonging to model.embed_tokens
+(VocabParallelEmbedding) are: {'model.embed_tokens.trellis', 'model.embed_tokens.mul1',
+ 'model.embed_tokens.svh', 'model.embed_tokens.suh'}
+```
 
-**The candidate the table misses is `google/gemma-4-12B-it-assistant`** — gemma-4-12B's
-external draft model, and the survey above was too narrow for looking only at
-vLLM-native drafter classes. Verified 2026-08-25:
+The chain, all in-tree:
 
-- it carries **its own** `model.embed_tokens.weight` `[262144, 1024]` BF16, at hidden
-  size 1024 against the target's 3840, so it cannot share the target's embedding the way
-  MTP and DFlash do;
-- vLLM implements `Gemma4UnifiedAssistantForCausalLM` in neither 0.27.0 nor 0.28.0, but
-  **transformers 5.15 does** (`model_type: gemma4_unified_assistant`, no remote code) —
-  so the loading path is the Transformers backend;
-- and that backend calls `replace_embedding_class(input_embeddings, self.quant_config)`
-  with the *ambient* config, which is exactly the mechanism the break describes.
+1. `config/speculative.py` rewrites `model_type` `gemma4_unified_assistant` →
+   `gemma4_mtp` and sets `architectures: ["Gemma4MTPModel"]`, so the assistant is served
+   by the MTP implementation.
+2. That routes it into the `method == "mtp"` branch, which copies the target's
+   quantization onto the draft: `if not self.quantization: self.quantization =
+   self.target_model_config.quantization`. Its own comment gives the assumption —
+   *"use the draft model from the same model"* — which is true of real MTP, whose
+   weights live inside the target checkpoint.
+3. **gemma-4's assistant is a separate checkpoint** with its own plain bf16
+   `model.embed_tokens.weight` `[262144, 1024]`, at a hidden size the target does not
+   even share (1024 against 3840).
+4. `get_draft_quant_config` — whose docstring correctly says *"Draft models should use
+   their own quantization config instead of the verifier/target model's"* — then
+   faithfully returns the target's, because step 2 stamped it onto the draft config.
+5. `gemma4_mtp.py:361` builds the embedding with it, registering `trellis/suh/svh/mul1`,
+   and the drafter's own `.weight` has nowhere to land.
 
-Target `turboderp/gemma-4-12B-it-exl3` is tied, so the ambient config would hand the
-drafter's bf16 embedding an `EXL3EmbeddingMethod` and send it looking for trellis
-tensors it does not have.
+*Why it is a good report*: the intent is already written down in the helper's docstring,
+and the defect is one conditional away from it. The fix is to not inherit quantization
+when the draft model is a different checkpoint from the target — which step 1's own
+rewrite is what makes possible to detect. Nothing about it is EXL3-specific: an AWQ,
+GPTQ or compressed-tensors gemma-4 with this drafter fails identically.
 
-**Untested**: whether the drafter actually loads through the backend under a speculative
-config, which is the one step between this and a filed bug. Worth running before
-anything is sent — and note the claim itself is dated 2026-08-20 against v0.27.0 and has
-not been retested since the bump, so the run settles two questions at once.
+*Last step before filing*: confirm it reproduces with our patches unapplied. The code
+path says they are irrelevant (the config is passed explicitly, not defaulted), but the
+report should say "verified" rather than "should not matter".
 
 ### Reports, not patches
 
