@@ -240,11 +240,35 @@ coexist with native-dtype layers in one cache. That is precisely the bookkeeping
 external project wrote by hand *outside* vLLM, and it is the thing any bypass approach
 has to solve — the sliding-window rejection is only the first gate.
 
-Whether that is tractable is unmeasured. The honest read is that it needs either a
-commensurate page layout for the mixed case or a paddable one, and neither is a patch
-someone lands on a Sunday. Worth re-checking against 0.28 before any further effort:
-`unify_kv_cache_spec_page_size` and the stride-order plumbing are exactly the kind of
-internals that move.
+**And upstream has already restructured it, after our pin.** vLLM's
+`[N/N] KV-Cache Layout Refactor` series has parts 1-3 in v0.27.0 and parts **4 and 5
+landing after it**:
+
+- `61874f9842` [4/N] Promote local KV cache specs via a class-changing replace helper
+  (#51612) — rewrites `kv_cache_utils.py`, the file holding the unifier.
+- `57bd0ed441` [5/N] Backend-published KV packing via `customize_spec` (#51704) —
+  touches `turboquant_attn.py` directly, and **deletes `TQFullAttentionSpec`**.
+
+TurboQuant stops being a special spec class carrying an opaque `page_size_padded` and
+becomes an ordinary `FullAttentionSpec` publishing `state_content_bytes =
+slot_size_aligned` through a backend hook. Page size then computes as
+`num_heads * storage_block_size * state_content_size_bytes` — a **per-cell** quantity,
+so it scales linearly with `block_size` where the old padded value did not.
+
+That dissolves both walls above by construction: nothing goes stale when `block_size`
+is scaled because turboquant no longer sets `page_size_padded`, and the scaling branch
+can reconcile the page rather than falling through to the un-paddable case. *Read from
+the commits, not run* — the v0.27.0 reproduction cannot test it.
+
+**So do not patch v0.27.0 for this.** Both measurements above are against a structure
+0.28 replaces. Re-run the three-step reproduction (dtype alone → keyword → explicit
+numeric skip) on 0.28 and see where it stops; the expected outcomes at each stage are
+recorded above, which makes it a short check rather than a fresh investigation.
+
+*This is the fourth time staleness has cost more than churn would have — see
+`check-upstream-before-patching-vllm`. The patch-and-revert experiment was worth
+running for what it confirmed, but the wall it found had already been restructured
+away upstream before it was measured.*
 
 → [docs/kernels.md](docs/kernels.md)
 
