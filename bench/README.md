@@ -371,6 +371,55 @@ the encoder does yields a gate that passes while serving a checkpoint the
 current code would not produce. `tests/test_bench_fixtures.py` pins that
 property.
 
+### The backend an entry gets is not the backend it asks for
+
+No entry names an attention backend. Selection is derived — from head dim,
+dtypes, sliding window, and *what is installed* — so it can change under a bump
+or an environment difference and quietly take the entry's meaning with it. Each
+capture therefore records `attn_backend`, and `check` **fails** on a change: the
+entry is no longer testing the path its baseline describes, which invalidates
+the comparison rather than merely moving numbers.
+
+What the current baselines select is worth reading once, because little of it is
+guessable:
+
+| entry | backend |
+|---|---|
+| `qwen3.8-27B ... MTP fp8` | `FLASHINFER` |
+| `qwen3.8-27B ... tq4`, `... MTP tq4` | `TURBOQUANT` |
+| `minicpm5-1B tq4` | **`['FLASH_ATTN', 'TURBOQUANT']`** |
+| `gemma-4-12B mul1 tied` | `TRITON_ATTN` |
+| everything else | `FLASH_ATTN` |
+
+`minicpm5-1B tq4` selecting *two* is not a bug: TurboQuant skips its own
+first/last-N boundary layers, and those land on FLASH_ATTN while the rest are
+TURBOQUANT. That mixed-group case reconciling here is the evidence that TODO
+`turboquant-sliding-window`'s blocker is the *third* (sliding) page class rather
+than mixing as such. `gemma-4-12B` on `TRITON_ATTN` is the head-dim-512 pin,
+now recorded rather than folklore.
+
+**One entry needs a package.** vLLM picks FlashInfer for fp8 KV on qwen3.8, and
+FlashInfer needs either `flashinfer-cubin` or `nvcc` to JIT:
+
+```
+pip install flashinfer-cubin==0.6.16.post3 --extra-index-url https://flashinfer.ai/whl/
+```
+
+That version is the one `requirements/cuda.txt` pins, and it is absent from PyPI
+past 0.6.13 — hence the extra index. Prebuilt cubins were verified byte-identical
+to nvcc-JIT (0.000e+00 against a baseline captured the other way), so the route
+does not affect the numbers. `run_entry` keeps an nvcc fallback for a machine
+with the toolkit but not the package.
+
+### KV headroom is reported, never gated
+
+`kv_cache_gib` records what was left after weights and activations. It is a
+*graded* VRAM signal where `weight_gib` is exact: a change prints
+`kv cache headroom 1.05 -> 0.83 GiB (-0.22)` and fails nothing. The alternative —
+letting a tight entry fail loudly when something inflates — does detect
+inflation, but only as a cliff, with no magnitude and no distinction between a
+regression and a benign upstream buffer change.
+
 ## Tiers
 
 `fast` (~15 min on a 16 GiB card) is the one to run casually: uniform K=3,
