@@ -48,9 +48,17 @@ as a bf16 base model, as AWQ 4-bit, and as EXL3 @4.00 — byte-identical. The sh
 [embeddings.md](embeddings.md)): a tensor nobody quantizes costs most, as a fraction,
 in the checkpoints chosen by the people with least VRAM to spare.
 
-**2. Every format ships it bf16.** AWQ, AutoRound int2, FP8, EXL3 — all of them. This is
-not an EXL3 defect and there is no format here to be ahead of; it is an ecosystem-wide
-default. exllamav3 is in fact the only pipeline of the group that *offers* the choice
+**2. Every format in the table ships it bf16.** AWQ, AutoRound int2, FP8, EXL3 — all of
+them. This is not an EXL3 defect and there is no format here to be ahead of; it is an
+ecosystem-wide default *among GPU-serving formats*.
+
+*Corrected 2026-08-25: "the only quantized tower found anywhere" was too strong.*
+`manjunathshiva/Muse-Glimmer-30B-tq3-g64` (MLX, so unservable here) quantizes the vision
+tower to **affine 4-bit group-64** — 1.002 GiB of a 12.53 GiB package — alongside a
+turboquant 3-bit g64 body and a 4-bit embedding and head. Its config names the idea
+outright, `affine_extras: {bits: 4, group_size: 64}`: a first-class notion that the
+non-body tensors get their own scheme at their own bit rate. So the practice exists; it
+is the *GPU-serving* ecosystem that defaults to bf16, and MLX that does not. exllamav3 is in fact the only pipeline of the group that *offers* the choice
 (`--vision_bits`, defaulting to 16); `compile.py` writes the key only when it is not 16,
 so **an absent `vision_bits` means the default was taken**, not that the value is unknown.
 

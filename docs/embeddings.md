@@ -1293,6 +1293,47 @@ the load-relevant fact — no calibration, so the same is available to any bf16 
 at startup — and nothing measured here argues against doing it, only against doing it
 symmetrically. That remains unbuilt and untracked.
 
+## Somebody else picked the same design point
+
+*Found 2026-08-25. Not a measurement of ours — a convergence worth recording, because it
+is the strongest available evidence that the sweep landed somewhere sensible.*
+
+`manjunathshiva/Muse-Glimmer-30B-tq3-g64` is an MLX quantization of a checkpoint this
+project also serves. Unservable here, and that is beside the point. Its embedding:
+
+```
+embed_tokens.weight  [202048, 832] U32     packed 4-bit
+embed_tokens.scales  [202048, 104] BF16    group of 64
+embed_tokens.biases  [202048, 104] BF16    group of 64   <- affine, not symmetric
+
+202048 x 6656 = 1344.8M params in 721.4 MiB  ->  4.5000 bpw
+```
+
+That is **exactly the `per-blk64 4-bit` arm** swept above: affine, group 64, one scale
+and one offset per group, 4 + 32/64 = 4.50 bpw. It measured +0.000970 (0.72x the noise
+floor) on Qwen3.5-9B. `blockq32` sits beside it at 4.5312.
+
+Three things follow:
+
+- **The design point is not idiosyncratic.** An unrelated practitioner, in a different
+  runtime, with a different body quantizer, chose the same scheme at the same bit rate
+  for the same tensor. The sweep's conclusion — block-scaled affine at ~4.5 bpw — is
+  where independent work converges.
+- **Affine, not symmetric.** They store a `biases` tensor per group. This is the
+  distinction llm-compressor's embedding path cannot express and vLLM's embedding kernel
+  cannot read, measured above at 2.64x floor against 0.17x. What ships in the wild when
+  the format permits it is the affine one.
+- **Extras are a first-class concept there.** The config key is literally
+  `affine_extras: {bits: 4, group_size: 64}`, applied to embedding, head *and* vision
+  tower while the body runs turboquant 3-bit. That is `config_groups` by another name,
+  and it is what makes the compressed-tensors route (see [upstream.md](upstream.md)) the
+  right shape rather than a compromise.
+
+`blockq32` remains the better encoding at essentially the same bytes — its
+double-quantized scales buy block-32 granularity for the metadata cost of block-64 — but
+"better than the thing serious people independently ship" is a much more useful claim
+than "better than the thing nobody ships."
+
 ## blockq on non-EXL3 checkpoints: the quality answer is already in
 
 *Asked 2026-08-25. Splits into two questions with very different answers.*
