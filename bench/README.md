@@ -60,7 +60,7 @@ floors measured on this build rather than guessed:
 
 | floor | value | what it is |
 |---|---|---|
-| same build, re-run | **exactly 0.0** | teacher-forced decoding at fixed context is deterministic — a `check` that changes nothing reports nothing |
+| same build, re-run | **exactly 0.0**, *almost always* — see below | teacher-forced decoding at fixed context is deterministic — a `check` that changes nothing reports nothing |
 | same weights, different kernels | **~0.157 nats / 0.013 KL** | Qwen3-0.6B eager vs CUDA graphs with the embedding path removed; the closest proxy for benign upstream drift |
 
 The one real defect with numbers moved logprobs by ~15 nats, so 0.25 sits above
@@ -70,6 +70,33 @@ Argmax and greedy stay exact on purpose. A kernel change big enough to flip an
 argmax at fixed context is one a human should look at, and it will occasionally
 fire on something benign — that cost buys a gate that does not quietly absorb the
 next dropped norm.
+
+### "Exactly 0.0" is almost always true, and here is the exception
+
+Observed once, 2026-08-25, at the exllamav3 v1.4.3 bump:
+`minicpm5-1B-3.0bpw-blockq-graphs` reported `argmax 1/60, |dlogprob| max
+1.157e-01, KL 4.333e-03, greedy ok` — inside both tolerances, greedy unchanged,
+and its *eager* twin bit-identical. It **did not reproduce**: four standalone
+captures of the same entry and a second full-tier run all came back at exactly
+0.0, so the same-build floor held everywhere else.
+
+**Investigate it this way, and stop when it comes back clean**, because the cost
+of chasing it further is how a gate stops being run:
+
+```
+bench/run.py capture <entry> /tmp/x.json     # standalone, a few times
+# identical to baseline -> the intermittent; the bump is not implicated
+```
+
+The flip appeared only *within* a tier run, where that entry loads after seven
+other models. A plausible mechanism is that EXL3 autotunes kernel selection by
+timing, so a warmer or more fragmented GPU can select differently and change an
+fp16 accumulation order enough to flip one near-tie — **hypothesis, not a
+finding**; nothing has been instrumented to confirm it.
+
+What matters operationally is that the gate behaved correctly: it flagged, the
+investigation was cheap and conclusive, and nothing was absorbed silently. An
+argmax failure that reproduces standalone is real; one that does not is this.
 
 ## Two kinds of baseline, and why they are stored differently
 
