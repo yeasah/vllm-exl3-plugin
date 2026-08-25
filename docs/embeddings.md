@@ -1293,6 +1293,45 @@ the load-relevant fact — no calibration, so the same is available to any bf16 
 at startup — and nothing measured here argues against doing it, only against doing it
 symmetrically. That remains unbuilt and untracked.
 
+## blockq on non-EXL3 checkpoints: the quality answer is already in
+
+*Asked 2026-08-25. Splits into two questions with very different answers.*
+
+**Quality generalizes for free, because the tensor is the same.** An embedding is dense
+in every format — the encoder census makes the same point for vision towers — and it is
+literally the same matrix:
+
+| checkpoint | `embed_tokens.weight` |
+|---|---|
+| `Qwen/Qwen3.5-9B` (bf16 base) | `[248320, 4096]` BF16 |
+| `cyankiwi/Qwen3.5-9B-AWQ-4bit` | `[248320, 4096]` BF16 |
+| `turboderp/Qwen3.5-9B-exl3@4.00bpw` | `[248320, 4096]` F16 |
+
+EXL3's is a cast, not a requantization. So every blockq measurement in this note was
+taken on a tensor an AWQ or GPTQ checkpoint of the same base also carries, byte for byte.
+There is nothing to re-measure: `blockq32` at 4 bits costs what it costs, whatever
+quantized the *body*.
+
+**Serving does not generalize, and the obstacle is structural.** vLLM resolves one
+`quant_config` per model, and `get_quant_method` dispatches from it per module. Serving a
+blockq embedding beside AWQ weights therefore needs one of:
+
+- the other format's config to learn blockq (i.e. this becomes a compressed-tensors-style
+  upstream feature, not a plugin);
+- a delegating wrapper config, which nothing in vLLM composes today; or
+- **no stored format at all** — quantize the dense embedding in memory at load.
+
+The third is why the JIT-at-load framing is the right shape for the cross-format case
+rather than an optimisation of the checkpoint one. It needs no new checkpoint format, no
+config composition, and no agreement from any other project: it is a hook that replaces a
+dense `VocabParallelEmbedding` with a packed one during loading. It is also, as noted
+when the idea came up, a separate project from this plugin — the audience is anyone
+serving a large-vocabulary model, not anyone serving EXL3.
+
+It still depends on `vllm-embed-quant-config` (86 of 131 architectures never pass
+`quant_config` at all), which is the same blocker in the same place. See
+[upstream.md](upstream.md).
+
 ## The axis nobody has swept: vector quantization
 
 *Speculative, and deliberately marked so — nothing below is measured, unlike the rest of

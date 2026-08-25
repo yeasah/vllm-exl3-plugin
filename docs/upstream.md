@@ -83,11 +83,25 @@ fixes, and the choice decides what gets filed:
 *Strength*: this is an ecosystem fix rather than ours alone — `vllm-gguf-plugin` is
 blocked by exactly the same gap.
 
-*Gap in our own coverage*: the two MTP entries in `bench/` do **not** exercise the
-breakage, because an MTP drafter shares the target's embedding so the mismatch never
-arises. Reproducing it wants an *external* drafter against a quantized target —
-`turboderp/Qwen3.6-27B-DFlash-exl3` is the available checkpoint. Worth building before
-filing anything here, since the bug report is only as good as its reproduction.
+*And the reproduction may not exist.* Checked 2026-08-25 against every drafter on hand:
+
+| drafter class | constructs a `VocabParallelEmbedding`? | ships embedding weights? |
+|---|---|---|
+| `qwen3_dflash2.py` | **no — none at all** | no |
+| `qwen3_dflash.py` | yes (`:422`) | no |
+| `qwen3_5_mtp.py` | yes (`:82`) | no — loads the target's |
+
+None of them can show the bug. The two MTP entries in `bench/` pass precisely because
+MTP constructs an embedding *and* loads the target's `embed_tokens`, which in our blockq
+fixture are `bq_*` — so method and tensors match. DFlash2 has no embedding module
+whatsoever. The break needs a drafter carrying its *own* embedding in a *different*
+format, and no such checkpoint is available here.
+
+**So the first task is not building a reproduction, it is re-verifying the claim.** It
+was recorded 2026-08-20 against v0.27.0 and has not been retested since the bump. Either
+it still fires by some path not enumerated above, or it was specific to a
+drafter/version combination that has moved. Filing a bug whose reproduction we cannot
+produce would be worse than not filing.
 
 ### Reports, not patches
 
