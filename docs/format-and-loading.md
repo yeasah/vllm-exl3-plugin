@@ -618,7 +618,8 @@ is **not** a fix for that second point: it restores the global read, but the
 global value is the wrong one. Verified -- it gets past config resolution and
 then fails at weight loading.
 
-`patches/vllm-gemma4-transformers-5.15-per-layer.patch` reads the per-layer
+`patches/vllm-gemma4-transformers-5.15-per-layer.patch` (retired at v0.28.0,
+where upstream's own per-layer arch config supersedes it) reads the per-layer
 configs at the five sites gemma-4 reaches, and takes the max where vLLM wants a
 single number for buffer sizing (matching `get_num_experts_from_block_configs`,
 which already did this for NemotronH). For gemma-4-12B the per-layer max

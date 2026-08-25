@@ -198,8 +198,10 @@ ENTRIES: list[Entry] = [
         exercises="the mul1 codebook, and the gemma4-style two-module tied "
         "shape where a separate ParallelLMHead is pointed at the embedding's "
         "storage -- a different tie path from Llama-3.2-1B's. Also the only "
-        "entry needing patches/vllm-gemma4-transformers-5.15-per-layer.patch, "
-        "so it is what verifies TODO `retire-gemma4-patch` when the pin moves",
+        "entry that needed patches/vllm-gemma4-transformers-5.15-per-layer.patch, "
+        "which it verified as retirable at the 0.28 bump: upstream landed "
+        "generic per-layer arch config, the patch was dropped, and this entry "
+        "captured at 0.000e+00 against its pre-bump baseline",
     ),
     Entry(
         label="muse-glimmer-30B 2.0bpw via transformers backend",

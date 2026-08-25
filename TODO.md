@@ -431,21 +431,24 @@ graph, so arithmetic living above it or inside a layer it substitutes gets dropp
 
 **What remains open:**
 
-- **Upstreaming the three patches — now one and a half.** A static scan of
-  `v0.28.0rc1` on 2026-08-20 found upstream had already closed most of it:
-  `soft_cap=final_logit_softcapping` is passed to `LogitsProcessor` (so the softcap
-  patch reduces to its `output_multiplier` half), and the backend appears to have
-  stopped substituting the input embedding at all — `embed_input_ids` now calls the
-  model's own — which would retire the postprocess patch by construction. **Check the
-  cost of that second one**: if the backend's embedding is no longer a
-  `VocabParallelEmbedding` it can carry no quantization method, which removes the seam
-  `quantized-embeddings` would need on this path. Only
-  `vllm-replicated-linear-weight-loader-v2.patch` is untouched upstream. For
-  `vllm-replicated-linear-weight-loader-v2.patch`, check the
-  `RowvLLMParameter`-narrowing edge noted in the doc first. For
-  `vllm-transformers-backend-embedding-postprocess.patch`, the detection is
-  structural (an `nn.Embedding` subclass overriding `forward` with exactly one
-  submodule) and upstream may want something declared by transformers instead.
+- **Upstreaming — now half a patch, and the feared cost did not materialize.**
+  Settled at the v0.28.0 bump (2026-08-25). Upstream closed most of it: the
+  postprocess patch is retired outright, and the softcap patch reduces to its
+  `output_multiplier` half plus the fold-into-cap identity, since `causal.py`
+  passes `soft_cap` but still reads only `logit_scale` and still applies its
+  scale *after* the cap. That half is what remains worth offering.
+
+  **The seam survives**, which was the open worry: upstream does not stop using
+  `VocabParallelEmbedding`, it *rebases the model's embedding class onto it*
+  (`type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})`), and
+  `replace_embedding_class` passes `quant_config` into
+  `VocabParallelEmbedding.__init__` — so a quantized embedding still attaches on
+  this path. Confirmed by the gate, not by reading: the two Transformers-backend
+  entries capture at 0.000e+00 across the bump.
+
+  `vllm-replicated-linear-weight-loader-v2.patch` remains untouched upstream;
+  check the `RowvLLMParameter`-narrowing edge noted in the doc before offering
+  it.
 - **Auditing rather than waiting.** Both Muse-Glimmer defects were found by reading
   the transformers modelling file against what the backend substitutes, and both
   would have stayed invisible on any metric short of a token-level comparison
@@ -927,31 +930,6 @@ well-evidenced correction independent of whether per-tensor allocation is worth 
 
 → [docs/qbench.md](docs/qbench.md)
 
-## `retire-gemma4-patch` — Retire `patches/vllm-gemma4-transformers-5.15-per-layer.patch`
-
-vLLM landed their own fix for the transformers 5.15 per-layer config break upstream:
-[70b84f0](https://github.com/vllm-project/vllm/commit/70b84f0bcbb6d0a35b74b1035673a1c934089dbb)
-(PR #49797, hmellor), and did it generically — a real
-`ModelArchitectureConfig.from_layers()` / per-layer arch-config plumbing through
-`get_num_kv_heads`/`get_num_attention_heads`, not a gemma-4-only patch like ours.
-
-**0.27.2 was abandoned; the bump is 0.28.** Upstream tagged `v0.28.0rc1` on
-2026-08-20, ~596 commits past v0.27.0, and a static scan of that tag confirms the fix
-is still present: `ModelArchitectureConfig` in `vllm/config/model.py`, with
-`Gemma4Config.verify_and_update_config` reading `model_config.model_arch_config`.
-
-**Already verified, on 2026-08-17**, against what was then the next release. A
-`bench/` dry run against a 0.27.2 preview
-(`vllm-main` @ `v0.27.2rc0-136-gfdab2b10bc`) carrying **only** the fused-param and
-ReplicatedLinear patches — no gemma-4 patch — had `gemma-4-12B 3.0bpw mul1 tied`
-compare **bit-identical** to its baseline: `argmax 0`, `|dlogprob| max 0.000e+00`
-across 84 scored positions, greedy unchanged. Upstream's generic fix covers what
-ours did — evidence about the *commit*, which 0.28 carries, rather than about a
-release that never happened.
-
-So at the bump this is mechanical: drop the patch, update the README table. The
-re-verification is already done and the entry will keep doing it.
-
 ## `report-ct-channel-embed` — Report llm-compressor's channel-strategy embedding default
 
 `llm-compressor`'s embedding example offers `"strategy": "channel"` as a plain
@@ -976,6 +954,15 @@ costs, and where its menu is a trap"
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `retire-gemma4-patch` — done 2026-08-25 at the v0.28.0 bump. Upstream landed
+  generic per-layer arch config (`ModelArchitectureConfig.from_layers`), so
+  `Gemma4Config` reads `model_config.model_arch_config` directly and the patch
+  was dropped. `vllm-transformers-backend-embedding-postprocess.patch` retired
+  with it, by a better mechanism than ours — upstream rebases the embedding's
+  class instead of substituting it. Both retirements confirmed by the gate
+  rather than by reading: the entries exercising them capture at 0.000e+00
+  against pre-bump baselines. See README "Retired at the 0.28 bump".
 
 - `gguf-embeddings` — decided 2026-08-17, see
   [docs/embeddings.md](docs/embeddings.md) "Is GGUF the right storage format?". No:

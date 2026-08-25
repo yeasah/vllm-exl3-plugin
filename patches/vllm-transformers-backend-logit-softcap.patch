@@ -1,48 +1,29 @@
-Apply the final logit soft cap (and its pre-scale) in the Transformers backend
+Apply MuseGlimmer's logit pre-scale in the Transformers backend
 
-transformers applies MuseGlimmer's logit transform in
-`MuseGlimmerForConditionalGeneration.forward`:
+Halved for vLLM 0.28.0. The soft cap itself now lands upstream -- causal.py
+passes `soft_cap=final_logit_softcapping` to LogitsProcessor -- so that half of
+the original patch is retired. Two things it does not do remain:
 
-    logits = logits * config.output_multiplier      # 0.19611613513818404
-    logits = final_logit_softcapping * tanh(logits / final_logit_softcapping)
+  - it reads only `logit_scale`. MuseGlimmer spells the same thing
+    `output_multiplier`, so the scale silently defaults to 1.0.
+  - LogitsProcessor applies its scale *after* the cap. MuseGlimmer needs it
+    before: `logits * m` then `T * tanh(logits / T)`.
 
-That is one level above `self.model(...)`, which is all the Transformers
-backend runs. The backend then computes its own logits, reading a `logit_scale`
-attribute (MuseGlimmer spells it `output_multiplier`, so it defaults to 1.0)
-and never passing `soft_cap` at all. Neither transform survives.
-
-Both are monotonic, so greedy decoding is unaffected -- which is why this hides
-behind the embedding bug rather than causing an obvious failure of its own. What
-it corrupts is every logprob the engine reports and every temperature-dependent
-sampling decision: the effective temperature is 1/0.196 ~= 5.1x too low. A
-top-1 reported at -0.0025 is really about -0.27.
-
-The two cannot simply both be passed to LogitsProcessor, which applies its
-`scale` *after* the cap; MuseGlimmer needs it before. Gemma 2 never exercised
-the combination because it caps without pre-scaling. But the existing
-LogitsProcessor can express it exactly, by folding the multiplier into the cap:
+Both are fixed the same way as before, by folding the multiplier into the cap,
+which the existing LogitsProcessor can express exactly:
 
     tanh(z / (T/m)) * (T/m) * m  ==  T * tanh(z * m / T)
 
-so `soft_cap = T/m` with `scale = m` is the intended function, and reduces to
-the plain cap at m == 1. No change to LogitsProcessor is needed.
+and which reduces to upstream's behaviour when m == 1, so no other model moves.
 
-Verified on `turboderp/Muse-Glimmer-30B-exl3` @2.00bpw against native
-exllamav3, which models the same pre-scale-then-softcap: with this and the
-embedding-postprocess patch, 40 greedy tokens match token for token, and the
-step-0 top-15 logprobs agree to ~0.03 nats -- the fp16 accumulation noise floor
-already characterized for this backend.
-
-Not EXL3-specific, and not Muse-Glimmer-specific either: vaultgemma, nanochat,
-t5gemma and t5gemma2 all carry final_logit_softcapping and have no native vLLM
-implementation, so the backend is the only way to serve them and it drops the cap.
-
-Known gap: the Granite family spells its scale `logits_scaling` and divides rather
-than multiplies. Not covered here -- no Granite checkpoint was on hand to verify
-against, and guessing at an inverse is how the bug being fixed got written.
+Greedy decoding is unaffected either way (both transforms are monotonic). What
+is corrupted without this is every reported logprob and every temperature
+dependent sampling decision: the effective temperature is 1/0.196 ~= 5.1x too
+low. This is the failure `bench/` entry `muse-glimmer-30B-2.0bpw-via-
+transformers-backend` predicts for the 0.28 bump.
 
 diff --git a/vllm/model_executor/models/transformers/causal.py b/vllm/model_executor/models/transformers/causal.py
-index 01a7e4198..3cbc2c381 100644
+index a32e2b54ba..706ddb87d7 100644
 --- a/vllm/model_executor/models/transformers/causal.py
 +++ b/vllm/model_executor/models/transformers/causal.py
 @@ -19,6 +19,7 @@
@@ -51,30 +32,31 @@ index 01a7e4198..3cbc2c381 100644
  
 +from vllm.config.utils import getattr_iter
  from vllm.model_executor.layers.logits_processor import LogitsProcessor
- from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
- from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
-@@ -55,9 +56,22 @@ class CausalMixin(VllmModelForTextGeneration):
-                     self.model.get_input_embeddings()
-                 )
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     ParallelLMHead,
+@@ -59,10 +60,23 @@ class CausalMixin(VllmModelForTextGeneration):
+                         self.lm_head = self.lm_head.tie_weights(module)
+                         break
  
--            logit_scale = getattr(self.text_config, "logit_scale", 1.0)
 +            # `logit_scale` is the common spelling; MuseGlimmer calls the same
-+            # thing `output_multiplier`.
++            # thing `output_multiplier`, so upstream's plain getattr misses it.
 +            logit_scale = getattr_iter(
 +                self.text_config, ("logit_scale", "output_multiplier"), 1.0
 +            )
-+            # A tanh soft cap on the logits (Gemma 2 and friends). Architectures
-+            # that also pre-scale want `T * tanh(z * m / T)`, but LogitsProcessor
-+            # applies its scale *after* the cap. Folding the multiplier into the
-+            # cap reproduces the intended order exactly:
++            # Architectures that pre-scale want `T * tanh(z * m / T)`, but
++            # LogitsProcessor applies its scale *after* the cap. Folding the
++            # multiplier into the cap reproduces the intended order exactly:
 +            #     tanh(z / (T/m)) * (T/m) * m  ==  T * tanh(z * m / T)
-+            # and reduces to the plain cap when m == 1.
++            # and reduces to upstream's behaviour when m == 1.
 +            soft_cap = getattr(self.text_config, "final_logit_softcapping", None)
 +            if soft_cap is not None:
 +                soft_cap = float(soft_cap) / logit_scale
              self.logits_processor = LogitsProcessor(
--                self.text_config.vocab_size, scale=logit_scale
-+                self.text_config.vocab_size, scale=logit_scale, soft_cap=soft_cap
+                 self.text_config.vocab_size,
+-                scale=getattr(self.text_config, "logit_scale", 1.0),
+-                soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
++                scale=logit_scale,
++                soft_cap=soft_cap,
              )
          else:
              self.lm_head = PPMissingLayer()

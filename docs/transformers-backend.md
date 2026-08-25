@@ -167,7 +167,9 @@ token**:
 | native, `embed_norm` ablated | `[200007, 198, 200007, 191099, 845, 845, 200008]` |
 
 both decoding to `'<|eom|>\n<|eom|>ிட��<|eot|>'`. Fixed by
-`patches/vllm-transformers-backend-embedding-postprocess.patch`.
+`patches/vllm-transformers-backend-embedding-postprocess.patch`, retired at the
+v0.28.0 bump once upstream began rebasing the embedding's class rather than
+substituting it (see README, "Retired at the 0.28 bump").
 
 ### 2. The dropped logit transform — invisible behind the first
 
