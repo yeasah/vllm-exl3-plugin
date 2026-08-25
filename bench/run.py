@@ -400,6 +400,12 @@ def cmd_list(args) -> int:
     for e in suite.by_tier(args.tier):
         print(f"{e.name}  [{e.tier}]")
         derived = f" fixture={e.fixture}" if e.fixture else ""
+        if e.kv_cache_dtype:
+            derived += f" kv={e.kv_cache_dtype}"
+        if e.speculative_config:
+            derived += f" spec={e.speculative_config.get('method')}"
+        if e.language_model_only:
+            derived += " lm-only"
         print(f"    {e.model}@{e.revision}  impl={e.model_impl} "
               f"{'eager' if e.enforce_eager else 'graphs'} "
               f"tp={e.tensor_parallel_size}{derived}")

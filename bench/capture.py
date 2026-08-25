@@ -64,6 +64,10 @@ def main() -> None:
         tensor_parallel_size=entry.tensor_parallel_size,
         max_model_len=entry.max_model_len,
         gpu_memory_utilization=entry.gpu_memory_utilization,
+        language_model_only=entry.language_model_only,
+        **({"kv_cache_dtype": entry.kv_cache_dtype} if entry.kv_cache_dtype else {}),
+        **({"speculative_config": entry.speculative_config}
+           if entry.speculative_config else {}),
     )
     tok = llm.get_tokenizer()
     prompts = core.capture_prompts(llm, tok, k=args.k, new_tokens=args.new_tokens)

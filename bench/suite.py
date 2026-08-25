@@ -36,6 +36,17 @@ class Entry:
     #: Per-entry threshold overrides; see bench/run.py for the defaults and the
     #: reasoning behind them.
     tolerance: dict = field(default_factory=dict)
+    #: KV cache dtype, e.g. "turboquant_4bit_nc" or "fp8". None leaves vLLM's
+    #: default ("auto"), which is what every entry used before these landed.
+    kv_cache_dtype: str | None = None
+    #: Speculative decoding, e.g. {"method": "mtp", "num_speculative_tokens": 3}.
+    #: An MTP drafter is a *second* model instance whose modules go through
+    #: `get_quant_method` independently -- coverage no single-model entry has.
+    speculative_config: dict | None = None
+    #: Skip the vision/audio tower. Not a shortcut: it is how these checkpoints
+    #: are actually served on a 16 GiB card (see ~/ckpt/run-*.sh), and it is the
+    #: only way some of them fit at all alongside a KV cache.
+    language_model_only: bool = False
     #: Recipe for a checkpoint the Hub does not hold, derived from `model`
     #: at `revision` before capture. Only "blockq" exists: a block-quantized
     #: token embedding produced by `tools/quantize_embedding.py`. See
@@ -149,6 +160,23 @@ ENTRIES: list[Entry] = [
         "else. tests/test_blockq.py covers this at the unit level; this is the "
         "same claim through vLLM's own graph handling",
     ),
+    Entry(
+        label="minicpm5-1B 3.0bpw tq4",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        kv_cache_dtype="turboquant_4bit_nc",
+        exercises="a quantized KV cache under EXL3 weights, which nothing else "
+        "in the matrix touches -- every other entry runs the default `auto` "
+        "dtype. Differs from `minicpm5-1B-3.0bpw-mcg` by the KV dtype alone, so "
+        "a divergence is attributable to turboquant rather than to the "
+        "checkpoint.\n\n"
+        "It earns fast-tier placement because turboquant is the linchpin of "
+        "this project's low end -- it is what makes a long context fit beside a "
+        "2-3bpw model on 16 GiB -- and because this model can host it at all: "
+        "MiniCPM5-1B has no sliding window, which is the one thing TurboQuant "
+        "cannot serve (see TODO `turboquant-sliding-window`, where gemma-4 and "
+        "Laguna are both blocked on exactly that)",
+    ),
     # ---- full tier: the surfaces the fast tier cannot reach on a 16 GiB card
     # in a couple of minutes. Same gate, run before a bump rather than casually.
     Entry(
@@ -211,6 +239,93 @@ ENTRIES: list[Entry] = [
         "architectures to `muse_glimmer`), which is exactly why model_impl is "
         "pinned here -- without the pin this entry would have silently stopped "
         "testing the backend at this bump",
+    ),
+    Entry(
+        label="muse-glimmer-30B 2.0bpw native",
+        model="turboderp/Muse-Glimmer-30B-exl3",
+        revision="2.00bpw",
+        tier="full",
+        model_impl="auto",
+        gpu_memory_utilization=0.92,
+        known_broken="vLLM's native MuseGlimmer builds the vision adapter as a "
+        "plain `nn.Linear` (`muse_glimmer.py`: `self.c_fc = nn.Linear(...)`), "
+        "which never reaches `get_quant_method`, so no quantization plugin can "
+        "serve this checkpoint's quantized adapter. Confirmed still true at "
+        "v0.28.0, where MuseGlimmer went native.",
+        exercises="the native implementation of a checkpoint the matrix already "
+        "serves through the Transformers backend -- the pair the MiniCPM "
+        "entries make for a text-only model, which nothing makes for a "
+        "multimodal one.\n\n"
+        "It is kept as a known failure rather than dropped because the failure "
+        "is the coverage: the day upstream builds that adapter as a vLLM linear "
+        "(or `--language-model-only` is added here to bypass it), this entry "
+        "starts capturing and `check` says so. That is how the fix gets "
+        "noticed, and it is cheaper than remembering to retest",
+    ),
+    Entry(
+        label="qwen3.8-27B 3.0bpw blockq tq4",
+        model="turboderp/Qwen3.8-27B-exl3",
+        revision="3.00bpw",
+        tier="full",
+        fixture="blockq",
+        kv_cache_dtype="turboquant_4bit_nc",
+        language_model_only=True,
+        max_model_len=4096,
+        gpu_memory_utilization=0.90,
+        exercises="the configuration this project is actually served with. It "
+        "is not a synthetic combination: it mirrors the live command line in "
+        "`~/ckpt/run-qwen3.8-27b.sh` -- blockq embedding, trellis weights, "
+        "turboquant KV, language-model-only -- so the gate covers the stack as "
+        "deployed rather than one axis at a time.\n\n"
+        "Three lossy schemes compose here and nothing else exercises the "
+        "combination. It also reaches a hybrid attention layout (48 "
+        "linear-attention layers, 16 full) where TurboQuant disables its "
+        "boundary skips, which is the case that works where Laguna's does not",
+    ),
+    Entry(
+        label="qwen3.8-27B 3.0bpw blockq MTP fp8",
+        model="turboderp/Qwen3.8-27B-exl3",
+        revision="3.00bpw",
+        tier="full",
+        fixture="blockq",
+        kv_cache_dtype="fp8",
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+        language_model_only=True,
+        max_model_len=4096,
+        gpu_memory_utilization=0.90,
+        exercises="two paths at once, and they belong together because MTP "
+        "cannot currently be combined with turboquant (see the sibling entry "
+        "below): the fp8 KV cache, which no other entry uses, and an MTP "
+        "drafter.\n\n"
+        "The drafter is the real prize. It is a *second model instance*, built "
+        "by vLLM's speculative machinery from the same checkpoint, whose "
+        "modules go through `get_quant_method` independently of the main "
+        "model's -- and this checkpoint's MTP head is genuinely EXL3-quantized "
+        "(8 trellis modules, 202.5 MiB). Nothing else in the matrix serves two "
+        "models in one engine, and a plugin that mis-handles the second would "
+        "fail nowhere else",
+    ),
+    Entry(
+        label="qwen3.8-27B 3.0bpw blockq MTP tq4",
+        model="turboderp/Qwen3.8-27B-exl3",
+        revision="3.00bpw",
+        tier="full",
+        fixture="blockq",
+        kv_cache_dtype="turboquant_4bit_nc",
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+        language_model_only=True,
+        max_model_len=4096,
+        gpu_memory_utilization=0.90,
+        known_broken="MTP and TurboQuant do not currently combine. Recorded "
+        "from practice rather than characterized here; the failure mode is "
+        "expected to be the same KV-cache-spec class the drafter introduces "
+        "against the quantized primary's page. Replace this reason with the "
+        "measured one the first time it runs.",
+        exercises="the combination the entry above works around. Both halves "
+        "are separately covered -- turboquant by the tq4 entries, MTP by the "
+        "fp8 one -- so this exists only to notice when their intersection "
+        "starts working, which is the cheapest way to learn that a KV-cache "
+        "refactor upstream has unblocked it",
     ),
 ]
 

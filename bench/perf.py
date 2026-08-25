@@ -103,6 +103,10 @@ def main() -> None:
         tensor_parallel_size=entry.tensor_parallel_size,
         max_model_len=max_model_len,
         gpu_memory_utilization=entry.gpu_memory_utilization,
+        language_model_only=entry.language_model_only,
+        **({"kv_cache_dtype": entry.kv_cache_dtype} if entry.kv_cache_dtype else {}),
+        **({"speculative_config": entry.speculative_config}
+           if entry.speculative_config else {}),
         dtype="float16",
         enable_prefix_caching=False,
         max_num_seqs=max(16, DECODE_SEQS),
