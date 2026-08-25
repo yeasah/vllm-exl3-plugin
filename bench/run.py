@@ -254,6 +254,10 @@ PERF_REGRESSION_PCT = 10.0
 
 PERF_EXPECTED = os.path.join(HERE, "expected", "perf")
 
+#: The full package list behind `environment()`'s `pkg.digest`, written by
+#: `bless`. A digest says something moved; this says what.
+MANIFEST = os.path.join(HERE, "expected", "environment.txt")
+
 
 def platform_tag(args) -> str:
     """The operator's name for the machine, and it is deliberately mandatory.
@@ -392,6 +396,61 @@ def cmd_perf_check(args) -> int:
     return 1
 
 
+def environment_drift() -> tuple[bool, list[str]]:
+    """Compare the live environment against the blessed manifest.
+
+    Returns (differs, lines). Used by `env` to report and by `check` to decide
+    whether to refuse -- the same comparison either way, so the two can never
+    disagree about what "the environment moved" means.
+    """
+    if not os.path.exists(MANIFEST):
+        return False, [f"no blessed manifest at {MANIFEST}; run bless"]
+    with open(MANIFEST) as f:
+        blessed = [ln.strip() for ln in f if ln.strip()]
+    live = core.package_manifest()
+
+    def as_map(rows):
+        out = {}
+        for r in rows:
+            name, _, ver = r.partition("==")
+            out[name.lower()] = ver
+        return out
+
+    b, lv = as_map(blessed), as_map(live)
+    lines = []
+    for name in sorted(set(b) | set(lv)):
+        ov, nv = b.get(name), lv.get(name)
+        if ov == nv:
+            continue
+        if ov is None:
+            lines.append(f"  + {name} {nv}  (added since bless)")
+        elif nv is None:
+            lines.append(f"  - {name} {ov}  (removed since bless)")
+        else:
+            lines.append(f"  ~ {name} {ov} -> {nv}")
+    return bool(lines), lines
+
+
+def cmd_env(args) -> int:
+    """What has moved in the environment since the baselines were blessed."""
+    differs, lines = environment_drift()
+    if not os.path.exists(MANIFEST):
+        print(lines[0])
+        return 1
+    if not differs:
+        print(f"environment matches the blessed manifest "
+              f"({len(core.package_manifest())} packages)")
+        return 0
+    print(f"environment differs from {MANIFEST}:\n")
+    for ln in lines:
+        print(ln)
+    print(f"\n{len(lines)} package(s) differ. This is reported, not fatal: a "
+          f"check will still run and will\nsay so. Use `check --strict-env` to "
+          f"refuse instead, or re-bless to accept the\ncurrent environment as "
+          f"the reference.")
+    return 1
+
+
 def cmd_verify(args) -> int:
     """Do all baselines in a set agree about what produced them?
 
@@ -509,15 +568,8 @@ def cmd_bless(args) -> int:
     # The manifest behind `environment()`'s pkg.digest: a digest says something
     # moved, this says what. One per bless, since a bless is one snapshot.
     try:
-        import importlib.metadata as _md
-
-        manifest = sorted(
-            f"{d.metadata['Name']}=={d.version}"
-            for d in _md.distributions()
-            if d.metadata and d.metadata["Name"]
-        )
-        with open(os.path.join(EXPECTED, "environment.txt"), "w") as f:
-            f.write("\n".join(manifest) + "\n")
+        with open(MANIFEST, "w") as f:
+            f.write("\n".join(core.package_manifest()) + "\n")
     except Exception as exc:  # pragma: no cover
         print(f"     ! could not write environment manifest: {exc}")
 
@@ -529,6 +581,22 @@ def cmd_bless(args) -> int:
 
 def cmd_check(args) -> int:
     import tempfile
+
+    # Checked once, before anything loads: the environment is the same for every
+    # entry, and discovering it after a 15-minute tier is a waste.
+    differs, lines = environment_drift()
+    if differs:
+        print(f"environment differs from the blessed manifest "
+              f"({len(lines)} package(s)):")
+        for ln in lines[:8]:
+            print(ln)
+        if len(lines) > 8:
+            print(f"  ... {len(lines) - 8} more; run `bench/run.py env` for all")
+        if getattr(args, "strict_env", False):
+            print("\nrefusing: --strict-env is set. Restore the environment, or "
+                  "re-bless to accept\nthis one as the reference.")
+            return 1
+        print("  (reported, not fatal -- pass --strict-env to refuse)\n")
 
     failed = {}
     known = []
@@ -581,7 +649,13 @@ def main() -> int:
     p.set_defaults(func=cmd_list)
     p = sub.add_parser("verify")
     p.set_defaults(func=cmd_verify)
+    p = sub.add_parser("env")
+    p.set_defaults(func=cmd_env)
+
     p = sub.add_parser("check"); p.add_argument("--tier", default="fast")
+    p.add_argument("--strict-env", action="store_true",
+                   help="refuse to run if the environment differs from the "
+                        "blessed manifest")
     p.set_defaults(func=cmd_check)
     p = sub.add_parser("bless"); p.add_argument("--tier", default="fast")
     p.set_defaults(func=cmd_bless)

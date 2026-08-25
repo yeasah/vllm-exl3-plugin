@@ -110,12 +110,47 @@ Added 2026-08-25 after a near miss: a dry-run install of `llm-compressor` wanted
 run, logprobs could have moved with nothing in the record to explain it. Reported
 like the rest of `environment()`, never gated.
 
+```
+bench/run.py env                     what moved since the baselines were blessed
+bench/run.py check --strict-env      refuse to run if anything moved
+```
+
 **And `pkg.digest` covers the rest**, because naming two packages only catches the
 two already thought of — these were picked *after* the near miss, and the next
 surprise is as likely to be `numpy`, `triton` or `tokenizers`. It is a sha256 over
 every installed distribution and version (`pkg.count` alongside it, 480 here). The
 digest says *something* moved; `bench/expected/environment.txt`, written by the
-same `bless`, says *what* — diff it against a fresh `pip freeze`.
+same `bless`, says *what*. `bench/run.py env` does that diff for you:
+
+```
+  + flashinfer-cubin 0.6.16.post3  (added since bless)
+  ~ transformers 5.14.1 -> 5.15.0
+  - triattention 0.1.0  (removed since bless)
+```
+
+`check` runs the same comparison **once, before any model loads** — discovering a
+changed environment after a 15-minute tier is a waste — and reports it. Pass
+`--strict-env` to refuse instead. That is the deliberate step: restore the
+environment, or re-bless to accept this one as the reference.
+
+**Why this rather than a second venv for the gate.** A gate with its own
+environment drifts from the serving one, and the first time that is forgotten it
+certifies a stack nobody runs — silently, which is the failure class this suite
+exists to avoid. Here the gate measures exactly what is served, and a
+disturbance is loud instead of prevented. The trade is deliberate: weaker
+protection that fails visibly, over stronger protection that can fail silently.
+The pattern that *does* pay is keeping checkpoint **producers** out entirely —
+`llm-compressor` never imports vLLM, so it belongs in its own venv.
+
+**Two bugs found while building this, both of which would have made the digest
+lie.** `importlib.metadata.distributions()` walks `sys.path`, so a venv whose
+`lib` and `lib64` are the same directory yields every distribution twice
+(editable installs four times) — the count roughly doubles and the digest tracks
+path order. And setuptools' vendored copies (`jaraco.*`, `zipp`, `tomli`, a
+second `packaging`) join `sys.path` only once setuptools is imported, so the
+first `environment()` call in a process saw 239 distributions and every later one
+251. Both are filtered; the manifest is deduplicated and vendored paths are
+excluded.
 
 *(The lesson generalises: `llm-compressor` is a checkpoint **producer** and does
 not belong in the serving environment. Install it in its own venv and hand the

@@ -142,6 +142,40 @@ def _source_trees() -> dict:
     return trees
 
 
+def package_manifest() -> list[str]:
+    """Every installed distribution as `name==version`, sorted.
+
+    The environment record's fine grain. `environment()` digests it,
+    `bench/run.py bless` writes it to `bench/expected/environment.txt`, and
+    `bench/run.py env` diffs the two -- so a digest can say *something* moved
+    and the manifest can say *what*.
+    """
+    import importlib.metadata as md
+
+    # Deduplicated: `distributions()` walks sys.path, and a venv whose `lib` and
+    # `lib64` are the same directory (the usual arrangement on RHEL-likes)
+    # yields every distribution twice -- editable installs more. Left raw the
+    # count roughly doubles and the digest depends on path order rather than on
+    # what is installed, which is the opposite of what it is for.
+    def vendored(dist) -> bool:
+        """setuptools ships copies of `jaraco.*`, `zipp`, `tomli`, a second
+        `packaging` and more under `_vendor/`. They join `sys.path` only once
+        setuptools is imported, so counting them makes the digest depend on
+        import order rather than on what is installed -- measured: the first
+        call in a process saw 239 distributions and every later one 251."""
+        try:
+            return "_vendor" in str(dist.locate_file(""))
+        except Exception:
+            return False
+
+    seen = {
+        (d.metadata["Name"].lower(), d.version)
+        for d in md.distributions()
+        if d.metadata and d.metadata["Name"] and not vendored(d)
+    }
+    return sorted(f"{name}=={ver}" for name, ver in seen)
+
+
 def environment() -> dict:
     """What the machine will admit about itself.
 
@@ -195,13 +229,8 @@ def environment() -> dict:
     # by the same bless, says what. Cheap enough to be unconditional.
     try:
         import hashlib
-        import importlib.metadata as _md
 
-        dists = sorted(
-            f"{d.metadata['Name']}=={d.version}"
-            for d in _md.distributions()
-            if d.metadata and d.metadata["Name"]
-        )
+        dists = package_manifest()
         env["pkg.digest"] = hashlib.sha256(
             "\n".join(dists).encode()
         ).hexdigest()[:12]
