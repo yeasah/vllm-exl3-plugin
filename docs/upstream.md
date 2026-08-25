@@ -71,6 +71,41 @@ failure for a block-quantized one. Our patch defaults it from
 *Strength*: an ecosystem fix rather than ours alone — `vllm-gguf-plugin` is blocked by
 exactly the same gap.
 
+**Reproduced with official tools only, 2026-08-25 — no EXL3, no plugin, no format of
+ours.** llm-compressor's embedding example validates on `pythia-1.4b` and states the
+result is "ready to be loaded into vLLM". Pythia is `GPTNeoXForCausalLM`, which vLLM
+serves from `gpt_neox.py:208` — a file that builds its embedding as
+`VocabParallelEmbedding(config.vocab_size, config.hidden_size)`, no `quant_config`. So
+following their documented recipe on their own example family produces a checkpoint
+vLLM cannot load:
+
+```
+# llm-compressor, in its own venv (it wants transformers <= 5.14.1)
+QuantizationModifier(config_groups={"embedding": {"targets": ["Embedding"], "weights":
+    {"num_bits": 4, "type": "int", "symmetric": True, "strategy": "group",
+     "group_size": 64}}})
+# -> gpt_neox.embed_in.weight_packed / weight_scale / weight_shape, format pack-quantized
+
+# stock vLLM v0.28.0
+ValueError: There is no module or parameter named 'embed_in.weight_packed' in
+GPTNeoXModel. The available parameters belonging to embed_in
+(VocabParallelEmbedding) are: {'embed_in.weight'}
+```
+
+With `vllm-embed-quant-config` applied the same checkpoint loads and generates. That is
+the whole report: their tool, their example model, their compatibility claim, and a
+one-file fix.
+
+**Two details that make it a better report than ours would have been.** The failure is
+*loud* here — compressed-tensors' packed tensors have nowhere to land, so it raises,
+where our tied-EXL3 case degrades silently. And it needs no argument about whether
+embedding quantization is worthwhile: llm-compressor already shipped the feature and
+documented the claim.
+
+**Count re-verified on v0.28.0**: 85 of 131 model files constructing a
+`VocabParallelEmbedding` omit `quant_config` (was 86 of 131 at v0.27.0). Affected files
+include `gpt_neox.py`, `opt.py`, `bloom.py`, `phi.py`, `minicpm.py`.
+
 **The speculative-decoding objection stands — measured 2026-08-25, after being wrongly
 withdrawn earlier the same day.** Reverting *only* this patch on v0.28.0 and running the
 target with `google/gemma-4-12B-it-assistant` as drafter loads cleanly; with the patch it
@@ -96,6 +131,12 @@ through `config/speculative.py`'s `method == "mtp"` branch — which does copy t
 quantization onto the draft, with a comment saying it is for drafters living inside the
 target checkpoint — looks like an exact fit and is not the cause here. It was refuted by
 reverting one patch, which is the test that should have come first.
+
+*The drafter break does not reproduce with official tools, and cannot* — it is caused by
+this patch, not by anything upstream ships. That makes it not a second bug report but the
+**reviewer's first objection, answered in advance**: here is the gap, here is a
+reproduction on your own example model, and here is why the obvious fix breaks
+separate-checkpoint drafters, measured rather than supposed.
 
 *So the two candidate fixes from 2026-08-20 stand unchanged*: condition the ambient
 default on the module belonging to the model the config describes (which
