@@ -71,58 +71,46 @@ failure for a block-quantized one. Our patch defaults it from
 *Strength*: an ecosystem fix rather than ours alone — `vllm-gguf-plugin` is blocked by
 exactly the same gap.
 
-*The speculative-decoding objection is withdrawn.* It was recorded 2026-08-20 as "the
-patch hands the drafter's embedding an EXL3 method", and reproducing it on v0.28.0
-(below) showed the patch is not involved: `gemma4_mtp.py` passes `quant_config`
-**explicitly**, from `get_draft_quant_config(vllm_config)`, so the ambient default never
-fires. The breakage is upstream's own and is filed separately as the next item. What
-remains before offering the patch is ordinary review work — it should still be judged
-against the plain-`nn.Linear` gap below, which is the same problem in a different place.
-
-### Reports, not patches
-
-**A separate-checkpoint drafter inherits the target's quantization.** Reproduced on
-v0.28.0, 2026-08-25, and this one is pure upstream — no plugin, no patch, and any
-quantization format hits it.
+**The speculative-decoding objection stands — measured 2026-08-25, after being wrongly
+withdrawn earlier the same day.** Reverting *only* this patch on v0.28.0 and running the
+target with `google/gemma-4-12B-it-assistant` as drafter loads cleanly; with the patch it
+fails:
 
 ```
-vllm serve turboderp/gemma-4-12B-it-exl3 --revision 4.00bpw_mul1 \
-  --speculative-config '{"model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":4}'
-
 ValueError: There is no module or parameter named 'model.embed_tokens.weight' in
 Gemma4MTP. The available parameters belonging to model.embed_tokens
 (VocabParallelEmbedding) are: {'model.embed_tokens.trellis', 'model.embed_tokens.mul1',
  'model.embed_tokens.svh', 'model.embed_tokens.suh'}
 ```
 
-The chain, all in-tree:
+The mechanism, now traced rather than inferred. `vocab_parallel_embedding.py:299` reads
+`if quant_config is not None: quant_method = quant_config.get_quant_method(...)`, and
+`get_draft_quant_config` correctly returns **None** for a drafter with no quantization
+config of its own — so upstream gives it `UnquantizedEmbeddingMethod` and its plain
+`.weight` loads. **Our patch turns that `None` into the ambient config**, which is the
+target's, so the drafter's embedding is built in EXL3's shape and its own weight has
+nowhere to land.
 
-1. `config/speculative.py` rewrites `model_type` `gemma4_unified_assistant` →
-   `gemma4_mtp` and sets `architectures: ["Gemma4MTPModel"]`, so the assistant is served
-   by the MTP implementation.
-2. That routes it into the `method == "mtp"` branch, which copies the target's
-   quantization onto the draft: `if not self.quantization: self.quantization =
-   self.target_model_config.quantization`. Its own comment gives the assumption —
-   *"use the draft model from the same model"* — which is true of real MTP, whose
-   weights live inside the target checkpoint.
-3. **gemma-4's assistant is a separate checkpoint** with its own plain bf16
-   `model.embed_tokens.weight` `[262144, 1024]`, at a hidden size the target does not
-   even share (1024 against 3840).
-4. `get_draft_quant_config` — whose docstring correctly says *"Draft models should use
-   their own quantization config instead of the verifier/target model's"* — then
-   faithfully returns the target's, because step 2 stamped it onto the draft config.
-5. `gemma4_mtp.py:361` builds the embedding with it, registering `trellis/suh/svh/mul1`,
-   and the drafter's own `.weight` has nowhere to land.
+*A wrong turn worth recording*, because it is the kind that survives review: the chain
+through `config/speculative.py`'s `method == "mtp"` branch — which does copy the target's
+quantization onto the draft, with a comment saying it is for drafters living inside the
+target checkpoint — looks like an exact fit and is not the cause here. It was refuted by
+reverting one patch, which is the test that should have come first.
 
-*Why it is a good report*: the intent is already written down in the helper's docstring,
-and the defect is one conditional away from it. The fix is to not inherit quantization
-when the draft model is a different checkpoint from the target — which step 1's own
-rewrite is what makes possible to detect. Nothing about it is EXL3-specific: an AWQ,
-GPTQ or compressed-tensors gemma-4 with this drafter fails identically.
+*So the two candidate fixes from 2026-08-20 stand unchanged*: condition the ambient
+default on the module belonging to the model the config describes (which
+`VocabParallelEmbedding.__init__` cannot know), or fix the drafter's config so it stops
+misdescribing what is being built. The second remains the cleaner contribution.
 
-*Last step before filing*: confirm it reproduces with our patches unapplied. The code
-path says they are irrelevant (the config is passed explicitly, not defaulted), but the
-report should say "verified" rather than "should not matter".
+**And the patch is load-bearing for correctness, not only for loading.** The same run
+without it produced `'1111.11.11.1.11.'` from `turboderp/gemma-4-12B-it-exl3` — it loads,
+runs, and emits garbage, where the `bench/` entry with the patch captures correct output.
+That is the "silently dense for a tied model" case this patch exists to prevent, observed
+directly for the first time rather than argued from the 86-file count. *The exact path
+from missing quant method to wrong output is not traced* — the tied checkpoint has no
+dense `embed_tokens.weight` for `UnquantizedEmbeddingMethod` to have loaded, so something
+supplied one — and that is worth knowing before the patch is offered, since a reviewer
+will ask.
 
 ### Reports, not patches
 
