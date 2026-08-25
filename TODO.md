@@ -922,12 +922,6 @@ result. Worth doing before the finding is stated anywhere load-bearing.
 
 *One line each, newest first. Prune to ~10 when appending.*
 
-- `sc-measure-kld-floor` — retired unfiled 2026-08-25 at the exllamav3 v1.4.3 bump.
-  The tools it described (`util/sc_measure.py`, `sc_optimize`'s power-law fit) no
-  longer exist: upstream deprecated `measure.py`/`optimize.py` and replaced them
-  with `conversion/measure_model.py` + `optimize_model.py`, which fits no alpha
-  for a constant floor to bias. See [docs/upstream.md](docs/upstream.md).
-
 - `retire-gemma4-patch` — done 2026-08-25 at the v0.28.0 bump. Upstream landed
   generic per-layer arch config (`ModelArchitectureConfig.from_layers`), so
   `Gemma4Config` reads `model_config.model_arch_config` directly and the patch

@@ -16,11 +16,15 @@
   "gpu_count": 1,
   "capability": "12.0",
   "vllm_reported": "0.28.1.dev0+g2cf0a6915.d20260825",
+  "pkg.digest": "b288b05ac847",
+  "pkg.count": 239,
+  "pkg.transformers": "5.15.0",
+  "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "ba853e1",
-   "head": "ba853e14e1",
-   "dirty_files": 2,
-   "diff_sha": "20a3d51b8891",
+   "describe": "9dddd6e",
+   "head": "9dddd6e232",
+   "dirty_files": 0,
+   "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
@@ -31,8 +35,8 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.4.2-19-ga4e0179",
-   "head": "a4e01792f6",
+   "describe": "v1.4.3-20-gbb1d0f1",
+   "head": "bb1d0f12e1",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
