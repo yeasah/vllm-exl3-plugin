@@ -179,6 +179,22 @@ def environment() -> dict:
         env["vllm_reported"] = vllm.__version__
     except Exception:  # pragma: no cover
         pass
+    # Load-bearing Python dependencies that are neither vLLM nor a git tree we
+    # track. `transformers` is the biggest: two entries run *its* model code
+    # through the Transformers backend, gemma-4's config handling has been
+    # version-sensitive enough to need a patch, and every tokenizer comes from
+    # it -- so a change there can move logprobs with nothing else moving.
+    # `compressed-tensors` decides how a quantized checkpoint is interpreted and
+    # is a vLLM dependency in its own right. Found missing 2026-08-25, when a
+    # dry-run install of llm-compressor turned out to want transformers
+    # *downgraded* 5.15.0 -> 5.14.1 underneath a freshly blessed set.
+    for pkg in ("transformers", "compressed-tensors"):
+        try:
+            import importlib.metadata as _md
+
+            env[f"pkg.{pkg}"] = _md.version(pkg)
+        except Exception:  # pragma: no cover - probing must never fail a run
+            env[f"pkg.{pkg}"] = None
     for name, path in _source_trees().items():
         prov = source_provenance(
             path, _PROVENANCE_EXCLUDE if name == "plugin" else ()

@@ -95,6 +95,25 @@ recorded as **evidence, not identity**. `perf-check` prints any field that
 changed under a tag, because a mislabelled baseline is exactly the failure this
 scoping prevents.
 
+### Load-bearing packages that are not vLLM
+
+`environment()` also records `pkg.transformers` and `pkg.compressed-tensors`.
+Neither is a git tree we track, and both decide what an entry measures:
+two entries run *transformers'* own model code through the Transformers backend,
+gemma-4's config handling has been version-sensitive enough to need a patch of its
+own, every tokenizer comes from transformers, and compressed-tensors decides how a
+quantized checkpoint is interpreted.
+
+Added 2026-08-25 after a near miss: a dry-run install of `llm-compressor` wanted
+`transformers` **downgraded** 5.15.0 → 5.14.1 and `compressed-tensors` bumped
+0.17.0 → 0.18.0, underneath a set of baselines blessed hours earlier. Had that
+run, logprobs could have moved with nothing in the record to explain it. Reported
+like the rest of `environment()`, never gated.
+
+*(The lesson generalises: `llm-compressor` is a checkpoint **producer** and does
+not belong in the serving environment. Install it in its own venv and hand the
+checkpoint over.)*
+
 ### Do not trust the package version string
 
 `vllm.__version__` reports `0.27.1.dev0+ge50f7d369.d20260810` for a checkout
