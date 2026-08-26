@@ -204,6 +204,34 @@ ENTRIES: list[Entry] = [
         "captured at 0.000e+00 against its pre-bump baseline",
     ),
     Entry(
+        label="gemma-4-12B 3.0bpw mul1 tied blockq embed",
+        model="turboderp/gemma-4-12B-it-exl3",
+        revision="3.00bpw_mul1",
+        tier="full",
+        fixture="blockq",
+        gpu_memory_utilization=0.92,
+        exercises="EXL3BlockQTiedEmbeddingMethod -- a tied checkpoint whose "
+        "embedding has also been block-quantized, so one module carries both "
+        "encodings: bq_* for the lookup and the renamed lm_head trellis for the "
+        "logits. Deliberately the same repo and revision as the entry above, so "
+        "the pair differs only in the fixture and any drift is attributable to "
+        "this path rather than to the model.\n\n"
+        "Nothing else covers it. Every other blockq fixture is MiniCPM5-1B, "
+        "which is untied, and the untied path routes to a different method that "
+        "owns no trellis. Until this entry existed the combination had unit "
+        "tests and one hand-run comparison, which is the kind of evidence this "
+        "suite exists to replace.\n\n"
+        "The two failures it stands against were both silent: predicates that "
+        "treated tied and blockq as mutually exclusive (died late, at logits "
+        "time) and an embed_prefix left at its default (755 MiB of trellis "
+        "routed to a path a nested model does not have, dropped without "
+        "complaint, garbage served). Neither announced itself at load, so a "
+        "logprob baseline is the instrument that would catch a recurrence.\n\n"
+        "Not an endorsement of the configuration at this bitrate: blockq beats "
+        "spending the same bytes on body bits only above ~4.00bpw "
+        "(docs/embeddings.md). 3.00bpw_mul1 is chosen to match its sibling.",
+    ),
+    Entry(
         label="muse-glimmer-30B 2.0bpw via transformers backend",
         model="turboderp/Muse-Glimmer-30B-exl3",
         revision="2.00bpw",
