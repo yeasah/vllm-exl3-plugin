@@ -64,6 +64,30 @@ are populated: `fast` (~15 min) covers uniform K=3, mixed-in-layer bit widths,
 text-only model; `full` adds MoE, `mul1` with the gemma4-style tie, and the
 multimodal Transformers backend.
 
+**This is the next `vast` trip, and everything else TP rides along with it**
+(sequenced 2026-08-26). Nothing TP-shaped outranks the gate tier, because until the
+per-degree baselines exist every other TP result is unrepeatable. So the tier goes
+first and the rest slot into the same rental rather than earning trips of their own:
+
+| rides along | what it needs there | slug |
+|---|---|---|
+| blockq embedding at TP>1 | written, never run multi-GPU. All three tensors slice on dim 0, so `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row Hadamard rule | `quantized-embeddings` |
+| tied+blockq at TP>1 | `EXL3BlockQTiedEmbeddingMethod` (2026-08-26) carries two parameter sets on one module; both shard on dim 0, but the *combination* is unproven | `quantized-embeddings` |
+| MoE+TP remainder | TP=3/5/6/7 (an 8-card box covers these by using fewer cards); a second checkpoint at TP=8, which needs a download arranged **before** the rental starts | `moe-tp` |
+| Transformers backend | no MoE and no TP has ever gone through it | `transformers-backend` |
+| comparator arm | Qwen3.8-27B unquantized is ~27 GiB and cannot run on the dev card at all | `comparator` |
+
+**Two things to arrange before the meter starts**, both of which otherwise waste
+rental time: the second TP=8 checkpoint has to be downloaded ahead (nothing on hand
+clears preflight), and `tools/host_survey.py` should run on contact, since GPU
+architecture, driver, card count, VRAM and uncorrected ECC are what move tokens and
+are all checkable before any real work.
+
+**Explicitly not a `vast` item:** the Laguna TP=4 `exl3_mgemm` performance bug. It is
+narrowed to two exact kernel instantiations with both autotuners ruled out, so closing
+it needs someone reading kernel source against per-tensor quantization parameters —
+more GPU time buys nothing. Listed under `moe-tp` and stays there.
+
 **What remains is TP**, which is the one axis the dev card cannot reach. It wants
 its own tier rather than an entry in `full`, because `bless` needs the 8×3090 box
 (`vast`) and the baselines are per-degree. TP=2/4/8 are the degrees already
