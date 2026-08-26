@@ -553,6 +553,69 @@ flash-attention head-dim-512 question (TODO `fa-head-dim-512`) -- the shared-ten
 optimization has almost nothing left to apply to. It is best read as a possible follow-up
 to that work rather than as an independent goal.
 
+### fp8 as the shared tensor: it clears the kernel gate, but the gate moved
+
+*Measured 2026-08-26, `~/qbench/gemma-tied-fp8.yaml`, same gemma-4-12B @4.00bpw_mul1 and
+test set as the sweeps above. Reproduces both recorded anchors exactly -- head per-row-8 at
++0.000423 and shared per-row-8 at +0.000412 against the recorded +0.000423 and +0.000413 --
+so it is directly comparable rather than merely similar.*
+
+The section above gates the shared tensor on writing an int-GEMM. fp8-e4m3 is the obvious
+way out: it is 8 bits, it is per-channel scaled, and `torch._scaled_mm` already exists, so
+the head matmul is a primitive rather than a kernel project. The question is only whether
+it is good enough, since e4m3 holds *relative* error roughly constant where an integer arm
+holds absolute error constant within a row -- a different failure mode, not a better one.
+
+Head role, against the fp16 control (0.026890), the same convention as the head sweep:
+
+| head encoding | tax | vs trellis |
+|---|---|---|
+| trellis, 6.004-bit (real) | +0.000073 | 1x |
+| per-row int8 | +0.000423 | 5.8x |
+| **fp8-e4m3, per-channel** | **+0.000686** | **9.4x** |
+| fp8-e4m3, per-tensor | +0.001110 | 15.2x |
+
+**Per-tensor fp8 is 1.6x worse than per-channel for free**, so the channel scale is not
+optional. The embedding role is nearly free in either format -- sharing adds only +0.000056
+on top of the fp8 head and +0.000062 on top of the int8 head -- which confirms conclusion 2
+above from a third direction: **the head is ~91% of the damage**, and the shared tensor is
+priced entirely by what the head needs.
+
+Placed on the frontier (tax against native, `embed+head` bytes, noise floor 0.001759):
+
+| option | embed+head | tax | vs floor | new kernel? |
+|---|---|---|---|---|
+| shared per-row 7-bit | 0.820 GiB | +0.001120 | 0.64x | yes |
+| **shared fp8-e4m3** | **0.938 GiB** | **+0.000669** | **0.38x** | **no** |
+| shared per-row 8-bit | 0.938 GiB | +0.000412 | 0.23x | yes |
+| **ships today: blockq-32 4-bit embed + trellis head** | **1.234 GiB** | **+0.000297** | **0.17x** | **no** |
+| trellis head + per-row 6-bit embed | 1.407 GiB | +0.000315 | 0.18x | no |
+| exllamav3 native | 2.579 GiB | +0 | — | — |
+
+Two readings, and the second is the one that decides it.
+
+**On quality, fp8 is acceptable.** At 0.38x the noise floor it sits comfortably inside the
+region this note already called free, and it is *better* than the 7-bit per-row point the
+sweep above recommends as the tied operating point -- so the prior that fp8 would be too
+lossy was wrong. It loses to int8 per-row by 1.6x at byte-for-byte parity, exactly as the
+Gaussian prior predicted in direction if not in size, but both are far under the floor.
+
+**On value, the gate moved out from under it.** The shared-tensor frontier was computed
+against *native's* 2.579 GiB, where sharing saved 1.76 GiB and was obviously worth kernel
+work. Shipping blockq closed most of that gap: the split now costs 1.234 GiB. Against that
+baseline a shared fp8 tensor saves **0.296 GiB -- 4.6% of the checkpoint -- for 2.25x the
+divergence**, and still needs an fp8 head path plus an fp8 gather. It is much less work
+than an int-GEMM, but it is not free, and it buys a quarter of what the frontier table
+implies because that table is priced against a baseline we no longer ship.
+
+**So: fp8 works, and the shared tensor is no longer worth building.** The honest form of
+the result is that the idea was right on its own terms -- fp8 does clear the blocker, and
+cheaply -- but blockq shipping in the interim reduced the prize to 0.3 GiB on the one tied
+mid-size family censused. Sharing stays a real option if a tied model ever needs that last
+5%; it is no longer a reason to build anything. The recorded "7 or 8 bit shared per-row"
+operating point should be read as superseded, not as pending work.
+
+
 ## Choosing depths: what the repair tool should default to
 
 *Partly superseded by "Is GGUF the right storage format?" below, which changed the storage

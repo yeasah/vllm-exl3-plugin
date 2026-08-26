@@ -419,12 +419,21 @@ per-module rather than per-checkpoint, and to point the rename at the head's own
 prefix, which still defeats the loader's `lm_head` skip. Not hypothetical:
 `gemma4-e2b` is tied *and* needs blockq for its per-layer embedding.
 
-**The shared tied-model tensor stays deferred**, on the same grounds as before: one
-tensor serving both roles needs a scalar-integer GEMM for the head, which does not
-exist anywhere, and sharing would otherwise mean dequantizing to dense fp16 and giving
-back the whole saving. It also only helps tied models, and gemma-4 is nearly its whole
-constituency — so it is best read as a follow-up to `fa-head-dim-512` rather than an
-independent goal.
+**The shared tied-model tensor is now closed rather than deferred** (2026-08-26). The
+standing blocker was that one tensor serving both roles needs a scalar-integer GEMM for
+the head, which exists nowhere. fp8-e4m3 clears that — `torch._scaled_mm` is a
+primitive, not a kernel project — and it is good enough: measured at **+0.000669**
+against native, 0.38x the noise floor, better than the 7-bit per-row point this note
+recommended as the tied operating point. Per-channel scaling is required; per-tensor is
+1.6x worse for nothing.
+
+What killed it is not quality but the baseline moving. The frontier that made sharing
+worth kernel work was priced against *native's* 2.579 GiB. Shipping blockq brought the
+split to 1.234 GiB, so a shared fp8 tensor now saves **0.296 GiB — 4.6% of the
+checkpoint — for 2.25x the divergence**, and still needs an fp8 head path and gather.
+Combined with gemma-4 being nearly the whole tied mid-size constituency, the prize no
+longer justifies the work. The recorded "7 or 8 bit shared per-row" operating point is
+**superseded, not pending**. Reopen only if a tied model ever needs that last 5%.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
