@@ -278,3 +278,68 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
             "the block-quantized embedding has no matmul path: it stores an "
             "embedding, not a weight matrix a GEMM can consume"
         )
+
+
+class EXL3BlockQTiedEmbeddingMethod(EXL3BlockQEmbeddingMethod, EXL3EmbeddingMethod):
+    """A *tied* model whose embedding has also been block-quantized.
+
+    This is the best-measured arrangement for a tied model and the one the
+    predicates above originally treated as impossible. A tied checkpoint that
+    `tools/quantize_embedding.py` has repaired holds both encodings of the same
+    logical matrix -- `bq_*` for the embedding and the trellis `lm_head.*` for
+    the head -- and each is the right encoding for its own role: a row gather
+    wants per-row scales, a GEMM wants the trellis. Serving the embedding from
+    the trellis instead (what a tied model gets without this) costs +0.0216 KLD
+    against +0.0003 here, ~73x worse, because it is the wrong encoding for a
+    lookup (docs/embeddings.md, "The head sweep").
+
+    **Both tensor sets live on this one module**, which looks odd and is in fact
+    the existing design: vLLM skips a tied model's `lm_head.*` outright, so
+    `get_cache_scale_mapper` renames those weights onto the embedding's prefix
+    and `EXL3TiedLMHeadMethod` -- owning no storage -- reads them back from here
+    to compute logits. Nothing about that changes; this class only adds the
+    block-quantized tensors beside them, and points the *lookup* at those
+    instead of at the trellis.
+
+    So the split of responsibilities is:
+
+    - `embedding()` -> `bq_*`, inherited from `EXL3BlockQEmbeddingMethod`.
+    - `apply()` -> the trellis, inherited from `EXL3EmbeddingMethod`, and reached
+      only via the tied head's `exl3_tied_source`.
+    """
+
+    def __init__(self, quant_config):
+        # Not `EXL3BlockQEmbeddingMethod.__init__`, which records only the
+        # config: the inherited `apply()` needs the codebook flags that
+        # `EXL3LinearMethod.__init__` derives.
+        EXL3EmbeddingMethod.__init__(self, quant_config)
+
+    def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
+        """Allocate both sets. Safe to run back to back: the parameter names are
+        disjoint (`bq_*` against `trellis`/`suh`/`svh`), and the two layer
+        attributes they both set -- `exl3_params_dtype` and `exl3_real_rows` --
+        are computed from the same arguments and agree by construction."""
+        EXL3EmbeddingMethod.create_weights(self, layer, *args, **kwargs)
+        EXL3BlockQEmbeddingMethod.create_weights(self, layer, *args, **kwargs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        EXL3EmbeddingMethod.process_weights_after_loading(self, layer)
+        EXL3BlockQEmbeddingMethod.process_weights_after_loading(self, layer)
+
+    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+        """Logits off the trellis, stated explicitly because the MRO gets this
+        wrong in a way that only one of the two tied shapes notices.
+
+        `EXL3BlockQEmbeddingMethod` comes first here -- it has to, so the lookup
+        resolves to the block-quantized gather -- and it defines `apply` as a
+        stub that raises "no matmul path". That stub is correct for an untied
+        embedding, which genuinely has no weight matrix a GEMM can consume, and
+        wrong here, where the module also holds the head's trellis.
+
+        The gemma4-style shape hides this: its head is a separate module whose
+        own `EXL3TiedLMHeadMethod.apply` reaches the trellis through
+        `EXL3EmbeddingMethod`, never through this class. The Qwen3-style shape
+        does not -- one module serves both roles, so this method *is* the logits
+        path, and inheriting the stub would raise on the first token.
+        """
+        return EXL3EmbeddingMethod.apply(self, layer, *args, **kwargs)

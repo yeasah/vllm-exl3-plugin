@@ -545,25 +545,48 @@ class EXL3Config(QuantizationConfig):
                 return EXL3TiedLMHeadMethod(self)
             return EXL3LMHeadMethod(self) if self.head_is_quantized() else None
         if isinstance(layer, VocabParallelEmbedding):
-            if self.embedding_is_blockq():
-                # Untied, with a block-quantized embedding produced by
-                # tools/quantize_embedding.py. Nothing is renamed onto this
-                # module: the tensors are its own.
-                from .embedding import EXL3BlockQEmbeddingMethod
-
-                return EXL3BlockQEmbeddingMethod(self)
-            # EXL3 never quantizes the input embedding -- `embed_tokens.weight`
-            # is dense in every checkpoint inspected -- but a *tied* model ships
-            # a quantized lm_head covering the same matrix, which can serve as
-            # the embedding so the dense copy is never loaded at all.
-            if not self.embedding_is_quantized():
-                return None
             # Where the rename in `get_cache_scale_mapper` has to send
             # `lm_head.*`. Taken from the module itself rather than guessed:
             # multimodal wrappers nest the embedding (gemma-4 puts it under
             # `language_model`), and construction runs before any weight is
             # loaded, so this is known in time.
+            #
+            # Recorded before any branch. It used to be set only on the path
+            # below, so a checkpoint taking the blockq branch left it at its
+            # `"model.embed_tokens"` default while the rename still fired --
+            # routing 755 MiB of trellis to a module path a nested model does
+            # not have, dropping it silently, and serving garbage.
             self.embed_prefix = prefix
+
+            blockq_embed = self.embedding_is_blockq()
+            # `embedding_is_quantized` answers a question about the *head's*
+            # storage -- whether a tied model's `lm_head.*` is being renamed
+            # onto this module -- so it is not exclusive with the embedding
+            # having block-quantized tensors of its own. A repaired tied
+            # checkpoint makes both true, and both are then load-bearing.
+            tied_head_here = self.embedding_is_quantized()
+
+            if blockq_embed:
+                from .embedding import (
+                    EXL3BlockQEmbeddingMethod,
+                    EXL3BlockQTiedEmbeddingMethod,
+                )
+
+                if tied_head_here:
+                    # Tied *and* repaired: this module owns the `bq_*` tensors
+                    # for the lookup and receives the head's trellis for the
+                    # logits matmul. Each role gets the encoding built for it.
+                    return EXL3BlockQTiedEmbeddingMethod(self)
+                # Untied. Nothing is renamed onto this module: the tensors are
+                # its own, and the head has its own method.
+                return EXL3BlockQEmbeddingMethod(self)
+
+            # EXL3 never quantizes the input embedding -- `embed_tokens.weight`
+            # is dense in every checkpoint inspected -- but a *tied* model ships
+            # a quantized lm_head covering the same matrix, which can serve as
+            # the embedding so the dense copy is never loaded at all.
+            if not tied_head_here:
+                return None
             return EXL3EmbeddingMethod(self)
 
         from vllm.model_executor.layers.fused_moe import RoutedExperts
