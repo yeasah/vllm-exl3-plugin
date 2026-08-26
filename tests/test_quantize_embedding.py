@@ -1,16 +1,20 @@
 """Tests for the tied-checkpoint guard in `tools/quantize_embedding.py`.
 
 The tool was documented as scoped to untied models and enforced that nowhere, so
-running it on a tied checkpoint succeeded and produced an artifact that corrupts
-at serve time. The trap is that a tied EXL3 checkpoint *does* carry a dense
+running it on a tied checkpoint produced an artifact that corrupted at serve
+time. The trap is that a tied EXL3 checkpoint *does* carry a dense
 `embed_tokens.weight` -- next to a trellis `lm_head` -- so the tensor's presence
 looks like evidence of untying and is not. Found 2026-08-26, from a repaired
 tied `gemma-4-12B-it-exl3`.
 
-The refusal runs before shard discovery, so a directory holding nothing but a
-`config.json` is enough to exercise it: a checkpoint that gets past the guard
-fails later on "no .safetensors", which is exactly how the permitted case is
-distinguished from the refused one here.
+Tied checkpoints are now supported rather than refused: the serving path landed
+the same day. What remains is that the output carries an invisible requirement --
+a plugin new enough to have `EXL3BlockQTiedEmbeddingMethod` -- and older ones
+serve it as garbage without complaint. `is_tied` is what drives saying so.
+
+The notice runs before shard discovery, so a directory holding nothing but a
+`config.json` is enough to exercise it: every case then fails on "no
+.safetensors", and what distinguishes them is what was said on the way there.
 """
 
 import importlib.util
@@ -84,7 +88,12 @@ class IsTiedTest(unittest.TestCase):
         self.assertIsNone(qe.is_tied(_ckpt(self.tmp, None)))
 
 
-class GuardTest(unittest.TestCase):
+class TiedNoticeTest(unittest.TestCase):
+    """Tied checkpoints are now *permitted* -- `EXL3BlockQTiedEmbeddingMethod`
+    serves them -- but the output carries a requirement nothing downstream can
+    see, so the tool has to say it. An older plugin loads such a checkpoint
+    without complaint and emits garbage."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = self._tmp.name
@@ -92,33 +101,27 @@ class GuardTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_tied_checkpoint_is_refused(self):
+    def test_tied_checkpoint_is_allowed_through(self):
+        """Proven by reaching the *next* failure -- missing shards -- rather
+        than being turned away at the door."""
         r = _run(_ckpt(self.tmp, {"tie_word_embeddings": True}))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("declares tied embeddings", r.stderr)
-
-    def test_refusal_explains_the_dense_embedding_trap(self):
-        """The message has to defuse the inference that produced the bug."""
-        r = _run(_ckpt(self.tmp, {"tie_word_embeddings": True}))
-        self.assertIn("not evidence of untying", r.stderr)
-
-    def test_unknown_tiedness_is_refused(self):
-        r = _run(_ckpt(self.tmp, None))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("cannot be ruled out", r.stderr)
-
-    def test_allow_tied_overrides(self):
-        """The escape hatch exists so the serving path can be worked on. It must
-        get *past* the guard -- proven by failing on the missing shards instead."""
-        r = _run(_ckpt(self.tmp, {"tie_word_embeddings": True}), "--allow-tied")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertNotIn("declares tied embeddings", r.stderr)
         self.assertIn("no .safetensors", r.stderr)
 
-    def test_untied_checkpoint_is_not_blocked(self):
-        """The guard must not touch the path it was added to protect."""
+    def test_tied_checkpoint_warns_about_plugin_version(self):
+        r = _run(_ckpt(self.tmp, {"tie_word_embeddings": True}))
+        self.assertIn("EXL3BlockQTiedEmbeddingMethod", r.stderr)
+        self.assertIn("is tied", r.stderr)
+
+    def test_unknown_tiedness_warns_too(self):
+        """None is not False: a checkpoint that cannot be read must not be
+        quietly treated as untied."""
+        r = _run(_ckpt(self.tmp, None))
+        self.assertIn("may be tied", r.stderr)
+
+    def test_untied_checkpoint_gets_no_notice(self):
+        """The common path stays quiet."""
         r = _run(_ckpt(self.tmp, {"tie_word_embeddings": False}))
-        self.assertNotIn("declares tied embeddings", r.stderr)
+        self.assertNotIn("EXL3BlockQTiedEmbeddingMethod", r.stderr)
         self.assertIn("no .safetensors", r.stderr)
 
 

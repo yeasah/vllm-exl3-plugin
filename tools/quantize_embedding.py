@@ -9,12 +9,17 @@ plugin then serves without ever materializing the dense matrix.
 
     tools/quantize_embedding.py <checkpoint-dir> <output-dir>
 
-Scoped to **untied** models, and that scope is now *enforced* -- it was documented
-here and checked nowhere, which is how tied checkpoints got repaired by accident.
-A tied model already has a quantized `lm_head` covering the same matrix and is
-served from it today with no tooling; repairing one produces a checkpoint that no
-serving path currently loads correctly. `--allow-tied` exists to build one on
-purpose, for work on that path.
+Useful on **tied** models too, which was not always true. A tied model is served
+from its quantized `lm_head` with no tooling at all, but through the *trellis*,
+which is the wrong encoding for a lookup and costs ~73x the divergence of a
+block-quantized embedding (docs/embeddings.md). Repairing a tied checkpoint keeps
+the trellis for the logits GEMM and adds `bq_*` for the gather, so each role gets
+the encoding built for it.
+
+That arrangement needs a plugin new enough to serve both from one module --
+`EXL3BlockQTiedEmbeddingMethod`, added 2026-08-26. **An older plugin loads such a
+checkpoint without complaint and serves garbage**, so a repaired tied checkpoint
+is not portable backwards; the run below says so when it applies.
 
 Two properties make this safe to run on a published checkpoint:
 
@@ -132,30 +137,24 @@ def main() -> None:
     ap.add_argument("output", help="directory to write the repaired checkpoint to")
     ap.add_argument("--chunk", type=int, default=16384, help="rows per encode step")
     ap.add_argument("--device", default="cpu", help="device to encode on")
-    ap.add_argument("--allow-tied", action="store_true",
-                    help="proceed on a tied checkpoint (see the refusal text)")
     args = ap.parse_args()
 
     src, dst = args.checkpoint, args.output
 
+    # Said out loud because the resulting checkpoint is a durable artifact and
+    # the requirement it carries is invisible in the file: served by a plugin
+    # predating EXL3BlockQTiedEmbeddingMethod, a repaired tied checkpoint loads
+    # clean and emits garbage. Nothing downstream can warn about that, so this
+    # is the only place it gets said.
     tied = is_tied(src)
-    if tied is not False and not args.allow_tied:
-        detail = ("declares tied embeddings" if tied
-                  else "has no config.json, so tying cannot be ruled out")
-        raise SystemExit(
-            f"{src} {detail}, and repairing a tied checkpoint produces one that "
-            "no serving path currently loads correctly.\n"
-            "\n"
-            "The dense embedding being present is not evidence of untying: an "
-            "EXL3 checkpoint stores one next to a trellis lm_head even when "
-            "tied. Repairing anyway yields a checkpoint where the embedding and "
-            "the head each claim quantized storage, which the plugin's "
-            "predicates treat as mutually exclusive -- it fails late, at logits "
-            "time, or silently discards the head's trellis and serves garbage.\n"
-            "\n"
-            "Pass --allow-tied only to build such a checkpoint deliberately, "
-            "for work on that serving path."
-        )
+    if tied is not False:
+        which = "is tied" if tied else "has no config.json, so may be tied"
+        print(f" -- {os.path.basename(os.path.normpath(src))} {which}: the "
+              f"output keeps the trellis lm_head for logits and adds bq_* for "
+              f"the lookup.\n"
+              f"    Requires a plugin with EXL3BlockQTiedEmbeddingMethod "
+              f"(2026-08-26 or newer). Older ones serve it as garbage.",
+              file=sys.stderr)
 
     if os.path.exists(dst) and os.listdir(dst):
         raise SystemExit(f"{dst} exists and is not empty")
