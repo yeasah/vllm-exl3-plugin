@@ -632,25 +632,30 @@ sequence a roadmap around. Its actual value is narrower and real: it is the only
 on hand that is tied *and* needs per-layer blockq, so it exercises together two paths
 nothing else reaches.
 
-The bug stands on its own, though its reachability is narrower than it first looks and is
-worth stating exactly. The predicate conflict is **latent**: it needs a tied checkpoint
-whose embedding has been repaired, and `tools/quantize_embedding.py` declines precisely
-that -- it looks for a dense `embed_tokens.weight`, which a tied EXL3 checkpoint does not
-have, and exits saying so. It arms itself the moment any path emits blockq for a tied
-model, which is where both the repair tool and the shared-tensor work are headed. The
-misrouting is the one that has actually been seen, on a stock tied `gemma-4-12B-it-exl3`
-with no blockq involved -- but only with `vllm-embed-quant-config` reverted, so a correctly
-patched tree does not hit it.
+The bug stands on its own, and it is reachable by the obvious workflow -- which is how it
+was found. `tools/quantize_embedding.py` documents itself as scoped to *untied* models, but
+**nothing enforces that**: there is no `tie_word_embeddings` check in the file, its only
+selection is `key.endswith(".embed_tokens.weight")`, and a tied EXL3 checkpoint *does* carry
+a dense embedding -- `gemma-4-12B-it-exl3` ships `model.language_model.embed_tokens.weight`
+at `[262144, 3840]` BF16 alongside `lm_head.trellis`. That redundancy is precisely what this
+note exists to remove, so naturally it is there. The suffix matches the nested name, the tool
+runs, and the output is a tied blockq checkpoint that corrupts at serve time.
 
-What earns it priority is therefore the failure *class*, not the odds of stumbling into it.
-Nothing fails at load in either variant: the conflict dies late, at logits time, and the
-misrouting sends 755 MiB of trellis to a module path that does not exist, drops it without
-complaint, and lets the model load, run and **emit garbage**. There is no guard anywhere in
-that -- one variant is held off solely by a patch of ours rather than by any check, the
-other arms itself as soon as tied+blockq becomes producible. Silent corruption outranks a
-size optimization sitting downstream of the same code. It is also cheap: per-module
-predicates, a rename pointed at the head's own prefix, and a guard -- plugin-local Python,
-no kernel or format work.
+(The `SystemExit` in `find_embedding` says "a tied checkpoint has nothing for this tool to
+do". That is prose in a *not-found* branch rather than a tie check, and the explanation is
+false for EXL3 tied checkpoints. It reads like a guard and is not one.)
+
+Nothing warns at any stage, and nothing fails at load either: the predicate conflict dies
+late, at logits time, and with `vllm-embed-quant-config` reverted the misrouting sends 755
+MiB of trellis to a module path that does not exist, drops it without complaint, and lets
+the model load, run and **emit garbage**. Silent corruption produced by running a shipped
+tool on a stock checkpoint outranks a size optimization sitting downstream of the same code.
+
+It is also cheap, and there are three places to intervene rather than two. Serving-side:
+per-module predicates instead of per-checkpoint, and a rename pointed at the head's own
+prefix. But the best of them is the tool itself -- it is where the broken artifact is
+*created*, it already knows its intended scope, and enforcing it is a config read plus a
+refusal. All plugin-local Python, no kernel or format work.
 
 **So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
 priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer

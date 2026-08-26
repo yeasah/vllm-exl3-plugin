@@ -446,28 +446,33 @@ entirely new architecture in the exl3 pipeline. Its real value is narrower and w
 keeping: it is the only checkpoint on hand that exercises tied and per-layer blockq
 together.
 
-**Reachability, checked rather than assumed (2026-08-26) — the two failures differ.**
+**It is reachable by the obvious workflow, and `tools/quantize_embedding.py` is where
+it starts** (verified 2026-08-26). The tool's docstring scopes it to *untied* models —
+"a tied model already has a quantized `lm_head` covering the same matrix" — but
+**nothing enforces that scope**. There is no `tie_word_embeddings` check anywhere in
+the file. Its only selection is `key.endswith(".embed_tokens.weight")`, and a tied EXL3
+checkpoint *does* carry a dense embedding: `gemma-4-12B-it-exl3` ships
+`model.language_model.embed_tokens.weight` at `[262144, 3840]` BF16 **alongside**
+`lm_head.trellis`. That redundancy is the very thing this section exists to remove, so
+of course it is present. The suffix matches the nested name, the tool proceeds happily,
+and out comes a tied blockq checkpoint that corrupts at serve time. This is how the bug
+was found in the first place.
 
-- *Tied + blockq predicate conflict → late crash at logits.* **Latent, not currently
-  reachable.** It needs a tied checkpoint whose embedding has been repaired, and
-  `tools/quantize_embedding.py` declines exactly that case: it looks for a dense
-  `embed_tokens.weight`, a tied EXL3 checkpoint has none, and it exits with "a tied
-  checkpoint has nothing for this tool to do". No blockq fixture in `bench/suite.py`
-  is tied either — they are all MiniCPM5-1B. This goes live the moment *any* path
-  emits blockq for a tied model, which is precisely where the repair tool and the
-  shared-tensor work are both heading.
-- *Nested-model `embed_prefix` default → 755 MiB of trellis misrouted and dropped.*
-  **Observed on a stock tied `gemma-4-12B-it-exl3`, no blockq required** — but only
-  with `vllm-embed-quant-config` reverted. On a correctly patched tree it does not
-  fire.
+The `SystemExit` in `find_embedding` reads "a tied checkpoint has nothing for this tool
+to do", which invites exactly the wrong inference — it is prose in a *not-found* branch,
+not a tie check, and its explanation is false for EXL3 tied checkpoints. Do not read it
+as a guard; there is no guard.
 
-So neither is reachable by an obvious workflow on a patched tree today, and the
-priority does not rest on that. It rests on the failure *class*: silent corruption, no
-guard anywhere — the misrouting discards 755 MiB and nothing objects, and with the
-patch applied the blockq conflict still fails late at logits rather than at load. One
-of the two is held off solely by a patch of ours rather than by any check, and the
-other arms itself as soon as tied+blockq becomes producible. That is worth a guard
-ahead of a size optimization sitting downstream of the same code.
+So the honest reachability is: **run the shipped tool on a stock tied gemma checkpoint
+and you have the broken artifact.** Nothing warns, at any stage. Then nothing fails at
+load either — the predicate conflict dies late at logits time, and with
+`vllm-embed-quant-config` reverted the misrouting sends 755 MiB of trellis to a
+nonexistent module path, drops it without complaint, and the model loads, runs and emits
+garbage.
+
+**That makes the repair tool the best place to stop the whole class**, ahead of the two
+serving-side fixes: it is the point where a broken checkpoint is *created*, it already
+knows its own scope, and enforcing it is a config read plus a refusal.
 
 **The shared tied-model tensor's kernel blocker is gone** (2026-08-26). One tensor
 serving both roles needed a scalar-integer GEMM for the head, which exists nowhere.
