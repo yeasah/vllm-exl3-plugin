@@ -438,22 +438,36 @@ loud. The fix is to make both predicates
 per-module rather than per-checkpoint, and to point the rename at the head's own
 prefix, which still defeats the loader's `lm_head` skip.
 
-**This is a live bug on the obvious path, and that is the whole case for fixing it**
-(sharpened 2026-08-26). It was previously justified by `gemma4-e2b` being tied *and*
-needing blockq for its per-layer embedding — the one model that *must* go through it.
-That framing undersold it twice over. E2B/E4B is a development aid rather than a
-serving target and would need an entirely new architecture in the exl3 pipeline to
-reach at all, which is a poor thing to hang a priority on; meanwhile the bug needs no
-unusual model. Run the shipped embedding-repair tooling on a tied gemma checkpoint —
-the obvious thing to do to a gemma checkpoint — and you are in it today.
+**The case for fixing it does not depend on `gemma4-e2b`** (sharpened 2026-08-26). It
+was previously justified by E2B being tied *and* needing blockq — the one model that
+*must* go through this path. That is a poor thing to hang a priority on: E2B/E4B is a
+development aid rather than a serving target, and reaching it at all would take an
+entirely new architecture in the exl3 pipeline. Its real value is narrower and worth
+keeping: it is the only checkpoint on hand that exercises tied and per-layer blockq
+together.
 
-It is also one of the worst presentations a bug can have. Nothing fails at load: with
-`vllm-embed-quant-config` applied it loads clean and dies late, at logits time; with it
-reverted the trellis is misrouted to a module path that does not exist, dropped without
-complaint, and the model loads, runs and **emits garbage**. The misrouting itself is
-unguarded in both directions — 755 MiB silently discarded and nothing objects. A
-wrong-output bug reachable by the obvious workflow outranks any size optimization
-downstream of it, independent of which models are currently in favour.
+**Reachability, checked rather than assumed (2026-08-26) — the two failures differ.**
+
+- *Tied + blockq predicate conflict → late crash at logits.* **Latent, not currently
+  reachable.** It needs a tied checkpoint whose embedding has been repaired, and
+  `tools/quantize_embedding.py` declines exactly that case: it looks for a dense
+  `embed_tokens.weight`, a tied EXL3 checkpoint has none, and it exits with "a tied
+  checkpoint has nothing for this tool to do". No blockq fixture in `bench/suite.py`
+  is tied either — they are all MiniCPM5-1B. This goes live the moment *any* path
+  emits blockq for a tied model, which is precisely where the repair tool and the
+  shared-tensor work are both heading.
+- *Nested-model `embed_prefix` default → 755 MiB of trellis misrouted and dropped.*
+  **Observed on a stock tied `gemma-4-12B-it-exl3`, no blockq required** — but only
+  with `vllm-embed-quant-config` reverted. On a correctly patched tree it does not
+  fire.
+
+So neither is reachable by an obvious workflow on a patched tree today, and the
+priority does not rest on that. It rests on the failure *class*: silent corruption, no
+guard anywhere — the misrouting discards 755 MiB and nothing objects, and with the
+patch applied the blockq conflict still fails late at logits rather than at load. One
+of the two is held off solely by a patch of ours rather than by any check, and the
+other arms itself as soon as tied+blockq becomes producible. That is worth a guard
+ahead of a size optimization sitting downstream of the same code.
 
 **The shared tied-model tensor's kernel blocker is gone** (2026-08-26). One tensor
 serving both roles needed a scalar-integer GEMM for the head, which exists nowhere.

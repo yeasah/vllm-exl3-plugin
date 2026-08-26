@@ -632,16 +632,25 @@ sequence a roadmap around. Its actual value is narrower and real: it is the only
 on hand that is tied *and* needs per-layer blockq, so it exercises together two paths
 nothing else reaches.
 
-The bug stands entirely on its own. It needs no unusual model -- run the shipped
-embedding-repair tooling on a tied gemma checkpoint, which is the obvious thing to do to a
-gemma checkpoint, and you are in it today. And it presents about as badly as a bug can:
-nothing fails at load. With `vllm-embed-quant-config` applied it loads clean and dies late,
-at logits time. With it reverted, 755 MiB of trellis is routed to a module path that does
-not exist, dropped without complaint, and the model loads, runs and **emits garbage** --
-the misrouting unguarded in either direction. A wrong-output bug reachable by the obvious
-workflow outranks a size optimization downstream of it, whichever models are in favour. It
-is also cheap: per-module predicates, a rename pointed at the head's own prefix, and a
-guard -- plugin-local Python, no kernel or format work.
+The bug stands on its own, though its reachability is narrower than it first looks and is
+worth stating exactly. The predicate conflict is **latent**: it needs a tied checkpoint
+whose embedding has been repaired, and `tools/quantize_embedding.py` declines precisely
+that -- it looks for a dense `embed_tokens.weight`, which a tied EXL3 checkpoint does not
+have, and exits saying so. It arms itself the moment any path emits blockq for a tied
+model, which is where both the repair tool and the shared-tensor work are headed. The
+misrouting is the one that has actually been seen, on a stock tied `gemma-4-12B-it-exl3`
+with no blockq involved -- but only with `vllm-embed-quant-config` reverted, so a correctly
+patched tree does not hit it.
+
+What earns it priority is therefore the failure *class*, not the odds of stumbling into it.
+Nothing fails at load in either variant: the conflict dies late, at logits time, and the
+misrouting sends 755 MiB of trellis to a module path that does not exist, drops it without
+complaint, and lets the model load, run and **emit garbage**. There is no guard anywhere in
+that -- one variant is held off solely by a patch of ours rather than by any check, the
+other arms itself as soon as tied+blockq becomes producible. Silent corruption outranks a
+size optimization sitting downstream of the same code. It is also cheap: per-module
+predicates, a rename pointed at the head's own prefix, and a guard -- plugin-local Python,
+no kernel or format work.
 
 **So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
 priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer
