@@ -210,27 +210,33 @@ prefill amortizes the same decode over 2200 tokens of GEMM, so it disappears. A 
 change that sped up both equally would have been evidence of a measurement artifact rather
 than of a faster codebook.
 
-**And it costs nothing in quality**: body-only KLD at 3.00bpw is 0.102867 (`mcg`) against
-0.102701 (`mul1`), a difference of 0.000166 -- see docs/embeddings.md, where that pair was
-measured to rule out a codebook confound in the layer curve. So prefer `mul1` where a
-checkpoint offers both.
+**It is not free, and mean KLD hides why.** At 3.00bpw the two codebooks have the same
+mean KLD -- 0.107332 (`mcg`) against 0.107292 (`mul1`) on 24 rows -- while `mul1` is
+**2.2% worse in perplexity** (18.5705 -> 18.9719). A mean cannot explain that, and the
+quantiles can: `mul1` is *better* on the typical token and *worse* on the hard ones.
 
-**gemma-4-12B is the transition point, so the dual publish is a one-off.** Every EXL3
-checkpoint on hand published after it carries `mul1` (Qwen3.6-27B, Qwen3.8-27B,
-Muse-Glimmer, Laguna) and every one before still carries `mcg` (Qwen3.5-9B, Qwen3.5-35B-A3B,
-MiniCPM5-1B, gemma-4-26B-A4B@2.54bpw). Nothing else publishes both, which is why this
-measurement was only possible here. The practical read: the older checkpoints are leaving
-~4% of decode on the floor and only a re-quant upstream recovers it -- worth knowing for
-gemma-4-26B-A4B in particular. (Older checkpoints again -- Llama-3.2-1B, Qwen3-0.6B -- carry
-neither tensor, predating both. So does `Qwen3.8-27B SC_3.00bpw_H4`, which presumably means
-the `sc_*` pipeline parameterizes the codebook differently; not chased.)
+| | mean KLD | median KLD | p90 KLD | ppl |
+|---|---|---|---|---|
+| `mcg` | 0.107332 | 0.050811 | **0.219520** | **18.5705** |
+| `mul1` | **0.107292** | **0.048615** | 0.221747 | 18.9719 |
 
-*One loose end.* Those two have near-identical KLD but perplexity **17.9276** (`mcg`) against
-**18.4556** (`mul1`) -- equal divergence from the bf16 reference, differently aimed, and
-`mul1`'s happens to land worse against the actual tokens. Ten rows of openwebtext, so this
-is a lead rather than a finding, and it is the one thing that would complicate "free" if it
-survived a larger sample. Worth resolving before the recommendation above is leaned on
-hard.
+Measured twice, at 10 and 24 rows, and the ordering holds on every axis both times. The
+tail gap reproduces to four significant figures across the 2.4x expansion (0.002235 ->
+0.002227), so this is a systematic difference in error *shape* rather than noise or a few
+outlier tokens. Perplexity weights exactly the tail `mul1` gives up, which is why it caught
+what mean KLD could not.
+
+**So the recommendation is a trade, not a freebie: +4.3% decode for ~2-3% perplexity.**
+Worth taking for throughput-bound serving; worth knowing about before assuming two
+same-bitrate checkpoints are interchangeable. Whether the tail regression matters in
+practice depends on the workload -- it is concentrated in exactly the tokens a model finds
+hard, which is where a user is most likely to be paying attention.
+
+*Methodological note, since it generalizes past this comparison:* two encodings can agree on
+mean KLD to five decimal places and still differ systematically. `qbench` reporting median
+and p90 alongside the mean is what made this visible; a harness reporting only the mean
+would have called them identical, which is precisely what the first run of this comparison
+concluded.
 
 ## Development note
 
