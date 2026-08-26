@@ -547,13 +547,19 @@ therefore covers untied models completely and tied models at a small penalty.
 
 **Build the split first; treat the shared tensor as a later optimization gated on kernel
 work.** Its value is also narrower than it looks: sharing only helps *tied* models, and of
-the checkpoints censused here only the gemma-4 family is both tied and mid-size. If
-gemma-4 turns out not to be practically deployable -- which currently rides on the
-flash-attention head-dim-512 question (TODO `fa-head-dim-512`) -- the shared-tensor
-optimization has almost nothing left to apply to. It is best read as a possible follow-up
-to that work rather than as an independent goal.
+the checkpoints censused here only the gemma-4 family is both tied and mid-size.
 
-### fp8 as the shared tensor: it clears the kernel gate, but the gate moved
+*Both halves of that gating have since moved (2026-08-26). The kernel gate is gone -- see
+"fp8 as the shared tensor" below. And gemma-4's deployability was recorded as riding on
+the flash-attention head-dim-512 question, which was a misdiagnosis: what decides it is the
+quantized KV cache, tracked under TODO `turboquant-sliding-window`, whose walls have so far
+reduced to one-line staleness bugs and which covers gemma-4, Laguna and Muse-Glimmer --
+every real-world candidate except Qwen. On present evidence that is more likely to be
+resolved than not, so the constituency for a shared tensor is real rather than
+hypothetical, and the priority demotion this paragraph justified should be unwound with the
+misdiagnosis that caused it.*
+
+### fp8 as the shared tensor: the kernel gate is gone
 
 *Measured 2026-08-26, `~/qbench/gemma-tied-fp8.yaml`, same gemma-4-12B @4.00bpw_mul1 and
 test set as the sweeps above. Reproduces both recorded anchors exactly -- head per-row-8 at
@@ -617,20 +623,30 @@ Measured that way fp8 is the *larger* saving of the two, by the same 0.296 GiB -
 frontier's original verdict, that sharing is worth real work, survives contact with fp8
 rather than being overturned by it.
 
-**What settles it is sequencing, not value.** The tied+blockq fix has to happen regardless
-of this question, because `gemma4-e2b` is tied *and* needs blockq for its per-layer
-embedding -- so it lands first no matter what, and when it does the split becomes a real
-1.234 GiB baseline and fp8's marginal value drops back to 0.296 GiB for 2.25x the
-divergence. There is genuine value left in that margin: 0.296 GiB is real money in a
-VRAM-bound appliance, and 2.25x of something already 0.38x the noise floor is still under
-the floor. It is simply not worth pre-empting a fix that is required anyway.
+**What settles the order is a correctness bug, not a model's priority.** The obvious
+argument -- that the tied+blockq fix must happen anyway because `gemma4-e2b` needs it --
+is weaker than it looks, since E2B/E4B is a development aid rather than a serving target:
+few will deploy it, and its value here is that it is unique enough to exercise paths
+nothing else on hand reaches (tied *and* per-layer blockq in one checkpoint). That is a
+good reason to keep it working and a poor reason to sequence roadmap work around it.
 
-**So: fp8 is confirmed viable, and the shared tensor is deferred rather than closed.** The
-blocker it was gated on -- no scalar-integer GEMM -- is genuinely gone. The reason to wait
-is ordering, not merit. Revisit once `quantized-embeddings` lands and the 1.234 GiB
-baseline is real. The recorded "7 or 8 bit shared per-row" operating point is **superseded
-on encoding** -- fp8 is the shape to build if it is built -- while the sharing decision
-itself stays open.
+The fix lands first on its own merits instead. Its failure mode is silent -- the trellis is
+routed to a module path that does not exist, is dropped without complaint, and the model
+loads, runs and emits garbage -- and a wrong-output bug outranks a size optimization
+regardless of which models are in favour. It is also cheap: per-module predicates, a rename
+pointed at the head's own prefix, and a guard, all plugin-local Python with no kernel or
+format work.
+
+**So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
+priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer
+GEMM -- is genuinely gone, and the second-order gate that demoted the whole tied-model line
+was a misdiagnosis (see the note above `fa-head-dim-512` / `turboquant-sliding-window`), so
+the constituency is real. Once the crash is fixed the split becomes a true 1.234 GiB
+baseline and fp8's margin returns to 0.296 GiB for 2.25x the divergence -- which is worth
+having, since 0.296 GiB is real in a VRAM-bound appliance and 2.25x of something already
+0.38x the noise floor is still under the floor. The recorded "7 or 8 bit shared per-row"
+operating point is **superseded on encoding** -- fp8 is the shape to build -- while the
+decision to build it is now waiting on ordering alone.
 
 
 ## Choosing depths: what the repair tool should default to

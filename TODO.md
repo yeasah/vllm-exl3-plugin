@@ -135,11 +135,13 @@ holding a confusing array of implementations across CUDA, ROCm, FA2-4 and Hopper
 The open question is whether any surface in that fork could be extended the way the
 llama.cpp changeset extends ggml, for consumer Ampere / Ada / Blackwell.
 
-**Something now hangs off the answer.** gemma-4 is the only tied mid-size family on
-hand, so it is effectively the entire constituency for the shared embed+head tensor
-deferred under `quantized-embeddings`. If this turns out to be a lost cause and
-gemma-4 is not practically deployable, that optimization loses most of its reason to
-exist; if it lands, the optimization becomes the natural follow-up here.
+**What used to hang off this answer has been moved to `turboquant-sliding-window`,
+where it always belonged** (2026-08-26). The shared embed+head tensor's constituency
+is gemma-4, and this item was recorded as the thing deciding whether gemma-4 is
+practically deployable. That was the same conflation the correction above fixes: what
+decides deployability is the quantized KV cache, not the flash-attention path. This
+item is now a performance question on its own merits — a triton pin with real costs —
+and nothing else is gated on it.
 
 ## `turboquant-sliding-window` — TurboQuant cannot serve a sliding-window model
 
@@ -320,6 +322,24 @@ model has field experience and a capability-benchmark lower bound behind it, but
 `qbench` numbers. That is the measurement that decides whether this is *practical*
 rather than merely running.
 
+**This item now carries the gemma-4 dependency, and its odds have improved enough to
+change downstream priorities** (2026-08-26). Two things moved. First, the blocker was
+misidentified: it was filed under `fa-head-dim-512` as a likely-insurmountable flash
+attention gap, and it is actually this — a KV-cache layout problem whose walls have so
+far all reduced to one-line staleness bugs, one of them already cleared by patching.
+Second, the scope is three families and not one: gemma-4, Laguna and Muse-Glimmer are
+all sliding-window, which is **every real-world candidate except Qwen**. A fix is
+therefore load-bearing for most of the candidate pile rather than for one demoted
+family, and it is now better read as *more likely to be resolved than not*.
+
+What that unblocks: gemma-4 goes back to being a genuine serving candidate, so the
+shared embed+head tensor deferred under `quantized-embeddings` has a **real
+constituency rather than a hypothetical one**. The severe priority demotion that both
+gemma and every tied-model optimization inherited was downstream of the misdiagnosis,
+and should be unwound with it. The remaining unknown is the divisibility wall above,
+which is genuinely structural — not the sliding-window rejection, which is only the
+first gate.
+
 → [docs/kernels.md](docs/kernels.md)
 
 ## `repair-tool` — Repair tool for existing EXL3 checkpoints
@@ -427,15 +447,25 @@ is good enough: **+0.000669** against native, 0.38x the noise floor, better than
 required; per-tensor is 1.6x worse for nothing. So "7 or 8 bit shared per-row" is
 **superseded on encoding** — fp8 is the shape to build if it is built.
 
-**It stays deferred on sequencing, not on value.** For a tied model the blockq split is
-not a baseline yet: it is exactly the crash above, so gemma-4's real baseline today is
-native's 2.579 GiB. Against that, shared fp8 saves **1.641 GiB** and the blockq split
-saves 1.345 GiB — fp8 is the *larger* saving, and both routes are unbuilt. What decides
-the order is that the tied+blockq fix is required anyway for `gemma4-e2b`, so it lands
-first regardless; only then does fp8's margin fall back to 0.296 GiB for 2.25x the
-divergence. That margin is still worth something — 0.296 GiB is real in a VRAM-bound
-appliance, and 2.25x of 0.38x the noise floor is still under the floor — so **revisit
-once the crash is fixed**, rather than treating this as closed.
+**It stays deferred on ordering, not on value — and its priority has risen.** For a
+tied model the blockq split is not a baseline yet: it is exactly the crash above, so
+gemma-4's real baseline today is native's 2.579 GiB. Against that, shared fp8 saves
+**1.641 GiB** and the blockq split saves 1.345 GiB — fp8 is the *larger* saving, and
+both routes are unbuilt.
+
+What lands first is the crash fix, on correctness grounds rather than because any model
+demands it: the failure is silent (trellis dropped, model loads and emits garbage), and
+a wrong-output bug outranks a size optimization. The tempting argument that
+`gemma4-e2b` forces it is weak — E2B/E4B is a development aid, not a serving target;
+its value is exercising tied *and* per-layer-blockq together, which nothing else on
+hand does. Worth keeping working, not worth sequencing a roadmap around.
+
+Only after that does fp8's margin fall back to 0.296 GiB for 2.25x the divergence,
+which is still worth having — 0.296 GiB is real in a VRAM-bound appliance and 2.25x of
+0.38x the noise floor is still under the floor. And the constituency is no longer
+hypothetical: the demotion that gemma and every tied-model optimization inherited came
+from the `fa-head-dim-512` misdiagnosis, now corrected under
+`turboquant-sliding-window`. **Revisit once the crash is fixed.**
 
 → [docs/embeddings.md](docs/embeddings.md)
 
