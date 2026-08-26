@@ -25,8 +25,8 @@
   "pkg.transformers": "5.15.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "9dddd6e",
-   "head": "9dddd6e232",
+   "describe": "fad7c9f",
+   "head": "fad7c9f008",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -39,8 +39,8 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.4.3-20-gbb1d0f1",
-   "head": "bb1d0f12e1",
+   "describe": "v1.4.3-21-g3e1893e",
+   "head": "3e1893ed4d",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
