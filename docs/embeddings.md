@@ -685,6 +685,63 @@ card for `gemma-4-12B-it-exl3` (2.00-8.00bpw), which agrees with our measurement
 label rounding where they overlap (3.00/3.50/4.00bpw: their 0.107/0.073/0.028 vs our
 0.1029/0.0703/0.0270).
 
+**The marginal is a *forward* difference** -- "the marginal at 4.00bpw" means what the
+next bit buys, 4.00 -> 5.00, the same convention as "the 3->4 bit marginal is 4.13 KLD/GiB,
+the 4->5 is 0.011" below. Stated because reading it as a backward difference makes the
+table look 5x wrong at 4.00 and invites a correction that would break it: the measured
+3.50 -> 4.00 slope really is 0.068 KLD/GiB while the 4.00 -> 5.00 marginal really is 0.014.
+Both are right. The curve is *convex* through this range -- improvement accelerates into
+4.00bpw and then collapses -- which is the whole reason a crossover exists at all.
+
+**Confirmed independently (2026-08-26, `~/qbench/gemma-body-curve.yaml`).** The layer curve
+above was taken from turboderp's model card; it has now been measured here on a matched
+codebook, with `head_quant: 16` so only the body varies:
+
+| revision | body-only KLD |
+|---|---|
+| 3.00bpw (plain codebook) | 0.102867 |
+| 3.00bpw_mul1 | 0.102701 |
+| 3.50bpw_mul1 | 0.070143 |
+| 4.00bpw_mul1 | 0.026890 |
+
+Reproduces 0.1029/0.0703/0.0270. It also **refutes a codebook confound**: plain and `mul1`
+at the same bitrate differ by 0.000166 in body KLD, so a curve mixing the two is still a
+bitrate curve. (Unexplained, and not the same question: those two have near-identical KLD
+but perplexity 17.9276 against 18.4556 -- equal divergence from the reference, differently
+directed. Ten rows, so a lead rather than a finding.)
+
+### When is a block-quantized embedding worth the VRAM, against just buying body bits?
+
+A *tied* model already drops its dense embedding and serves the lookup from the trellis, so
+adding `bq_*` **costs** VRAM rather than saving it -- +0.531 GiB on gemma-4-12B -- in
+exchange for taking that lookup from +0.021619 to +0.000297. The same 0.531 GiB could
+instead buy ~0.42 bpw of body. Which wins is a marginal question, and both sides are now
+measured:
+
+blockq delivers `0.021322 / 0.531` = **0.0402 KLD/GiB**. The body beats that where its
+forward marginal is larger:
+
+| at body bpw | forward layer marginal | vs 0.0402 | better spend |
+|---|---|---|---|
+| 3.00 | 0.0514 | 1.28x | body bits |
+| 3.50 | 0.0684 | 1.70x | body bits |
+| 4.00 | 0.0142 | 0.35x | **blockq** |
+
+**The crossover is essentially 4.00bpw.** Above it, repair the embedding; below it, spend
+the bytes on the body and leave the trellis serving the lookup. The intuition is the ratio
+rather than the absolute: the trellis-served embedding costs a fixed ~0.0216, which is 1.80x
+the body's own damage at 4.00bpw but only 1.21x at 3.00bpw -- a rounding error next to a
+body that is already far worse.
+
+Two consequences. **gemma-4-12B at 4.00bpw is a clear yes.** **gemma-4-26B-A4B at 2.54bpw
+is a clear no**, and not because it is bigger -- its blockq is actually *cheaper* (0.390
+GiB, since hidden is 2816 rather than 3840). It is the bitrate that decides, and down there
+the layer marginal is roughly an order of magnitude above the bar.
+
+Caveat on the one number this rests on: the 4.00 -> 5.00 marginal is still the model card's,
+not ours. It agreed with our measurements at all three overlapping points, but pinning the
+crossover rather than inferring it wants a 4.50 or 5.00bpw run.
+
 Note the leverage: **1 bpw of layers costs 10.8x what 1 bit of embed+head costs** on this
 model, which is why the first few embed/head bits are such good value and why they fall off
 a cliff so quickly afterwards.
