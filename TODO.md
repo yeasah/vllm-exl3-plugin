@@ -145,7 +145,16 @@ exist; if it lands, the optimization becomes the natural follow-up here.
 
 `TurboQuantAttentionBackend` never overrides `supports_sliding_window`, so it takes
 the base class's `return False` and is rejected for any model with a sliding window.
-That is **gemma-4 and Laguna both** — one reason, two families.
+That is **gemma-4, Laguna and Muse-Glimmer** — one reason, three families.
+Muse-Glimmer is 39 sliding / 13 full at a 2048 window with `head_dim` 128, so like
+Laguna it carries no head-dim triton pin and is blocked on the sliding window alone.
+
+**And the rejection is a fix, not merely an obstacle.** Reported 2026-08-25: Muse
+*used* to be accepted with a turboquant cache dtype and is not any more. It could
+never have been correct — the model has been sliding-window throughout — so
+whatever ran before was serving wrong attention silently. 0.28 refusing it is the
+gate upstream should always have had, which is worth remembering when arguing for
+the sliding-window support: the ask is to make it work, not to relax the check.
 
 **Bigger than the FA miss it was mistaken for.** `fa-head-dim-512` buys gemma-4 a
 flash-attention path; this buys gemma-4 *and* Laguna a quantized KV cache, which on a
@@ -506,7 +515,14 @@ gap this item was opened for — the vision path is not merely loading.
   all for text — except that vLLM cannot offload an encoder at all
   (`upstream-queue`). → [docs/media-encoders.md](docs/media-encoders.md),
   [docs/upstream.md](docs/upstream.md)
-- **Muse-Glimmer remains the one blocked checkpoint**, for two unrelated reasons
+- **Muse-Glimmer is usable in practice now, through the Transformers backend.**
+  Reported 2026-08-25: fp8 KV works, and vLLM 0.28 ships a reasoning parser
+  (`muse_glimmer_reasoning_parser.py`) plus tool-call parsing, so the serving path
+  is complete rather than merely functional. Two things it still cannot do:
+  turboquant (sliding window -- see `turboquant-sliding-window`, where it is the
+  third family), and the **native** implementation, which fails on the quantized
+  vision adapter even with `--language-model-only`.
+- **Muse-Glimmer remains blocked on the native path**, for two unrelated reasons
   already characterized: native vLLM cannot serve its quantized vision adapter
   (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
   plugin — the same class of gap as `DFlashQwen3Model.fc`, see

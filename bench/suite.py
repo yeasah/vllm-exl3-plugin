@@ -261,10 +261,14 @@ ENTRIES: list[Entry] = [
         "entries make for a text-only model, which nothing makes for a "
         "multimodal one.\n\n"
         "It is kept as a known failure rather than dropped because the failure "
-        "is the coverage: the day upstream builds that adapter as a vLLM linear "
-        "(or `--language-model-only` is added here to bypass it), this entry "
-        "starts capturing and `check` says so. That is how the fix gets "
-        "noticed, and it is cheaper than remembering to retest",
+        "is the coverage: the day upstream builds that adapter as a vLLM linear, "
+        "this entry starts capturing and `check` says so. That is how the fix "
+        "gets noticed, and it is cheaper than remembering to retest.\n\n"
+        "**`--language-model-only` does not bypass it** -- an obvious-looking "
+        "workaround, tested 2026-08-25 and reported still failing, so the entry "
+        "is not merely un-run for want of the right flag. An earlier version of "
+        "this text offered that flag as a second way the entry might start "
+        "capturing; it is not one",
     ),
     Entry(
         label="qwen3.8-27B 3.0bpw blockq tq4",
