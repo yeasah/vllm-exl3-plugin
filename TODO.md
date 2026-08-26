@@ -892,51 +892,18 @@ and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why
 divergence is deliberately all qbench measures),
 [docs/embeddings.md](docs/embeddings.md)
 
-## `head-bits` — Head allocation, the one bit-allocation question that survives
-
-Per-tensor allocation across *body* tensors is measured dead (see
-[docs/qbench.md](docs/qbench.md), "Per-tensor bit allocation does not compose"):
-summing independently measured deltas
-over-states the result by 65% once tensors move in opposite directions, because EXL3's
-sequential error compensation makes the errors cancel. **The head is structurally
-immune to that failure.** It is one tensor traded against a uniform body — a 1-D sweep
-with a single cross term — so it can be answered by converting at each head bitrate and
-scoring, with no superposition assumption anywhere. That is exactly the assumption that
-broke; nothing else about the finding transfers.
-
-**Reasons to expect the answer is not 6.** `lm_head` measures **15x more sensitive than
-any body tensor** (3.83e-01 against a body max of 2.58e-02 at matched injected error).
-It is also large — 614M params on phi-4-mini, ~28% of body bytes at 6 bits — so head
-depth is a real size lever, not a rounding error. And the one comparison on record says
-the current default is not obviously right in either direction: a 4-bit head was a mild
-pessimization against 6-bit on *both* in-domain and neutral text, which prices 4 as too
-few but says nothing about 7 or 8. Upstream never allocates the head at all;
-`--head_bits` is a fixed integer merely recorded in the recipe.
-
-**The experiment is budget-neutral and cheap.** Hold total checkpoint size constant and
-sweep the head against a compensating body bitrate — head 4/5/6/7/8 with body adjusted
-to match bytes — then convert and score each. phi-4-mini is the right first target: it
-is small, it already has a validated bf16 reference and a scored uniform baseline, and
-the whole surrounding toolchain is built.
-
-**It also prices the tied-model plan directly.** Under
-`quantize-embeddings-pipeline`'s proposal a tied model emits one shared block-scaled
-tensor whose depth is set by the head. So whatever this sweep says the head is worth is
-the same number that decides what that shared tensor costs — the two questions are one
-measurement.
-
-**Lower priority, same area: generalize the body null.** The composability result is one
-4B model at one bitrate. The mechanism is present at any size, but the magnitude of the
-error cancellation is not known to be, and "allocation cannot work in this form" is a
-stronger claim than one model licenses. A second model at a different bitrate would
-settle whether that is a general property of sequential-LDLQ quantizers or a phi-4-mini
-result. Worth doing before the finding is stated anywhere load-bearing.
-
-→ [docs/qbench.md](docs/qbench.md)
-
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `head-bits` — answered 2026-08-25, see [docs/qbench.md](docs/qbench.md) "Head bitrate:
+  6 is defensible". Budget-neutral sweep on phi-4-mini, five points within 0.041% of each
+  other on size: head 5 edges head 6 by 3.4% (inside run noise), while 7 costs +34%, 8
+  costs +87% and 4 costs +35%. The hypothesis that the head wants more bits is not
+  supported -- it is 16% of quantizable weights, so each head bit costs 0.19 body bits.
+  With the body null and the embedding pinned at 4, the allocation solver has two scalars
+  left and needs no solver. The remaining sub-item, generalizing the body null to a second
+  model, is folded into that note.
 
 - `retire-gemma4-patch` — done 2026-08-25 at the v0.28.0 bump. Upstream landed
   generic per-layer arch config (`ModelArchitectureConfig.from_layers`), so

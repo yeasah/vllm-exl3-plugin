@@ -262,6 +262,50 @@ asymmetry the non-EXL3 arms do not get.
 
 Projects and raw results: `~/qbench/qwen38-27b-sc-{neutral,indomain}.yaml`.
 
+## Head bitrate: 6 is defensible, and the lever does not want pulling (2026-08-25)
+
+*Tracked as `head-bits`, which this closes.* The one allocation question the composability
+result did not kill: the head is a single tensor traded against a uniform body, a 1-D sweep
+with no superposition assumption anywhere, so it could be answered by converting at each
+head bitrate and scoring.
+
+Budget-neutral by construction on phi-4-mini: quantizable weights are 3221M body + 615M
+head, so `615·H + 3221·B` is held constant; the dense embedding (1.145 GiB, 42% of the
+checkpoint) is excluded because neither knob moves it. **Verified after conversion rather
+than assumed** — all five points land within **0.041%** of each other (max 688 KiB of
+1.67 GiB), against a signal in the third decimal place.
+
+| head / body | KLD | x floor | vs head 6 |
+|---|---|---|---|
+| 4 / 3.382 | 0.133103 | 25.3 | +34.6% |
+| **5 / 3.191** | **0.095567** | 18.2 | **-3.4%** |
+| 6 / 3.000 *(default)* | 0.098907 | 18.8 | — |
+| 7 / 2.809 | 0.132526 | 25.2 | +34.0% |
+| 8 / 2.618 | 0.185293 | 35.2 | +87.3% |
+
+Noise floor 0.005258, so every point sits 18-35x above it and the differences are
+resolvable by a wide margin.
+
+**The hypothesis is not supported.** The item expected the answer not to be 6, on the
+grounds that `lm_head` measures 15x more sensitive than any body tensor at matched
+injected error. It does — but sensitivity per tensor is the wrong currency. The head is
+16% of quantizable weights, so each head bit costs 0.19 body bits spread across a far
+larger tensor, and the trade turns sharply negative in both directions: +34% at head 7,
++87% at head 8, +35% at head 4. The optimum is 5-6 and the default is defensible.
+
+**Caveats, because the margin at 5 is small.** One model at one budget; head 5 beats
+head 6 by 3.4% against roughly 1% run-to-run variation in this harness, and no point was
+repeated, so "5 is better" and "5 and 6 are indistinguishable" are not currently
+separable. What *is* separable is everything outside 5-6.
+
+**Consequence: the allocation solver has nothing left to solve.** Body tensors cannot be
+allocated independently (above); the embedding is a flat 4 bits across every model
+measured ([embeddings.md](embeddings.md)); the head is 5-6 here. That leaves two scalars,
+and two scalars are a lookup table rather than a search space. Note what this is *not*: a
+claim that bit allocation is impossible in general. The body result is specific to EXL3's
+sequential error compensation, which is what makes independently measured deltas cancel —
+a quantizer without it might well compose.
+
 ## Per-tensor bit allocation does not compose (2026-08-23)
 
 *Survives the exllamav3 v1.4.3 bump unrevisited, and provably.* The study ran from
