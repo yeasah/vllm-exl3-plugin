@@ -623,19 +623,25 @@ Measured that way fp8 is the *larger* saving of the two, by the same 0.296 GiB -
 frontier's original verdict, that sharing is worth real work, survives contact with fp8
 rather than being overturned by it.
 
-**What settles the order is a correctness bug, not a model's priority.** The obvious
-argument -- that the tied+blockq fix must happen anyway because `gemma4-e2b` needs it --
-is weaker than it looks, since E2B/E4B is a development aid rather than a serving target:
-few will deploy it, and its value here is that it is unique enough to exercise paths
-nothing else on hand reaches (tied *and* per-layer blockq in one checkpoint). That is a
-good reason to keep it working and a poor reason to sequence roadmap work around it.
+**What settles the order is a correctness bug, and it needs no argument from any model's
+priority.** The tempting justification -- that the fix must happen anyway because
+`gemma4-e2b` needs it -- is the weakest available. E2B/E4B is a development aid rather than
+a serving target, and reaching it at all would take an entirely new architecture in the
+exl3 pipeline; that is a great deal of work to hang on a curiosity, and a poor thing to
+sequence a roadmap around. Its actual value is narrower and real: it is the only checkpoint
+on hand that is tied *and* needs per-layer blockq, so it exercises together two paths
+nothing else reaches.
 
-The fix lands first on its own merits instead. Its failure mode is silent -- the trellis is
-routed to a module path that does not exist, is dropped without complaint, and the model
-loads, runs and emits garbage -- and a wrong-output bug outranks a size optimization
-regardless of which models are in favour. It is also cheap: per-module predicates, a rename
-pointed at the head's own prefix, and a guard, all plugin-local Python with no kernel or
-format work.
+The bug stands entirely on its own. It needs no unusual model -- run the shipped
+embedding-repair tooling on a tied gemma checkpoint, which is the obvious thing to do to a
+gemma checkpoint, and you are in it today. And it presents about as badly as a bug can:
+nothing fails at load. With `vllm-embed-quant-config` applied it loads clean and dies late,
+at logits time. With it reverted, 755 MiB of trellis is routed to a module path that does
+not exist, dropped without complaint, and the model loads, runs and **emits garbage** --
+the misrouting unguarded in either direction. A wrong-output bug reachable by the obvious
+workflow outranks a size optimization downstream of it, whichever models are in favour. It
+is also cheap: per-module predicates, a rename pointed at the head's own prefix, and a
+guard -- plugin-local Python, no kernel or format work.
 
 **So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
 priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer

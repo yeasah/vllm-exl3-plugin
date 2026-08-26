@@ -436,8 +436,24 @@ dropped without complaint, and the model loads, runs and emits garbage. The
 guard is worth building on the strength of that: nothing in the failure is
 loud. The fix is to make both predicates
 per-module rather than per-checkpoint, and to point the rename at the head's own
-prefix, which still defeats the loader's `lm_head` skip. Not hypothetical:
-`gemma4-e2b` is tied *and* needs blockq for its per-layer embedding.
+prefix, which still defeats the loader's `lm_head` skip.
+
+**This is a live bug on the obvious path, and that is the whole case for fixing it**
+(sharpened 2026-08-26). It was previously justified by `gemma4-e2b` being tied *and*
+needing blockq for its per-layer embedding — the one model that *must* go through it.
+That framing undersold it twice over. E2B/E4B is a development aid rather than a
+serving target and would need an entirely new architecture in the exl3 pipeline to
+reach at all, which is a poor thing to hang a priority on; meanwhile the bug needs no
+unusual model. Run the shipped embedding-repair tooling on a tied gemma checkpoint —
+the obvious thing to do to a gemma checkpoint — and you are in it today.
+
+It is also one of the worst presentations a bug can have. Nothing fails at load: with
+`vllm-embed-quant-config` applied it loads clean and dies late, at logits time; with it
+reverted the trellis is misrouted to a module path that does not exist, dropped without
+complaint, and the model loads, runs and **emits garbage**. The misrouting itself is
+unguarded in both directions — 755 MiB silently discarded and nothing objects. A
+wrong-output bug reachable by the obvious workflow outranks any size optimization
+downstream of it, independent of which models are currently in favour.
 
 **The shared tied-model tensor's kernel blocker is gone** (2026-08-26). One tensor
 serving both roles needed a scalar-integer GEMM for the head, which exists nowhere.
