@@ -215,6 +215,16 @@ than of a faster codebook.
 measured to rule out a codebook confound in the layer curve. So prefer `mul1` where a
 checkpoint offers both.
 
+**gemma-4-12B is the transition point, so the dual publish is a one-off.** Every EXL3
+checkpoint on hand published after it carries `mul1` (Qwen3.6-27B, Qwen3.8-27B,
+Muse-Glimmer, Laguna) and every one before still carries `mcg` (Qwen3.5-9B, Qwen3.5-35B-A3B,
+MiniCPM5-1B, gemma-4-26B-A4B@2.54bpw). Nothing else publishes both, which is why this
+measurement was only possible here. The practical read: the older checkpoints are leaving
+~4% of decode on the floor and only a re-quant upstream recovers it -- worth knowing for
+gemma-4-26B-A4B in particular. (Older checkpoints again -- Llama-3.2-1B, Qwen3-0.6B -- carry
+neither tensor, predating both. So does `Qwen3.8-27B SC_3.00bpw_H4`, which presumably means
+the `sc_*` pipeline parameterizes the codebook differently; not chased.)
+
 *One loose end.* Those two have near-identical KLD but perplexity **17.9276** (`mcg`) against
 **18.4556** (`mul1`) -- equal divergence from the bf16 reference, differently aimed, and
 `mul1`'s happens to land worse against the actual tokens. Ten rows of openwebtext, so this
