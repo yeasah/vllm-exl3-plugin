@@ -9,9 +9,12 @@ plugin then serves without ever materializing the dense matrix.
 
     tools/quantize_embedding.py <checkpoint-dir> <output-dir>
 
-Scoped to **untied** models, which is where the win is and where nothing else can
-help: a tied model already has a quantized `lm_head` covering the same matrix and
-is served from it today, with no tooling at all.
+Scoped to **untied** models, and that scope is now *enforced* -- it was documented
+here and checked nowhere, which is how tied checkpoints got repaired by accident.
+A tied model already has a quantized `lm_head` covering the same matrix and is
+served from it today with no tooling; repairing one produces a checkpoint that no
+serving path currently loads correctly. `--allow-tied` exists to build one on
+purpose, for work on that path.
 
 Two properties make this safe to run on a published checkpoint:
 
@@ -57,8 +60,7 @@ def find_embedding(shard_files):
                     return path, key, tuple(sl.get_shape()), sl.get_dtype()
     raise SystemExit(
         f"no tensor ending {EMBED_SUFFIX} in {len(shard_files)} shard(s); "
-        "a tied checkpoint has nothing for this tool to do (it is already served "
-        "from the quantized lm_head)"
+        "there is no dense embedding here to quantize (already repaired?)"
     )
 
 
@@ -99,6 +101,30 @@ def link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
+def is_tied(src: str) -> bool | None:
+    """Whether the checkpoint's config declares tied embeddings.
+
+    Checked because the dense embedding's *presence* says nothing about it: an
+    EXL3 checkpoint stores a dense `embed_tokens.weight` alongside a trellis
+    `lm_head` even when tied -- that redundancy is the whole subject of
+    docs/embeddings.md -- so `find_embedding` succeeds on a tied checkpoint and
+    this tool will happily produce one. Multimodal configs nest the flag, so
+    both levels are consulted and either one counts.
+
+    Returns None when there is no config to read, which is not the same as
+    False and must not be treated as permission.
+    """
+    path = os.path.join(src, "config.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        cfg = json.load(f)
+    for scope in (cfg, cfg.get("text_config") or {}):
+        if scope.get("tie_word_embeddings"):
+            return True
+    return False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -106,9 +132,31 @@ def main() -> None:
     ap.add_argument("output", help="directory to write the repaired checkpoint to")
     ap.add_argument("--chunk", type=int, default=16384, help="rows per encode step")
     ap.add_argument("--device", default="cpu", help="device to encode on")
+    ap.add_argument("--allow-tied", action="store_true",
+                    help="proceed on a tied checkpoint (see the refusal text)")
     args = ap.parse_args()
 
     src, dst = args.checkpoint, args.output
+
+    tied = is_tied(src)
+    if tied is not False and not args.allow_tied:
+        detail = ("declares tied embeddings" if tied
+                  else "has no config.json, so tying cannot be ruled out")
+        raise SystemExit(
+            f"{src} {detail}, and repairing a tied checkpoint produces one that "
+            "no serving path currently loads correctly.\n"
+            "\n"
+            "The dense embedding being present is not evidence of untying: an "
+            "EXL3 checkpoint stores one next to a trellis lm_head even when "
+            "tied. Repairing anyway yields a checkpoint where the embedding and "
+            "the head each claim quantized storage, which the plugin's "
+            "predicates treat as mutually exclusive -- it fails late, at logits "
+            "time, or silently discards the head's trellis and serves garbage.\n"
+            "\n"
+            "Pass --allow-tied only to build such a checkpoint deliberately, "
+            "for work on that serving path."
+        )
+
     if os.path.exists(dst) and os.listdir(dst):
         raise SystemExit(f"{dst} exists and is not empty")
     os.makedirs(dst, exist_ok=True)
