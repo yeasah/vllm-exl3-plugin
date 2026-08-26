@@ -663,15 +663,26 @@ bar for proposing a storage format to exllamav3, which is higher than "serves th
 plugin's targets", plus a wrinkle: the recipe is a flat `{tensor: bits}` map, so an
 embedding needing a different *encoding* rather than a different depth cannot be
 expressed in it. Now that checkpoints are built here rather than consumed, that bar is
-just "does it work for us", and the wrinkle is nobody else's design decision to wait
-on. What gates the work now is the serving path, not the format.
+just "does it work for us", and the wrinkle is nobody else's design decision to wait on.
+
+**And the serving path is no longer a blocker either — for untied models it is done.**
+`blockq` is specified ([docs/blockq-format.md](docs/blockq-format.md)), emitted by
+`tools/quantize_embedding.py`, served by `EXL3BlockQEmbeddingMethod`, and gated by three
+`bench/` entries (eager, CUDA graphs, and throughput) that derive a fixture on every run
+and held at exactly 0.0 across both the v0.28.0 and exllamav3 v1.4.3 bumps. So for the
+untied case nothing is missing but doing it at conversion time instead of as a repair
+pass, and `repair-tool` already covers the interim.
 
 **The solver is no longer part of this item.** It was only ever second-order here —
 embedding depth is fixed, so there is nothing for an allocator to trade. What remains
 of the allocation question is the head, which is `head-bits`.
 
-Depends on `quantized-embeddings` growing a block-scaled serving path — see there.
-Nothing can load what this would emit today.
+**What is still blocked is the tied half, and on a different thing than this item used
+to say.** It wanted "one shared block-scaled integer tensor serving both roles", and
+`blockq` deliberately has no matmul path — decoding to dense fp16 to multiply would
+return the whole saving. That needs a scalar-integer GEMM for the head role, which does
+not exist; see `quantized-embeddings`. Tied models therefore continue to be served from
+their existing quantized `lm_head`, which is already shipped and costs nothing new.
 
 **The v1.4.3 bump changes nothing here.** Upstream's "new optimization pipeline" was
 tagged at `2398c05`, the same commit the 2026-08-23 allocation study was run against, so
