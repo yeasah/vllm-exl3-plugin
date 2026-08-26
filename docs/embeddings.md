@@ -632,41 +632,43 @@ sequence a roadmap around. Its actual value is narrower and real: it is the only
 on hand that is tied *and* needs per-layer blockq, so it exercises together two paths
 nothing else reaches.
 
-The bug stands on its own, and it is reachable by the obvious workflow -- which is how it
-was found. `tools/quantize_embedding.py` documents itself as scoped to *untied* models, but
-**nothing enforces that**: there is no `tie_word_embeddings` check in the file, its only
-selection is `key.endswith(".embed_tokens.weight")`, and a tied EXL3 checkpoint *does* carry
-a dense embedding -- `gemma-4-12B-it-exl3` ships `model.language_model.embed_tokens.weight`
-at `[262144, 3840]` BF16 alongside `lm_head.trellis`. That redundancy is precisely what this
-note exists to remove, so naturally it is there. The suffix matches the nested name, the tool
-runs, and the output is a tied blockq checkpoint that corrupts at serve time.
+**Fixed 2026-08-26**, and the fix is what makes the blockq row above real for a tied
+model. It was reachable by the obvious workflow -- which is how it was found.
+`tools/quantize_embedding.py` documented itself as scoped to *untied* models and enforced
+that nowhere: no `tie_word_embeddings` check, only `key.endswith(".embed_tokens.weight")`,
+and a tied EXL3 checkpoint *does* carry a dense embedding -- `gemma-4-12B-it-exl3` ships
+`model.language_model.embed_tokens.weight` at `[262144, 3840]` BF16 beside
+`lm_head.trellis`. That redundancy is precisely what this note exists to remove, so
+naturally it is there. (The `SystemExit` in `find_embedding` said "a tied checkpoint has
+nothing for this tool to do" -- prose in a *not-found* branch, false for EXL3, and it reads
+like a guard while being none.)
 
-(The `SystemExit` in `find_embedding` says "a tied checkpoint has nothing for this tool to
-do". That is prose in a *not-found* branch rather than a tie check, and the explanation is
-false for EXL3 tied checkpoints. It reads like a guard and is not one.)
+The cause was one assumption: `embedding_is_quantized()` and `embedding_is_blockq()` were
+written as mutually exclusive, but they ask about *different modules* -- whether the head's
+trellis is being renamed onto the embedding, and whether the embedding has `bq_*` of its
+own. A repaired tied checkpoint makes both true and both load-bearing.
+`EXL3BlockQTiedEmbeddingMethod` now carries both parameter sets on the one module, lookup
+on `bq_*` and logits on the trellis, with no vLLM patch and **no metadata change** --
+`tie_word_embeddings` stays `true`, which it is. Serving a tied model this way replaces the
+trellis-served lookup (Phase A, +0.021619) with the blockq one (+0.000297): **~73x less
+divergence for +0.53 GiB.**
 
-Nothing warns at any stage, and nothing fails at load either: the predicate conflict dies
-late, at logits time, and with `vllm-embed-quant-config` reverted the misrouting sends 755
-MiB of trellis to a module path that does not exist, drops it without complaint, and lets
-the model load, run and **emit garbage**. Silent corruption produced by running a shipped
-tool on a stock checkpoint outranks a size optimization sitting downstream of the same code.
-
-It is also cheap, and there are three places to intervene rather than two. Serving-side:
-per-module predicates instead of per-checkpoint, and a rename pointed at the head's own
-prefix. But the best of them is the tool itself -- it is where the broken artifact is
-*created*, it already knows its intended scope, and enforcing it is a config read plus a
-refusal. All plugin-local Python, no kernel or format work.
+Verified on a repaired tied gemma-4-12B: it holds ~0.53 GiB more weight than the
+unrepaired baseline (KV cache 19,176 -> 17,545 tokens), and 150 of 157 prompt logprobs
+differ from it, mean |delta| 0.122 -- the gather is executing rather than merely allocated.
 
 **So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
 priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer
 GEMM -- is genuinely gone, and the second-order gate that demoted the whole tied-model line
 was a misdiagnosis (see the note above `fa-head-dim-512` / `turboquant-sliding-window`), so
-the constituency is real. Once the crash is fixed the split becomes a true 1.234 GiB
-baseline and fp8's margin returns to 0.296 GiB for 2.25x the divergence -- which is worth
-having, since 0.296 GiB is real in a VRAM-bound appliance and 2.25x of something already
-0.38x the noise floor is still under the floor. The recorded "7 or 8 bit shared per-row"
-operating point is **superseded on encoding** -- fp8 is the shape to build -- while the
-decision to build it is now waiting on ordering alone.
+the constituency is real. That ordering has now resolved: the crash is fixed, the split
+*is* a 1.234 GiB baseline, and fp8's margin is therefore the marginal 0.296 GiB for 2.25x
+the divergence rather than a route to a working path. Worth having -- 0.296 GiB is real in
+a VRAM-bound appliance and 2.25x of something already 0.38x the noise floor is still under
+the floor -- but it is now an optimization on top of something that works, needing an fp8
+head path, an fp8 gather and repair-tool emission to collect. The recorded "7 or 8 bit
+shared per-row" operating point is **superseded on encoding**: fp8 is the shape to build,
+if it is built.
 
 
 ## Choosing depths: what the repair tool should default to

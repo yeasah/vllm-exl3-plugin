@@ -420,59 +420,54 @@ Four things remain, in rough order of how much they would cost to discover late.
    measured, and nibbles keep both ends byte-aligned — but 3 bits is usable at ~3.5
    bpw and would want the packing if a checkpoint ever calls for it.
 
-**A tied model with a block-quantized embedding crashes** (found 2026-08-19). The
-two predicates in `quantization/config.py` treat the cases as mutually exclusive —
-`embedding_is_blockq()` says so in as many words — but a tied checkpoint whose
-embedding has been repaired makes both true. It loads without complaint and dies at
-logits time: `EXL3TiedLMHeadMethod` reads a trellis off the embedding module, which
-now holds `bq_*` instead. Worse, `get_cache_scale_mapper` still fires with
-`embed_prefix` at its `"model.embed_tokens"` default, routing 755 MiB of trellis to a
-module path that does not exist on a nested model, and nothing objects — so the
-silent weight loss wants a guard of its own. **Observed 2026-08-25**, and it is
-exactly as predicted: running tied `gemma-4-12B-it-exl3` with
-`vllm-embed-quant-config` reverted leaves `embed_prefix` at its default, the
-`lm_head.*` rename targets a path the nested model does not have, the trellis is
-dropped without complaint, and the model loads, runs and emits garbage. The
-guard is worth building on the strength of that: nothing in the failure is
-loud. The fix is to make both predicates
-per-module rather than per-checkpoint, and to point the rename at the head's own
-prefix, which still defeats the loader's `lm_head` skip.
+**A tied model with a block-quantized embedding crashes** — **FIXED 2026-08-26**
+(found 2026-08-19, observed 2026-08-25). The two predicates in
+`quantization/config.py` treated the cases as mutually exclusive —
+`embedding_is_blockq()` said so in as many words — but they answer questions
+about *different modules*: one asks whether a tied model's `lm_head.*` is being
+renamed onto the embedding, the other whether the embedding has block-quantized
+tensors of its own. A repaired tied checkpoint makes both true and both
+load-bearing.
 
-**The case for fixing it does not depend on `gemma4-e2b`** (sharpened 2026-08-26). It
-was previously justified by E2B being tied *and* needing blockq — the one model that
-*must* go through this path. That is a poor thing to hang a priority on: E2B/E4B is a
-development aid rather than a serving target, and reaching it at all would take an
-entirely new architecture in the exl3 pipeline. Its real value is narrower and worth
-keeping: it is the only checkpoint on hand that exercises tied and per-layer blockq
-together.
+Two silent failures came out of that, and both are gone:
 
-**It is reachable by the obvious workflow, and `tools/quantize_embedding.py` is where
-it starts** (verified 2026-08-26). The tool's docstring scopes it to *untied* models —
-"a tied model already has a quantized `lm_head` covering the same matrix" — but
-**nothing enforces that scope**. There is no `tie_word_embeddings` check anywhere in
-the file. Its only selection is `key.endswith(".embed_tokens.weight")`, and a tied EXL3
-checkpoint *does* carry a dense embedding: `gemma-4-12B-it-exl3` ships
-`model.language_model.embed_tokens.weight` at `[262144, 3840]` BF16 **alongside**
-`lm_head.trellis`. That redundancy is the very thing this section exists to remove, so
-of course it is present. The suffix matches the nested name, the tool proceeds happily,
-and out comes a tied blockq checkpoint that corrupts at serve time. This is how the bug
-was found in the first place.
+- `EXL3TiedLMHeadMethod` read a trellis off the embedding module, which now held
+  `bq_*`. Died late, at logits time.
+- The blockq branch returned *before* `self.embed_prefix = prefix`, so the prefix
+  stayed at its `"model.embed_tokens"` default while the rename still fired —
+  routing 755 MiB of trellis to a path a nested model does not have, dropping it
+  without complaint, and serving garbage.
 
-The `SystemExit` in `find_embedding` reads "a tied checkpoint has nothing for this tool
-to do", which invites exactly the wrong inference — it is prose in a *not-found* branch,
-not a tie check, and its explanation is false for EXL3 tied checkpoints. Do not read it
-as a guard; there is no guard.
+The fix is `EXL3BlockQTiedEmbeddingMethod`: both parameter sets on the one
+module — which is the existing design, since vLLM skips a tied model's
+`lm_head.*` and those weights are already renamed onto the embedding for the head
+to borrow back — with the lookup on `bq_*` and the logits on the trellis.
+`embed_prefix` is now recorded before any branch. **No vLLM patch and no metadata
+change**: `tie_word_embeddings` stays `true`, which it is.
 
-So the honest reachability is: **run the shipped tool on a stock tied gemma checkpoint
-and you have the broken artifact.** Nothing warns, at any stage. Then nothing fails at
-load either — the predicate conflict dies late at logits time, and with
-`vllm-embed-quant-config` reverted the misrouting sends 755 MiB of trellis to a
-nonexistent module path, drops it without complaint, and the model loads, runs and emits
-garbage.
+`apply()` is overridden explicitly rather than inherited, and that was not
+cosmetic. The MRO puts the blockq method first (it must, for the gather) and its
+`apply` is a stub raising "no matmul path" — right for an untied embedding, wrong
+here. The gemma4-style two-module shape never notices because its head reaches
+the trellis through its own method; **the Qwen3-style one-module shape would have
+raised on the first token.** Caught by an MRO assertion in
+`tests/test_tied_blockq_routing.py`, not by running a model.
 
-**That makes the repair tool the best place to stop the whole class**, ahead of the two
-serving-side fixes: it is the point where a broken checkpoint is *created*, it already
-knows its own scope, and enforcing it is a config read plus a refusal.
+Verified on a repaired tied `gemma-4-12B-it-exl3@3.00bpw_mul1`: loads clean,
+answers correctly, holds ~0.53 GiB more weight than the unrepaired baseline (KV
+cache 19,176 → 17,545 tokens) which is `bq_*` loading beside the trellis, and 150
+of 157 prompt logprobs differ from that baseline (mean |Δ| 0.122) — so the gather
+is executing, not merely allocated. Full suite 118 pass.
+
+`tools/quantize_embedding.py` now *supports* tied checkpoints rather than
+producing broken ones, and says at creation time that the output needs a plugin
+with this method — an older one loads it clean and serves garbage, which nothing
+downstream can detect.
+
+**Still open on this path**: tensor parallelism is unproven (both sets shard on
+dim 0, but the combination has never run on more than one GPU), and the
+Qwen3-style one-module tied shape is covered only by the MRO test, not
+end-to-end. Neither blocks the gemma-4 case.
 
 **The shared tied-model tensor's kernel blocker is gone** (2026-08-26). One tensor
 serving both roles needed a scalar-integer GEMM for the head, which exists nowhere.
@@ -482,25 +477,24 @@ is good enough: **+0.000669** against native, 0.38x the noise floor, better than
 required; per-tensor is 1.6x worse for nothing. So "7 or 8 bit shared per-row" is
 **superseded on encoding** — fp8 is the shape to build if it is built.
 
-**It stays deferred on ordering, not on value — and its priority has risen.** For a
-tied model the blockq split is not a baseline yet: it is exactly the crash above, so
-gemma-4's real baseline today is native's 2.579 GiB. Against that, shared fp8 saves
-**1.641 GiB** and the blockq split saves 1.345 GiB — fp8 is the *larger* saving, and
-both routes are unbuilt.
+**It stays deferred, and the ordering that deferred it has now resolved.** The crash
+above landed first, on correctness grounds rather than because any model demanded it,
+and that changed the baseline this has to be measured against. The blockq split is a
+real tied-model baseline as of 2026-08-26: **1.234 GiB at +0.000297**, serving gemma-4
+from `bq_*` for the lookup and the trellis for the logits.
 
-What lands first is the crash fix, on correctness grounds rather than because any model
-demands it: the failure is silent (trellis dropped, model loads and emits garbage), and
-a wrong-output bug outranks a size optimization. The tempting argument that
-`gemma4-e2b` forces it is weak — E2B/E4B is a development aid, not a serving target;
-its value is exercising tied *and* per-layer-blockq together, which nothing else on
-hand does. Worth keeping working, not worth sequencing a roadmap around.
+So fp8's margin is the marginal one after all: **0.296 GiB for 2.25x the divergence**,
+not the 1.641 GiB it looked like while the split was unbuilt. That margin is still
+worth something — 0.296 GiB is real in a VRAM-bound appliance, and 2.25x of 0.38x the
+noise floor is still under the floor — but it is now an optimization on top of a
+working path rather than a route to one, and it needs an fp8 head path, an fp8 gather
+and repair-tool emission to collect it.
 
-Only after that does fp8's margin fall back to 0.296 GiB for 2.25x the divergence,
-which is still worth having — 0.296 GiB is real in a VRAM-bound appliance and 2.25x of
-0.38x the noise floor is still under the floor. And the constituency is no longer
-hypothetical: the demotion that gemma and every tied-model optimization inherited came
-from the `fa-head-dim-512` misdiagnosis, now corrected under
-`turboquant-sliding-window`. **Revisit once the crash is fixed.**
+The constituency is no longer hypothetical, which is what keeps this open at all: the
+demotion gemma and every tied-model optimization inherited came from the
+`fa-head-dim-512` misdiagnosis, corrected under `turboquant-sliding-window`.
+**Revisit if a tied model ever needs that last 5%**, or if fp8 emission turns out to be
+nearly free alongside other repair-tool work.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
