@@ -588,7 +588,7 @@ Placed on the frontier (tax against native, `embed+head` bytes, noise floor 0.00
 | shared per-row 7-bit | 0.820 GiB | +0.001120 | 0.64x | yes |
 | **shared fp8-e4m3** | **0.938 GiB** | **+0.000669** | **0.38x** | **no** |
 | shared per-row 8-bit | 0.938 GiB | +0.000412 | 0.23x | yes |
-| **ships today: blockq-32 4-bit embed + trellis head** | **1.234 GiB** | **+0.000297** | **0.17x** | **no** |
+| blockq-32 4-bit embed + trellis head | 1.234 GiB | +0.000297 | 0.17x | no, but does not run yet -- see below |
 | trellis head + per-row 6-bit embed | 1.407 GiB | +0.000315 | 0.18x | no |
 | exllamav3 native | 2.579 GiB | +0 | — | — |
 
@@ -600,20 +600,37 @@ sweep above recommends as the tied operating point -- so the prior that fp8 woul
 lossy was wrong. It loses to int8 per-row by 1.6x at byte-for-byte parity, exactly as the
 Gaussian prior predicted in direction if not in size, but both are far under the floor.
 
-**On value, the gate moved out from under it.** The shared-tensor frontier was computed
-against *native's* 2.579 GiB, where sharing saved 1.76 GiB and was obviously worth kernel
-work. Shipping blockq closed most of that gap: the split now costs 1.234 GiB. Against that
-baseline a shared fp8 tensor saves **0.296 GiB -- 4.6% of the checkpoint -- for 2.25x the
-divergence**, and still needs an fp8 head path plus an fp8 gather. It is much less work
-than an int-GEMM, but it is not free, and it buys a quarter of what the frontier table
-implies because that table is priced against a baseline we no longer ship.
+**On value, the comparison depends on which baseline is real -- and for a tied model the
+split is not one yet.** The blockq row above is *not* what ships for gemma-4: a tied
+checkpoint with a block-quantized embedding still crashes at logits time, because both
+predicates in `quantization/config.py` are per-checkpoint while `EXL3TiedLMHeadMethod`
+reads a trellis off a module that now holds `bq_*`. That is tracked under TODO
+`quantized-embeddings`. So for the one family this question is about, **today's baseline is
+native's 2.579 GiB**, and both routes are unbuilt:
 
-**So: fp8 works, and the shared tensor is no longer worth building.** The honest form of
-the result is that the idea was right on its own terms -- fp8 does clear the blocker, and
-cheaply -- but blockq shipping in the interim reduced the prize to 0.3 GiB on the one tied
-mid-size family censused. Sharing stays a real option if a tied model ever needs that last
-5%; it is no longer a reason to build anything. The recorded "7 or 8 bit shared per-row"
-operating point should be read as superseded, not as pending work.
+| route | gets to | saves vs native | work |
+|---|---|---|---|
+| fix tied+blockq, keep the trellis head | 1.234 GiB | 1.345 GiB | per-module predicates, rename at the head's own prefix, a guard for the silent trellis loss |
+| shared fp8-e4m3 | 0.938 GiB | **1.641 GiB** | fp8 head path, fp8 gather, repair-tool emission |
+
+Measured that way fp8 is the *larger* saving of the two, by the same 0.296 GiB -- so the
+frontier's original verdict, that sharing is worth real work, survives contact with fp8
+rather than being overturned by it.
+
+**What settles it is sequencing, not value.** The tied+blockq fix has to happen regardless
+of this question, because `gemma4-e2b` is tied *and* needs blockq for its per-layer
+embedding -- so it lands first no matter what, and when it does the split becomes a real
+1.234 GiB baseline and fp8's marginal value drops back to 0.296 GiB for 2.25x the
+divergence. There is genuine value left in that margin: 0.296 GiB is real money in a
+VRAM-bound appliance, and 2.25x of something already 0.38x the noise floor is still under
+the floor. It is simply not worth pre-empting a fix that is required anyway.
+
+**So: fp8 is confirmed viable, and the shared tensor is deferred rather than closed.** The
+blocker it was gated on -- no scalar-integer GEMM -- is genuinely gone. The reason to wait
+is ordering, not merit. Revisit once `quantized-embeddings` lands and the 1.234 GiB
+baseline is real. The recorded "7 or 8 bit shared per-row" operating point is **superseded
+on encoding** -- fp8 is the shape to build if it is built -- while the sharing decision
+itself stays open.
 
 
 ## Choosing depths: what the repair tool should default to

@@ -419,21 +419,23 @@ per-module rather than per-checkpoint, and to point the rename at the head's own
 prefix, which still defeats the loader's `lm_head` skip. Not hypothetical:
 `gemma4-e2b` is tied *and* needs blockq for its per-layer embedding.
 
-**The shared tied-model tensor is now closed rather than deferred** (2026-08-26). The
-standing blocker was that one tensor serving both roles needs a scalar-integer GEMM for
-the head, which exists nowhere. fp8-e4m3 clears that — `torch._scaled_mm` is a
-primitive, not a kernel project — and it is good enough: measured at **+0.000669**
-against native, 0.38x the noise floor, better than the 7-bit per-row point this note
-recommended as the tied operating point. Per-channel scaling is required; per-tensor is
-1.6x worse for nothing.
+**The shared tied-model tensor's kernel blocker is gone** (2026-08-26). One tensor
+serving both roles needed a scalar-integer GEMM for the head, which exists nowhere.
+fp8-e4m3 clears that — `torch._scaled_mm` is a primitive, not a kernel project — and it
+is good enough: **+0.000669** against native, 0.38x the noise floor, better than the
+7-bit per-row point that was the recorded tied operating point. Per-channel scaling is
+required; per-tensor is 1.6x worse for nothing. So "7 or 8 bit shared per-row" is
+**superseded on encoding** — fp8 is the shape to build if it is built.
 
-What killed it is not quality but the baseline moving. The frontier that made sharing
-worth kernel work was priced against *native's* 2.579 GiB. Shipping blockq brought the
-split to 1.234 GiB, so a shared fp8 tensor now saves **0.296 GiB — 4.6% of the
-checkpoint — for 2.25x the divergence**, and still needs an fp8 head path and gather.
-Combined with gemma-4 being nearly the whole tied mid-size constituency, the prize no
-longer justifies the work. The recorded "7 or 8 bit shared per-row" operating point is
-**superseded, not pending**. Reopen only if a tied model ever needs that last 5%.
+**It stays deferred on sequencing, not on value.** For a tied model the blockq split is
+not a baseline yet: it is exactly the crash above, so gemma-4's real baseline today is
+native's 2.579 GiB. Against that, shared fp8 saves **1.641 GiB** and the blockq split
+saves 1.345 GiB — fp8 is the *larger* saving, and both routes are unbuilt. What decides
+the order is that the tied+blockq fix is required anyway for `gemma4-e2b`, so it lands
+first regardless; only then does fp8's margin fall back to 0.296 GiB for 2.25x the
+divergence. That margin is still worth something — 0.296 GiB is real in a VRAM-bound
+appliance, and 2.25x of 0.38x the noise floor is still under the floor — so **revisit
+once the crash is fixed**, rather than treating this as closed.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
