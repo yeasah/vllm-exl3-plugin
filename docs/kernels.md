@@ -186,6 +186,42 @@ fault.** The lesson for the test suite is that raw completion prompts are not a
 safe default across model families; the packaging layer should drive models
 through their chat templates.
 
+## The `mul1` codebook: +4.3% decode, and free
+
+exllamav3 publishes some checkpoints twice at the same bitrate, once with the `mcg`
+codebook and once with `mul1` -- the kernels take the codebook as two booleans and compile
+the multiplier constants in (`EXL3LinearMethod.__init__`). `mul1` is described as a
+performance improvement; measured 2026-08-26 on `gemma-4-12B-it-exl3` at 3.00bpw, where
+both variants are published, it is.
+
+| | `mcg` | `mul1` | |
+|---|---|---|---|
+| decode tok/s | 583.6 | **608.6** | **+4.28%** |
+| prefill tok/s | 3268.9 | 3264.9 | -0.13% |
+
+Same weights, same bitrate. Workload is `bench/perf.py`'s (8 seqs x 128 decode tokens, 4 x
+2200 prefill), run interleaved A,B,B,A across four separate loads so ordering and thermal
+drift cannot produce the gap: `mul1` won in both its slots (610.1, 606.9) and `mcg` lost in
+both (583.3, 586.2), against a within-revision spread of ~0.85%.
+
+**Only decode moves, which is the mechanism working as expected.** The multiplier is
+*per-weight* work inside the trellis decode. Decode is bound by exactly that, so it shows;
+prefill amortizes the same decode over 2200 tokens of GEMM, so it disappears. A codebook
+change that sped up both equally would have been evidence of a measurement artifact rather
+than of a faster codebook.
+
+**And it costs nothing in quality**: body-only KLD at 3.00bpw is 0.102867 (`mcg`) against
+0.102701 (`mul1`), a difference of 0.000166 -- see docs/embeddings.md, where that pair was
+measured to rule out a codebook confound in the layer curve. So prefer `mul1` where a
+checkpoint offers both.
+
+*One loose end.* Those two have near-identical KLD but perplexity **17.9276** (`mcg`) against
+**18.4556** (`mul1`) -- equal divergence from the bf16 reference, differently aimed, and
+`mul1`'s happens to land worse against the actual tokens. Ten rows of openwebtext, so this
+is a lead rather than a finding, and it is the one thing that would complicate "free" if it
+survived a larger sample. Worth resolving before the recommendation above is leaned on
+hard.
+
 ## Development note
 
 vLLM's compile cache is keyed on its own config and version, and cannot see
