@@ -648,8 +648,11 @@ row accurate as a vector. What to emit instead:
 
 Embedding depth is no longer per-model: 4 bits (4.5 bpw in the block-scaled layout)
 covers every model measured. The head's depth in a shared tensor is a separate
-question, only ever measured on gemma-4-12B, and is now `head-bits` — which prices it
-directly, since the shared tensor's depth is the head's.
+question, and is now **answered**: a budget-neutral sweep on phi-4-mini puts the head
+optimum at 5-6 bits, with 7 costing +34% KLD and 8 costing +87% — see
+[docs/qbench.md](docs/qbench.md), "Head bitrate: 6 is defensible". Since the shared
+tensor's depth *is* the head's, that prices the tied-model plan directly: 5-6, not
+higher.
 
 **Not urgent: `repair-tool`'s post-processing covers this today.** All this item adds
 is that checkpoints built here would be right from the start instead of needing a pass.
@@ -673,9 +676,10 @@ and held at exactly 0.0 across both the v0.28.0 and exllamav3 v1.4.3 bumps. So f
 untied case nothing is missing but doing it at conversion time instead of as a repair
 pass, and `repair-tool` already covers the interim.
 
-**The solver is no longer part of this item.** It was only ever second-order here —
-embedding depth is fixed, so there is nothing for an allocator to trade. What remains
-of the allocation question is the head, which is `head-bits`.
+**The solver is not part of this item, and as of 2026-08-25 is not part of any.**
+Embedding depth is fixed at 4, the head measures out at 5-6, and body tensors cannot be
+allocated independently at all. Two scalars is a lookup table, not a search space — see
+[docs/qbench.md](docs/qbench.md).
 
 **What is still blocked is the tied half, and on a different thing than this item used
 to say.** It wanted "one shared block-scaled integer tensor serving both roles", and
