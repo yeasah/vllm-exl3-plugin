@@ -660,7 +660,7 @@ differ from it, mean |delta| 0.122 -- the gather is executing rather than merely
 **So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
 priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer
 GEMM -- is genuinely gone, and the second-order gate that demoted the whole tied-model line
-was a misdiagnosis (see the note above `fa-head-dim-512` / `turboquant-sliding-window`), so
+was a misdiagnosis (see TODO `turboquant-sliding-window`), so
 the constituency is real. That ordering has now resolved: the crash is fixed, the split
 *is* a 1.234 GiB baseline, and fp8's margin is therefore the marginal 0.296 GiB for 2.25x
 the divergence rather than a route to a working path. Worth having -- 0.296 GiB is real in
@@ -861,7 +861,7 @@ re-derive per family once a tool exists to produce the tensors.
 Phase A makes the embedding inherit the head's bit width (`head_bits`, usually 6), which
 is a quality question rather than plumbing — and gemma-4 is the most numerically delicate
 family here (it already needs fp32 residuals, and is the reason for the flash-attention
-head-dim work in TODO `fa-head-dim-512`). This was the open question when Phase A shipped.
+head-dim work, retired -- see docs/kernels.md). This was the open question when Phase A shipped.
 
 It has since been answered, by the sweeps above: `Exl3Backend`'s `embed_quant` was indeed
 the right instrument, and the knee is *not* a constant. On gemma-4-12B inheriting 6.004

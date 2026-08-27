@@ -128,45 +128,6 @@ is cross-entry rather than against a baseline, so it needs something
 
 → [bench/README.md](bench/README.md)
 
-## `fa-head-dim-512` — Flash Attention for head dim 512 on pre-FA4 architectures
-
-vLLM has no FA path for head dim 512, and does not allow mixed attention layers
-(over real, demonstrated instability concerns) that could otherwise cover the
-majority of layers at dim 256. So the attention backend falls back to triton, which
-carries real performance costs.
-
-**Correction 2026-08-24: it does *not* take turboquant off the table, and that
-claim confused two independent limits.** The pin to triton is FA-related and the
-turboquant miss looked like a consequence of it; it is not. TurboQuant's
-`supports_head_size` returns `head_size > 0` — it accepts any head dim — while it
-never overrides `supports_sliding_window`, inheriting the base class's blanket
-`False`. gemma-4's blocker for turboquant is the **sliding window**, and closing
-`fa-head-dim-512` would buy flash attention without buying turboquant. Split out as
-`turboquant-sliding-window`, which is the larger of the two prizes and covers two
-model families rather than one.
-
-This looks at first glance like a bad complexity-to-payoff trade, and probably is
-not: it is close to the difference between an entire model family (Gemma 4 among
-them) being on the table or not. Not because those models will not run, but because
-they will run badly enough against alternatives of similar capability to be a dead
-choice.
-
-**Candidate approach.** llama.cpp/ggml extended their FA implementation to cover
-head dim 512 ([PR #20998](https://github.com/ggml-org/llama.cpp/pull/20998)). Unlike
-ggml, vLLM uses a forked copy of upstream flash attention
-([vllm-project/flash-attention](https://github.com/vllm-project/flash-attention)),
-holding a confusing array of implementations across CUDA, ROCm, FA2-4 and Hopper.
-The open question is whether any surface in that fork could be extended the way the
-llama.cpp changeset extends ggml, for consumer Ampere / Ada / Blackwell.
-
-**What used to hang off this answer has been moved to `turboquant-sliding-window`,
-where it always belonged** (2026-08-26). The shared embed+head tensor's constituency
-is gemma-4, and this item was recorded as the thing deciding whether gemma-4 is
-practically deployable. That was the same conflation the correction above fixes: what
-decides deployability is the quantized KV cache, not the flash-attention path. This
-item is now a performance question on its own merits — a triton pin with real costs —
-and nothing else is gated on it.
-
 ## `turboquant-sliding-window` — TurboQuant cannot serve a sliding-window model
 
 `TurboQuantAttentionBackend` never overrides `supports_sliding_window`, so it takes
@@ -182,9 +143,10 @@ whatever ran before was serving wrong attention silently. 0.28 refusing it is th
 gate upstream should always have had, which is worth remembering when arguing for
 the sliding-window support: the ask is to make it work, not to relax the check.
 
-**Bigger than the FA miss it was mistaken for.** `fa-head-dim-512` buys gemma-4 a
-flash-attention path; this buys gemma-4 *and* Laguna a quantized KV cache, which on a
-16 GiB card decides whether the context is usable.
+**Bigger than the FA miss it was mistaken for.** Closing the head-dim-512 gap would
+have bought gemma-4 a flash-attention path and nothing else (retired, see
+[docs/kernels.md](docs/kernels.md)); this buys gemma-4 *and* Laguna a quantized KV
+cache, which on a 16 GiB card decides whether the context is usable.
 
 **The economics are better than the layer count suggests**, which is what makes it
 worth pursuing rather than filing as impossible. gemma-4 is mostly sliding layers
@@ -348,8 +310,8 @@ rather than merely running.
 
 **This item now carries the gemma-4 dependency, and its odds have improved enough to
 change downstream priorities** (2026-08-26). Two things moved. First, the blocker was
-misidentified: it was filed under `fa-head-dim-512` as a likely-insurmountable flash
-attention gap, and it is actually this — a KV-cache layout problem whose walls have so
+misidentified: it was filed as a likely-insurmountable flash-attention gap (head dim
+512, since retired -- see [docs/kernels.md](docs/kernels.md)), and it is actually this — a KV-cache layout problem whose walls have so
 far all reduced to one-line staleness bugs, one of them already cleared by patching.
 Second, the scope is three families and not one: gemma-4, Laguna and Muse-Glimmer are
 all sliding-window, which is **every real-world candidate except Qwen**. A fix is
@@ -516,7 +478,7 @@ and repair-tool emission to collect it.
 
 The constituency is no longer hypothetical, which is what keeps this open at all: the
 demotion gemma and every tied-model optimization inherited came from the
-`fa-head-dim-512` misdiagnosis, corrected under `turboquant-sliding-window`.
+head-dim-512 misdiagnosis, corrected under `turboquant-sliding-window`.
 **Revisit if a tied model ever needs that last 5%**, or if fp8 emission turns out to be
 nearly free alongside other repair-tool work.
 

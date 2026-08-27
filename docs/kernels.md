@@ -238,6 +238,39 @@ and p90 alongside the mean is what made this visible; a harness reporting only t
 would have called them identical, which is precisely what the first run of this comparison
 concluded.
 
+## Head dim 512 pins gemma-4 to triton — accepted, not fixed
+
+*Was TODO `fa-head-dim-512`; retired 2026-08-26 without being done. Kept here because
+the pin is a standing property of the system that explains what `bench/` observes, not
+a task anyone is working.*
+
+vLLM has no flash-attention path for head dim 512, and does not allow mixed attention
+layers -- over real, demonstrated instability concerns -- which could otherwise have
+covered the majority of gemma-4's layers at dim 256. So the backend falls back to
+triton. `bench/`'s gemma-4-12B entries record `TRITON_ATTN` for exactly this reason,
+and the performance cost is real.
+
+**It is not why turboquant is unavailable, and conflating the two cost real time.**
+TurboQuant's `supports_head_size` returns `head_size > 0` -- it accepts any head dim --
+while it never overrides `supports_sliding_window` and so inherits the base class's
+blanket `False`. The unforced failure message (`TRITON_ATTN is not valid ...
+['kv_cache_dtype not supported']`) mentions neither, which is what produced the
+original wrong diagnosis. gemma-4's turboquant blocker is the sliding window; see TODO
+`turboquant-sliding-window`, which is the larger prize and covers three model families
+rather than one.
+
+**Why it was dropped rather than attempted.** llama.cpp/ggml extended their FA
+implementation to head dim 512 ([PR
+#20998](https://github.com/ggml-org/llama.cpp/pull/20998)), so the shape of the work is
+known. But vLLM uses a forked copy of upstream flash attention
+([vllm-project/flash-attention](https://github.com/vllm-project/flash-attention)) with
+implementations spread across CUDA, ROCm, FA2-4 and Hopper, and whether any surface in
+that fork could take the ggml changeset for consumer Ampere/Ada/Blackwell was never
+established. Against that scope and probability of success, the payoff is a
+performance improvement on one model family that already runs. The KV-cache work
+dominates it on every axis, so this stays closed unless upstream lands head dim 512 on
+its own.
+
 ## Development note
 
 vLLM's compile cache is keyed on its own config and version, and cannot see
