@@ -50,3 +50,65 @@ become unreadable.
   `mc_sample()` chunks the softmax to keep the peak down; beyond that, lower `--ctx`.
 - EXL3's bundled calibration corpus is ~1.42M tokens, i.e. 694 unique rows at 2048
   tokens. The paper uses 2K–64K sequences, so matching its budget needs a real corpus.
+
+## Reproducing the matched-budget result
+
+The headline numbers in [../../docs/yaqa.md](../../docs/yaqa.md) need a calibration corpus
+this repo does not ship, and that is not a detail — it is the whole reason the first pass
+measured half the effect. EXL3's bundled text is 942K tokens once `code.utf8` is held out,
+so a 2048-sequence sketch recycles 460 rows **4.5x**. That is 4.5x *below* the smallest
+configuration the paper ever reports (Appendix A.11: 2K sequences of 2K tokens, all
+unique) and 142x below its main results. Fresh Monte-Carlo labels on a repeated row cut
+label-sampling variance and do nothing for data-sampling variance.
+
+One RedPajama-V2 shard is enough: 26.2M tokens, 12,807 unique rows at 2048, i.e. 6x the
+paper's minimum. It is ~57 MB and ungated.
+
+```python
+# fetch (cached under ~/.cache/huggingface/hub after the first run)
+from huggingface_hub import hf_hub_download
+src = hf_hub_download(
+    "togethercomputer/RedPajama-Data-V2",
+    "sample/documents/2023-06/0000/en_head.json.gz",
+    repo_type = "dataset",
+)
+
+# extract to the flat .txt --cal-file expects
+import gzip, json
+chars = 0
+with gzip.open(src, "rt", encoding = "utf8", errors = "replace") as f, \
+     open("redpajama_en.txt", "w", encoding = "utf8") as o:
+    for line in f:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue                      # a few malformed lines per shard
+        t = d.get("raw_content") or ""
+        if len(t) < 200:                  # drop stubs; they tokenize to noise
+            continue
+        o.write(t.rstrip() + "\n\n")
+        chars += len(t)
+        if chars > 120_000_000:           # ~26M tokens, 6x the paper's minimum
+            break
+```
+
+Then the run that produced the headline result:
+
+```bash
+python3 tools/yaqa/probe.py --model <llama-3.2-1b-instruct> \
+    --layers 7 14 1 --projs mlp.down_proj --bits 2 \
+    --cal-seqs 2048 --sketch-seqs 2048 --ctx 2048 --eval-seqs 24 \
+    --cal-file redpajama_en.txt --grad-checkpoint \
+    --eval-source in-domain code literary
+```
+
+`--cal-seqs` must be >= `--sketch-seqs` or rows get recycled; the probe prints the unique
+token count and the reuse factor, so check that line rather than assuming. ~18 min per
+layer on a 5070 Ti, and it scales linearly with `--sketch-seqs` if you want more of A.11's
+curve (-20.4% at 2K sequences, -26.3% at 16K).
+
+Provenance caveat: the paper calibrated on RedPajama **v1**, which mixes CommonCrawl, C4,
+GitHub, books, ArXiv, Wikipedia and StackExchange. V2 is CommonCrawl-derived only. Web
+text dominates v1 by volume so this is the right order of thing, but it is less diverse
+than what they used -- which biases the measurement slightly pessimistic, the safe
+direction for a decision to pass.
