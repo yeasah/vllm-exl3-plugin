@@ -50,9 +50,9 @@ Never reuse a retired slug for different work.
 
 The biggest win available in the immediate future is `quantized-embeddings`
 combined with either `repair-tool` or `quantize-embeddings-pipeline`. Together they
-take EXL3 from significantly underperforming competing formats on most checkpoints
-(when given a full and honest accounting) to being as competitive as originally
-advertised. [docs/qbench.md](docs/qbench.md) has the measurement that establishes
+take EXL3 from losing to competing formats on most checkpoints, once total bytes are
+counted rather than only the tensors that participate in the bit-rate target, to being
+as competitive as that bit-rate target implies. [docs/qbench.md](docs/qbench.md) has the measurement that establishes
 the gap is real on the served path.
 
 ## `bench-suite` — A TP tier for the bump gate
@@ -330,10 +330,13 @@ first gate.
 
 ## `repair-tool` — Repair tool for existing EXL3 checkpoints
 
-Every existing EXL3 checkpoint is handicapped by two pipeline mistakes, badly enough
-to more than erase its efficiency advantage against other formats: a separate output
-head is emitted for tied models (entirely redundant, and not small), and the
-embeddings are skipped entirely and left at full resolution. A post-processing tool
+Every existing EXL3 checkpoint carries two packaging choices that cost far more in a
+GPU-resident server than they do upstream, enough to more than erase its efficiency
+advantage against other formats on total bytes: a separate output head is emitted for
+tied models (redundant once the embedding is quantized, and not small), and the
+embedding is left at full resolution. Both are rational for exllamav3, which keeps the
+embedding in system RAM and counts it against neither VRAM nor the published size --
+see [docs/embeddings.md](docs/embeddings.md). A post-processing tool
 preserves the very large investment in computation the published EXL3 collection
 represents, rather than requiring it be redone.
 

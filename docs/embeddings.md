@@ -32,7 +32,7 @@ The win is concentrated in **dense mid-size models with large vocabularies** -- 
 the appliance target. MoE checkpoints dilute it (expert weights dominate) and Laguna is an
 outlier with a small vocabulary for its size.
 
-### Against other formats: this is where EXL3 loses
+### Against other formats: where the packaging costs more than the algorithm saves
 
 The census above is internal. The reason it matters is competitive, and the comparison
 was the original motivation for all of the work below (measured 2026-08-08 from real
@@ -41,10 +41,24 @@ safetensors bytes and from the Hub's tensor-metadata viewer -- no downloads).
 On `Llama-3.2-1B-Instruct` (128,256 vocab, tied), EXL3 spends **0.673 GiB on embed+head
 at every target bpw** -- identical at 2.00, 3.00 and 4.00, because neither tensor
 participates in the bit-rate target -- against **0.201 GiB** for bartowski's Q6_K GGUF
-and **0.168 GiB** for unsloth's Q5_K. A 3.3-4x gap, from two compounding pipeline
-choices rather than the quantization algorithm: the embedding is never quantized at all,
-and a tie is never exploited (a second, independently quantized `lm_head` is baked out
-*in addition to* the untouched fp16 embedding, where GGUF stores the shared tensor once).
+and **0.168 GiB** for unsloth's Q5_K. A 3.3-4x gap, from two packaging choices rather
+than the quantization algorithm: the embedding is not quantized, and a tie is not
+exploited (a second, independently quantized `lm_head` is baked out *in addition to* the
+untouched fp16 embedding, where GGUF stores the shared tensor once).
+
+**Both choices are coherent for exllamav3's own deployment, and they are really one
+choice.** `Embedding.caps["prefer_cpu"]` is `True` and every loader honors it
+unconditionally, so upstream's fp16 embedding lives in system RAM and never occupies
+VRAM; there is even a pinned-staging path to hide the per-token upload behind the decode
+loop. turboderp [says as much](https://huggingface.co/turboderp/Qwen3.8-27B-exl3/discussions/2)
+and excludes the embedding from published checkpoint sizes on exactly that basis. Once
+the embedding is fp16 on the host, a tied model *must* also carry a separate quantized
+`lm_head` on the GPU, because the host copy cannot serve as one -- the duplication is a
+consequence of the residency decision rather than an independent oversight. What makes
+it our problem is that vLLM has no CPU-embedding path: the lookup sits inside the
+graph-captured forward, and prefill gathers thousands of rows rather than one. We pay in
+VRAM what upstream pays in host RAM. The download is paid by everyone either way, and
+that is the axis the rest of this section measures.
 
 The consequence is not academic. On real total file size, bartowski's IQ4_XS is smaller
 than *every* EXL3 checkpoint tested and beats two of the three on KLD -- the opposite of
