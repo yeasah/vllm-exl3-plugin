@@ -555,7 +555,12 @@ gap this item was opened for — the vision path is not merely loading.
 
 - **No gate.** All three results are hand-run. `bench/core.py`'s prompts are
   strings, and an image entry needs the fixture committed beside the baseline,
-  since a baseline against an image that later changes is worthless.
+  since a baseline against an image that later changes is worthless. The fixture
+  buys a second thing once it exists: exllamav3 quantizes vision towers with no
+  calibration data at all, and the same image-conditioned logprob divergence
+  measures a bf16 tower against a quantized one on an otherwise identical
+  checkpoint -- no vision benchmark required. See
+  [docs/media-encoders.md](docs/media-encoders.md).
 - **Audio is broken, probably not ours.** gemma-4-12B insists every clip is
   chirping birds. It is a unified model with no audio encoder — sound goes into
   the same token space as text — so there is no EXL3-quantized audio component to

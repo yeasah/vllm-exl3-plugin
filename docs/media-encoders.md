@@ -70,6 +70,40 @@ the allocation wanted. Sizing that properly is a solver problem with a vision ob
 KLD against a text corpus, the instrument this project uses everywhere else, would measure
 nothing relevant to it. Nothing here proposes touching that.
 
+**What `--vision_bits` actually does, and the caveat it carries.** A quantized tower goes
+through `quantize_side_model` in exllamav3's `convert_model.py`, whose own comment names
+it: *"uncalibrated side models: MTP head, vision tower"*. It is called with `state = None`,
+so each linear gets `init_H_data(False)` -- an `H` on the meta device with `count = 0` --
+and `finalize_capture_H` reads that as `q_fallback`. There is no third option available:
+the calibration corpus is six `.utf8` files tokenized into `input_ids`, and the tower takes
+pixels, so it is never in the calibration forward pass at all. Calibrating it would mean a
+second pipeline with an image corpus and the licensing that comes with shipping one. No
+data is the honest answer here, not a lazy one.
+
+**Most of EXL3 survives that, but not all.** `fallback_quant` is documented as "the same
+quantization as `ldlq()` but without an LDL decomposition", and it calls the same
+`quantize_tiles_multigpu` over the same 16x16 tensor-core tiles: the trellis codebook, the
+Hadamard incoherence rotation, the sign flips and the global scale search are all intact.
+What is missing is the Hessian-weighted layer -- LDLQ error feedback, and the
+out-channel-scaling heuristic, which under `q_fallback` reverts to `apply_out_scales =
+force_out_scales` and so defaults *off*. In QuIP#/QTIP terms this is the
+incoherence-processed VQ baseline without the GPTQ-style correction pass: an increment
+removed, not the foundation. **One trap for anyone reading a conversion log** -- under
+fallback `proxy_err` is set to plain unweighted MSE, where every body tensor's `proxy_err`
+is Hessian-weighted relative error. Same column, two different quantities, not comparable.
+
+**The gap that leaves is measurable cheaply, which qualifies the KLD point above.** "KLD
+against a text corpus would measure nothing relevant" is right about *sizing* an encoder
+against a vision objective, and wrong about detecting whether quantizing one broke it.
+Those are different questions, and the second is a self-comparison: same checkpoint, same
+body, bf16 tower against quantized tower, on the same per-position logprob divergence
+`bench/` already computes -- that instrument does not care that the prompt carries an
+image. Cheaper still as a first look, cosine divergence on the adapter output isolates the
+tower with no generation at all. Neither needs labels, a vision benchmark, or an absolute
+score. `turboderp/Muse-Glimmer-30B-exl3` is the checkpoint that makes the comparison
+possible, and the image fixture the `multimodal` gate needs is the same fixture this would
+use.
+
 **The offload argument is untouched by any of it, because eviction is lossless.** Whatever
 depth an encoder is stored at, moving it to host memory costs zero accuracy, one PCIe pass
 per image, and nothing at all for a text-only request. The quantization question is

@@ -202,7 +202,11 @@ to find out early.
   rounds as though it were. This is a `H_O` that requires **no gradients, no sketch
   and no second pass** — it is already sitting in `sv` — and the wavefront in
   `tools/yaqa/rounding.py` can consume it as-is. Unmeasured, and much cheaper than
-  YAQA proper.
+  YAQA proper. **Scope: calibrated body tensors only.** Uncalibrated side models --
+  vision towers and MTP heads -- take the `q_fallback` path, where `apply_out_scales`
+  reverts to `force_out_scales` and so defaults *off*: there is no `sv` scaling to
+  harvest, and no LDLQ to feed it to either. See
+  [docs/media-encoders.md](media-encoders.md).
 - **`regularize()` picks output-channel scales after `H` is finalized.**
   [`regularize()`](../deps/exllamav3/exllamav3/modules/quant/exl3_lib/quantize.py#L1125)
   folds a data-dependent `out_channel_scales` into `sv` and divides the weight by it.
