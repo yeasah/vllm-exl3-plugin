@@ -72,6 +72,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [embeddings.md](docs/embeddings.md) | quantized embeddings, block-scaled vs. trellis, storage format, depth selection, serving under torch.compile |
 | [blockq-format.md](docs/blockq-format.md) | the block-scaled embedding format itself: layout, decode/encode reference, invariants, how to produce and consume it |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
+| [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
 | [exllamav3-arch.md](docs/exllamav3-arch.md) | where exllamav3 branches by GPU architecture |
 | [feasibility-2026-08-03.md](docs/feasibility-2026-08-03.md) | the original research report (frozen) |

@@ -769,12 +769,32 @@ the pipeline this item would build on is the one already measured — see
 
 ## `yaqa` — YAQA-quality rounding in the quantizer
 
-The quantizer process itself can likely be improved, given its QTIP heritage and
-YAQA's further work on QTIP. **Given license incompatibility it is important that
-nobody look at the reference code — papers only.**
+Round with a second Hessian on the output channels, minimizing the full-model output KL
+instead of each layer's immediate activation error. Converter-side only — format, kernels
+and plugin untouched — so every model we ship would get better at no inference cost.
 
-Large project, likely modest gains. Highly desirable, but as against the other
-low-hanging fruit this one is high up the tree and should be scheduled as such.
+**Measured, and the decision is open rather than blocked.** At the paper's minimum data
+budget, on its own model family, YAQA gives **−19% KL in-domain and −16% on neutral text**
+(Llama-3.2-1B, 2 bits, per-layer), against Appendix A.11's −20.4% at that same budget —
+i.e. it reproduces the paper, and nothing structural in EXL3 is costing us the effect. It
+survives the domain shift that `EXL3-SC` failed, and the gain grows as bitrate falls.
+A.11's curve suggests ~−25% at full budget.
+
+**The cost is the question, not the benefit.** A reverse-streaming gradient pass the
+converter does not have (it is forward-only, one module resident, no autograd), 2.8x the
+Hessian working set on dense models and 14x on wide MoE, a calibration corpus we do not
+ship, and one unexplained pathological layer — the first block's `down_proj`, reproducible
+across both models tested — worth 1-3 points if gated around.
+
+**What would move it:** the 8B (~20.5 GiB, one 24 GiB card, not this workstation); a
+full-budget sketch (corpus already downloaded, only GPU time missing); or an explanation
+of that first-block layer.
+
+**Cheap side-result worth taking regardless:** EXL3 applies `out_channel_scales` and then
+rounds as if the output metric were the identity, which it no longer is. That is an `H_O`
+needing no gradients at all, and the wavefront can already consume it.
+
+→ [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
 
 ## `moe-tp` — Finish the job on MoE + TP
 
