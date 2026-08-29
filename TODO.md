@@ -425,7 +425,7 @@ quality question below, and whether gemma-4's multimodal blocker yields.
 
 → [docs/kernels.md](docs/kernels.md)
 
-## `turboquant-boundary-tax` — TurboQuant's first/last-N protection may not be paying for itself
+## `turboquant-boundary-tax` — What TurboQuant's first/last-N protection costs, and when it pays
 
 Split out of `turboquant-sliding-window` on 2026-08-29 because it is a separate
 question with a wider blast radius. That item is a *correctness* fix — a TurboQuant KV
@@ -460,44 +460,69 @@ Sliding-window models pay less, not more: their boundary indices mostly land on 
 layers that are already native, so only one full-attention layer is actually lost
 (Laguna layer 0, gemma-4 layer 47, Muse layer 51) — 23-39% of *full-attention* KV.
 
-**Measured on Laguna, and nothing moved** (2026-08-29, full GSM8K test set n=1319,
-greedy, paired per-item McNemar, `Laguna-XS-2.1-exl3@3.00bpw`):
+**Reproduced on Qwen3-4B, and the docstring is exactly right** (2026-08-29, GSM8K
+5-shot completion, greedy, full test set n=1319, `Qwen/Qwen3-4B` bf16). The claim is
+neither obsolete nor a mis-specified test — k3v4_nc loses **29.80 points** when the
+skip is removed, against the docstring's "~30 points".
 
-| kv dtype | boundary | correct | acc |
-|---|---|---|---|
-| 4bit_nc | on | 1220 | 92.49% |
-| 4bit_nc | off | 1218 | 92.34% |
-| 3bit_nc | on | 1215 | 92.12% |
-| 3bit_nc | off | 1215 | 92.12% |
+| config | acc | vs auto | KV bytes/token | vs 4bit+prot |
+|---|---|---|---|---|
+| auto (bf16 KV) | 86.81% | — | 147,456 | 2.91x |
+| 4bit_nc, boundary **on** | 84.53% | −2.27 | 50,688 | 1.00x |
+| 4bit_nc, boundary off | 78.01% | −8.79 | 38,592 | 0.76x |
+| k3v4_nc, boundary **on** | 78.70% | −8.11 | 46,592 | 0.92x |
+| k3v4_nc, boundary off | 48.90% | −37.91 | 33,984 | 0.67x |
+| 3bit_nc, boundary **on** | 78.17% | −8.64 | 42,496 | 0.84x |
+| 3bit_nc, boundary off | 46.25% | −40.56 | 29,376 | 0.58x |
 
-4bit ± boundary: p=0.89. **3bit ± boundary: identical counts, 26 flips each way,
-p=1.00** — the docstring's own aggressive preset, on which its claim does not reproduce
-at all. Byte-equivalent comparison: 3bit_nc *with* protection scores 0.23 points below
-4bit_nc *without* it, at 8% more bytes.
+Removing the skip, paired McNemar: 4bit_nc **−6.52** (167 lost / 81 gained, p=5e-08),
+k3v4_nc **−29.80** (440/47, p=4e-81), 3bit_nc **−31.92** (485/64, p=5e-81). **So 4-bit
+is not exempt either** — the protection is load-bearing on a dense model at every preset
+tested, and this item's earlier framing (that it might be free to drop) was wrong.
 
-Three limits, all real:
+**But the byte-for-byte question survives, and answers in favour of dropping it.** At
+equal or fewer bytes, 4bit_nc *without* protection matches both aggressive presets *with*
+it:
 
-- **Short context.** GSM8K prompts here are ~700 tokens; the reason to compress KV is
-  long context, and that is where a first/last-layer effect is most likely to be real.
-  This says nothing about 32k.
-- **Sensitivity ~1.2 points.** Every pair has ~52 discordant items, so the exact test
-  needs a 34/18 split to reach p<0.05. **The repeat-run control is bit-identical** —
-  the same config run twice scores 1220/1319 both times with *zero* discordant items,
-  so decoding here is fully reproducible and all ~52 flips are attributable to the KV
-  change rather than to batching. That makes the churn a real finding rather than
-  noise: changing the boundary layers moves ~4% of answers, symmetrically in both
-  directions (27/25, 26/26). The effect is not invisible, it is unbiased.
-- **One model, and a quantized one.** MiniCPM5-1B was tried as a dense instrument and is
-  useless — an unquantized KV cache scores *below* a 3-bit one there, so it has no signal
-  to lose. phi4mini will not load; both Qwen3.x checkpoints are hybrids and already
-  exempt from boundary skips.
+- 4bit_nc/off vs k3v4_nc/on: −0.68 points, **p=0.62**, at 0.83x the bytes
+- 4bit_nc/off vs 3bit_nc/on: −0.15 points, **p=0.95**, at 0.91x the bytes
 
-**Next is Qwen3-4B itself**, the exact model the docstring names, isolated to the
-boundary change alone, 5-shot completion rather than chat CoT (what lm-eval's `gsm8k`
-does, so the likeliest provenance of the number, and it sidesteps Qwen3's thinking
-mode). If that is also flat, the useful claim is narrow — "not reproducible on the cited
-model with a standard short-context harness" — and the long-context case stays open
-rather than refuted.
+**Which means the aggressive presets are never on the Pareto frontier for this model.**
+With protection they are dominated by unprotected 4-bit — same accuracy, more bytes.
+Without it they collapse to ~47%. The frontier is `auto` → `4bit_nc`+protection →
+`4bit_nc`−protection, and then a cliff. If that generalises, k3v4_nc and 3bit_nc have no
+place in the configuration space at all, and the operator's only real choice is whether
+to spend 1.31x the cache on the boundary layers.
+
+**Laguna is the anomaly, and it is worth understanding before generalising either way.**
+Same measurement, full test set, and *nothing* moves: 4bit ±protection p=0.89, and
+3bit_nc scores identically with and without (1215/1215, 26 flips each way, p=1.00). The
+repeat-run control is bit-identical (1220/1319 twice, zero discordant), so this is a real
+null and not a noisy harness. Two candidate explanations, untested:
+
+- **Only one full-attention layer is at stake.** Laguna's boundary indices are
+  {0,1,38,39} and three of those are sliding layers already held native by the operator's
+  skip list, so "protection off" changes one layer there against four on Qwen3-4B.
+- **Laguna is a far less perturbed system.** 30 of its 40 layers keep a native cache
+  regardless, so only 10 layers are ever compressed; Qwen3-4B compresses 32 of 36.
+
+Distinguishing these is cheap and worth doing: skip layer 0 *only* on Qwen3-4B (n=1
+instead of n=2 on the front, nothing at the back) and see whether one layer carries most
+of the 6.52 points. The likely physics is attention sinks / massive activations in the
+first layers, which would predict that it does.
+
+**Consequences for `turboquant-sliding-window`.** Keeping boundary protection working,
+rather than monkeypatching it away, was the right call — and the workaround in
+[vllm#41403](https://github.com/vllm-project/vllm/issues/41403) (patch
+`get_boundary_skip_layers` to `[]` for gemma) is now known to cost real quality on dense
+models. For gemma specifically only one global layer is at stake, as with Laguna, so it
+may well be harmless there; that is worth telling them, with the Qwen3-4B numbers, since
+the issue currently presents it as a free workaround.
+
+**Still open**: everything above is short context (~700-token prompts for Qwen3-4B, ~1.3k
+for Laguna). The reason to compress KV is long context, and both KV damage and any
+first/last-layer effect plausibly grow with sequence length. No long-context measurement
+exists yet, and it is the one that decides the shipping default.
 
 → [patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
 
