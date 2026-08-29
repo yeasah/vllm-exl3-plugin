@@ -481,8 +481,12 @@ Three limits, all real:
   long context, and that is where a first/last-layer effect is most likely to be real.
   This says nothing about 32k.
 - **Sensitivity ~1.2 points.** Every pair has ~52 discordant items, so the exact test
-  needs a 34/18 split to reach p<0.05. A repeat-run control is measuring how much of
-  that 4% churn is vLLM's batching rather than the KV change.
+  needs a 34/18 split to reach p<0.05. **The repeat-run control is bit-identical** —
+  the same config run twice scores 1220/1319 both times with *zero* discordant items,
+  so decoding here is fully reproducible and all ~52 flips are attributable to the KV
+  change rather than to batching. That makes the churn a real finding rather than
+  noise: changing the boundary layers moves ~4% of answers, symmetrically in both
+  directions (27/25, 26/26). The effect is not invisible, it is unbiased.
 - **One model, and a quantized one.** MiniCPM5-1B was tried as a dense instrument and is
   useless — an unquantized KV cache scores *below* a 3-bit one there, so it has no signal
   to lose. phi4mini will not load; both Qwen3.x checkpoints are hybrids and already
