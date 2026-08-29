@@ -305,6 +305,11 @@ The first/last-N sibling *is* TurboQuant's boundary protection. So what blocks L
 is a case upstream has already identified and left unimplemented, plus the block-scaling
 staleness bug — two narrow, reportable things rather than a missing capability.
 
+**The boundary-protection question is filed separately** as
+`turboquant-boundary-tax` below: the patch here keeps that protection working, so
+removing it is an independent optimization across all TurboQuant models rather than
+anything this item depends on.
+
 **Answered 2026-08-29, and Laguna serves.** The answer to the bounded question was
 yes, but the two known fixes were not the load-bearing one. See
 [patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
@@ -419,6 +424,78 @@ was written — turned out to be three narrow bugs and is cleared. What is left 
 quality question below, and whether gemma-4's multimodal blocker yields.
 
 → [docs/kernels.md](docs/kernels.md)
+
+## `turboquant-boundary-tax` — TurboQuant's first/last-N protection may not be paying for itself
+
+Split out of `turboquant-sliding-window` on 2026-08-29 because it is a separate
+question with a wider blast radius. That item is a *correctness* fix — a TurboQuant KV
+cache could not coexist with sliding-window layers, and now can. This one is an
+*optimization*, it applies to every TurboQuant model including dense ones, and nothing
+depends on it: the sibling patch keeps boundary protection working, so this is upside
+rather than a blocker.
+
+`TurboQuantConfig.get_boundary_skip_layers` leaves the first and last two layers on a
+native KV cache. Its docstring justifies the hard `n=2` with "Empirically required for
+aggressive presets (k3v4_nc, 3bit_nc) — without it GSM8K drops ~30 points on Qwen3-4B."
+
+**The tax is larger than the layer count suggests, and largest where it is least
+affordable.** Four native layers at `4 * head_dim` bytes/head sit beside compressed ones
+at `head_dim + 6`, so the whole cache costs this much more than the same preset with no
+skipping:
+
+| model shape | 4bit_nc | k3v4_nc | 3bit_nc |
+|---|---|---|---|
+| 24 layers (MiniCPM5-1B) | 1.470x | 1.556x | 1.670x |
+| 36 layers (Qwen3-4B) | 1.313x | 1.371x | 1.447x |
+| 64 layers | 1.176x | 1.209x | 1.251x |
+| 80 layers | 1.141x | 1.167x | 1.201x |
+
+Two things fall out. It is **worse on shallow models**, which are exactly the ones run on
+small cards where KV pressure decides the usable context. And it is **worse on the
+aggressive presets** — the ones whose need for it is the stated justification — so those
+presets pay a bigger penalty for their own protection. On a 24-layer model, dropping the
+skip saves 32% of the cache while the entire 4bit_nc → 3bit_nc step saves 9%.
+
+Sliding-window models pay less, not more: their boundary indices mostly land on sliding
+layers that are already native, so only one full-attention layer is actually lost
+(Laguna layer 0, gemma-4 layer 47, Muse layer 51) — 23-39% of *full-attention* KV.
+
+**Measured on Laguna, and nothing moved** (2026-08-29, full GSM8K test set n=1319,
+greedy, paired per-item McNemar, `Laguna-XS-2.1-exl3@3.00bpw`):
+
+| kv dtype | boundary | correct | acc |
+|---|---|---|---|
+| 4bit_nc | on | 1220 | 92.49% |
+| 4bit_nc | off | 1218 | 92.34% |
+| 3bit_nc | on | 1215 | 92.12% |
+| 3bit_nc | off | 1215 | 92.12% |
+
+4bit ± boundary: p=0.89. **3bit ± boundary: identical counts, 26 flips each way,
+p=1.00** — the docstring's own aggressive preset, on which its claim does not reproduce
+at all. Byte-equivalent comparison: 3bit_nc *with* protection scores 0.23 points below
+4bit_nc *without* it, at 8% more bytes.
+
+Three limits, all real:
+
+- **Short context.** GSM8K prompts here are ~700 tokens; the reason to compress KV is
+  long context, and that is where a first/last-layer effect is most likely to be real.
+  This says nothing about 32k.
+- **Sensitivity ~1.2 points.** Every pair has ~52 discordant items, so the exact test
+  needs a 34/18 split to reach p<0.05. A repeat-run control is measuring how much of
+  that 4% churn is vLLM's batching rather than the KV change.
+- **One model, and a quantized one.** MiniCPM5-1B was tried as a dense instrument and is
+  useless — an unquantized KV cache scores *below* a 3-bit one there, so it has no signal
+  to lose. phi4mini will not load; both Qwen3.x checkpoints are hybrids and already
+  exempt from boundary skips.
+
+**Next is Qwen3-4B itself**, the exact model the docstring names, isolated to the
+boundary change alone, 5-shot completion rather than chat CoT (what lm-eval's `gsm8k`
+does, so the likeliest provenance of the number, and it sidesteps Qwen3's thinking
+mode). If that is also flat, the useful claim is narrow — "not reproducible on the cited
+model with a standard short-context harness" — and the long-context case stays open
+rather than refuted.
+
+→ [patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
 
 ## `repair-tool` — Repair tool for existing EXL3 checkpoints
 
