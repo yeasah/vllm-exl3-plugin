@@ -128,7 +128,14 @@ is cross-entry rather than against a baseline, so it needs something
 
 → [bench/README.md](bench/README.md)
 
-## `turboquant-sliding-window` — TurboQuant cannot serve a sliding-window model
+## `turboquant-sliding-window` — TurboQuant KV cache for sliding-window models
+
+**Status 2026-08-29: Laguna serves, patched.** The three fixes are in
+[patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
+and the measurement is at the end of this item. Still open: the quality question
+(`qbench` on tq4), gemma-4 and Muse-Glimmer (neither fits the local card), and
+reporting any of it upstream. The history below is kept because it is what the
+diagnosis cost, and because two of the three walls were misdiagnosed on the way.
 
 `TurboQuantAttentionBackend` never overrides `supports_sliding_window`, so it takes
 the base class's `return False` and is rejected for any model with a sliding window.
@@ -298,10 +305,51 @@ The first/last-N sibling *is* TurboQuant's boundary protection. So what blocks L
 is a case upstream has already identified and left unimplemented, plus the block-scaling
 staleness bug — two narrow, reportable things rather than a missing capability.
 
-**Next step is a bounded upstream question**, not an investigation: does adding the
-sibling page class (the two commented lines) plus scaling `page_size_padded` with
-`block_size` let Laguna serve? Both are small enough to try, and the instrumented spec
-dump above is the diagnostic that tells you immediately whether the classes reconciled.
+**Answered 2026-08-29, and Laguna serves.** The answer to the bounded question was
+yes, but the two known fixes were not the load-bearing one. See
+[patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
+for all three.
+
+- **The primary page was priced by the wrong backend.**
+  `_align_heterogeneous_kv_block_size` prices the quantized primary through
+  `backend_cls`, which `_find_non_ssm_backend` defines as the backend of the *first*
+  attention layer — with skip layers, an unquantized one on FLASH_ATTN, whose
+  `customize_spec` is a no-op for TurboQuant's packing. So the primary was priced as
+  dense uint8 (2·hd bytes/head, 2048/token) instead of packed (hd+6, 1072/token). Since
+  `2·hd/(hd+6)` is never an integer — 1.91 at hd 128, 1.95 at hd 256 — the shared page
+  could never be a multiple of the real primary page, and no amount of sibling work
+  would have fixed that. The sibling function `_align_hybrid_block_size` already
+  special-cases TurboQuant for this exact reason and says so in its own comment.
+  Resolving the backend that serves the primary dtype moves block_size 32 → 64 and the
+  shared page 65536 → 68608, which is the packed page exactly.
+- **The sibling then does what upstream's comments say**, with two gates: only when the
+  native page is not an integer multiple of the primary's (nvfp4 is exactly 2× and
+  keeps its block-scaling path), and only when some layer is sliding-window or the model
+  is hybrid. The second gate matters — an all-full-attention model never reaches
+  `unify` at all (`UniformTypeKVCacheSpecs` takes it first) and packs differing page
+  sizes more tightly than padding does. Ungated, the sibling cost **2.0% of KV tokens on
+  dense TurboQuant**, which is a real regression on the path that already worked.
+- **The `page_size_padded` staleness one-liner is real but no longer on the path.**
+  Applied alone against the baseline it clears the assert and exposes the divisibility
+  wall behind it, reproducing the history recorded above; with the other two fixes the
+  pages reconcile and `unify` returns before the scaling branch.
+
+Measured on `Laguna-XS-2.1-exl3@3.00bpw`, `turboquant_4bit_nc`, 30 sliding layers
+skipped by index, RTX 5070 Ti / vLLM 0.28.0. All three page classes reconcile to 68608
+— turboquant layers exact at block 64, native full and sliding padded from 65536 at
+block 16 (4.5% waste) — and the model generates. **Boundary protection is intact**: the
+first/last-N layers keep native KV, so nothing was traded for this. Dense TurboQuant
+(MiniCPM5-1B) is unchanged at 909,888 vs 909,920 KV tokens, and both models still serve
+with an unquantized cache.
+
+**Not yet shown on the other two families.** gemma-4 and Muse-Glimmer do not fit the
+16 GiB card (Muse OOMs during load; its native path additionally fails earlier on an
+unrelated `vision_adapter.c_fc.mul1` weight-loading error, and it is served through
+`--model-impl transformers` here). Both need the vast box. gemma-4 also still has the
+multimodal blocker in front of it, which this does not touch.
+
+The `key=int` crash on the literal `sliding_window` keyword (`arg_utils.py:2022`) is
+untouched and still stands — the runs above skip layers by numeric index.
 
 Worth pairing with the quality question before investing: tq4 on a trellis-quantized
 model has field experience and a capability-benchmark lower bound behind it, but no
@@ -316,15 +364,16 @@ far all reduced to one-line staleness bugs, one of them already cleared by patch
 Second, the scope is three families and not one: gemma-4, Laguna and Muse-Glimmer are
 all sliding-window, which is **every real-world candidate except Qwen**. A fix is
 therefore load-bearing for most of the candidate pile rather than for one demoted
-family, and it is now better read as *more likely to be resolved than not*.
+family, and it is now better read as *more likely to be resolved than not*. (Resolved
+for Laguna on 2026-08-29; see the measurement above.)
 
 What that unblocks: gemma-4 goes back to being a genuine serving candidate, so the
 shared embed+head tensor deferred under `quantized-embeddings` has a **real
 constituency rather than a hypothetical one**. The severe priority demotion that both
 gemma and every tied-model optimization inherited was downstream of the misdiagnosis,
-and should be unwound with it. The remaining unknown is the divisibility wall above,
-which is genuinely structural — not the sliding-window rejection, which is only the
-first gate.
+and should be unwound with it. The divisibility wall — the remaining unknown when this
+was written — turned out to be three narrow bugs and is cleared. What is left is the
+quality question below, and whether gemma-4's multimodal blocker yields.
 
 → [docs/kernels.md](docs/kernels.md)
 
