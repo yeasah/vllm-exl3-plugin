@@ -32,6 +32,15 @@ Worth upstreaming rather than carrying: any out-of-tree quantization plugin that
 serves embeddings hits this, and `vllm-gguf-plugin`'s GGUFEmbeddingMethod is
 equally unreachable on those 86 architectures today.
 
+**Reported upstream 2026-08-28 as
+[vllm-project/vllm#54304](https://github.com/vllm-project/vllm/issues/54304)**, with
+an llm-compressor reproduction, the root cause, and why *this* fix is unsatisfying —
+deliberately as an issue and not a PR, because choosing between defaulting from
+ambient config and threading `quant_config` through 86 model files is a maintainer's
+call, not ours. Someone volunteered to pick it up. **So check the issue before
+re-applying this at the next bump**: whatever lands upstream may not resemble what is
+below, and re-applying on top of a different fix is the failure mode to avoid.
+
 diff --git a/vllm/model_executor/layers/vocab_parallel_embedding.py b/vllm/model_executor/layers/vocab_parallel_embedding.py
 index 6eed2b5249..3a6e23e06b 100644
 --- a/vllm/model_executor/layers/vocab_parallel_embedding.py

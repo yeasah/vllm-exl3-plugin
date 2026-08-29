@@ -351,6 +351,49 @@ multimodal blocker in front of it, which this does not touch.
 The `key=int` crash on the literal `sliding_window` keyword (`arg_utils.py:2022`) is
 untouched and still stands — the runs above skip layers by numeric index.
 
+**There is an upstream tracking issue for the gemma-4 half of this**, found 2026-08-29:
+[vllm-project/vllm#41403](https://github.com/vllm-project/vllm/issues/41403), "TurboQuant
++ Gemma 4 multimodal: 5-gate blocker stack" (open). Same destination, four gates in
+common, and it is worth reading before writing anything upstream.
+
+What it gives us:
+
+- **The multimodal blocker has a workaround.** `--hf-overrides
+  '{"text_config":{"use_bidirectional_attention":null}}'` clears
+  `partial multimodal token full attention not supported` at the cost of vision
+  quality. That is the blocker filed here as sitting behind everything else, and it
+  turns out to be steppable for a text-only measurement.
+- Two pieces of trivia that will cost an afternoon otherwise: TurboQuant's triton
+  kernels need `ninja` on the path, and an installed external `turboquant-vllm` plugin
+  collides with the in-tree API (`TQ4FullAttentionSpec.__init__() got an unexpected
+  keyword argument 'tq_slot_size'`).
+- Their Gate 2 is our boundary-skip question, and their workaround is exactly the one
+  considered here: monkeypatch `get_boundary_skip_layers` to return `[]`. So the
+  approach has independent users, and our patch is the alternative that keeps the
+  protection rather than trading it away.
+
+Where we are ahead: their Gate 5 stops at `NotImplementedError ... cannot unify by
+adjusting block_size` and attributes it to gemma's heterogeneous head_dim. That is a
+real second cause, but it is not the one that stops Laguna — the mispriced primary page
+is, and it is invisible from the error message. Their Gate 2 diagnosis ("needs per-layer
+attention backend routing") is also stale for 0.28: per-layer routing already happens
+here, FLASH_ATTN for the skip layers and TURBOQUANT for the rest, which is precisely how
+the aligner ends up asking the wrong backend for the primary's packing.
+
+**And gemma is harder than Laguna in a way this item had not recorded.** Its full and
+sliding layers do not share a KV geometry: `head_dim` 256 with 8 KV heads on the sliding
+layers, `global_head_dim` **512** with `num_global_key_value_heads` **1** on the global
+ones (plus `attention_k_eq_v: true`). So natively the two layer types are 8192 and 2048
+bytes/token — the heterogeneity the issue names, and a *fourth* page class that the fix
+above does not address: `padded_pages` computes one native per-token page from
+`model_config.get_num_kv_heads()`, which cannot be right for both. The Laguna fix is
+necessary but not sufficient for gemma.
+
+It also re-prices gemma's prize, favourably: the global layers are only 2048 bytes/token
+against 8192 for sliding, so the fixed sliding cost is ~335 MiB total (capped at the
+1024 window) while the global layers are what grows — 2.1 GiB at 128k, which tq4 takes
+to ~540 MiB. That is the same number the issue arrives at independently for the 31B.
+
 Worth pairing with the quality question before investing: tq4 on a trellis-quantized
 model has field experience and a capability-benchmark lower bound behind it, but no
 `qbench` numbers. That is the measurement that decides whether this is *practical*
