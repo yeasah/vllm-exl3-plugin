@@ -1,0 +1,239 @@
+# TurboQuant KV cache: page geometry, and what boundary protection buys
+
+*Two subjects that surfaced together and are worth keeping apart. The first is a
+correctness fix — a TurboQuant KV cache could not coexist with sliding-window
+layers, and now can. The second is an optimization with a much wider blast
+radius, applying to every TurboQuant model including dense ones.*
+
+Measured on vLLM 0.28.0, single RTX 5070 Ti (16 GiB), 2026-08-29. Open work is
+tracked as `turboquant-sliding-window` and `turboquant-boundary-tax` in
+[TODO.md](../TODO.md).
+
+## Part 1 — Why a sliding-window model could not serve
+
+`--kv-cache-dtype turboquant_4bit_nc` with the sliding layers held native by
+`--kv-cache-dtype-skip-layers` failed in KV cache group construction: first an
+`AssertionError` inside `unify_kv_cache_spec_page_size`, and behind it
+`NotImplementedError: page size is not divisible by the maximum page size`.
+Three independent bugs, fixed in
+[patches/vllm-tq-sliding-window-kv-pages.patch](../patches/vllm-tq-sliding-window-kv-pages.patch).
+
+**The load-bearing one is a mispriced page.**
+`Platform._align_heterogeneous_kv_block_size` prices the quantized primary
+through `backend_cls`, which `_find_non_ssm_backend` defines as the backend of
+the *first* attention layer. With skip layers that layer is usually an
+unquantized one on FLASH_ATTN, whose `customize_spec` is a no-op for
+TurboQuant's packing — so the primary is priced as dense uint8 (`2 * head_dim`
+bytes/head) instead of its packed slot (`head_dim + 6`). The shared page is then
+computed against a page ~1.9x too large, and because `2*hd / (hd+6)` is never an
+integer, the real primary page can never divide it. Invisible from the error
+message, and unfixable by any amount of work on the other two.
+
+The remaining two are the ones upstream had already flagged in its own comments:
+a **first/last-N sibling** (a full-attention skip layer had no way to pad up to
+the shared page — that mechanism existed only for `SlidingWindowSpec`), and
+**`page_size_padded` staleness** in `unify`, which scales `block_size` without
+scaling the pad.
+
+Sequence on `Laguna-XS-2.1-exl3@3.00bpw` (40 layers, 10 full / 30 sliding at
+window 512, 8 KV heads, head_dim 128):
+
+| state | outcome |
+|---|---|
+| baseline | `AssertionError` — the `page_size_padded` staleness |
+| + backend pricing fix | block 32→64, shared page 65536→**68608**; sliding and turboquant agree; layer 0 alone at 262144 |
+| + sibling | all classes 68608 → **serves** |
+| staleness one-liner alone | clears the assert, exposes the divisibility wall behind it |
+
+The sibling is gated twice so nothing else moves: only when the native per-token
+page is not an integer multiple of the primary's (nvfp4 is exactly 2x and keeps
+reconciling by block scaling), and only when some layer is sliding-window or the
+model is hybrid. That second gate matters — an all-full-attention model never
+reaches `unify` at all (`UniformTypeKVCacheSpecs` takes it first) and packs
+differing page sizes more tightly than padding does. Ungated, the sibling cost
+**2.0% of KV tokens on dense TurboQuant**, a regression on a path that worked.
+
+Not yet shown on gemma-4 or Muse-Glimmer: neither fits this card. gemma also has
+a second geometry problem this fix does not address — `head_dim` 256 with 8 KV
+heads on its sliding layers against `global_head_dim` **512** with **one** KV
+head on its global ones, so the two types are 8192 and 2048 bytes/token natively.
+See [vllm#41403](https://github.com/vllm-project/vllm/issues/41403).
+
+## Part 2 — What boundary protection buys
+
+`TurboQuantConfig.get_boundary_skip_layers` leaves the first and last two layers
+on a native KV cache. Its docstring justifies the hard `n=2` with "Empirically
+required for aggressive presets (k3v4_nc, 3bit_nc) — without it GSM8K drops ~30
+points on Qwen3-4B."
+
+### The claim reproduces exactly
+
+`Qwen/Qwen3-4B` bf16, GSM8K 5-shot completion, greedy, full test set n=1319:
+
+| config | acc | vs auto | KV bytes/token |
+|---|---|---|---|
+| auto (bf16 KV) | 86.81% | — | 147,456 |
+| 4bit_nc, boundary on | 84.53% | −2.27 | 50,688 |
+| 4bit_nc, boundary off | 78.01% | −8.79 | 38,592 |
+| k3v4_nc, boundary on | 78.70% | −8.11 | 46,592 |
+| k3v4_nc, boundary off | 48.90% | −37.91 | 33,984 |
+| 3bit_nc, boundary on | 78.17% | −8.64 | 42,496 |
+| 3bit_nc, boundary off | 46.25% | −40.56 | 29,376 |
+
+Removing the skip, paired: k3v4_nc **−29.80** (440 lost / 47 gained, p=4e-81)
+against the docstring's "~30 points". Not obsolete, not a mis-specified test.
+3bit_nc **−31.92** (485/64). And **4-bit is not exempt**: **−6.52** (167/81,
+p=5e-08).
+
+### But layer 0 is the entire effect, and the trailing layers buy nothing
+
+Decomposing the stock set `{0,1,34,35}`:
+
+| native layers | 4bit_nc | share of effect | k3v4_nc | share | KV B/token (4bit) |
+|---|---|---|---|---|---|
+| `{}` | 78.01% | — | 48.90% | — | 38,592 |
+| `{0}` | 83.17% | **79%** | 77.41% | **96%** | 41,616 |
+| `{0,1}` | 83.62% | 86% | 79.30% | 102% | 44,640 |
+| `{34,35}` | 77.63% | **−6%** | 48.67% | **−1%** | 44,640 |
+| `{0,35}` (n=1) | 83.55% | 85% | 77.56% | 96% | 44,640 |
+| `{0,1,34,35}` (stock) | 84.53% | 100% | 78.70% | 100% | 50,688 |
+
+**The last two layers are a pure tax.** Protecting only them is
+indistinguishable from protecting nothing — 4bit p=0.79, k3v4 p=0.92 — while
+costing two layers of native cache. Protecting layer 0 alone recovers 79% / 96%
+of the effect, and is itself statistically indistinguishable from full stock
+protection (4bit `{0}` vs `{0,1,34,35}`: −1.36 points, **p=0.17**) at **18%
+fewer bytes**. The likely physics is attention sinks / massive activations in the
+first layer, which predicts exactly this asymmetry.
+
+### The frontier, and what it means for the presets
+
+Every measured Qwen3-4B point, `*` = Pareto-optimal:
+
+| KV B/token | acc | | preset | native layers |
+|---|---|---|---|---|
+| 29,376 | 46.25% | * | 3bit_nc | `{}` |
+| 33,984 | 48.90% | * | k3v4_nc | `{}` |
+| 37,136 | 77.41% | * | k3v4_nc | `{0}` |
+| 38,592 | 78.01% | * | 4bit_nc | `{}` |
+| 40,288 | 79.30% | * | k3v4_nc | `{0,1}` |
+| 41,616 | 83.17% | * | 4bit_nc | `{0}` |
+| 42,496 | 78.17% | | 3bit_nc | `{0,1,34,35}` |
+| 44,640 | 83.62% | * | 4bit_nc | `{0,1}` |
+| 46,592 | 78.70% | | k3v4_nc | `{0,1,34,35}` |
+| 50,688 | 84.53% | * | 4bit_nc | `{0,1,34,35}` |
+| 147,456 | 86.81% | * | auto | `{}` |
+
+**Both stock aggressive presets are dominated.** `3bit_nc` as it ships — 78.17%
+at 42,496 — is beaten by `4bit_nc` protecting only layer 0 by **five points at
+fewer bytes**. `k3v4_nc` as it ships is beaten by the same configuration by 4.5
+points at 11% fewer bytes. Whatever byte budget an operator picks the aggressive
+presets for, a 4-bit cache with less boundary protection serves it better.
+
+**And none of those better configurations can be expressed.**
+`--kv-cache-dtype-skip-layers` only ever adds to the automatic list
+(`existing | set(boundary)` in `arg_utils.py`), so there is no invocation that
+reduces or retargets boundary protection. `get_boundary_skip_layers(model_config,
+n=2)` already takes the parameter; the sole call site hardcodes it.
+
+### Laguna shows none of this
+
+Same measurement on `Laguna-XS-2.1-exl3@3.00bpw` (chat CoT, n=1319): 4bit
+92.49% on / 92.34% off (p=0.89), 3bit **1215/1319 both ways**, 26 flips each
+direction (p=1.00). Two candidate explanations, untested: only one
+full-attention layer is at stake there (its boundary indices are `{0,1,38,39}`
+and three are sliding layers already held native), and 30 of its 40 layers keep
+a native cache regardless, so it is a far less perturbed system than Qwen3-4B
+with 32 of 36 compressed.
+
+### Controls and limits
+
+- **Decoding is bit-reproducible.** The same config run twice: 1220/1319 both
+  times, **zero** discordant items. So every per-item flip between two
+  configurations is the KV change, not batching, and the paired tests are clean.
+- **The perturbation is real but unbiased on Laguna.** ~52 items (4%) flip in
+  every Laguna comparison, symmetrically (27/25, 26/26). Not invisible —
+  directionless.
+- **Sensitivity ~1.2 points** on the Laguna nulls: with ~52 discordant items the
+  exact test needs a 34/18 split to reach p<0.05.
+- **All of this is short context** — ~700-token prompts on Qwen3-4B, ~1.3k on
+  Laguna. The reason to compress KV is long context, and both KV damage and any
+  first-layer effect plausibly grow with sequence length. No long-context
+  measurement exists yet, and it is the one that should decide a shipping default.
+- **MiniCPM5-1B is not a usable instrument** and its numbers are excluded: an
+  unquantized KV cache scores *below* a 3-bit one there (12.8% vs 16.0%), so it
+  has no signal to lose. phi4mini would not load; both Qwen3.x checkpoints are
+  hybrids and already exempt from boundary skips.
+
+## Reproducing
+
+The harness is [tools/gsm8k_kv.py](../tools/gsm8k_kv.py); per-item results for
+every run above are in [docs/data/turboquant-kv/](data/turboquant-kv/), so the
+tables re-derive without a GPU:
+
+    tools/gsm8k_kv.py report 'docs/data/turboquant-kv/qwen_*.json'
+    tools/gsm8k_kv.py report 'docs/data/turboquant-kv/iso_turboquant_4bit_nc_*.json'
+    tools/gsm8k_kv.py report 'docs/data/turboquant-kv/full_laguna_*.json'
+
+Boundary control is a replacement of `get_boundary_skip_layers`, which
+`EngineArgs.create_engine_config` calls in the driver process before any engine
+subprocess exists — so it lands on the real code path, and each run prints the
+engine's resulting `kv_cache_dtype_skip_layers` to prove which layers were
+skipped. There is no CLI for this; that is the finding.
+
+Qwen3-4B, the dense grid (~2 min/arm):
+
+    export MML=2048 UTIL=0.93
+    for kv in turboquant_4bit_nc turboquant_k3v4_nc turboquant_3bit_nc; do
+      for b in on off; do
+        tools/gsm8k_kv.py run Qwen/Qwen3-4B $kv $b 1319 qwen_${kv}_${b}.json fewshot
+      done
+    done
+    tools/gsm8k_kv.py run Qwen/Qwen3-4B auto on 1319 qwen_auto_on.json fewshot
+
+The layer isolation:
+
+    for spec in layers:0 layers:0,1 layers:34,35 layers:0,35; do
+      tools/gsm8k_kv.py run Qwen/Qwen3-4B turboquant_4bit_nc "$spec" 1319 \
+          iso_4bit_${spec//[:,]/_}.json fewshot
+    done
+
+Laguna, which needs its 30 sliding layers held native and a smaller context to
+fit 12.6 GiB of weights on a 16 GiB card (~20 min/arm, near-serial decoding):
+
+    export MML=1280 UTIL=0.93 MAXTOK=448
+    export SKIP_SLIDING=$(python -c "print(','.join(str(i) for i in range(40) if i%4))")
+    tools/gsm8k_kv.py run ~/ckpt/Laguna-XS-2.1-exl3-3.00bpw-bq \
+        turboquant_4bit_nc on 1319 full_laguna_4bit_on.json chat
+
+The determinism control is just the same invocation twice to different output
+files. It is worth re-running whenever the sampling path changes: every paired
+p-value above assumes it.
+
+## Where this goes upstream
+
+Two separable pieces, in order.
+
+1. **The page-size fixes.** Policy-free correctness, no default moves.
+2. **A lever for boundary protection.** The argument is a reachability gap
+   rather than a request to relax a conservative default: the configurations on
+   the frontier cannot be expressed today. The mechanism with the least new
+   surface is exposing the `n` that already exists, as a keyword in
+   `--kv-cache-dtype-skip-layers` — that flag already carries a keyword
+   vocabulary (`sliding_window`), matched by plain membership test, and its whole
+   purpose is which layers keep a native cache. It also requires fixing the
+   `key=int` crash (`sorted(existing | set(boundary), key=int)` raises on the
+   documented `sliding_window` keyword), which is a standalone bug.
+
+   New presets would be the most invasive option despite feeling like the
+   lightest: each costs ~5 registration sites (`TQ_PRESETS`, a `KVQuantMode`
+   member, `STR_DTYPE_TO_TORCH_DTYPE`, the backend's `supported_kv_cache_dtypes`,
+   the `CacheDType` literal), and a cross-product would enshrine configurations
+   measured here at 46-49%.
+
+A default change — `n=1`, or dropping the trailing layers, both of which the
+isolation supports — needs long context and more than one model first. Note that
+[vllm#41403](https://github.com/vllm-project/vllm/issues/41403) currently
+presents monkeypatching `get_boundary_skip_layers` to `[]` as a free gemma
+workaround; on a dense model that costs 6.5 points at 4 bits and 30 at k3v4, and
+that is worth telling them.
