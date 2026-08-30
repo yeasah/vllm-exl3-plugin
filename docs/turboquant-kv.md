@@ -136,15 +136,46 @@ presets for, a 4-bit cache with less boundary protection serves it better.
 reduces or retargets boundary protection. `get_boundary_skip_layers(model_config,
 n=2)` already takes the parameter; the sole call site hardcodes it.
 
+### Which layer the boundary set actually protects, per model
+
+Boundary protection is `{0, 1, L-2, L-1}`, but on a sliding-window model most of
+those are sliding layers the operator is already holding native. What is left is
+one full-attention layer, and *which* one differs:
+
+| model | layers | boundary set | full-attn layer protected | position |
+|---|---|---|---|---|
+| Laguna-XS-2.1 | 40 | `{0,1,38,39}` | `{0}` | **first** |
+| gemma-4-12B | 48 | `{0,1,46,47}` | `{47}` | **last** |
+| Muse-Glimmer-30B | 52 | `{0,1,50,51}` | `{51}` | **last** |
+
+Read against the isolation above, that is a per-model recommendation rather than
+a general one. On **gemma-4 and Muse the protected layer is the last one** — the
+position measured as buying nothing (p=0.79 at 4bit, p=0.92 at k3v4) — and their
+layer 0, the position that does carry the effect, is a sliding layer that stays
+native regardless. So `boundary:0` on those models is predicted near-free.
+
+Measured on Muse-Glimmer-30B @2.50bpw, `turboquant_4bit_nc`, 4.37 GiB of KV,
+full 131,072 context, releasing layer 51:
+
+| | KV tokens | max concurrency at 131k |
+|---|---|---|
+| stock boundary | 751,263 | 5.73x |
+| `boundary:0` | **862,096** | **6.58x** |
+
+**+14.8% for one layer**, at unchanged weights and unchanged KV memory.
+
 ### Laguna shows none of this
 
 Same measurement on `Laguna-XS-2.1-exl3@3.00bpw` (chat CoT, n=1319): 4bit
 92.49% on / 92.34% off (p=0.89), 3bit **1215/1319 both ways**, 26 flips each
-direction (p=1.00). Two candidate explanations, untested: only one
-full-attention layer is at stake there (its boundary indices are `{0,1,38,39}`
-and three are sliding layers already held native), and 30 of its 40 layers keep
-a native cache regardless, so it is a far less perturbed system than Qwen3-4B
-with 32 of 36 compressed.
+direction (p=1.00). Two candidate explanations were proposed, and the table
+above disfavours the first. "Only one layer is at stake" does not explain it,
+because on Laguna that layer is **layer 0** — the one carrying 79-96% of the
+effect on Qwen3-4B. If the count were the reason, most of the effect should have
+survived; none of it did. What remains is that Laguna is a far less perturbed
+system (10 of 40 layers ever compressed, against 32 of 36 on Qwen3-4B), or that
+the sensitivity is model-specific. Distinguishing those needs a second dense
+model, not a second sliding-window one.
 
 ### Controls and limits
 
