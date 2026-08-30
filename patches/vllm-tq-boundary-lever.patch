@@ -33,6 +33,19 @@ is the whole configuration for a sliding-window model with no boundary
 protection, which today cannot be expressed at all and until this patch could
 not even be typed.
 
+`boundary:N` is deliberately symmetric, with no separate front/back counts.
+Asymmetric protection is already expressible by disabling it and listing the
+layers, and that stays portable across models because layer indices are numbered
+from the front:
+
+    --kv-cache-dtype-skip-layers 0 boundary:0
+
+keeps a native cache on only the first layer -- the configuration that measures
+best below -- and means the same thing on any model without knowing its depth. A
+front/back form would add a dimension to the grammar whose only unique
+contribution is a portable spelling for *back*-anchored protection, which is the
+half measured here as buying nothing.
+
 **Why it is worth reaching.** Measured on Qwen/Qwen3-4B, GSM8K 5-shot, greedy,
 full test set n=1319, paired per-item (see docs/turboquant-kv.md):
 
@@ -51,10 +64,10 @@ The default is unchanged at N=2. This only makes the rest of the curve
 expressible.
 
 diff --git a/vllm/config/cache.py b/vllm/config/cache.py
-index 654e9a5358..8382ae44d2 100644
+index 654e9a5358..1a9fba0877 100644
 --- a/vllm/config/cache.py
 +++ b/vllm/config/cache.py
-@@ -113,7 +113,11 @@ class CacheConfig:
+@@ -113,7 +113,24 @@ class CacheConfig:
        reproducible hashing. Requires the optional ``xxhash`` package."""
      kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
      """Layer patterns to skip KV cache quantization. Accepts layer indices
@@ -63,11 +76,24 @@ index 654e9a5358..8382ae44d2 100644
 +    for a ``turboquant_*`` cache dtype ``'boundary:N'``, which sets how many
 +    layers at each end keep a native cache (default 2, ``'boundary:0'`` for
 +    none). The boundary entry is resolved into layer indices while the engine
-+    config is built and does not appear in the stored list."""
++    config is built and does not appear in the stored list.
++
++    ``boundary:N`` is symmetric; asymmetric protection is spelled by disabling it
++    and listing the layers, which stays model-portable because layer indices are
++    numbered from the front. To keep a native cache on only the first layer, the
++    configuration that measures best on the models tested so far::
++
++        --kv-cache-dtype-skip-layers 0 boundary:0
++
++    and for a sliding-window model, whose sliding layers must stay native
++    because TurboQuant cannot serve a sliding window::
++
++        --kv-cache-dtype-skip-layers 0 sliding_window boundary:0
++    """
      mamba_page_size_padded: int | None = None
      """ Optional override for mamba page size; used by hybrid mamba/attention
      models to ensure exact alignment with attention page size."""
-@@ -122,6 +126,11 @@ class CacheConfig:
+@@ -122,6 +139,11 @@ class CacheConfig:
      quantization (``--kv-cache-dtype-skip-layers``); set during block-size
      alignment so unquantized skip layers pad up to the quantized primary's
      page."""

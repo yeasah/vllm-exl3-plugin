@@ -236,6 +236,15 @@ Two separable pieces, in order.
    | `sliding_window boundary:1` | `0, 39, sliding_window` | 1,697 |
    | `sliding_window boundary:0` | `sliding_window` | 1,732 |
 
+   `boundary:N` is symmetric on purpose. Asymmetric protection needs no new
+   syntax, because layer indices are numbered from the front and so stay portable
+   across models: `--kv-cache-dtype-skip-layers 0 boundary:0` resolves to `['0']`
+   on any model, which is the best-measured configuration above. A front/back
+   `boundary:N,M` form would add a grammar dimension whose only unique
+   contribution is a portable spelling for *back*-anchored protection — the half
+   measured here as buying nothing. Worth revisiting only if long context shows
+   the trailing layers doing something.
+
    The middle row is the sliding-window case in miniature: `boundary:1` drops
    layers 1 and 38, both of which are sliding and already native, so capacity does
    not move. Only layer 0 is ever at stake on this model, which is the same fact
