@@ -418,6 +418,39 @@ when they move in opposite directions.** That is the regime every allocation sol
 operates in, and it is why the objective being minimised -- a sum of independently measured
 per-tensor terms -- has little relationship to the KLD that results.
 
+### The same effect, seen from outside: fractional bitrates are penalised (2026-08-30)
+
+If mixed-direction moves superpose badly, then **every fractional bpw target should sit
+above the trend through its integer neighbours** — a fractional target is nothing but a
+mixture of K levels, which is the mixed-direction regime by construction. turboderp's
+pre-SC `Muse-Glimmer-30B` card carries two fractional points on an **openwebtext** eval
+(no in-domain calibration confound, no SC arm), and both do:
+
+| bpw | measured | log-interp of neighbours | bump | additivity alone | residual |
+|---|---|---|---|---|---|
+| 2.50 | 0.123 | 0.0900 | **+37%** | +27% | +8% |
+| 3.50 | 0.030 | 0.0230 | **+31%** | +22% | +7% |
+
+Two effects, and the split matters. A 50/50 mix of K levels gives the *arithmetic* mean of
+the endpoint KLDs while the log-trend is the *geometric* mean, so `(1+r)/2*sqrt(r)`
+predicts +27% and +22% from additivity alone — no allocation failure required, and it
+depends only on the local steepness of the curve. **What is left is +8% and +7% on two
+independent points**, which is this section's superposition penalty measured from the
+outside.
+
+It is easy to miss because it is small on either axis: +31% at KLD 0.030 is 4% of a linear
+plot dominated by the 2.0 bpw point, and 0.12 decades on a log one. The in-domain eval of
+the later SC card magnifies it — 1.63x and 1.62x inflation on the 3.00 and 4.00 points
+against **1.80x on 3.50** — which is what turns the +31% into the +45% visible there, and
+why the effect first surfaced on the confounded chart.
+
+**Not yet tested, and cheap:** assemble a 50/50 K3/K4 mixture from the existing phi-4-mini
+`uniform-3.0` and `uniform-4.0` checkpoints with `mix_recipe.py` and score it. Geometric
+(no penalty) is 0.0539, additivity alone 0.0642, additivity plus a 7% residual **0.0686**.
+If it lands near the last, fractional EXL3 bitrates carry a structural ~25-35% penalty and
+**integer K is the only efficient place on the curve** — which is not how bpw targets are
+currently chosen, here or anywhere.
+
 ### What this licenses
 
 On this model at this bitrate, per-tensor allocation is worth ~1.7% at best, and the

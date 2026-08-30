@@ -23,7 +23,8 @@ There is no CLI for this -- that is the point of the experiment.
 Sliding-window models need their sliding layers held native (TurboQuant cannot
 serve a sliding window); pass them in SKIP_SLIDING as a comma-separated list.
 
-Env: MML (max_model_len), UTIL (gpu_memory_utilization), MAXTOK, SKIP_SLIDING.
+Env: MML (max_model_len), UTIL (gpu_memory_utilization), MAXTOK, SKIP_SLIDING,
+SHOTS (few-shot count -- the context-length knob for long-context runs).
 
 Decoding is greedy and, with enforce_eager, bit-reproducible: the same config run
 twice scored 1220/1319 both times with zero per-item disagreement. So per-item
@@ -60,9 +61,14 @@ def run(model, kv, boundary, n, outp, mode):
 
     train = load_dataset("openai/gsm8k", "main", split="train")
     test = load_dataset("openai/gsm8k", "main", split="test").select(range(n))
+    # Shot count is the context-length knob: task, metric and scoring stay fixed
+    # while the prompt grows, so long-context runs stay comparable to the 5-shot
+    # ones. Every problem shares the prefix, so prefix caching pays the long
+    # prefill once. ~192 tokens/shot on GSM8K: 42 shots ~ 8K, 175 ~ 32K.
+    n_shots = int(os.environ.get("SHOTS", 5))
     shots = "".join(
         f"Question: {train[i]['question']}\nAnswer: {train[i]['answer']}\n\n"
-        for i in range(5)
+        for i in range(n_shots)
     )
     gold = [r["answer"].split("####")[-1].strip().replace(",", "") for r in test]
 
@@ -80,6 +86,8 @@ def run(model, kv, boundary, n, outp, mode):
     llm = LLM(**kwargs)
     skips = llm.llm_engine.vllm_config.cache_config.kv_cache_dtype_skip_layers
     print("EFFECTIVE SKIP LAYERS:", skips, flush=True)
+    shot_tokens = len(llm.get_tokenizer().encode(shots)) if n_shots else 0
+    print(f"PROMPT CONTEXT: {n_shots} shots = {shot_tokens} tokens", flush=True)
 
     if mode == "chat":
         # Few-shot completion is the lm-eval `gsm8k` shape and the right default;
@@ -122,6 +130,7 @@ def run(model, kv, boundary, n, outp, mode):
     res = dict(
         model=model, kv=kv, boundary=boundary, n=n, correct=sum(items),
         acc=sum(items) / n, skip_layers=list(skips), items=items,
+        n_shots=n_shots, shot_tokens=shot_tokens, mode=mode,
     )
     json.dump(res, open(outp, "w"), indent=1)
     print("RESULT", json.dumps({k: v for k, v in res.items() if k != "items"}), flush=True)

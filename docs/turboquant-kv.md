@@ -177,6 +177,59 @@ system (10 of 40 layers ever compressed, against 32 of 36 on Qwen3-4B), or that
 the sensitivity is model-specific. Distinguishing those needs a second dense
 model, not a second sliding-window one.
 
+### Long context, and weight quantization: the full matrix (2026-08-30)
+
+`Qwen/Qwen3-4B` is 40,960 native with `rope_scaling: null`, so a bf16 reference *and* an
+unquantized 32K KV cache both fit on a 16 GiB card and **no YaRN appears anywhere** — the
+only axes are the ones being measured. Context length is swept with the shot count (192
+tokens/shot on GSM8K), which holds task, metric and scoring fixed; prefix caching pays the
+long prefill once. A 3.00bpw EXL3 conversion of the same model (`head_bits 6`, bundled
+calibration) supplies the weight axis. First 500 problems throughout, so every column is
+paired.
+
+| weights | KV | ~0.7K | 8.2K | 32.8K |
+|---|---|---|---|---|
+| bf16 | auto (bf16 KV) | 88.0% | 89.0% | 86.8% |
+| bf16 | tq4 + protection | 86.2% | 88.2% | 86.4% |
+| bf16 | tq4 − protection | 78.2% | 84.0% | 82.6% |
+| 3bpw | auto (bf16 KV) | 75.4% | 79.8% | 76.6% |
+| 3bpw | tq4 + protection | 73.0% | 77.0% | 74.4% |
+| 3bpw | tq4 − protection | 68.2% | 72.2% | 70.0% |
+
+**Boundary protection does not become more valuable at long context — it becomes less.**
+Paired McNemar, significant in all six cells (p from 4e-2 to 2e-5):
+
+| | ~0.7K | 8.2K | 32.8K |
+|---|---|---|---|
+| bf16, cost of dropping protection | **−8.0** | −4.2 | **−3.8** |
+| 3bpw, cost of dropping protection | −4.8 | −4.8 | −4.4 |
+
+That contradicts the attention-sink prior stated above, which predicted the first layer
+should matter *more* as sequences lengthen. On bf16 the cost halves from 0.7K to 32.8K
+(~1.6 sigma, suggestive rather than conclusive since the two prompts differ); on 3bpw it is
+flat. Neither shows growth. The long-context worry that was deferring the shipping default
+does not reproduce on this task.
+
+**The tq4 cost itself is small and never significant here** (auto → tq4+protection: −0.4
+to −2.8 points, p = 0.13 to 0.87 across six cells). All six have the same sign, which a
+sign test puts at p=0.03, so the effect is real and just below this n's resolution.
+
+**Compounding is at most mild.** The tq4 cost is consistently larger on 3bpw weights
+(−2.2 to −2.8) than on bf16 (−0.4 to −1.8), but no individual comparison is significant.
+Consistent with the roughly-additive prediction from the same-direction superposition
+result in [qbench.md](qbench.md), with a hint of mild super-additivity that this n cannot
+resolve. Weight quantization dominates either way: bf16 → 3bpw costs 9-13 points against
+the KV configs' 0.4-8.
+
+**The caveat is now the most important thing in this section.** Many-shot GSM8K's long
+context is 175 near-identical exemplars, and *redundancy is exactly what makes a task
+robust to losing part of its context*. So the observed shrink may be a property of the
+task rather than of length — a model that can answer from any of 175 examples does not
+care much which ones the cache damaged. This is the result that most needs a second
+instrument, and a needle/RULER-style retrieval probe is the one that would not share the
+weakness. **Until that runs, "protection matters less at long context" is a statement
+about many-shot prompts, not about long context.**
+
 ### Controls and limits
 
 - **Decoding is bit-reproducible.** The same config run twice: 1220/1319 both
