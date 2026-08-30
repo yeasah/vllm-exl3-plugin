@@ -215,7 +215,9 @@ p-value above assumes it.
 Two separable pieces, in order.
 
 1. **The page-size fixes.** Policy-free correctness, no default moves.
-2. **A lever for boundary protection.** The argument is a reachability gap
+2. **A lever for boundary protection**, drafted as
+   [patches/vllm-tq-boundary-lever.patch](../patches/vllm-tq-boundary-lever.patch).
+   The argument is a reachability gap
    rather than a request to relax a conservative default: the configurations on
    the frontier cannot be expressed today. The mechanism with the least new
    surface is exposing the `n` that already exists, as a keyword in
@@ -224,6 +226,20 @@ Two separable pieces, in order.
    purpose is which layers keep a native cache. It also requires fixing the
    `key=int` crash (`sorted(existing | set(boundary), key=int)` raises on the
    documented `sliding_window` keyword), which is a standalone bug.
+
+   Verified end to end on Laguna, where the effective skip list is printed back
+   by the engine:
+
+   | invocation | resulting native layers | KV tokens |
+   |---|---|---|
+   | `sliding_window` | `0, 1, 38, 39, sliding_window` | 1,697 |
+   | `sliding_window boundary:1` | `0, 39, sliding_window` | 1,697 |
+   | `sliding_window boundary:0` | `sliding_window` | 1,732 |
+
+   The middle row is the sliding-window case in miniature: `boundary:1` drops
+   layers 1 and 38, both of which are sliding and already native, so capacity does
+   not move. Only layer 0 is ever at stake on this model, which is the same fact
+   that makes Laguna's quality nulls unsurprising in hindsight.
 
    New presets would be the most invasive option despite feeling like the
    lightest: each costs ~5 registration sites (`TQ_PRESETS`, a `KVQuantMode`

@@ -462,10 +462,11 @@ Open:
 - **Why Laguna is flat** — one full-attention layer at stake versus four, or 30 of 40
   layers native regardless? Cheaply separable by compressing Laguna's sliding layers too
   once that path exists, or by testing a dense model of Laguna's depth.
-- **The upstream lever**, argued as a reachability gap rather than a defaults change:
-  expose the `n` that `get_boundary_skip_layers` already takes, as a keyword in
-  `--kv-cache-dtype-skip-layers`, bundled with the `key=int` fix that the documented
-  `sliding_window` keyword needs anyway. Reasoning in the doc.
+- **The upstream lever is drafted** as
+  [patches/vllm-tq-boundary-lever.patch](patches/vllm-tq-boundary-lever.patch): the
+  `key=int` fix plus `boundary:N` in `--kv-cache-dtype-skip-layers`, default unchanged
+  at 2. Verified end to end. What is left is filing it — as a reachability gap rather
+  than a defaults change, with the Qwen3-4B frontier as the motivation.
 - **Tell [vllm#41403](https://github.com/vllm-project/vllm/issues/41403)** that
   monkeypatching `get_boundary_skip_layers` to `[]` is not free — it presents that as a
   costless gemma workaround, and on a dense model it costs 6.5 points at 4 bits.
