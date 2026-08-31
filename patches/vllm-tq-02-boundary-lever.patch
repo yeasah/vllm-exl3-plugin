@@ -63,7 +63,7 @@ full test set n=1319, paired per-item (see docs/turboquant-kv.md):
 The default is unchanged at N=2. This only makes the rest of the curve
 expressible.
 
-Applies on top of vllm-tq-sliding-window-kv-pages.patch, which adds the adjacent
+Applies on top of vllm-tq-01-sliding-window-kv-pages.patch, which adds the adjacent
 `sibling_page_size_padded` field to the same dataclass.
 
 diff --git a/vllm/config/cache.py b/vllm/config/cache.py

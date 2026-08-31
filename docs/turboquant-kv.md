@@ -16,7 +16,7 @@ tracked as `turboquant-sliding-window` and `turboquant-boundary-tax` in
 `AssertionError` inside `unify_kv_cache_spec_page_size`, and behind it
 `NotImplementedError: page size is not divisible by the maximum page size`.
 Three independent bugs, fixed in
-[patches/vllm-tq-sliding-window-kv-pages.patch](../patches/vllm-tq-sliding-window-kv-pages.patch).
+[patches/vllm-tq-01-sliding-window-kv-pages.patch](../patches/vllm-tq-01-sliding-window-kv-pages.patch).
 
 **The load-bearing one is a mispriced page.**
 `Platform._align_heterogeneous_kv_block_size` prices the quantized primary
@@ -427,7 +427,7 @@ Two separable pieces, in order.
 
 1. **The page-size fixes.** Policy-free correctness, no default moves.
 2. **A lever for boundary protection**, drafted as
-   [patches/vllm-tq-boundary-lever.patch](../patches/vllm-tq-boundary-lever.patch).
+   [patches/vllm-tq-02-boundary-lever.patch](../patches/vllm-tq-02-boundary-lever.patch).
    The argument is a reachability gap
    rather than a request to relax a conservative default: the configurations on
    the frontier cannot be expressed today. The mechanism with the least new

@@ -135,7 +135,7 @@ the diagnostic history, kept because two of the three walls were misdiagnosed on
 way.*
 
 **Status 2026-08-29: Laguna serves, patched.** The three fixes are in
-[patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
+[patches/vllm-tq-01-sliding-window-kv-pages.patch](patches/vllm-tq-01-sliding-window-kv-pages.patch)
 and the measurement is at the end of this item. Still open: the quality question
 (`qbench` on tq4), gemma-4 and Muse-Glimmer (neither fits the local card), and
 reporting any of it upstream. The history below is kept because it is what the
@@ -316,7 +316,7 @@ anything this item depends on.
 
 **Answered 2026-08-29, and Laguna serves.** The answer to the bounded question was
 yes, but the two known fixes were not the load-bearing one. See
-[patches/vllm-tq-sliding-window-kv-pages.patch](patches/vllm-tq-sliding-window-kv-pages.patch)
+[patches/vllm-tq-01-sliding-window-kv-pages.patch](patches/vllm-tq-01-sliding-window-kv-pages.patch)
 for all three.
 
 - **The primary page was priced by the wrong backend.**
@@ -463,7 +463,7 @@ Open:
   layers native regardless? Cheaply separable by compressing Laguna's sliding layers too
   once that path exists, or by testing a dense model of Laguna's depth.
 - **The upstream lever is drafted** as
-  [patches/vllm-tq-boundary-lever.patch](patches/vllm-tq-boundary-lever.patch): the
+  [patches/vllm-tq-02-boundary-lever.patch](patches/vllm-tq-02-boundary-lever.patch): the
   `key=int` fix plus `boundary:N` in `--kv-cache-dtype-skip-layers`, default unchanged
   at 2. Verified end to end. What is left is filing it — as a reachability gap rather
   than a defaults change, with the Qwen3-4B frontier as the motivation.
