@@ -298,6 +298,44 @@ statistics; all twelve cells of that sweep were discarded.
   has no signal to lose. phi4mini would not load; both Qwen3.x checkpoints are
   hybrids and already exempt from boundary skips.
 
+### Does tq4 compose safely with aggressive weight quantization? (2026-08-30)
+
+The question this work started from, and the one vLLM's own study cannot answer because it
+evaluates KV quantization against unquantized weights.
+
+**At 4 bits, composition is additive.** The cost of adding tq4 is the same whether the
+weights are bf16 or 3.00bpw, pooled over five task/context combinations (GSM8K at
+0.7K/8.2K/32.8K, needle at 8K/32K): difference-of-differences **−0.09%, 95% CI −1.1% to
++0.9%**. Per-cell estimates wobble in both directions with no consistent sign. That is also
+what the same-direction superposition result in [qbench.md](qbench.md) predicts — weight
+and KV quantization are degradations pointing the same way.
+
+**At the aggressive presets it is not.** Raising the KV perturbation ~4x makes the
+interaction appear immediately (GSM8K 5-shot, n=1319, cost against an unquantized cache):
+
+| preset | bf16 weights | 3.00bpw weights | interaction |
+|---|---|---|---|
+| 4bit_nc | −2.3% | −2.7% | −0.5 [−3.4, +2.5] n.s. |
+| k3v4_nc | −8.1% | **−15.0%** | **−6.9 [−10.5, −3.3]** |
+| 3bit_nc | −8.6% | **−15.1%** | **−6.4 [−10.0, −2.9]** |
+
+So on a 3bpw model the aggressive presets cost roughly **twice** what they cost on bf16
+weights, and the excess is a genuine interaction rather than a sum of parts. Absolute
+damage compounds hard: bf16+auto 86.8% → 3bpw+k3v4_nc 59.7%, of which ~12 points is the
+weights, ~8 would be additive KV, and ~7 is the interaction.
+
+**Two consequences.** First, tq4 is safe to compose with aggressive EXL3 — the reassuring
+result, now with a bound rather than an absence of evidence. Second, **published KV-quant
+evaluations on unquantized weights understate the risk for quantized deployments**: vLLM's
+study recommends avoiding k3v4_nc and 3bit_nc based on bf16-weight numbers, and on a 3bpw
+model the penalty is about double what those numbers imply. Anyone serving an EXL3 or
+GGUF-quantized model should read published KV-quant results as a lower bound.
+
+It also strengthens the Pareto argument above on exactly the models that matter here: at
+3.00bpw, `4bit_nc` *without* boundary protection scores 65.1% against `k3v4_nc` *with* it
+at 59.7% — **5.4 points better at 17% fewer bytes**, where on bf16 weights the two were
+tied.
+
 ### Independent corroboration, and what it leaves open (2026-05-11)
 
 vLLM published their own TurboQuant study
