@@ -817,6 +817,15 @@ the instance has been reassigned and needs re-provisioning.
 In the order that answers the most per hour. Nothing here is required reading before a
 decision — [Where it lands](#where-it-lands) has the numbers.
 
+0. **Re-run the headline against the baseline the converter actually ships**, i.e.
+   `probe.py` with `apply_out_scales = True` instead of the `False` it hardcodes today.
+   This is first because it is the only item that can *close* the project rather than
+   advance it: `apply_out_scales` is worth up to 66% KL by itself and corrects the same
+   axis YAQA does, so the −19% could be largely or entirely subsumed. It is also the
+   cheapest thing on this list — same model, same corpus, this workstation, ~18 min per
+   layer — because nothing new needs downloading: the RedPajama-V2 shard is already in
+   the HF cache and the README's snippet re-extracts the flat `.txt` in seconds.
+   Everything below is wasted effort if this comes back neutral.
 1. **Llama-3.1-8B-Instruct**, the paper's own model, for a third point on a size trend
    that has been favourable throughout (0.6B → 1.2B roughly doubled the effect). Measured
    floor **~20.5 GiB at ctx 2048** — one 24 GiB card, or sharded, since it does not need
@@ -835,7 +844,6 @@ decision — [Where it lands](#where-it-lands) has the numbers.
 **The cheap side-result was measured, and it is not there.** Restoring the output
 metric `H_n D_sv² H_nᵀ` that `regularize()` creates and `ldlq()` drops costs up to +57%
 KL rather than saving anything; the omission is load-bearing. See
-[The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing). It does leave one
-caveat for the numbers above: `probe.py` sets `apply_out_scales = False`, so every YAQA
-result in this document is measured against a baseline up to 66% worse than what the
-converter actually ships.
+[The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing). What it left
+behind is item 0 above — the same measurement showed `probe.py` has been scoring YAQA
+against a baseline the converter does not use.

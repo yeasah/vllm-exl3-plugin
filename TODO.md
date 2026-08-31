@@ -939,9 +939,11 @@ Hessian working set on dense models and 14x on wide MoE, a calibration corpus we
 ship, and one unexplained pathological layer — the first block's `down_proj`, reproducible
 across both models tested — worth 1-3 points if gated around.
 
-**What would move it:** the 8B (~20.5 GiB, one 24 GiB card, not this workstation); a
-full-budget sketch (corpus already downloaded, only GPU time missing); or an explanation
-of that first-block layer.
+**What would move it, cheapest first:** re-run the headline with
+`apply_out_scales = True` (see below) — it runs on this workstation and can close the
+entry outright; then the 8B (~20.5 GiB, one 24 GiB card, not this workstation); a
+full-budget sketch (corpus already in the HF cache, only GPU time missing); or an
+explanation of that first-block layer.
 
 **The cheap side-result was measured and is closed (2026-08-31).** EXL3 applies
 `out_channel_scales` and then rounds as if the output metric were the identity, which it
