@@ -324,6 +324,14 @@ weights, and the excess is a genuine interaction rather than a sum of parts. Abs
 damage compounds hard: bf16+auto 86.8% → 3bpw+k3v4_nc 59.7%, of which ~12 points is the
 weights, ~8 would be additive KV, and ~7 is the interaction.
 
+**The second table is the positive control for the first**, which is what licenses
+reading the 4-bit result as additive rather than as a failure to measure. The same
+instrument, the same 1319 problems and the same paired test detect compounding
+unambiguously when it is there (p<0.001 at both aggressive presets), so its silence at
+4 bits is a measurement. Compare the needle probe above, whose first three variants
+saturated at 93-100%: those nulls were worth nothing because sensitivity had never been
+demonstrated. Any null reported here should carry a control of this shape.
+
 **Two consequences.** First, tq4 is safe to compose with aggressive EXL3 — the reassuring
 result, now with a bound rather than an absence of evidence. Second, **published KV-quant
 evaluations on unquantized weights understate the risk for quantized deployments**: vLLM's
