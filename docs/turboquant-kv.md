@@ -33,7 +33,8 @@ The remaining two are the ones upstream had already flagged in its own comments:
 a **first/last-N sibling** (a full-attention skip layer had no way to pad up to
 the shared page — that mechanism existed only for `SlidingWindowSpec`), and
 **`page_size_padded` staleness** in `unify`, which scales `block_size` without
-scaling the pad.
+scaling the pad (narrowed to `AttentionSpec`, which is where the field is declared —
+the base `KVCacheSpec` has no pad, so an unguarded access fails type checking).
 
 Sequence on `Laguna-XS-2.1-exl3@3.00bpw` (40 layers, 10 full / 30 sliding at
 window 512, 8 KV heads, head_dim 128):
