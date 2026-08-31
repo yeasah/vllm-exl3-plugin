@@ -1,0 +1,200 @@
+ -- /home/ypell/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct/snapshots/5a8abab4a5d6f164389b1079fb721cfab8d7126c/
+ -- calibration (128, 2048), eval in-domain(16, 2048), code(16, 2048), literary(16, 2048), K=[2, 3, 4], sigma_o=[0.001]
+
+ == L1.self_attn.q_proj: in=2048 out=2048
+    input skew 0.0811 -> auto would say ON   (21s)
+    sv std/mean 0.386  max/min 21.1  H_O eff.rank 65.1%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           2.49757e+04   +0.0% 2.17577e+04   +0.0% 6.20978e+05   +0.0%
+    ldlq+ho/0.001  2.13107e+04  -14.7% 2.62707e+04  +20.7% 7.38956e+05  +19.0%
+    profile ldlq           slope -0.004   rel-err spread(std of log) 0.022
+    profile ldlq+ho/0.001  slope -0.514   rel-err spread(std of log) 0.265
+    profile ldlq-noos      slope -0.851   rel-err spread(std of log) 0.388
+    K=2 in-domain  ldlq           KL 0.001407     +0.0%  [  +0.0,   +0.0]  fedRMS 1.252
+    K=2 in-domain  ldlq+ho/0.001  KL 0.001418     +0.8%  [  -7.8,   +9.4]  fedRMS 1.264
+    K=2 in-domain  ldlq-noos      KL 0.001618    +15.0%  [  +3.0,  +26.0]  fedRMS 1.178
+    K=2 in-domain  ldlq-dup       KL 0.001407     +0.0%  [  +0.0,   +0.0]
+    K=2 code       ldlq           KL 0.001807     +0.0%  [  +0.0,   +0.0]  fedRMS 1.252
+    K=2 code       ldlq+ho/0.001  KL 0.002298    +27.2%  [ +15.6,  +40.7]  fedRMS 1.264
+    K=2 code       ldlq-noos      KL 0.002760    +52.8%  [ +41.4,  +66.4]  fedRMS 1.178
+    K=2 code       ldlq-dup       KL 0.001807     +0.0%  [  +0.0,   +0.0]
+    K=2 literary   ldlq           KL 0.002410     +0.0%  [  +0.0,   +0.0]  fedRMS 1.252
+    K=2 literary   ldlq+ho/0.001  KL 0.002576     +6.9%  [  +2.5,  +11.5]  fedRMS 1.264
+    K=2 literary   ldlq-noos      KL 0.003058    +26.9%  [ +19.8,  +34.0]  fedRMS 1.178
+    K=2 literary   ldlq-dup       KL 0.002410     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.386  max/min 21.1  H_O eff.rank 65.1%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           5.39207e+03   +0.0% 4.68871e+03   +0.0% 1.41558e+05   +0.0%
+    ldlq+ho/0.001  4.51294e+03  -16.3% 5.66188e+03  +20.8% 1.70244e+05  +20.3%
+    profile ldlq           slope -0.001   rel-err spread(std of log) 0.021
+    profile ldlq+ho/0.001  slope -0.550   rel-err spread(std of log) 0.284
+    profile ldlq-noos      slope -0.883   rel-err spread(std of log) 0.401
+    K=3 in-domain  ldlq           KL 0.000762     +0.0%  [  +0.0,   +0.0]  fedRMS 1.154
+    K=3 in-domain  ldlq+ho/0.001  KL 0.000823     +8.0%  [  +2.9,  +13.7]  fedRMS 1.157
+    K=3 in-domain  ldlq-noos      KL 0.000913    +19.9%  [ +14.5,  +25.9]  fedRMS 1.076
+    K=3 in-domain  ldlq-dup       KL 0.000762     +0.0%  [  +0.0,   +0.0]
+    K=3 code       ldlq           KL 0.000876     +0.0%  [  +0.0,   +0.0]  fedRMS 1.154
+    K=3 code       ldlq+ho/0.001  KL 0.000973    +11.1%  [  +7.3,  +14.6]  fedRMS 1.157
+    K=3 code       ldlq-noos      KL 0.001157    +32.2%  [ +23.9,  +40.9]  fedRMS 1.076
+    K=3 code       ldlq-dup       KL 0.000876     +0.0%  [  +0.0,   +0.0]
+    K=3 literary   ldlq           KL 0.001337     +0.0%  [  +0.0,   +0.0]  fedRMS 1.154
+    K=3 literary   ldlq+ho/0.001  KL 0.001434     +7.2%  [  +4.9,   +9.8]  fedRMS 1.157
+    K=3 literary   ldlq-noos      KL 0.001557    +16.4%  [ +14.0,  +19.5]  fedRMS 1.076
+    K=3 literary   ldlq-dup       KL 0.001337     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.386  max/min 21.1  H_O eff.rank 65.1%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           1.24288e+03   +0.0% 1.08210e+03   +0.0% 3.29737e+04   +0.0%
+    ldlq+ho/0.001  1.03587e+03  -16.7% 1.30606e+03  +20.7% 3.98306e+04  +20.8%
+    profile ldlq           slope -0.004   rel-err spread(std of log) 0.022
+    profile ldlq+ho/0.001  slope -0.560   rel-err spread(std of log) 0.289
+    profile ldlq-noos      slope -0.896   rel-err spread(std of log) 0.404
+    K=4 in-domain  ldlq           KL 0.000640     +0.0%  [  +0.0,   +0.0]  fedRMS 1.085
+    K=4 in-domain  ldlq+ho/0.001  KL 0.000639     -0.2%  [  -1.5,   +1.2]  fedRMS 1.086
+    K=4 in-domain  ldlq-noos      KL 0.000672     +5.0%  [  +2.6,   +7.8]  fedRMS 1.011
+    K=4 in-domain  ldlq-dup       KL 0.000640     +0.0%  [  +0.0,   +0.0]
+    K=4 code       ldlq           KL 0.000644     +0.0%  [  +0.0,   +0.0]  fedRMS 1.085
+    K=4 code       ldlq+ho/0.001  KL 0.000661     +2.5%  [  -0.4,   +5.4]  fedRMS 1.086
+    K=4 code       ldlq-noos      KL 0.000708     +9.9%  [  +7.2,  +13.2]  fedRMS 1.011
+    K=4 code       ldlq-dup       KL 0.000644     +0.0%  [  +0.0,   +0.0]
+    K=4 literary   ldlq           KL 0.001072     +0.0%  [  +0.0,   +0.0]  fedRMS 1.085
+    K=4 literary   ldlq+ho/0.001  KL 0.001087     +1.4%  [  +0.0,   +2.8]  fedRMS 1.086
+    K=4 literary   ldlq-noos      KL 0.001138     +6.1%  [  +4.7,   +7.5]  fedRMS 1.011
+    K=4 literary   ldlq-dup       KL 0.001072     +0.0%  [  +0.0,   +0.0]
+
+ == L1.self_attn.k_proj: in=2048 out=512
+    input skew 0.0811 -> auto would say ON   (20s)
+    sv std/mean 0.342  max/min 8.0  H_O eff.rank 72.4%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           6.18095e+03   +0.0% 5.53915e+03   +0.0% 1.56710e+05   +0.0%
+    ldlq+ho/0.001  5.33613e+03  -13.7% 6.79197e+03  +22.6% 1.89080e+05  +20.7%
+    profile ldlq           slope -0.001   rel-err spread(std of log) 0.019
+    profile ldlq+ho/0.001  slope -0.638   rel-err spread(std of log) 0.274
+    profile ldlq-noos      slope -0.903   rel-err spread(std of log) 0.360
+    K=2 in-domain  ldlq           KL 0.001673     +0.0%  [  +0.0,   +0.0]  fedRMS 1.263
+    K=2 in-domain  ldlq+ho/0.001  KL 0.002202    +31.6%  [ +20.9,  +44.9]  fedRMS 1.277
+    K=2 in-domain  ldlq-noos      KL 0.002120    +26.7%  [ +20.3,  +33.9]  fedRMS 1.242
+    K=2 in-domain  ldlq-dup       KL 0.001673     +0.0%  [  +0.0,   +0.0]
+    K=2 code       ldlq           KL 0.002208     +0.0%  [  +0.0,   +0.0]  fedRMS 1.263
+    K=2 code       ldlq+ho/0.001  KL 0.003052    +38.2%  [ +29.5,  +46.9]  fedRMS 1.277
+    K=2 code       ldlq-noos      KL 0.003655    +65.6%  [ +55.3,  +77.9]  fedRMS 1.242
+    K=2 code       ldlq-dup       KL 0.002208     +0.0%  [  +0.0,   +0.0]
+    K=2 literary   ldlq           KL 0.003217     +0.0%  [  +0.0,   +0.0]  fedRMS 1.263
+    K=2 literary   ldlq+ho/0.001  KL 0.005060    +57.3%  [ +52.0,  +62.7]  fedRMS 1.277
+    K=2 literary   ldlq-noos      KL 0.005206    +61.8%  [ +55.1,  +68.1]  fedRMS 1.242
+    K=2 literary   ldlq-dup       KL 0.003217     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.342  max/min 8.0  H_O eff.rank 72.4%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           1.31970e+03   +0.0% 1.18294e+03   +0.0% 3.55993e+04   +0.0%
+    ldlq+ho/0.001  1.11351e+03  -15.6% 1.45377e+03  +22.9% 4.35779e+04  +22.4%
+    profile ldlq           slope -0.003   rel-err spread(std of log) 0.020
+    profile ldlq+ho/0.001  slope -0.688   rel-err spread(std of log) 0.296
+    profile ldlq-noos      slope -0.938   rel-err spread(std of log) 0.373
+    K=3 in-domain  ldlq           KL 0.000853     +0.0%  [  +0.0,   +0.0]  fedRMS 1.161
+    K=3 in-domain  ldlq+ho/0.001  KL 0.000895     +4.9%  [  +2.9,   +7.1]  fedRMS 1.164
+    K=3 in-domain  ldlq-noos      KL 0.000969    +13.6%  [  +9.4,  +19.0]  fedRMS 1.140
+    K=3 in-domain  ldlq-dup       KL 0.000853     +0.0%  [  +0.0,   +0.0]
+    K=3 code       ldlq           KL 0.001058     +0.0%  [  +0.0,   +0.0]  fedRMS 1.161
+    K=3 code       ldlq+ho/0.001  KL 0.001075     +1.7%  [  -4.2,   +8.2]  fedRMS 1.164
+    K=3 code       ldlq-noos      KL 0.001402    +32.5%  [ +22.1,  +42.8]  fedRMS 1.140
+    K=3 code       ldlq-dup       KL 0.001058     +0.0%  [  +0.0,   +0.0]
+    K=3 literary   ldlq           KL 0.001585     +0.0%  [  +0.0,   +0.0]  fedRMS 1.161
+    K=3 literary   ldlq+ho/0.001  KL 0.001776    +12.0%  [  +8.7,  +15.4]  fedRMS 1.164
+    K=3 literary   ldlq-noos      KL 0.002104    +32.7%  [ +27.7,  +38.6]  fedRMS 1.140
+    K=3 literary   ldlq-dup       KL 0.001585     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.342  max/min 8.0  H_O eff.rank 72.4%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           3.05465e+02   +0.0% 2.73831e+02   +0.0% 8.33628e+03   +0.0%
+    ldlq+ho/0.001  2.56075e+02  -16.2% 3.37612e+02  +23.3% 1.02570e+04  +23.0%
+    profile ldlq           slope +0.000   rel-err spread(std of log) 0.020
+    profile ldlq+ho/0.001  slope -0.706   rel-err spread(std of log) 0.302
+    profile ldlq-noos      slope -0.945   rel-err spread(std of log) 0.374
+    K=4 in-domain  ldlq           KL 0.000653     +0.0%  [  +0.0,   +0.0]  fedRMS 1.094
+    K=4 in-domain  ldlq+ho/0.001  KL 0.000670     +2.6%  [  +0.6,   +4.5]  fedRMS 1.095
+    K=4 in-domain  ldlq-noos      KL 0.000691     +5.9%  [  +4.1,   +7.8]  fedRMS 1.067
+    K=4 in-domain  ldlq-dup       KL 0.000653     +0.0%  [  +0.0,   +0.0]
+    K=4 code       ldlq           KL 0.000659     +0.0%  [  +0.0,   +0.0]  fedRMS 1.094
+    K=4 code       ldlq+ho/0.001  KL 0.000688     +4.5%  [  +1.5,   +7.5]  fedRMS 1.095
+    K=4 code       ldlq-noos      KL 0.000760    +15.4%  [ +11.3,  +19.6]  fedRMS 1.067
+    K=4 code       ldlq-dup       KL 0.000659     +0.0%  [  +0.0,   +0.0]
+    K=4 literary   ldlq           KL 0.001125     +0.0%  [  +0.0,   +0.0]  fedRMS 1.094
+    K=4 literary   ldlq+ho/0.001  KL 0.001178     +4.7%  [  +3.5,   +6.0]  fedRMS 1.095
+    K=4 literary   ldlq-noos      KL 0.001286    +14.4%  [ +12.4,  +16.6]  fedRMS 1.067
+    K=4 literary   ldlq-dup       KL 0.001125     +0.0%  [  +0.0,   +0.0]
+
+ == L1.self_attn.o_proj: in=2048 out=2048
+    input skew 0.0691 -> auto would say ON   (20s)
+    sv std/mean 0.180  max/min 7.9  H_O eff.rank 72.0%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           2.35196e+02   +0.0% 2.27541e+02   +0.0% 7.09239e+05   +0.0%
+    ldlq+ho/0.001  2.24912e+02   -4.4% 2.33018e+02   +2.4% 7.26016e+05   +2.4%
+    profile ldlq           slope +0.001   rel-err spread(std of log) 0.021
+    profile ldlq+ho/0.001  slope -0.746   rel-err spread(std of log) 0.108
+    profile ldlq-noos      slope -0.861   rel-err spread(std of log) 0.118
+    K=2 in-domain  ldlq           KL 0.002459     +0.0%  [  +0.0,   +0.0]  fedRMS 1.255
+    K=2 in-domain  ldlq+ho/0.001  KL 0.002385     -3.0%  [  -6.6,   +0.8]  fedRMS 1.257
+    K=2 in-domain  ldlq-noos      KL 0.002492     +1.3%  [  -3.3,   +6.2]  fedRMS 1.255
+    K=2 in-domain  ldlq-dup       KL 0.002459     +0.0%  [  +0.0,   +0.0]
+    K=2 code       ldlq           KL 0.004051     +0.0%  [  +0.0,   +0.0]  fedRMS 1.255
+    K=2 code       ldlq+ho/0.001  KL 0.003929     -3.0%  [  -7.5,   +1.9]  fedRMS 1.257
+    K=2 code       ldlq-noos      KL 0.004396     +8.5%  [  +3.6,  +14.1]  fedRMS 1.255
+    K=2 code       ldlq-dup       KL 0.004051     +0.0%  [  +0.0,   +0.0]
+    K=2 literary   ldlq           KL 0.005778     +0.0%  [  +0.0,   +0.0]  fedRMS 1.255
+    K=2 literary   ldlq+ho/0.001  KL 0.005682     -1.7%  [  -4.7,   +1.3]  fedRMS 1.257
+    K=2 literary   ldlq-noos      KL 0.005938     +2.8%  [  -0.4,   +6.4]  fedRMS 1.255
+    K=2 literary   ldlq-dup       KL 0.005778     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.180  max/min 7.9  H_O eff.rank 72.0%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           5.25254e+01   +0.0% 5.08671e+01   +0.0% 1.66219e+05   +0.0%
+    ldlq+ho/0.001  5.01487e+01   -4.5% 5.20816e+01   +2.4% 1.70141e+05   +2.4%
+    profile ldlq           slope -0.006   rel-err spread(std of log) 0.021
+    profile ldlq+ho/0.001  slope -0.797   rel-err spread(std of log) 0.116
+    profile ldlq-noos      slope -0.951   rel-err spread(std of log) 0.129
+    K=3 in-domain  ldlq           KL 0.001036     +0.0%  [  +0.0,   +0.0]  fedRMS 1.170
+    K=3 in-domain  ldlq+ho/0.001  KL 0.001062     +2.5%  [  -0.1,   +5.6]  fedRMS 1.170
+    K=3 in-domain  ldlq-noos      KL 0.001095     +5.6%  [  +2.9,   +8.2]  fedRMS 1.166
+    K=3 in-domain  ldlq-dup       KL 0.001036     +0.0%  [  +0.0,   +0.0]
+    K=3 code       ldlq           KL 0.001458     +0.0%  [  +0.0,   +0.0]  fedRMS 1.170
+    K=3 code       ldlq+ho/0.001  KL 0.001365     -6.4%  [ -10.1,   -2.2]  fedRMS 1.170
+    K=3 code       ldlq-noos      KL 0.001455     -0.2%  [  -3.4,   +3.6]  fedRMS 1.166
+    K=3 code       ldlq-dup       KL 0.001458     +0.0%  [  +0.0,   +0.0]
+    K=3 literary   ldlq           KL 0.002191     +0.0%  [  +0.0,   +0.0]  fedRMS 1.170
+    K=3 literary   ldlq+ho/0.001  KL 0.002202     +0.5%  [  -2.2,   +3.3]  fedRMS 1.170
+    K=3 literary   ldlq-noos      KL 0.002219     +1.3%  [  -1.1,   +3.6]  fedRMS 1.166
+    K=3 literary   ldlq-dup       KL 0.002191     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.180  max/min 7.9  H_O eff.rank 72.0%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           1.21863e+01   +0.0% 1.18072e+01   +0.0% 3.89934e+04   +0.0%
+    ldlq+ho/0.001  1.16365e+01   -4.5% 1.20967e+01   +2.5% 3.99282e+04   +2.4%
+    profile ldlq           slope -0.001   rel-err spread(std of log) 0.021
+    profile ldlq+ho/0.001  slope -0.810   rel-err spread(std of log) 0.117
+    profile ldlq-noos      slope -0.984   rel-err spread(std of log) 0.133
+    K=4 in-domain  ldlq           KL 0.000713     +0.0%  [  +0.0,   +0.0]  fedRMS 1.105
+    K=4 in-domain  ldlq+ho/0.001  KL 0.000711     -0.2%  [  -2.2,   +1.8]  fedRMS 1.105
+    K=4 in-domain  ldlq-noos      KL 0.000720     +1.1%  [  -1.3,   +3.4]  fedRMS 1.091
+    K=4 in-domain  ldlq-dup       KL 0.000713     +0.0%  [  +0.0,   +0.0]
+    K=4 code       ldlq           KL 0.000791     +0.0%  [  +0.0,   +0.0]  fedRMS 1.105
+    K=4 code       ldlq+ho/0.001  KL 0.000763     -3.5%  [  -5.5,   -1.3]  fedRMS 1.105
+    K=4 code       ldlq-noos      KL 0.000798     +0.9%  [  -1.7,   +3.8]  fedRMS 1.091
+    K=4 code       ldlq-dup       KL 0.000791     +0.0%  [  +0.0,   +0.0]
+    K=4 literary   ldlq           KL 0.001318     +0.0%  [  +0.0,   +0.0]  fedRMS 1.105
+    K=4 literary   ldlq+ho/0.001  KL 0.001322     +0.3%  [  -1.9,   +2.5]  fedRMS 1.105
+    K=4 literary   ldlq-noos      KL 0.001321     +0.2%  [  -1.0,   +1.6]  fedRMS 1.091
+    K=4 literary   ldlq-dup       KL 0.001318     +0.0%  [  +0.0,   +0.0]
+
+ == L8.self_attn.q_proj: in=2048 out=2048
+    input skew 0.0967 -> auto would say ON   (20s)
+    sv std/mean 0.356  max/min 17.3  H_O eff.rank 66.5%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           4.40159e+04   +0.0% 3.92260e+04   +0.0% 6.15511e+05   +0.0%
+    ldlq+ho/0.001  3.77681e+04  -14.2% 4.53938e+04  +15.7% 7.06774e+05  +14.8%
+    profile ldlq           slope -0.013   rel-err spread(std of log) 0.025
+    profile ldlq+ho/0.001  slope -0.542   rel-err spread(std of log) 0.240
+    profile ldlq-noos      slope -0.902   rel-err spread(std of log) 0.368
+    K=2 in-domain  ldlq           KL 0.001293     +0.0%  [  +0.0,   +0.0]  fedRMS 1.246
+    K=2 in-domain  ldlq+ho/0.001  KL 0.001365     +5.5%  [  +3.6,   +7.8]  fedRMS 1.255
+    K=2 in-domain  ldlq-noos      KL 0.001583    +22.4%  [ +20.2,  +24.6]  fedRMS 1.183
+    K=2 in-domain  ldlq-dup       KL 0.001293     +0.0%  [  +0.0,   +0.0]
+    K=2 code       ldlq           KL 0.002388     +0.0%  [  +0.0,   +0.0]  fedRMS 1.246
+    K=2 code       ldlq+ho/0.001  KL 0.002281     -4.5%  [  -8.2,   -0.9]  fedRMS 1.255
+    K=2 code       ldlq-noos      KL 0.002924    +22.4%  [ +18.7,  +26.0]  fedRMS 1.183
+    K=2 code       ldlq-dup       KL 0.002388     +0.0%  [  +0.0,   +0.0]

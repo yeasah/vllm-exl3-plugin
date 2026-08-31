@@ -8,15 +8,28 @@ the pieces are.
 | file | what it does |
 |---|---|
 | `rounding.py` | the YAQA wavefront, calling EXL3's own `quantize_tiles()` |
-| `test_guard.py` | three correctness guards; run this first, it needs no model |
+| `test_guard.py` | five correctness guards; run this first, it needs no model |
 | `probe.py` | quantize one layer, measure whole-model KL against the original |
 | `hessian_fit.py` | how well a sketch approximates the true Hessian, no quantizer involved |
+| `outscales.py` | what EXL3's *own* ignored `H_O` is worth; no gradients needed |
+| `ho_vs_scales.py` | does the measured `H_O` agree with `apply_out_scales`? |
 
 ```bash
 python3 tools/yaqa/test_guard.py
 python3 tools/yaqa/probe.py --model <hf-dir> --layers 14 --projs mlp.down_proj --bits 3
 python3 tools/yaqa/hessian_fit.py --model <hf-dir> --layers 14 --projs mlp.down_proj
+python3 tools/yaqa/outscales.py --model <hf-dir> --layers 1 --projs self_attn.q_proj \
+    --bits 2 3 --eval-source in-domain code literary
 ```
+
+`outscales.py` is the cheap one and it answers a question of its own: `regularize()`
+leaves a non-identity output metric in `sv` that `ldlq()` ignores, and restoring it needs
+no gradients, no sketch and no second pass. The answer is that restoring it makes the
+model **worse**, by up to +57% KL — dropping that factor is the mechanism by which
+`apply_out_scales` works. See
+[../../docs/yaqa.md](../../docs/yaqa.md#the-ignored-h_o-is-load-bearing). Note it also
+means `probe.py`, which sets `apply_out_scales = False`, measures YAQA against a baseline
+that is not the shipping one.
 
 ## Why the guards matter
 
@@ -33,6 +46,13 @@ noise floor larger than the effect all look like "YAQA does not help".
    ~1e-7. Rounding happens in EXL3's incoherence-processed space, so `H_O` needs the
    same `(sv, had_n)` treatment `finalize_capture_H()` gives `H_I`. Getting this wrong
    does not crash; it silently optimizes a scrambled objective.
+
+Guards 4 and 5 cover the out-scales metric specifically. 4 runs the shipping
+`regularize()` and checks that the `sv` it actually returns makes `B D_sv² B` the true
+output metric, rather than trusting a reading of the source — so it fails if
+`regularize()` ever moves where it folds the scales. 5 pins both ends of the lever:
+exactly-constant output scales give `L_O = 0` and rounding bit-identical to `ldlq`, while
+iid columns — whose `block_rms` still carries ~4% sampling noise — already do not.
 
 `probe.py` additionally carries a `ldlq-dup` arm — a bit-identical copy of the `ldlq`
 weight — through the KL measurement as a live noise floor. It must read `+0.0%`. With

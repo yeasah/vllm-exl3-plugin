@@ -84,6 +84,7 @@ def main():
 def _main():
     main()
     test_transform_consistency()
+    test_out_scales_hessian()
 
 
 def test_transform_consistency():
@@ -137,6 +138,107 @@ def test_transform_consistency():
     print(f"guard 3  tr(D H_O Dᵀ H_I): original {lhs:.6e}  transformed {rhs:.6e}  "
           f"rel err {rel:.2e}  {'OK' if rel < 1e-4 else '!! MISMATCH'}")
     return rel < 1e-4
+
+
+def test_out_scales_hessian():
+    """The `H_O` EXL3 already has and ignores.
+
+    `regularize()` with `apply_out_scales` on folds a per-output-channel scale into
+    `sv` and divides the weight by it. The layer's true output metric is the identity
+    -- the error that reaches the next layer is `x Δ`, with no weighting across output
+    channels -- so by guard 3's congruence the metric in *quantization* space is
+    `T(I; sv, had_n) = B D_sv² B`, which is not the identity once `sv` carries those
+    scales. `ldlq()` rounds as though it were.
+
+    This guard does not re-derive that from the source; it runs the shipping
+    `regularize()`, takes the `sv` it actually returns, reconstructs through the same
+    path `quantize_exl3()` uses, and checks the two losses agree. If `regularize()`
+    ever changes where it folds the scales, this fails rather than silently measuring
+    the wrong objective.
+
+    Also checks the degenerate direction: constant output scales must give `L_O = 0`,
+    i.e. the whole lever collapses to plain LDLQ with no rounding change at all.
+    """
+    from exllamav3.modules.quant.exl3_lib.quantize import (
+        preapply_had_l, preapply_had_r, blockwise_preapply_had_l_,
+        blockwise_preapply_had_r_, had_k, had_n, regularize, block_rms,
+    )
+    dev = torch.device("cuda:0")
+    k, n = 256, 384
+    torch.manual_seed(5)
+
+    def T(H, s, blk):
+        H = H.clone()
+        s = s.reshape(-1, 1)
+        H *= s.T
+        blockwise_preapply_had_r_(H, blk)
+        H *= s
+        blockwise_preapply_had_l_(H, blk)
+        return H
+
+    ok = True
+    for label, force in (("out-scales ON", True), ("out-scales OFF", False)):
+        qa = {"K": 3, "devices": [0], "buf_size_k": 128,
+              "sigma_reg": 0.025, "apply_out_scales": force}
+        # A weight with genuinely uneven output channels, so the scales are non-constant.
+        W = torch.randn(k, n, device = dev, dtype = torch.float)
+        W *= torch.linspace(0.2, 5.0, n, device = dev).unsqueeze(0)
+        su = (torch.randn(k, device = dev).sign() + 1e-5).sign().float().unsqueeze(1)
+        sv = (torch.randn(n, device = dev).sign() + 1e-5).sign().float().unsqueeze(0)
+        H_act = random_psd(k, 2 * k, dev, 21)
+
+        _, _, g_scale, su_r, sv_r = regularize(
+            W.clone(), su.clone(), sv.clone(), qa, False,
+            H_act.diagonal().clone(), None, q_fallback = False)
+
+        # An arbitrary quantization-space error, pushed through the reconstruction map.
+        D_q = torch.randn(k, n, device = dev, dtype = torch.float)
+        D_o = preapply_had_l(D_q.clone(), had_k) * su_r
+        D_o = preapply_had_r(D_o, had_n) * sv_r
+
+        eye_n = torch.eye(n, device = dev)
+        lhs = torch.einsum("kn,nm,jm,kj->", D_o, eye_n, D_o, H_act).item()
+        H_O = T(eye_n, sv_r, had_n)
+        H_I = T(H_act, su_r, had_k)
+        rhs = torch.einsum("kn,nm,jm,kj->", D_q, H_O, D_q, H_I).item()
+        rel = abs(rhs - lhs) / abs(lhs)
+
+        off = (H_O - torch.eye(n, device = dev)).abs().max().item()
+        L_O = make_L(H_O, qa)
+        lo_nz = L_O.abs().max().item()
+        good = rel < 1e-4 and ((off > 1e-3 and lo_nz > 1e-3) if force else
+                               (off < 1e-4 and lo_nz < 1e-6))
+        ok = ok and good
+        print(f"guard 4  {label:15s} loss {lhs:.6e} vs {rhs:.6e}  rel {rel:.2e}   "
+              f"max|H_O - I| {off:.3e}  max|L_O| {lo_nz:.3e}   "
+              f"{'OK' if good else '!! MISMATCH'}")
+
+    # Two degenerate directions. Exactly-constant output scales must make the lever
+    # vanish bit-for-bit; and iid columns, whose block_rms still carries ~4% sampling
+    # noise over 256 elements, say how little spread it takes to engage.
+    qa = {"K": 3, "devices": [0], "buf_size_k": 128,
+          "sigma_reg": 0.025, "apply_out_scales": True}
+    L_I = make_L(random_psd(k, 2 * k, dev, 22), qa)
+    for label, norm in (("exactly constant", True), ("iid columns", False)):
+        W = torch.randn(k, n, device = dev, dtype = torch.float)
+        if norm:
+            W /= block_rms(W, dim = 0, keepdim = True)     # ocs == 1 by construction
+        su = torch.ones(k, 1, device = dev)
+        sv = torch.ones(1, n, device = dev)
+        _, _, _, _, sv_r = regularize(W.clone(), su.clone(), sv.clone(), qa, False,
+                                      torch.ones(k, device = dev), None, q_fallback = False)
+        H_O = T(torch.eye(n, device = dev), sv_r, had_n)
+        spread = (sv_r.abs().max() / sv_r.abs().min()).item()
+        L_O = make_L(H_O, qa)
+        _, ea = yaqa_round(W.clone(), L_I, None, qa)
+        _, eb = yaqa_round(W.clone(), L_I, L_O, qa)
+        same = torch.equal(ea, eb)
+        ok = ok and (same if norm else not same)
+        print(f"guard 5  {label:17s} (sv spread {spread:.3f}x): "
+              f"max|L_O| {L_O.abs().max().item():.3e}  "
+              f"encoded identical to LDLQ: {same}")
+    return ok
+
 
 
 if __name__ == "__main__":

@@ -1,0 +1,152 @@
+ -- /home/ypell/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct/snapshots/5a8abab4a5d6f164389b1079fb721cfab8d7126c/
+ -- calibration (128, 2048), eval in-domain(12, 2048), literary(12, 2048), K=[2, 3], sigma_o=[0.001], alpha=[-0.5, 0.0, 0.25, 0.5, 1.0]
+
+ == L1.self_attn.q_proj: in=2048 out=2048
+    input skew 0.0811 -> auto would say ON   (21s)
+    sv std/mean 0.386  max/min 21.1  H_O eff.rank 65.1%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           2.49757e+04   +0.0% 2.17577e+04   +0.0% 6.20978e+05   +0.0%
+    ho/a-0.5       3.12102e+04  +25.0% 2.30111e+04   +5.8% 6.54312e+05   +5.4%
+    ho/a0          2.49765e+04   +0.0% 2.17580e+04   +0.0% 6.20976e+05   -0.0%
+    ho/a0.25       2.29848e+04   -8.0% 2.21069e+04   +1.6% 6.30510e+05   +1.5%
+    ho/a0.5        2.18346e+04  -12.6% 2.30695e+04   +6.0% 6.56700e+05   +5.8%
+    ho/a1          2.13107e+04  -14.7% 2.62707e+04  +20.7% 7.38956e+05  +19.0%
+    profile ldlq           slope -0.004   rel-err spread(std of log) 0.022
+    profile ho/a-0.5       slope +0.288   rel-err spread(std of log) 0.153
+    profile ho/a0          slope -0.004   rel-err spread(std of log) 0.022
+    profile ho/a0.25       slope -0.163   rel-err spread(std of log) 0.085
+    profile ho/a0.5        slope -0.304   rel-err spread(std of log) 0.156
+    profile ho/a1          slope -0.514   rel-err spread(std of log) 0.265
+    profile ldlq-noos      slope -0.851   rel-err spread(std of log) 0.388
+    K=2 in-domain  ldlq           KL 0.001452     +0.0%  [  +0.0,   +0.0]  fedRMS 1.252
+    K=2 in-domain  ho/a-0.5       KL 0.001411     -2.8%  [ -10.9,   +6.1]  fedRMS 1.256
+    K=2 in-domain  ho/a0          KL 0.001446     -0.4%  [  -1.9,   +1.1]  fedRMS 1.252
+    K=2 in-domain  ho/a0.25       KL 0.001435     -1.1%  [ -13.2,  +11.5]  fedRMS 1.253
+    K=2 in-domain  ho/a0.5        KL 0.001258    -13.3%  [ -21.1,   -6.7]  fedRMS 1.256
+    K=2 in-domain  ho/a1          KL 0.001463     +0.7%  [  -9.1,  +11.3]  fedRMS 1.264
+    K=2 in-domain  ldlq-noos      KL 0.001682    +15.8%  [  +1.3,  +28.1]  fedRMS 1.178
+    K=2 in-domain  ldlq-dup       KL 0.001452     +0.0%  [  +0.0,   +0.0]
+    K=2 literary   ldlq           KL 0.002461     +0.0%  [  +0.0,   +0.0]  fedRMS 1.252
+    K=2 literary   ho/a-0.5       KL 0.002601     +5.7%  [  -0.3,  +10.6]  fedRMS 1.256
+    K=2 literary   ho/a0          KL 0.002465     +0.2%  [  -0.8,   +1.2]  fedRMS 1.252
+    K=2 literary   ho/a0.25       KL 0.002394     -2.7%  [  -7.9,   +2.4]  fedRMS 1.253
+    K=2 literary   ho/a0.5        KL 0.002351     -4.5%  [ -10.4,   +1.7]  fedRMS 1.256
+    K=2 literary   ho/a1          KL 0.002575     +4.7%  [  +0.7,   +8.5]  fedRMS 1.264
+    K=2 literary   ldlq-noos      KL 0.003132    +27.3%  [ +18.8,  +35.9]  fedRMS 1.178
+    K=2 literary   ldlq-dup       KL 0.002461     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.386  max/min 21.1  H_O eff.rank 65.1%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           5.39207e+03   +0.0% 4.68871e+03   +0.0% 1.41558e+05   +0.0%
+    ho/a-0.5       6.79448e+03  +26.0% 4.96564e+03   +5.9% 1.49688e+05   +5.7%
+    ho/a0          5.39246e+03   +0.0% 4.68857e+03   -0.0% 1.41569e+05   +0.0%
+    ho/a0.25       4.93856e+03   -8.4% 4.76653e+03   +1.7% 1.43717e+05   +1.5%
+    ho/a0.5        4.67828e+03  -13.2% 4.98087e+03   +6.2% 1.50031e+05   +6.0%
+    ho/a1          4.51294e+03  -16.3% 5.66188e+03  +20.8% 1.70244e+05  +20.3%
+    profile ldlq           slope -0.001   rel-err spread(std of log) 0.021
+    profile ho/a-0.5       slope +0.315   rel-err spread(std of log) 0.165
+    profile ho/a0          slope -0.001   rel-err spread(std of log) 0.022
+    profile ho/a0.25       slope -0.173   rel-err spread(std of log) 0.090
+    profile ho/a0.5        slope -0.323   rel-err spread(std of log) 0.166
+    profile ho/a1          slope -0.550   rel-err spread(std of log) 0.284
+    profile ldlq-noos      slope -0.883   rel-err spread(std of log) 0.401
+    K=3 in-domain  ldlq           KL 0.000780     +0.0%  [  +0.0,   +0.0]  fedRMS 1.154
+    K=3 in-domain  ho/a-0.5       KL 0.000815     +4.5%  [  +0.4,   +9.7]  fedRMS 1.155
+    K=3 in-domain  ho/a0          KL 0.000784     +0.5%  [  -1.7,   +2.8]  fedRMS 1.154
+    K=3 in-domain  ho/a0.25       KL 0.000788     +1.0%  [  -1.9,   +4.2]  fedRMS 1.154
+    K=3 in-domain  ho/a0.5        KL 0.000801     +2.7%  [  -1.7,   +7.0]  fedRMS 1.155
+    K=3 in-domain  ho/a1          KL 0.000848     +8.7%  [  +3.1,  +15.1]  fedRMS 1.157
+    K=3 in-domain  ldlq-noos      KL 0.000945    +21.1%  [ +14.1,  +28.9]  fedRMS 1.076
+    K=3 in-domain  ldlq-dup       KL 0.000780     +0.0%  [  +0.0,   +0.0]
+    K=3 literary   ldlq           KL 0.001353     +0.0%  [  +0.0,   +0.0]  fedRMS 1.154
+    K=3 literary   ho/a-0.5       KL 0.001347     -0.5%  [  -1.5,   +0.4]  fedRMS 1.155
+    K=3 literary   ho/a0          KL 0.001342     -0.8%  [  -1.6,   -0.1]  fedRMS 1.154
+    K=3 literary   ho/a0.25       KL 0.001361     +0.6%  [  -1.7,   +4.0]  fedRMS 1.154
+    K=3 literary   ho/a0.5        KL 0.001371     +1.4%  [  -2.1,   +6.9]  fedRMS 1.155
+    K=3 literary   ho/a1          KL 0.001446     +6.9%  [  +4.3,  +10.1]  fedRMS 1.157
+    K=3 literary   ldlq-noos      KL 0.001577    +16.5%  [ +13.6,  +20.6]  fedRMS 1.076
+    K=3 literary   ldlq-dup       KL 0.001353     +0.0%  [  +0.0,   +0.0]
+
+ == L1.self_attn.o_proj: in=2048 out=2048
+    input skew 0.0691 -> auto would say ON   (20s)
+    sv std/mean 0.180  max/min 7.9  H_O eff.rank 72.0%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           2.35196e+02   +0.0% 2.27541e+02   +0.0% 7.09239e+05   +0.0%
+    ho/a-0.5       2.55464e+02   +8.6% 2.29733e+02   +1.0% 7.15756e+05   +0.9%
+    ho/a0          2.35219e+02   +0.0% 2.27547e+02   +0.0% 7.09269e+05   +0.0%
+    ho/a0.25       2.29709e+02   -2.3% 2.27737e+02   +0.1% 7.10522e+05   +0.2%
+    ho/a0.5        2.26717e+02   -3.6% 2.28918e+02   +0.6% 7.14408e+05   +0.7%
+    ho/a1          2.24912e+02   -4.4% 2.33018e+02   +2.4% 7.26016e+05   +2.4%
+    profile ldlq           slope +0.001   rel-err spread(std of log) 0.021
+    profile ho/a-0.5       slope +0.380   rel-err spread(std of log) 0.058
+    profile ho/a0          slope +0.001   rel-err spread(std of log) 0.021
+    profile ho/a0.25       slope -0.205   rel-err spread(std of log) 0.036
+    profile ho/a0.5        slope -0.392   rel-err spread(std of log) 0.059
+    profile ho/a1          slope -0.746   rel-err spread(std of log) 0.108
+    profile ldlq-noos      slope -0.861   rel-err spread(std of log) 0.118
+    K=2 in-domain  ldlq           KL 0.002532     +0.0%  [  +0.0,   +0.0]  fedRMS 1.255
+    K=2 in-domain  ho/a-0.5       KL 0.002538     +0.2%  [  -4.7,   +5.5]  fedRMS 1.256
+    K=2 in-domain  ho/a0          KL 0.002551     +0.8%  [  -0.6,   +2.0]  fedRMS 1.255
+    K=2 in-domain  ho/a0.25       KL 0.002497     -1.4%  [  -7.6,   +5.1]  fedRMS 1.255
+    K=2 in-domain  ho/a0.5        KL 0.002472     -2.4%  [  -7.4,   +2.4]  fedRMS 1.256
+    K=2 in-domain  ho/a1          KL 0.002481     -2.0%  [  -6.8,   +2.2]  fedRMS 1.257
+    K=2 in-domain  ldlq-noos      KL 0.002593     +2.4%  [  -3.1,   +8.0]  fedRMS 1.255
+    K=2 in-domain  ldlq-dup       KL 0.002532     +0.0%  [  +0.0,   +0.0]
+    K=2 literary   ldlq           KL 0.005996     +0.0%  [  +0.0,   +0.0]  fedRMS 1.255
+    K=2 literary   ho/a-0.5       KL 0.006192     +3.3%  [  -0.0,   +6.4]  fedRMS 1.256
+    K=2 literary   ho/a0          KL 0.006012     +0.3%  [  -0.4,   +1.0]  fedRMS 1.255
+    K=2 literary   ho/a0.25       KL 0.006176     +3.0%  [  -0.4,   +6.1]  fedRMS 1.255
+    K=2 literary   ho/a0.5        KL 0.006277     +4.7%  [  +2.3,   +7.4]  fedRMS 1.256
+    K=2 literary   ho/a1          KL 0.005869     -2.1%  [  -5.6,   +1.2]  fedRMS 1.257
+    K=2 literary   ldlq-noos      KL 0.006129     +2.2%  [  -1.4,   +6.7]  fedRMS 1.255
+    K=2 literary   ldlq-dup       KL 0.005996     +0.0%  [  +0.0,   +0.0]
+    sv std/mean 0.180  max/min 7.9  H_O eff.rank 72.0%
+    arm               tr(D H_O Dt H_I)      tr(D I Dt H_I)           |D|^2
+    ldlq           5.25254e+01   +0.0% 5.08671e+01   +0.0% 1.66219e+05   +0.0%
+    ho/a-0.5       5.73132e+01   +9.1% 5.12431e+01   +0.7% 1.67493e+05   +0.8%
+    ho/a0          5.25225e+01   -0.0% 5.08669e+01   -0.0% 1.66195e+05   -0.0%
+    ho/a0.25       5.12756e+01   -2.4% 5.09201e+01   +0.1% 1.66418e+05   +0.1%
+    ho/a0.5        5.05895e+01   -3.7% 5.11767e+01   +0.6% 1.67180e+05   +0.6%
+    ho/a1          5.01487e+01   -4.5% 5.20816e+01   +2.4% 1.70141e+05   +2.4%
+    profile ldlq           slope -0.006   rel-err spread(std of log) 0.021
+    profile ho/a-0.5       slope +0.422   rel-err spread(std of log) 0.064
+    profile ho/a0          slope -0.007   rel-err spread(std of log) 0.021
+    profile ho/a0.25       slope -0.219   rel-err spread(std of log) 0.037
+    profile ho/a0.5        slope -0.421   rel-err spread(std of log) 0.063
+    profile ho/a1          slope -0.797   rel-err spread(std of log) 0.116
+    profile ldlq-noos      slope -0.951   rel-err spread(std of log) 0.129
+    K=3 in-domain  ldlq           KL 0.001073     +0.0%  [  +0.0,   +0.0]  fedRMS 1.170
+    K=3 in-domain  ho/a-0.5       KL 0.001113     +3.7%  [  +2.4,   +4.9]  fedRMS 1.170
+    K=3 in-domain  ho/a0          KL 0.001069     -0.4%  [  -1.6,   +0.5]  fedRMS 1.170
+    K=3 in-domain  ho/a0.25       KL 0.001096     +2.1%  [  -1.7,   +5.5]  fedRMS 1.169
+    K=3 in-domain  ho/a0.5        KL 0.001142     +6.4%  [  +0.8,  +13.8]  fedRMS 1.170
+    K=3 in-domain  ho/a1          KL 0.001106     +3.1%  [  +0.2,   +6.8]  fedRMS 1.170
+    K=3 in-domain  ldlq-noos      KL 0.001135     +5.8%  [  +2.9,   +8.5]  fedRMS 1.166
+    K=3 in-domain  ldlq-dup       KL 0.001073     +0.0%  [  +0.0,   +0.0]
+    K=3 literary   ldlq           KL 0.002260     +0.0%  [  +0.0,   +0.0]  fedRMS 1.170
+    K=3 literary   ho/a-0.5       KL 0.002248     -0.5%  [  -3.3,   +1.9]  fedRMS 1.170
+    K=3 literary   ho/a0          KL 0.002255     -0.2%  [  -1.2,   +0.7]  fedRMS 1.170
+    K=3 literary   ho/a0.25       KL 0.002289     +1.3%  [  -2.6,   +5.1]  fedRMS 1.169
+    K=3 literary   ho/a0.5        KL 0.002302     +1.9%  [  -1.6,   +6.5]  fedRMS 1.170
+    K=3 literary   ho/a1          KL 0.002259     -0.0%  [  -3.3,   +3.1]  fedRMS 1.170
+    K=3 literary   ldlq-noos      KL 0.002266     +0.3%  [  -2.4,   +2.9]  fedRMS 1.166
+    K=3 literary   ldlq-dup       KL 0.002260     +0.0%  [  +0.0,   +0.0]
+
+ K=2  eval=in-domain
+                                    ldlq      ho/a-0.5         ho/a0      ho/a0.25       ho/a0.5         ho/a1     ldlq-noos      ldlq-dup
+L1.self_attn.q_proj                +0.0%         -2.8%         -0.4%         -1.1%        -13.3%         +0.7%        +15.8%         +0.0%
+L1.self_attn.o_proj                +0.0%         +0.2%         +0.8%         -1.4%         -2.4%         -2.0%         +2.4%         +0.0%
+
+ K=2  eval=literary
+                                    ldlq      ho/a-0.5         ho/a0      ho/a0.25       ho/a0.5         ho/a1     ldlq-noos      ldlq-dup
+L1.self_attn.q_proj                +0.0%         +5.7%         +0.2%         -2.7%         -4.5%         +4.7%        +27.3%         +0.0%
+L1.self_attn.o_proj                +0.0%         +3.3%         +0.3%         +3.0%         +4.7%         -2.1%         +2.2%         +0.0%
+
+ K=3  eval=in-domain
+                                    ldlq      ho/a-0.5         ho/a0      ho/a0.25       ho/a0.5         ho/a1     ldlq-noos      ldlq-dup
+L1.self_attn.q_proj                +0.0%         +4.5%         +0.5%         +1.0%         +2.7%         +8.7%        +21.1%         +0.0%
+L1.self_attn.o_proj                +0.0%         +3.7%         -0.4%         +2.1%         +6.4%         +3.1%         +5.8%         +0.0%
+
+ K=3  eval=literary
+                                    ldlq      ho/a-0.5         ho/a0      ho/a0.25       ho/a0.5         ho/a1     ldlq-noos      ldlq-dup
+L1.self_attn.q_proj                +0.0%         -0.5%         -0.8%         +0.6%         +1.4%         +6.9%        +16.5%         +0.0%
+L1.self_attn.o_proj                +0.0%         -0.5%         -0.2%         +1.3%         +1.9%         -0.0%         +0.3%         +0.0%

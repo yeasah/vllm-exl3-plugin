@@ -1,8 +1,8 @@
 # YAQA in the EXL3 quantizer
 
 Investigation opened 2026-08-26 against `TODO: yaqa`, measured out over the following
-days. Nothing is implemented in the converter; the rounding algorithm, three correctness
-guards and four diagnostics live in [tools/yaqa/](../tools/yaqa/).
+days. Nothing is implemented in the converter; the rounding algorithm, five correctness
+guards and six diagnostics live in [tools/yaqa/](../tools/yaqa/).
 
 **Where it landed, so nobody has to read to the end for it.** YAQA works on EXL3's
 quantizer and reproduces the paper at matched data budget: **−19% KL in-domain, −16% on
@@ -12,7 +12,9 @@ neutral text** on Llama-3.2-1B at 2 bits, against Appendix A.11's −20.4% at th
 Against that: a reverse-streaming gradient pass the converter does not have, 2.8x the
 Hessian working set (14x on wide MoE), a calibration corpus we do not ship, and one
 unexplained pathological layer worth 1-3 points. **The build decision is open** — see
-[Where it lands](#where-it-lands).
+[Where it lands](#where-it-lands). One caveat added 2026-08-31: those numbers were all
+measured with `apply_out_scales` off, which is not what the converter ships — see
+[The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing).
 
 Read [Result](#result-matched-data-budget-reproduces-the-paper) onward for what holds.
 The Qwen3-0.6B sections before it are a superseded first pass, kept for the hypotheses
@@ -195,26 +197,23 @@ to find out early.
 
 ## Traps identified but not resolved
 
-- **EXL3 already has a non-identity `H_O` and ignores it.** When `apply_out_scales`
-  is on, `regularize()` folds per-output-channel scales into `sv` and divides the
-  weight by them; the loss in quantization space then carries an output factor
-  `H_n D_sv² H_nᵀ`, which is not the identity unless those scales are constant. LDLQ
-  rounds as though it were. This is a `H_O` that requires **no gradients, no sketch
-  and no second pass** — it is already sitting in `sv` — and the wavefront in
-  `tools/yaqa/rounding.py` can consume it as-is. Unmeasured, and much cheaper than
-  YAQA proper. **Scope: calibrated body tensors only.** Uncalibrated side models --
-  vision towers and MTP heads -- take the `q_fallback` path, where `apply_out_scales`
-  reverts to `force_out_scales` and so defaults *off*: there is no `sv` scaling to
-  harvest, and no LDLQ to feed it to either. See
-  [docs/media-encoders.md](media-encoders.md).
+- ~~**EXL3 already has a non-identity `H_O` and ignores it.**~~ **Resolved, and the
+  sign was backwards** — measured 2026-08-31, see
+  [The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing). The latent
+  `H_O = H_n D_sv² H_nᵀ` is real and the description above is accurate, but restoring
+  it makes the model *worse*, by up to +57% KL. Ignoring it is the mechanism by which
+  `apply_out_scales` works. Nothing to harvest here.
 - **`regularize()` picks output-channel scales after `H` is finalized.**
   [`regularize()`](../deps/exllamav3/exllamav3/modules/quant/exl3_lib/quantize.py#L1125)
   folds a data-dependent `out_channel_scales` into `sv` and divides the weight by it.
   `H_O` must receive the matching congruence transform, applied in the right order
   relative to `su`/`had_n`. Get this wrong and nothing crashes — the model is just
   quietly worse. This wants a synthetic case where the correct `H_O` is known.
-  (Related, and more interesting: `apply_out_scales` is a *heuristic* for exactly the
-  non-uniform output sensitivity that `H_O` measures directly. YAQA may subsume it.)
+  (Related: `apply_out_scales` is a *heuristic* for exactly the non-uniform output
+  sensitivity that `H_O` measures directly, so YAQA may subsume it. But it is a
+  *load-bearing* heuristic worth up to 66% KL on its own — see
+  [The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing) — so anything
+  that displaces it has to clear that bar, not the uncalibrated one.)
 - **qmap sharing does not extend to `H_O`.** Q/K/V share one `H_data` because they
   share an input. They do not share an output. `H_O` has to be per-linear, which cuts
   against how `capture_H` is keyed today.
@@ -228,6 +227,123 @@ to find out early.
   a missing or degenerate `H_O` should fall back to `H_O = I` (i.e. plain LDLQ) rather
   than to uncalibrated is a decision, and `H_O = I` is exactly what LDLQ is, so the
   degradation path is clean if it is wired that way.
+
+## The ignored `H_O` is load-bearing
+
+Measured 2026-08-31 on Llama-3.2-1B-Instruct with
+[`tools/yaqa/outscales.py`](../tools/yaqa/outscales.py); full logs for every run quoted
+below are in [docs/data/yaqa-outscales/](data/yaqa-outscales/). This closes the first
+entry in [Traps](#traps-identified-but-not-resolved), in the opposite direction to the
+one it was written in.
+
+**The claim under test.** `regularize()` with `apply_out_scales` on folds a
+per-output-channel scale into `sv` and divides the weight by it. The layer's true output
+metric is the identity, so the metric in *quantization* space is `H_O' = H_n D_sv² H_nᵀ`,
+which `ldlq()` ignores. Feeding it to the wavefront needs no gradients, no sketch and no
+second pass. The Trap entry assumed that was free quality left on the table.
+
+**It is not a corner case.** `convert_model.py`'s `--out_scales` defaults to `always`,
+not `auto`, so the skew heuristic in `regularize()` is dead code by default and every
+calibrated body tensor in every shipped EXL3 quant carries this. Confirmed directly
+against `turboderp/Llama-3.2-1B-Instruct-exl3` at 2 bits: its `svh` tensors have
+non-unit magnitude, matching a weights-only prediction of `out_channel_scales` to three
+decimals (L0.k_proj 0.3782 vs 0.378, L0.gate_proj 0.1196 vs 0.120, lm_head 0.0979 vs
+0.098). Because the block Hadamard is orthogonal, `H_O'`'s eigenvalues are *exactly*
+`out_channel_scales²`, so the size of the effect is readable off the weights alone,
+with no calibration data: `std/mean` runs 0.23-0.46 on `q_proj`/`k_proj`, 0.05-0.15 on
+`down_proj`, up to 29x max/min.
+
+### Result: restoring it makes the model worse
+
+Per-arm KL of the whole model against bf16 with one layer quantized, bootstrap CI over
+sequences, `ldlq-dup` reading exactly +0.0% throughout. `ldlq+ho` restores the true
+metric; `ldlq-noos` instead makes it exact by turning `apply_out_scales` off.
+
+| tensor | K | eval | `ldlq+ho` | `ldlq-noos` |
+|---|---|---|---|---|
+| L1.q_proj | 2 | code | +27.2% [+15.6, +40.7] | +52.8% |
+| L1.q_proj | 3 | in-domain | +8.0% [+2.9, +13.7] | +19.9% |
+| L1.q_proj | 4 | in-domain | −0.2% [−1.5, +1.2] | +5.0% |
+| L1.k_proj | 2 | literary | +57.3% [+52.0, +62.7] | +61.8% |
+| L1.k_proj | 2 | in-domain | +31.6% [+20.9, +44.9] | +26.7% |
+| L1.o_proj | 3 | code | −6.4% [−10.1, −2.2] | −0.2% |
+
+The harm shrinks with bitrate — near-neutral at 4 bits (−0.2 to +4.7% across all three
+tensors), largest at 2 — which is the mirror of YAQA proper and for the same reason: at
+low bitrate the rounding has more freedom to spend on whatever objective it is given, so
+a misspecified one costs more. The ordering is clean on `k_proj` (literary: +57.3%,
++12.0%, +4.7% at K=2/3/4) and holds for 4 bits against the rest on `q_proj`, where K=2
+and K=3 are within each other's intervals. `o_proj` is the exception, and it is the
+tensor whose output scales are flattest (`sv` std/mean 0.180 against 0.386 for
+`q_proj`) and where `apply_out_scales` is worth least (`ldlq-noos` only +2 to +6%). On `L1.k_proj` at K=2
+in-domain the "fix" is *worse than deleting the heuristic entirely*.
+
+### Why: it un-does what `apply_out_scales` is for
+
+Dividing the weight by its per-output-channel RMS and then rounding with `H_O = I` does
+not minimize absolute activation error — it minimizes **relative per-channel** error.
+That is the whole content of the heuristic, and it is delivered precisely by dropping
+the `D_sv²` factor. `outscales.py` reports the slope of
+`log(per-channel relative error)` against `log(out_channel_scales)`: 0 means uniform
+relative error, −1 means uniform absolute error.
+
+| arm | slope | KL (L1.q_proj, K=3, in-domain) |
+|---|---|---|
+| `ldlq`, as shipped | **−0.001** | +0.0% |
+| `ldlq+ho`, metric restored | −0.550 | +8.0% |
+| `ldlq-noos` | −0.883 | +19.9% |
+
+KL rank-orders with `|slope|` across every tensor and bitrate measured. The correction
+works exactly as designed — it lowers the objective it targets, `tr(Δ H_O Δᵀ H_I)`, by
+14-17% on `q_proj`/`k_proj` and 4-5% on `o_proj`, stably across four decades of damping
+— and buys that by raising `‖Δ‖²` by the same order (~20% and ~2% respectively) and
+dragging the error profile back toward uniform-absolute.
+
+### `α = 0` is at the optimum
+
+Generalising to `H_O = B D_sv^{2α} B` — `α = 1` the true metric, `α = 0` the identity
+EXL3 rounds with, `α < 0` over-correcting the other way — the shipped behaviour is the
+best of the five at K=3, degrading in both directions:
+
+| α | −0.5 | 0 | 0.25 | 0.5 | 1 |
+|---|---|---|---|---|---|
+| L1.q_proj K=3 in-domain | +4.5% | **+0.5%** | +1.0% | +2.7% | +8.7% |
+| L1.q_proj K=3 literary | −0.5% | **−0.8%** | +0.6% | +1.4% | +6.9% |
+
+A −13.3% dip at `α = 0.5`, K=2 in-domain did not reproduce at K=3 or on `o_proj`;
+2-bit rounding is a much higher-variance lottery and it is noise. Note that `α = 0` is
+*not* bit-identical to `ldlq`: `L_O` comes out ~3e-8 rather than exactly zero, so the
+wavefront takes its two-sided arithmetic path and flips tiles at quantizer decision
+boundaries. It reads ±1% rather than the +0.0% of `ldlq-dup`, and that is the honest
+noise floor for the `α` arms — a second floor worth having, since `ldlq-dup` only
+bounds the KL measurement and not the rounding.
+
+### Two things this changes elsewhere in this document
+
+- **Every YAQA number here was measured with the heuristic off.**
+  [`probe.py`](../tools/yaqa/probe.py#L288) sets `apply_out_scales = False`, so the
+  `ldlq` baseline behind the −19% headline is up to 66% worse than what the converter
+  ships (+2 to +6% on `o_proj`, +15 to +66% on `q_proj`/`k_proj`). Whether YAQA's gain
+  survives on top of `apply_out_scales` is untested, and it is now the first thing to
+  check if the build is picked up — it is cheap, and a −19% measured against the wrong
+  baseline is the kind of error [EXL3-SC](qbench.md) made.
+- **The composition matters.** Under YAQA *and* out-scales the correct metric is
+  `B D_sv H_O_yaqa D_sv B`, which contains the `D_sv²` factor measured harmful here.
+  An implementation that "fixes the bookkeeping" while adding YAQA gets that factor
+  whether or not it wants it.
+
+### Attempted corroboration, inconclusive
+
+If out-scales' equalization is right, YAQA's own measured `H_O` should say downstream
+sensitivity falls like `ocs⁻²`, making the composed metric flat.
+[`ho_vs_scales.py`](../tools/yaqa/ho_vs_scales.py) fits
+`log diag(H_O_sketchB)` against `log ocs` at 128 sequences. The slopes scatter from
+−2.20 to +0.04 with `r` from −0.90 to +0.01: near −2 with strong correlation on
+`down_proj` and `o_proj` (where the composed metric does flatten), near 0 on `q_proj`
+(where it does not). At this sketch budget the diagnostic is too weak to build on —
+this document's own history shows under-sampled Sketch B reversing conclusions — so the
+mechanism rests on the error-profile slope above, which is a direct measurement, not on
+this. Worth redoing at the paper's data budget if anyone revisits.
 
 ## Licence hazard
 
@@ -647,9 +763,10 @@ comparison is the meaningful one, and that is what the table reports.)
   ±1 signs, but `regularize()` then further scales the weight's input channels by
   `in_channel_scales` and by `g_scale` without `H` following. EXL3's `L_I` is therefore
   already an approximation of the correct factor, in both arms.
-- **`apply_out_scales` gives EXL3 a latent non-identity `H_O` it ignores** — see
-  [Traps](#traps-identified-but-not-resolved). This one cuts the other way: part of what
-  YAQA would fix, EXL3 is currently getting wrong for free.
+- ~~**`apply_out_scales` gives EXL3 a latent non-identity `H_O` it ignores.**~~
+  Measured and closed: it is not a free win but a free *loss*, and the reason is that
+  the omission is what makes `apply_out_scales` work. See
+  [The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing).
 - **Production EXL3 calibrates on the quantized-prefix state.** Its `H_I` reflects the
   input distribution the *quantized* model will actually see. That is an upstream
   correction where `H_O` is a downstream one, so they should be complementary rather
@@ -714,9 +831,10 @@ decision — [Where it lands](#where-it-lands) has the numbers.
 4. Only then the converter work: the reverse stream, then the rounding change, which is
    the easy half and is already written and guarded.
 
-**One cheap side-result worth taking regardless of all this.** EXL3 applies
-`out_channel_scales` in `regularize()` and then rounds as though the output metric were
-the identity, which it no longer is — it is `H_n D_sv² H_nᵀ`. That is a non-identity
-`H_O` requiring **no gradients, no sketch and no second pass**, already sitting in `sv`,
-and `tools/yaqa/rounding.py` can consume it as-is. Unmeasured. See
-[Traps](#traps-identified-but-not-resolved).
+**The cheap side-result was measured, and it is not there.** Restoring the output
+metric `H_n D_sv² H_nᵀ` that `regularize()` creates and `ldlq()` drops costs up to +57%
+KL rather than saving anything; the omission is load-bearing. See
+[The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing). It does leave one
+caveat for the numbers above: `probe.py` sets `apply_out_scales = False`, so every YAQA
+result in this document is measured against a baseline up to 66% worse than what the
+converter actually ships.

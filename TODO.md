@@ -943,9 +943,17 @@ across both models tested — worth 1-3 points if gated around.
 full-budget sketch (corpus already downloaded, only GPU time missing); or an explanation
 of that first-block layer.
 
-**Cheap side-result worth taking regardless:** EXL3 applies `out_channel_scales` and then
-rounds as if the output metric were the identity, which it no longer is. That is an `H_O`
-needing no gradients at all, and the wavefront can already consume it.
+**The cheap side-result was measured and is closed (2026-08-31).** EXL3 applies
+`out_channel_scales` and then rounds as if the output metric were the identity, which it
+no longer is — but restoring it costs up to **+57% KL**, and `α = 0` (the shipped
+behaviour) is at the optimum of a five-point sweep. Dropping that factor is *how*
+`apply_out_scales` works: it makes the rounding minimize relative per-channel error
+rather than absolute. Nothing to harvest.
+
+**A caveat this leaves on the numbers above:** `probe.py` sets `apply_out_scales = False`,
+so the −19% is measured against a baseline up to 66% worse than what the converter ships
+(`--out_scales` defaults to `always`). Whether the gain survives on top of the heuristic
+is untested and is now the cheapest thing to check first.
 
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
 
