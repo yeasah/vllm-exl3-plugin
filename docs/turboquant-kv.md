@@ -298,6 +298,38 @@ statistics; all twelve cells of that sweep were discarded.
   has no signal to lose. phi4mini would not load; both Qwen3.x checkpoints are
   hybrids and already exempt from boundary skips.
 
+### Independent corroboration, and what it leaves open (2026-05-11)
+
+vLLM published their own TurboQuant study
+([vllm.ai/blog/2026-05-11-turboquant](https://vllm.ai/blog/2026-05-11-turboquant)) over
+Llama-3.3-70B, Qwen3-30B-A3B (Instruct and Thinking) and MiniMax-M2.7 — dense and MoE,
+30B to 200B+, against our 4B. It reaches the same split we did the hard way:
+
+- **Long-context retrieval (openai/mrcr) tolerates 4-bit** and breaks only at the
+  aggressive presets — k3v4_nc 33.5% AUC against bf16's 45.8% on Qwen3-30B at 256k,
+  3bit_nc 31.2%.
+- **Reasoning is the sensitive axis** — ~20 point drops on AIME25 and LiveCodeBench-v6
+  for k3v4_nc and 3bit_nc on Qwen3-30B-Thinking.
+- **Their recommendation**: 4bit_nc viable under memory pressure at 1-4 points;
+  **avoid k3v4_nc and 3bit_nc in production**; fp8 remains the better choice wherever 2x
+  capacity is enough.
+
+That retrieval-vs-reasoning asymmetry is exactly what the needle and GSM8K instruments
+here disagreed about, on a model two orders of magnitude smaller, which is worth more than
+either result alone.
+
+**What their study does not cover, and this one does.** Their four models are all
+full-attention, so the sliding-window page-geometry failure in Part 1 never arises for
+them. Their quick-start notes that first/last layer skipping happens, but carries no
+per-layer sensitivity analysis — so the layer-0 result above, and the finding that the
+trailing layers buy nothing, is not something their evaluation would have surfaced.
+
+**And the two results compose into the upstream argument.** They recommend avoiding the
+aggressive presets. We measure that the byte budget those presets are chosen for is better
+served by 4bit_nc with less boundary protection — which their own flag cannot express. So
+the ask is not to relax a guard they have just published evidence for; it is to make
+reachable the configuration that dominates the branch they are recommending against.
+
 ## Reproducing
 
 The harness is [tools/gsm8k_kv.py](../tools/gsm8k_kv.py); per-item results for
