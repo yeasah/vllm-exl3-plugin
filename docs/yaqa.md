@@ -275,8 +275,9 @@ a misspecified one costs more. The ordering is clean on `k_proj` (literary: +57.
 +12.0%, +4.7% at K=2/3/4) and holds for 4 bits against the rest on `q_proj`, where K=2
 and K=3 are within each other's intervals. `o_proj` is the exception, and it is the
 tensor whose output scales are flattest (`sv` std/mean 0.180 against 0.386 for
-`q_proj`) and where `apply_out_scales` is worth least (`ldlq-noos` only +2 to +6%). On `L1.k_proj` at K=2
-in-domain the "fix" is *worse than deleting the heuristic entirely*.
+`q_proj`) and where `apply_out_scales` is worth least (`ldlq-noos` only +2 to +6%).
+On `L1.k_proj` at K=2 in-domain the "fix" is *worse than deleting the heuristic
+entirely*.
 
 ### Why: it un-does what `apply_out_scales` is for
 
