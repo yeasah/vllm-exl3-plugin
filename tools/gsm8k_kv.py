@@ -44,17 +44,49 @@ import sys
 TQ_SLOT = {"4bit_nc": 134, "k3v4_nc": 118, "3bit_nc": 102}  # head_dim 128
 
 
-def run(model, kv, boundary, n, outp, mode):
-    if boundary != "on":
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
+def override_boundary(boundary):
+    """Force TurboQuant's boundary skip layers before the engine config is built.
 
-        forced = [] if boundary == "off" else boundary.split(":", 1)[1].split(",")
-        forced = [x for x in forced if x]
-        TurboQuantConfig.get_boundary_skip_layers = staticmethod(
-            lambda mc, n=2, _l=forced: list(_l)
-        )
+    ``EngineArgs.create_engine_config`` calls ``get_boundary_skip_layers`` in this
+    process, so replacing it here lands on the real code path. Must be called
+    before constructing the LLM. "on" leaves stock behaviour alone.
+    """
+    if boundary == "on":
+        return
+    from vllm.model_executor.layers.quantization.turboquant.config import (
+        TurboQuantConfig,
+    )
+
+    forced = [] if boundary == "off" else boundary.split(":", 1)[1].split(",")
+    forced = [x for x in forced if x]
+    TurboQuantConfig.get_boundary_skip_layers = staticmethod(
+        lambda mc, n=2, _l=forced: list(_l)
+    )
+
+
+def build_llm(model, kv):
+    """Engine with the requested KV dtype; prints back the effective skip list."""
+    from vllm import LLM
+
+    kwargs = dict(
+        model=model,
+        max_model_len=int(os.environ.get("MML", 2048)),
+        gpu_memory_utilization=float(os.environ.get("UTIL", 0.60)),
+        enforce_eager=True,
+        trust_remote_code=True,
+    )
+    if os.environ.get("SKIP_SLIDING"):
+        kwargs["kv_cache_dtype_skip_layers"] = os.environ["SKIP_SLIDING"].split(",")
+    if kv != "auto":
+        kwargs["kv_cache_dtype"] = kv
+    llm = LLM(**kwargs)
+    skips = llm.llm_engine.vllm_config.cache_config.kv_cache_dtype_skip_layers
+    print("EFFECTIVE SKIP LAYERS:", skips, flush=True)
+    return llm, list(skips)
+
+
+def run(model, kv, boundary, n, outp, mode):
+    override_boundary(boundary)
 
     from datasets import load_dataset
     from vllm import LLM, SamplingParams
@@ -72,20 +104,7 @@ def run(model, kv, boundary, n, outp, mode):
     )
     gold = [r["answer"].split("####")[-1].strip().replace(",", "") for r in test]
 
-    kwargs = dict(
-        model=model,
-        max_model_len=int(os.environ.get("MML", 2048)),
-        gpu_memory_utilization=float(os.environ.get("UTIL", 0.60)),
-        enforce_eager=True,
-        trust_remote_code=True,
-    )
-    if os.environ.get("SKIP_SLIDING"):
-        kwargs["kv_cache_dtype_skip_layers"] = os.environ["SKIP_SLIDING"].split(",")
-    if kv != "auto":
-        kwargs["kv_cache_dtype"] = kv
-    llm = LLM(**kwargs)
-    skips = llm.llm_engine.vllm_config.cache_config.kv_cache_dtype_skip_layers
-    print("EFFECTIVE SKIP LAYERS:", skips, flush=True)
+    llm, skips = build_llm(model, kv)
     shot_tokens = len(llm.get_tokenizer().encode(shots)) if n_shots else 0
     print(f"PROMPT CONTEXT: {n_shots} shots = {shot_tokens} tokens", flush=True)
 

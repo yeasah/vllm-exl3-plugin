@@ -230,6 +230,55 @@ instrument, and a needle/RULER-style retrieval probe is the one that would not s
 weakness. **Until that runs, "protection matters less at long context" is a statement
 about many-shot prompts, not about long context.**
 
+### Retrieval: the needle probe the many-shot result demanded (2026-08-30)
+
+Many-shot GSM8K is redundant and barely stresses retrieval, so its "protection matters
+less at long context" needed an instrument without that weakness. Needle-in-a-haystack
+on the same six configurations, wikitext-103 haystack, identical trials across cells.
+
+**Three variants saturated before one bit.** On Qwen3-4B a single needle scores 93-100%
+everywhere with no ordering by KV quality (bf16 `auto` at 32K scored 144/150 against
+bf16 tq4-*without*-protection at 148/150); 8 needles with distinct keys scored 200/200;
+8 same-key needles 197/200. Verbatim recall of rare numeric strings is close to free.
+What finally bites is **16 same-key needles at 32K**, where sixteen indistinguishable
+spans must be held apart across the full context.
+
+| weights | KV | 8K | 32K |
+|---|---|---|---|
+| bf16 | auto | 97.5% | 88.4% |
+| bf16 | tq4 + protection | 97.0% | 87.5% |
+| bf16 | tq4 − protection | 96.2% | 86.2% |
+| 3bpw | auto | 97.4% | 86.2% |
+| 3bpw | tq4 + protection | 96.7% | 86.9% |
+| 3bpw | tq4 − protection | 96.9% | **84.1%** |
+
+100 trials x 16 needles = 1600 paired items per cell. **tq4 itself is free on retrieval**
+— `auto -> tq4+protection` is −0.9% to +0.7% and never significant in four cells.
+Dropping protection costs −0.8%, −1.3%, +0.2%, −2.8%, and **only the last is significant**
+(3bpw @32K, p=0.009) — the cell where both stressors combine.
+
+**This corrects the many-shot reading in the direction the caveat predicted.** There, the
+cost of dropping protection *shrank* with length (−8.0 → −3.8). Here it grows (bf16 −0.8 →
+−1.3, 3bpw +0.2 → −2.8). The 8K cells sit at 96-97% with little room, so part of that is
+ceiling; but where there is headroom, the effect is present rather than absent.
+
+**And retrieval is the less sensitive task, which was not the expectation.** At comparable
+headroom (GSM8K ~85%, needle ~86%) dropping protection costs 3.8-8.0 points on GSM8K
+against 1.3-2.8 here. The damage layer 0 prevents looks like general degradation of the
+computation rather than a failure to reach distant context — consistent with an
+attention-sink role, and a caution against assuming retrieval benchmarks are the sensitive
+instrument for KV quality.
+
+**A harness bug worth recording, because it nearly became a finding.** The first hard-needle
+sweep ended its prompt with "Give the numbers only.", which a base-style completion
+*continues* rather than obeys: the model emitted ` Do not include any other text.\nAnswer:`
+and then restated every fact in full sentences, so every generation hit the token cap
+(`finish_reason: length`). The metric was scoring verbosity against that cap, and it
+produced bf16 `auto` at 70.8% against bf16 tq4 at 95.9%, **p=7.7e-69** — strongly
+significant and physically impossible. Ending the prompt at `\nAnswer:` and sizing the cap
+to the answer moved that same cell to 97.5%. The tell was implausibility, not weak
+statistics; all twelve cells of that sweep were discarded.
+
 ### Controls and limits
 
 - **Decoding is bit-reproducible.** The same config run twice: 1220/1319 both
