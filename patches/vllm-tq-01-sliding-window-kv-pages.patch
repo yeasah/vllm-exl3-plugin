@@ -1,15 +1,26 @@
 Let a TurboQuant KV cache coexist with sliding-window layers
 
-Serving a sliding-window model with `--kv-cache-dtype turboquant_* ` plus
-`--kv-cache-dtype-skip-layers <the sliding layers>` dies in KV cache group
-construction, first on an assert inside `unify_kv_cache_spec_page_size` and
-then, once that is cleared, on the page-size divisibility wall behind it.
-Three independent things are wrong; the first is the load-bearing one.
+Currently turboquant is not compatible with sliding-window attention layers.
+vLLM provides the exact knobs needed to run such models in mixed attention,
+with turboquant applied to the full attention layers only. Even in models where 
+a smller fraction of layers are full, this provides turboquant for nearly all
+of the cache at high context use, because the sliding window layers are capped
+at the window size and remain small while the full attention layers grow.
+
+Setting `--kv-cache-dtype` to a turboquant dtype and adding
+`--kv-cache-dtype-skip-layers` with a list of the sliding layer indicies is
+the recipe for this. (Note that `--kv-cache-dtype-skip-layers` also supports
+an idiom that would be directly useful for this and avoid looking up model-specific
+layer indices, by including the string `sliding_window` in the list. This doesn't
+work with TQ for a different reason, and I will propose a different PR to resolve
+this)
+
+However, there are a few issues that block this from actually working today:
 
 1. `Platform._align_heterogeneous_kv_block_size` prices the quantized primary
    through `backend_cls`, which `_find_non_ssm_backend` defines as the backend
    of the *first* attention layer. With skip layers that layer is usually an
-   unquantized one on FLASH_ATTN, whose `customize_spec` is a no-op for
+   unquantized one on a different backend, whose `customize_spec` is a no-op for
    TurboQuant's packing, so the primary is priced as dense uint8
    (`2 * head_size` bytes/head) instead of its packed slot (`head_size + 6`).
    The shared page is then computed against a page ~1.9x too large, and since
@@ -26,11 +37,11 @@ Three independent things are wrong; the first is the load-bearing one.
 
 2. A full-attention layer skipped from KV quantization keeps the native layout
    and had no way to pad up to that shared page -- the mechanism existed only
-   for `SlidingWindowSpec`. This is the "first/last-N sibling" upstream flagged
-   in two comments in `_align_heterogeneous_kv_block_size`; TurboQuant's own
-   `get_boundary_skip_layers` is what creates such layers. Implemented as the
-   comments describe, via a `sibling_page_size_padded` hint, and gated twice so
-   nothing else moves:
+   for `SlidingWindowSpec`. This is the "first/last-N sibling" comments that
+   propose exactly this work in `_align_heterogeneous_kv_block_size`; 
+   TurboQuant's own `get_boundary_skip_layers` is what creates such layers. 
+   Implemented as the comments describe, via a `sibling_page_size_padded` hint,
+   and gated twice so the extra cost is only applied where needed:
 
      - only when the native per-token page is *not* an integer multiple of the
        primary's, so nvfp4 (exactly 2x) keeps reconciling by block scaling; and
@@ -53,9 +64,11 @@ Measured on vLLM 0.28.0, RTX 5070 Ti, `Laguna-XS-2.1-exl3@3.00bpw` with
 classes reconcile to 68608 and the model serves. Boundary protection is left
 intact -- the first/last-N layers keep native KV. Dense TurboQuant
 (MiniCPM5-1B) is unchanged at 909,888 vs 909,920 KV tokens (block granularity
-only), and both models still serve with an unquantized cache. gemma-4 and
-Muse-Glimmer are untested: neither fits this card, and Muse's native path fails
-earlier on an unrelated vision-adapter weight-loading error.
+only), and both models still serve with an unquantized cache.
+
+Co-authored-by: Claude Opus 5 <noreply@anthropic.com>
+
+Signed-off-by: Yeasah Pell <yeasah@schwide.net>
 
 diff --git a/vllm/config/cache.py b/vllm/config/cache.py
 index 654e9a5358..01b10e8d14 100644

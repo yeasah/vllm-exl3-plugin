@@ -421,6 +421,50 @@ The determinism control is just the same invocation twice to different output
 files. It is worth re-running whenever the sampling path changes: every paired
 p-value above assumes it.
 
+### A reproduction model that needs no plugin (2026-08-31)
+
+Every model in this document is EXL3-quantized, which is no use to anyone reproducing the
+Part 1 bug from a stock vLLM checkout. **`unsloth/gemma-3-1b-it`** is the smallest clean
+reproducer found:
+
+- **1.86 GiB** in bf16, so it fits anywhere, and it is an ungated mirror (google's own
+  Gemma repos are gated, as are Cohere's Command-R7B).
+- **Text-only**, so it never reaches the multimodal gate that blocks gemma-4 in
+  [vllm#41403](https://github.com/vllm-project/vllm/issues/41403).
+- **Interleaved sliding/full**: 26 layers, `sliding_window_pattern: 6`, so full attention
+  at layers 5, 11, 17, 23 and a 512-token window elsewhere.
+- **Uniform head geometry** — `head_dim` 256 on both layer types, unlike gemma-4's
+  `global_head_dim` 512 against `head_dim` 256, which is a separate unfixed problem.
+- `Gemma3ForCausalLM` is supported by stock vLLM 0.28.
+
+Other candidates and why not: `EXAONE-4.0-32B` is interleaved with ideal uniform geometry
+but 59.6 GiB; `Ministral-8B-Instruct-2410` is interleaved at 14.9 GiB, too tight to leave
+KV room on 16 GiB; gemma-4-E2B is small and interleaved but multimodal *and* carries the
+split head_dim; Qwen2.5, Phi-4-mini, SmolLM3 and AFM-4.5B are all effectively
+full-attention.
+
+Reproduction, holding the 22 sliding layers native because TurboQuant cannot serve a
+sliding window:
+
+    sliding = [str(i) for i in range(26) if (i + 1) % 6 != 0]
+    LLM(model="unsloth/gemma-3-1b-it", kv_cache_dtype="turboquant_4bit_nc",
+        kv_cache_dtype_skip_layers=sliding,
+        max_model_len=2048, gpu_memory_utilization=0.60, enforce_eager=True)
+
+On stock 0.28.0 that fails in KV cache group construction:
+
+    NotImplementedError: Layer model.layers.5.self_attn.attn: page size is not
+    divisible by the maximum page size and cannot be padded.
+
+on layer 5 — a TurboQuant layer — which is the mispriced-primary bug. With
+`vllm-tq-01-sliding-window-kv-pages.patch` it serves, at 264,171 KV tokens.
+
+**Note which half this exercises.** gemma-3-1b's boundary indices `{0,1,24,25}` are all
+sliding layers that were already held native, so no *full-attention* layer keeps a native
+cache and the sibling hunk never fires. To exercise that half, add a full-attention layer
+to the skip list — appending `"5"` makes 23 skip layers and still serves (278,150 tokens),
+where it is the sibling padding that reconciles the resulting third page class.
+
 ## Where this goes upstream
 
 Two separable pieces, in order.
