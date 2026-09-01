@@ -174,6 +174,64 @@ model keeps serving.
 
 ### Reports, not patches
 
+**There is no out-of-tree surface for a KV-cache dtype, and the kernel half already has
+one.** Read at v0.27.0, 2026-09-01. Weight quantization has
+`register_quantization_config`; attention backends have
+`register_backend(AttentionBackendEnum.CUSTOM, ...)`, public and documented. A KV-cache
+format has neither — `--kv-cache-dtype` validates against `CacheDType`, a closed
+`typing.Literal` on a **pydantic** field, so an unregistered name is rejected at config
+construction. The only other hook, `Platform.register_custom_kv_cache_specs`, is
+platform-level, and an out-of-tree platform *replaces* the builtin
+(`activated_oot_plugins[0]` wins), so it cannot coexist with `CudaPlatform`.
+
+**What the gap actually is, measured against TurboQuant's own footprint.** TurboQuant
+touches 18 files; 10 are its own (`turboquant_attn.py`, the two Triton ops,
+`quantization/turboquant/`). The other **8 are shared code**, and every one of them is a
+hardcoded case where a lookup would do:
+
+| site | what a format needs to supply |
+|---|---|
+| `config/cache.py` — `CacheDType` Literal | a name |
+| `utils/torch_utils.py` — `STR_DTYPE_TO_TORCH_DTYPE` | a storage dtype |
+| `v1/kv_cache_interface.py` — `KVQuantMode` enum + `get_kv_quant_mode()` | a quant mode |
+| `layers/attention/attention.py:668` **and** `platforms/interface.py:808` | a page geometry — **duplicated at two sites** |
+| `engine/arg_utils.py:1978` | post-resolution config adjustment (boundary skip layers) |
+| `engine/arg_utils.py:2350` | a backend-compatibility declaration (the FA3 override) |
+| `platforms/{cuda,rocm,xpu}.py` | backend availability and routing |
+
+**The abstraction is already half-built**, which is the strongest thing about this ask.
+`KVQuantMode` with `get_kv_quant_mode()` is exactly the right seam; it is simply a closed
+enum reached by string-prefix matching. Two tells that it was never finished: a
+format-name predicate, `is_turboquant`, sits in shared code beside capability-shaped ones
+like `is_per_token_head`; and `tq_max_kv_splits_for_cuda_graph`, a format-specific
+tunable, lives in the shared `AttentionConfig`. A third, possibly a real defect worth
+reporting on its own: **`is_quantized_kv_cache()` does not return True for any
+`turboquant_*` dtype** — it tests `fp8` / `per_token_head` / `nvfp4` only — and it has 77
+call sites.
+
+*Why it is worth their time, stated in their interest rather than ours*: it makes "you
+are on your own, here is the surface" a sayable answer. Today it is not sayable for KV
+quant, so every proposal arrives as a core PR against a closed `Literal` and has to be
+reviewed or ignored — four have been ignored (vllm#39241, exllamav2#814, and
+vllm#46613 + #46812, the last Huawei-backed and open since 2026-06-26 with zero
+approvals). It is also a subtraction: a registry turns N formats x 8 shared files into
+N x 1, and TurboQuant is the reference implementation that proves the surface is
+sufficient by being re-expressed through it with no behaviour change.
+
+*The objection to pre-empt*, because it is the real cost: `CacheDType` is used as a
+**type annotation at 49 sites**, and `supported_kv_cache_dtypes` ClassVars are declared
+across **29 files**. Widening the Literal to `str` loses static checking at all of them.
+The mitigation to propose up front is `Literal[...] | str` — builtins keep checking,
+only the open case degrades.
+
+*The risk area to be honest about*: the page geometry is the one piece that is genuinely
+delicate, it is duplicated at two sites, and `platforms/interface.py:808` carries a
+comment conceding the standard formula over-sizes TQ's packed layout. That is the same
+code in which [turboquant-kv.md](turboquant-kv.md) Part 1 found three interacting bugs,
+so this project has unusually specific evidence to offer about what a registry must get
+right for hybrid and sliding-window models — which is also the argument for filing the
+sliding-window patch first and this second, so the report arrives with standing.
+
 **Media encoders cannot be offloaded, on any model, in any format.**
 `get_offloader().wrap_modules()` has exactly one call site in vLLM, inside
 `make_layers()` — the helper that builds a *text decoder's* `ModuleList`. Vision towers
