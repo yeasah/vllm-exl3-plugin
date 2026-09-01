@@ -316,6 +316,34 @@ second consumer is known, so it is ours to maintain until one appears.
 
 ---
 
+## SINQ
+
+**`device_map="auto"` silently produces an unusable model.** A checkpoint saved by SINQ's
+own transformers integration, reloaded with `device_map="auto"`, goes through
+transformers' native `SinqConfig` quantizer and comes back as
+`sinq.sinqlinear_hf.SINQLinear` modules with `ready=False`. Nothing complains at load;
+the first forward raises `AssertionError: model was not quantized` from
+`sinqlinear_hf.py:433`. With `device_map="cuda:0"` the same file loads through SINQ's own
+patched path (`sinq.sinqlinear.SINQLinear`, `ready=True`) and generates correctly.
+
+*Repro*: quantize any model with `SinqConfig(nbits=4, group_size=128)`,
+`save_pretrained`, then `from_pretrained(..., device_map="auto")` and generate.
+Established 2026-09-01 on `Qwen/Qwen3-0.6B-Base`, transformers 5.15.0, `sinq` 0.2.0.
+
+*Why it is worth their time*: `device_map="auto"` is the single most common way people
+load a model, it is what accelerate's own documentation leads with, and the failure
+surfaces far from its cause — an assertion about quantization, thrown from a matmul,
+against a model that loaded without a word. Either the HF-integration path should mark
+the layers ready or it should refuse at load. Costs them nothing to accept: no format
+change, no dependency, no agreement with anything of ours.
+
+*Second, smaller, and separable*: SINQ's weights are attached as plain tensor attributes
+rather than parameters or buffers, so `named_parameters()` and `named_buffers()` see
+nothing on a quantized model. Any parameter-walking size or memory tool reports only the
+norms and embedding, with no error. Registering `W_q` as a buffer would fix it for every
+such tool at once. Worth raising as a question rather than a defect — there may be a
+reason, and asking is the honest first move.
+
 ## llm-compressor
 
 **`strategy: "channel"` is a trap for embeddings, and the docs offer it neutrally.**
