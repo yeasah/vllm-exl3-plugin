@@ -350,6 +350,34 @@ metadata, 2D costs **0.24 bpw** over 1D at group 64, and on Qwen3-0.6B at 3 bits
 strictly dominated by 1D — worse KLD at more bits. If that generalizes, the option's
 documentation should say what it costs.
 
+**It installs a `sitecustomize.py`, which costs every Python process in the environment
+3.3 seconds.** The `sinq` package writes `sitecustomize.py` into site-packages, and CPython
+imports that at **every interpreter startup**. Measured 2026-09-01:
+
+| | interpreter start | modules preloaded |
+|---|---|---|
+| as shipped | **3.31 s** | 106 |
+| `SINQ_AUTO_PATCH=0` | **0.02 s** | 2 |
+
+165x, paid by every `python3 -c`, every CLI tool, every git hook in the venv — to import
+sinq, gemlite and the whole `gemlite.triton_kernels` tree before the user's script runs.
+It also prints `Found gemlite installation, fast SINQ-ference for 4-bit models` to
+**stdout** on the way, unconditionally, from `sinqlinear.py:19` and `sinqlinear_hf.py:24`,
+which corrupts the output of any program whose stdout is parsed.
+
+*Why it is worth their time*: three separable defects, each with an easy fix, and none of
+them require them to agree with anything of ours. `sitecustomize` is reserved for the
+environment's owner — only one file can hold the name, so **whichever package installs it
+last silently wins**, and a library taking it will eventually break someone else's. A
+`.pth` that registers a lazy import hook, or documenting the env var, would do the same
+job without the collision. The eager import should be lazy regardless. And the banner
+belongs on a logger at debug level, or on stderr at worst.
+
+*Carried locally*: the venv's `sitecustomize.py` is neutered with the default inverted —
+`SINQ_AUTO_PATCH=1` restores it — with the original kept beside it as
+`sitecustomize.py.sinq-orig`. Only *loading a saved SINQ checkpoint* through
+`from_pretrained` needs the patch; quantizing in process is unaffected, which is verified.
+
 *Second, smaller, and separable*: SINQ's weights are attached as plain tensor attributes
 rather than parameters or buffers, so `named_parameters()` and `named_buffers()` see
 nothing on a quantized model. Any parameter-walking size or memory tool reports only the
