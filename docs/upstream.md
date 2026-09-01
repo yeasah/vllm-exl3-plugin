@@ -204,10 +204,20 @@ hardcoded case where a lookup would do:
 enum reached by string-prefix matching. Two tells that it was never finished: a
 format-name predicate, `is_turboquant`, sits in shared code beside capability-shaped ones
 like `is_per_token_head`; and `tq_max_kv_splits_for_cuda_graph`, a format-specific
-tunable, lives in the shared `AttentionConfig`. A third, possibly a real defect worth
-reporting on its own: **`is_quantized_kv_cache()` does not return True for any
-`turboquant_*` dtype** — it tests `fp8` / `per_token_head` / `nvfp4` only — and it has 77
-call sites.
+tunable, lives in the shared `AttentionConfig`. A third, checked and **not** a separate defect:
+`is_quantized_kv_cache()` returns False for every `turboquant_*` dtype, but reading its
+77 call sites shows the predicate means *"fp8-family, handled by the standard
+reshape-and-cache and view path"*, not *"quantized at all"* — `FP8_KV_CACHE =
+is_quantized_kv_cache(...)` in the Triton store op, `cache.view(current_platform.
+fp8_dtype())` in Kimi-K3 MLA, `self._fp8_kv = ...`, `fp8_attention = ...`. False is
+**required** at those sites; TurboQuant has its own store kernel. The name is wrong, the
+behaviour is right, and that is the point worth making here: it is a capability predicate
+wearing a category name, which is the same unfinished-abstraction symptom as
+`is_turboquant`. One visible consequence, small: `models/extract_hidden_states.py:356`
+gracefully coerces a quantized cache to `"auto"`, TurboQuant misses the coercion and then
+trips the generic `supports_kv_cache_dtype` check at `v1/attention/backend.py:171`, so it
+fails backend selection where fp8 silently falls back. Fold it in as evidence; not worth
+filing alone.
 
 *Why it is worth their time, stated in their interest rather than ours*: it makes "you
 are on your own, here is the surface" a sayable answer. Today it is not sayable for KV
