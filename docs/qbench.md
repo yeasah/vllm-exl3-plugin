@@ -706,3 +706,75 @@ study](#head-bitrate-6-is-defensible-and-the-lever-does-not-want-pulling-2026-08
 not transfer: it was budget-neutral, trading head bits against body bits at constant
 bytes, so it says the optimum trade is 5-6 — not what a bf16 head buys at a fixed body
 bitrate, which is the quantity that matters here and is unmeasured.
+
+### Isolating the body quantizer: the head was not the confound, and the advantage is bitrate-local (2026-09-01)
+
+Two corrections to the section above, both from measurement.
+
+**The head/embedding confound was the wrong explanation.** `head_quant: {bits: 16}` on
+the exllamav3 arms replaces the checkpoint's quantized head with the dense tied
+embedding, and that engine already keeps the embedding at bf16 — so every arm below
+carries a bf16 head *and* a bf16 embedding, and only the body quantizer varies. (Note
+the direction: `embed_quant` / `head_quant` / `embed_file` are **`Exl3Backend`-only
+options**, so normalization has to run toward bf16 rather than pushing SINQ down to a
+6-bit head. Giving the transformers engine the same knobs is the missing piece if the
+other direction is ever wanted.)
+
+Removing EXL3's 6-bit head changed **nothing**:
+
+| EXL3 arm | 6-bit head (vLLM) | bf16 head | Δ |
+|---|---|---|---|
+| 4.00 bpw | 0.50243 | 0.50170 | −0.0007 |
+| 3.50 bpw | 0.55904 | 0.55757 | −0.0015 |
+| 3.00 bpw | 0.64493 | 0.64263 | −0.0023 |
+| 2.75 bpw | 0.72497 | 0.72436 | −0.0006 |
+
+All four inside the ~1% run-to-run variation this harness shows. **The 6-bit head costs
+EXL3 essentially nothing on this model** — independent corroboration of the head-bitrate
+result above, arriving from the opposite direction and without a budget-neutral trade.
+The confound named in the previous section was real in principle and empty in practice;
+what remains of it is the byte axis, not the quality axis.
+
+**And then the sweep, which is the actual finding.** Every arm bf16 head and embedding:
+
+| | bpw_layer | vram_gb | ppl | KLD |
+|---|---|---|---|---|
+| Noise floor | 16.00 | 1.3999 | 18.21 | 0.00159 |
+| SINQ 4bit g64 | 4.28 | 0.5090 | 20.68 | **0.13145** |
+| SINQ 4bit g128 | 4.14 | 0.5022 | 21.52 | **0.16827** |
+| AutoRound 4bit | 4.18 | 0.5040 | 31.31 | 0.54395 |
+| AWQ 4bit | 4.16 | 0.5029 | 34.21 | 0.63316 |
+| EXL3 4.00 bpw | 4.02 | 0.7858 | 29.97 | 0.50170 |
+| EXL3 3.50 bpw | 3.52 | 0.7602 | 31.82 | 0.55757 |
+| SINQ 3bit g64 | 3.48 | 0.4680 | 37.61 | **0.73513** |
+| SINQ 3bit g128 | 3.34 | 0.4613 | 54.89 | **1.11322** |
+| EXL3 3.00 bpw | 3.02 | 0.7346 | 34.44 | 0.64263 |
+| EXL3 2.75 bpw | 2.77 | 0.7216 | 37.52 | 0.72436 |
+| SINQ 2bit g64 | 2.28 | 0.4065 | **269,529** | **9.63180** |
+| SINQ 2bit g128 | 2.14 | 0.3997 | **2,550,682** | **11.82632** |
+
+**The two curves cross between 4 and 3 bits, and below that SINQ does not degrade — it
+fails.** At 4 bits SINQ is 3.8x better than EXL3. At ~3.4 bits it is already *worse* than
+EXL3 at 3.02 (0.735 vs 0.643), and SINQ 3bit g128 at 3.34 bpw is beaten by EXL3 at
+**2.75** bpw. At 2 bits SINQ produces perplexities in the hundreds of thousands and
+millions — not a degraded model, a destroyed one — where EXL3 at 2.77 still sits at
+0.724.
+
+That is the textbook signature of the two families: **scalar RTN with good normalization
+is excellent where the grid is dense enough and falls off a cliff when it is not, while a
+calibrated trellis degrades gracefully.** EXL3 moves only 0.502 → 0.724 across
+4.02 → 2.77 bpw; SINQ moves 0.131 → 11.8 across 4.28 → 2.28. The low-bitrate regime is
+precisely what the QuIP#/QTIP lineage exists for, and this is what that looks like
+measured.
+
+**What this means for the project.** The 4-bit result is real and should not be dismissed
+— at 4 bits, calibration-free dual scaling beats a calibrated trellis by 3.8x here, on a
+1.5-second quantization, and that is worth understanding. But the operating range this
+project cares about is 2–4 bpw, and SINQ is not a competitor there at any bitrate below
+about 3.5. Two caveats before generalizing: this is a **0.6B model**, where every format's
+low-bitrate behaviour is at its worst and the crossover point is likely to move down on a
+larger one; and on **total bytes** SINQ still carries the bf16 embedding (57% of its
+checkpoint), so its `vram_gb` column is not a deployment figure.
+
+The larger-model sweep is still worth running — but to locate *where* the crossing is,
+not to ask whether there is one.
