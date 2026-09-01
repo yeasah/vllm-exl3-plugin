@@ -459,6 +459,11 @@ Open:
   it does not exist yet.
 - **A second dense model**, to know whether "layer 0 only" is a property of Qwen3-4B or
   of transformers. The attention-sink explanation predicts it generalises.
+- **And whether it generalises across *quantizers*, not just models.** If attention
+  sinks are the mechanism, the effect is a property of the model and constrains any KV
+  compression scheme — which makes the finding worth more than one vLLM patch. E8-lattice
+  KV caches claiming ~2 bits are now shipping from at least two other projects
+  (see the field notes); none of the public claims say what they hold native at layer 0.
 - **Why Laguna is flat** — one full-attention layer at stake versus four, or 30 of 40
   layers native regardless? Cheaply separable by compressing Laguna's sliding layers too
   once that path exists, or by testing a dense model of Laguna's depth.
