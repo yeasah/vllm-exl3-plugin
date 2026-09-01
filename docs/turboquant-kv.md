@@ -365,6 +365,29 @@ That retrieval-vs-reasoning asymmetry is exactly what the needle and GSM8K instr
 here disagreed about, on a model two orders of magnitude smaller, which is worth more than
 either result alone.
 
+**And their study prices the whole approach, which the summary above skipped on first
+reading.** Throughput is a major section, not a footnote, and its conclusion is
+*"lower KV-cache storage cost does not directly translate into faster serving"*:
+
+| | Qwen3-30B-A3B (2xH100) | Llama-3.3-70B (4xH100) |
+|---|---|---|
+| fp8 | matches bf16 | matches bf16 |
+| `turboquant_k8v4` | 80% of bf16 | 75% |
+| `turboquant_4bit_nc` | ~77% | 75% |
+| `turboquant_k3v4_nc` | ~75% | ~70% |
+| `turboquant_3bit_nc` | 73% | **66%** |
+
+Latency overhead runs to 60% (Qwen3-30B) and 10-68% (Llama-70B) across batch 1/8/32/64,
+where fp8 is negligible. The stated mechanism is that **TurboQuant dequantizes to bf16
+before attention, and that cost grows with the amount of KV accessed** — so the penalty
+scales with exactly the context length the compression is bought for.
+
+**But it is not one-dimensional.** Under burst load on Llama-70B the capacity wins on
+tail latency anyway: P99 TTFT is ~17 s at bf16, under 3.5 s for every TurboQuant preset,
+and ~1.3 s at fp8. Steady-state throughput and admission under pressure are different
+questions, and this project has measured neither locally — every figure in this note is
+capacity. See `turboquant-boundary-tax` in [TODO.md](../TODO.md).
+
 **What their study does not cover, and this one does.** Their four models are all
 full-attention, so the sliding-window page-geometry failure in Part 1 never arises for
 them. Their quick-start notes that first/last layer skipping happens, but carries no

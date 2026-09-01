@@ -459,11 +459,13 @@ Open:
   it does not exist yet.
 - **A second dense model**, to know whether "layer 0 only" is a property of Qwen3-4B or
   of transformers. The attention-sink explanation predicts it generalises.
-- **TurboQuant's throughput cost is unmeasured here.** Every number in the note is KV
-  *capacity*; none is tokens/s. A competing RFC ([vllm#46613](https://github.com/vllm-project/vllm/issues/46613))
-  asserts TurboQuant carries a "documented 40-52% throughput regression" — unverified and
-  unsourced, but there is no local number to check it against, and for an appliance the
-  capacity/throughput trade is the whole decision. Cheap to add to the existing harness.
+- **TurboQuant's throughput cost is unmeasured here, and it is large.** Every number in
+  this project is KV *capacity*; none is tokens/s. vLLM's own study — already cited in
+  the note — measures 66-80% of bf16 throughput depending on preset and model, with
+  latency overhead to 68%, because TurboQuant dequantizes to bf16 before attention and
+  that cost grows with the KV accessed. It also shows the trade is not one-dimensional:
+  P99 TTFT under burst *improves* 5x over bf16. For an appliance that trade is the whole
+  decision, and we have no local number on either axis. Cheap to add to the harness.
 - **And whether it generalises across *quantizers*, not just models.** If attention
   sinks are the mechanism, the effect is a property of the model and constrains any KV
   compression scheme — which makes the finding worth more than one vLLM patch. E8-lattice
