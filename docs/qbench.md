@@ -128,6 +128,16 @@ the four already-correct formats are unchanged.
 
 ## The first cross-format comparison
 
+**RETIRED as a comparison (2026-09-01)** — see "gemma-4-12B: the ordering reverses"
+below. Qwen3-0.6B sits far enough into the damaged regime that its *ordering* does not
+survive a change of model, so nothing in this section or the later 0.6B tables should be
+cited for how formats rank. They stay because the wrong version is what gets remembered,
+and because the wiring, the accounting fixes and the sub-3-bit cliff they established all
+hold. The cross-format exemplar is now **Qwen3-8B** (`~/qbench/qwen3-8b.yaml`), chosen for
+being dull: dense uniform attention, untied embeddings, a 151936 vocab, and published
+EXL3 / AWQ / GGUF coverage. gemma stays in the regression matrix, where harsh is a
+feature.
+
 Qwen3-0.6B, 2-row smoke trace — treat the absolute numbers as indicative, not a
 verdict:
 
