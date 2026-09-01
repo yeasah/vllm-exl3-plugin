@@ -882,3 +882,54 @@ So the parameter axis is exhausted, and it did not extend SINQ's strong range do
 all. **What remains open is the model-size axis**, which is the sweep worth running: the
 question is whether a larger model moves the crossing below 3 bpw, and nothing measured
 here bears on it.
+
+### gemma-4-12B: the ordering reverses, and 0.6B was the wrong instrument (2026-09-01)
+
+The SINQ arms now reach a 12B model (block-wise quantization, above). The result inverts
+the Qwen3-0.6B finding completely.
+
+| | group | bpw_layer | bpw_head | bpw_embed | vram_gb | ppl | KLD |
+|---|---|---|---|---|---|---|---|
+| HF BF16 (reference) | — | 16.00 | 16.0 | 16.0 | 24.057 | 17.687 | — |
+| Noise floor | — | 16.00 | 16.0 | 16.0 | 24.150 | 17.681 | 0.00176 |
+| **EXL3 4.00 bpw** | exllamav3 | 4.01 | 6.0 | 16.0 | 7.662 | 17.898 | **0.02696** |
+| **EXL3 4.00 bpw** | vLLM | 4.05 | 6.0 | 6.0 | **5.868** | 17.937 | **0.04858** |
+| EXL3 3.50 bpw | exllamav3 | 3.51 | 6.0 | 16.0 | 7.027 | 18.149 | 0.07026 |
+| Q4_K_XL | GGUF | 4.88 | 5.5 | 5.5 | 6.843 | 18.098 | 0.07132 |
+| EXL3 3.50 bpw | vLLM | 3.56 | 6.0 | 6.0 | 5.234 | 18.156 | 0.09135 |
+| EXL3 3.00 bpw | exllamav3 | 3.01 | 6.0 | 16.0 | 6.393 | 18.456 | 0.10293 |
+| EXL3 3.00 bpw | vLLM | 3.06 | 6.0 | 6.0 | 4.599 | 18.473 | 0.12354 |
+| A-SINQ 4bit | transformers | 4.27 | 16.0 | 16.0 | 7.296 | 19.984 | 0.15861 |
+| SINQ 4bit | transformers | 4.27 | 16.0 | 16.0 | 7.296 | 20.432 | 0.18576 |
+| A-SINQ 3bit | transformers | 3.47 | 16.0 | 16.0 | 6.281 | 45.154 | 1.01148 |
+| SINQ 3bit | transformers | 3.47 | 16.0 | 16.0 | 6.281 | 46.696 | 1.04736 |
+
+**EXL3 at 4.00 bpw is 6.9x better than SINQ at 4 bits** (0.02696 against 0.18576) — and
+the handicap runs *against* EXL3, which carries a 6-bit head where SINQ keeps bf16.
+EXL3 at **3.00 bpw** beats SINQ at 4 bits on quality (0.10293 vs 0.18576) while using
+**12% fewer bytes**, and on the vLLM path with its embedding served from the quantized
+head it does so at 4.599 GiB against SINQ's 7.296 — **37% smaller**. GGUF's Q4_K_XL also
+beats SINQ 4bit, by 2.6x. A-SINQ's calibration is worth more here than at 0.6B (15%
+rather than 5%) and does not change the ordering.
+
+At 3 bits SINQ collapses exactly as it did on the small model — ppl 45-47 against EXL3's
+18.5 — so the cliff is not a small-model artifact even though the ranking above it was.
+
+**The methodological finding is the bigger one: Qwen3-0.6B was not a valid instrument for
+ranking formats, and the earlier section that used it should be read with that in mind.**
+On the 0.6B model *every* arm sat in the badly-damaged regime — EXL3 4.00 bpw measured
+KLD **0.50**, against **0.027** here. That is an 18x difference in what "4-bit EXL3" means,
+and it is the model, not the format. SINQ moved the other way, 0.131 to 0.186. A
+comparison run entirely inside a regime where the best available option is already 300x
+its noise floor ranks the *damage patterns of a broken model*, not the formats.
+
+**The tell to keep**: check where the best arm sits relative to the noise floor before
+believing an ordering. On gemma-12B the best arm is 15x the floor and the spread is
+resolvable; on Qwen3-0.6B it was 300x, and everything above it was compressed into a band
+where the ordering did not survive a change of model. A format comparison needs a model
+big enough that a good quantizer is *nearly lossless* on it, or it is measuring something
+else.
+
+What survives from the small-model work: SINQ quantizes extremely fast (30 s for 12B), it
+is calibration-free, A-SINQ is a free improvement, 2D tiling costs more than it returns,
+and the sub-3-bit cliff is real. What does not survive is any claim about how it ranks.
