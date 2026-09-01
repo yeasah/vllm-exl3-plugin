@@ -514,3 +514,47 @@ developers, for whom "how does our GGUF path compare against native llama.cpp on
 the same checkpoint" is a first-order question and currently an awkward one to
 answer. If they do not already have such a tool, this would be the useful thing to
 hand them. Worth noting as a possible contribution rather than a roadmap item.
+
+## Adding SINQ as a comparator arm: what it would actually cost (2026-09-01)
+
+`huawei-csl/SINQ` (Apache-2.0, ICML 2026) — Sinkhorn-Normalized Quantization, dual
+row/column scales with iterative Sinkhorn-style normalization to even out variance
+across quantization groups. **Calibration-free**, 2/3/4/5/6/8 bits at group size 64 or
+128, weight-only, symmetric/asymmetric plus an NF4 variant. Pre-quantized checkpoints
+exist under the `huawei-csl` org.
+
+**Reconnaissance says this is a couple of edits, not a project.**
+
+- **`SinqConfig` is already in the installed transformers (5.15.0)**, native since
+  Feb 2026, so a pre-quantized checkpoint loads through the ordinary
+  `AutoModelForCausalLM.from_pretrained` path. The runtime `sinq` package is a separate
+  `pip install` — transformers ships only the config class.
+- **The streaming allowlist does not bite.** `TransformersBackend` raises
+  `"Streaming does not support this quantization_config"` for anything outside
+  {compressed-tensors, modelopt, fp8, mxfp4}, but `streaming` defaults to **False**, and
+  the default `device_map` load has no such gate.
+- **One real edit, in the place this file keeps finding bugs.** `_quant_bits()` reads
+  `bits` / `w_bit` / `weight_bits`; `SinqConfig.to_dict()` emits **`nbits`** (verified
+  against the installed class, alongside `group_size`, `tiling_mode`, `method`, and
+  `quant_method: sinq`). None of the three keys match, so the size axis comes back
+  `None` — the fourth instance of the accounting-bug class enumerated above.
+- **Storage suffixes are the unknown.** `_KNOWN_SUFFIXES` covers CT, EXL3 and classic
+  GPTQ/AWQ; SINQ's dual-scale tensors are named something else, and an unrecognized
+  suffix is mis-bucketed rather than rejected. **`check_against_disk` is what makes this
+  cheap**: it classifies every on-disk tensor as counted, expected-absent or
+  *unexplained*, so a wrong suffix list surfaces as a number rather than as a plausible
+  point on a plot. The apparatus built after the first three bugs is precisely what makes
+  the fourth format a small job.
+
+**What the arm would and would not show.** SINQ's headline is *speed* — ~21 s for
+Qwen3-14B, claimed ~2x HQQ and ~31x AWQ/GPTQ — and qbench has **no time axis**, so the
+thing SINQ is actually selling is invisible here. What the plot would answer is the
+question worth asking anyway: how far calibration-free dual-scaling gets at matched
+total bytes against EXL3's calibrated trellis. Quantization wall-clock is a real
+operational number for the appliance, and if it is wanted it belongs beside the plot as
+a recorded fact, not as a qbench axis.
+
+**Same lab as KVarN, and the same idea.** KVarN's KV cache is Hadamard rotation plus
+"iterative Sinkhorn-like variance normalization"; SINQ is that normalization applied to
+weights. They are one research program in two places, so a SINQ result at matched bytes
+is also weak evidence about the KV claims — see the ecosystem field notes.
