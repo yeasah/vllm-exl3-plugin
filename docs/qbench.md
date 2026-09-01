@@ -558,3 +558,73 @@ a recorded fact, not as a qbench axis.
 "iterative Sinkhorn-like variance normalization"; SINQ is that normalization applied to
 weights. They are one research program in two places, so a SINQ result at matched bytes
 is also weak evidence about the KV claims — see the ecosystem field notes.
+
+### The arm exists: first SINQ numbers, and three accounting gaps it exposed
+
+Quantizing locally rather than pulling a prequant was the right call — it gave a known
+configuration and it is *fast*: `Qwen/Qwen3-0.6B-Base` at 4 bits took **2.3 s for g64 and
+1.8 s for g128**, load included, on one 5070 Ti. The speed claim is not marketing.
+
+`~/qbench/qwen-0.6b-sinq.yaml`, 10 rows x 2048, `openwebtext10k`, reference
+`Qwen3-0.6B-Base` bf16:
+
+| | bpw_layer | vram_gb | ppl | KLD |
+|---|---|---|---|---|
+| HF BF16 (reference) | 16.000 | 1.3999 | 18.2025 | — |
+| Noise floor | 16.000 | 1.3999 | 18.2059 | 0.00159 |
+| AWQ 4bit (vLLM) | 4.156 | 0.5029 | 34.2096 | 0.63316 |
+| **SINQ 4bit g128** | 4.143 | 0.5022 | 21.5154 | **0.16827** |
+| **SINQ 4bit g64** | 4.276 | 0.5090 | 20.6813 | **0.13145** |
+
+SINQ g128 lands within 0.013 bpw and 0.7 MiB of the AWQ arm — as close to matched bytes
+as two independently-produced checkpoints get — at **3.8x lower KLD**. Calibration-free.
+
+**Read it as a smoke trace, not a verdict**, for two reasons beyond the 0.6B model and
+ten rows. The arms **differ in engine as well as format** (SINQ through `transformers`,
+AWQ through `vllm`), which is the exact confound the EXL3 / EXL3-vLLM split exists to
+keep visible. And the AWQ checkpoint is one community quantization of unknown care, not
+a controlled AWQ baseline. What the run does establish is that the arm works end to end
+and the axes are trustworthy.
+
+**Three accounting gaps, each reporting a plausible number rather than an error** — the
+pattern this file keeps finding, now four and five and six:
+
+1. `_quant_bits` knew `bits` / `w_bit` / `weight_bits`; SINQ spells it **`nbits`**.
+2. Storage suffixes. `W_q` is int-packed exactly like `qweight` and shares its numel
+   math, so it feeds the same slot. Its sidecars needed full dotted paths, because
+   **SINQ quantizes its own scales and zeros** and the leaf names of that second-order
+   metadata are the single letters `m`, `s`, `x`. Bare, they would match anything.
+3. **The one worth carrying elsewhere: SINQ's weights are invisible to a parameter
+   walk.** `W_q` is a plain tensor attribute and the scales are a plain Python dict, so
+   neither `named_parameters()` nor `named_buffers()` yields them. The live-module path
+   in `TransformersBackend` therefore saw only norms and the embedding and reported
+   `bpw_layer 0.0` with a `vram_gb` covering the embedding alone — silently. **Any tool
+   that measures a model by summing `p.numel()` has the same blind spot on this format**,
+   including every memory profiler and every `sum(p.numel() for p in model.parameters())`
+   in a README. Fixed by falling back to `safetensors_storage_info`, which is the better
+   source regardless: it is what `check_against_disk` validates, and it cannot be fooled
+   by how a loader chooses to attach its tensors.
+
+Gaps 1 and 2 were caught by `check_against_disk` immediately and by name
+(`bpw_layer is 0.0, so that bucket matched no tensor at all; 0.219 GiB ... matched no
+bucket`, naming `model.layers.0.mlp.down_proj.W_q`). Gap 3 was **not** — that path
+computes its own numbers and never consults the disk check, which is why it survived a
+fix that made the standalone function correct. The guard was real and the gap was
+outside it.
+
+**A fourth, in SINQ itself, and it is a bug worth reporting.** A checkpoint saved by
+SINQ's own transformers integration **cannot be loaded with `device_map="auto"`**: that
+routes through transformers' native `SinqConfig` quantizer, which builds
+`sinq.sinqlinear_hf.SINQLinear` modules and never marks them ready, and the failure
+arrives as `AssertionError: model was not quantized` at the **first forward**, not at
+load. An explicit device (`device_map="cuda:0"`) reaches SINQ's own patched loader
+(`sinq.sinqlinear.SINQLinear`, `ready=True`) and works. Two loaders selected by an
+argument that has nothing to do with which one is wanted. qbench already exposes
+`device_map` as an option, so the project file sets it and no harness change was needed.
+
+**Results are cached per model** (`_logit_cache/qbench/results_*.json`, keyed on data,
+reference, model spec and `METRICS_VERSION`), and the cache stores `backend.info`
+alongside the metrics. A harness fix to the *accounting* therefore does not invalidate
+anything — a rerun replays the stale numbers and looks like the fix failed. Delete the
+matching `results_*.json` (the manifest maps hashes to labels) when changing how storage
+is measured.
