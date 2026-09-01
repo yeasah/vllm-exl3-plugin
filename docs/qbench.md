@@ -475,6 +475,36 @@ as TODO `qbench-noise-floor`.
 
 **No GGUF through `vllm-gguf-plugin`**, as above.
 
+**The `vllm` engine cannot be isolated from the rest of a project run**, and the design
+for fixing it is recorded here rather than queued, because the auto-sized
+`gpu_memory_utilization` (2026-09-01) turned the symptom from a failure into a
+degradation. Revisit if a project starts failing again, or if a vLLM crash costs a long
+run.
+
+*The cheap version is closed.* `VLLM_ENABLE_V1_MULTIPROCESSING=0` is load-bearing:
+the capture patches `compute_topk_scores`, which runs **in the worker**, so with
+multiprocessing on the worker is a subprocess that never sees the monkeypatch and the
+full-vocabulary capture silently stops being the code that runs. Installing it there via
+a `vllm.general_plugins` entry point (which does load in worker processes) does not help
+either — the captured tensor would then be in the worker's address space and the consumer
+that finalizes the row is in the frontend, at 1.16 GiB per row.
+
+*Which is what says where the boundary goes:* not the engine, but **the engine and the
+reduction together**. The capture needs worker, frontend and callback sharing an address
+space, so all three go in the child and only statistics come back. The surface is the
+nine-line per-model block in `qbench.py`: in go `mspec`, `max_len`, `device`, `ids`,
+`ranges`, `vocab_size` and `ref_store` — which is a **path**, the load-bearing detail,
+since the child then loads reference logits off disk and no logits ever cross the pipe;
+back come `stats.results()`, `stats.kl_vector()` (~80 KB at 10x2048) and `backend.info`.
+A wrapper implementing the existing four-member backend contract, ~100-150 lines, with no
+change to any engine and none to the rest of `qbench.py`.
+
+*What it would buy beyond the leak*: `options.env` becomes genuinely isolated instead of
+save-and-restore, and a vLLM crash stops taking a whole project run with it. *What it
+costs*: an interpreter plus torch/vLLM import per vllm arm (~15-30 s on top of engine
+init), care that a child traceback does not vanish, and `noise_eps`, which does not
+survive the boundary — though this engine has no noise injection anyway.
+
 **The `vllm` engine mis-scores Qwen3.5.** Qwen3.5-9B's unmodified EXL3 checkpoint
 measures ppl 248076 / KLD 10.26 through it, against ppl 12.15 / KLD 0.0131 for the
 same checkpoint through the `exllamav3` engine, while generating coherent text
