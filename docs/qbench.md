@@ -475,6 +475,33 @@ as TODO `qbench-noise-floor`.
 
 **No GGUF through `vllm-gguf-plugin`**, as above.
 
+**`options.quantize` cannot reach a model larger than the box**, which is what stops SINQ
+arms being added to the gemma-4-12B project. It quantizes *after* an ordinary
+`from_pretrained`, so the full bf16 model has to be resident first: 22.3 GiB of weights
+against 16.3 GiB of VRAM and ~20 GiB of RAM. `device_map="auto"` does not rescue it —
+accelerate assigns the overflow to meta and SINQ's `_patch_other` does `layer.to(device)`
+on it, so it fails in 4 s with `NotImplementedError: Cannot copy out of meta tensor`
+rather than OOMing. Neither does disk offload: SINQ patches by walking modules, not
+through forward, so accelerate's materialize-on-access hooks never fire.
+
+*Two adjacent bugs, both fixed, both of the silent kind.* `streaming: true` combined with
+`quantize` ignored the spec and scored the **unquantized** model against the unquantized
+reference — KLD ~0, a column of zeroes indistinguishable from a lossless quantizer. It
+raises now. And `BaseQuantizeConfig`'s own default `method` is **`"dual"`, not `"sinq"`**
+— a variant keeping fp16 metadata, 4.5104 bpw against sinq's 4.2761 at nbits=4/group 64 —
+so a project file omitting `method` silently mixed two quantizers into one sweep. The
+option now defaults to the named method and prints the effective config.
+
+*The fix, when it is wanted*: quantize per block during a streaming materialization,
+never holding the whole bf16 model. `sinq.sinqlinear.SINQLinear(linear_layer, cfg,
+del_orig=True, ...)` is a per-`nn.Linear` constructor that frees the original as it goes,
+so the shape is: walk the decoder blocks in checkpoint order, materialize one from the
+shards, replace its `nn.Linear` children, keep the (small) quantized result resident, move
+on. Peak is one bf16 block plus the accumulating quantized model — ~8.5 GiB for
+gemma-4-12B at 4 bits, comfortably resident — after which scoring uses the ordinary
+non-streaming path. The existing streaming machinery already materializes per module for
+the reference pass; what differs is keeping the result instead of returning it to meta.
+
 **The `vllm` engine cannot be isolated from the rest of a project run**, and the design
 for fixing it is recorded here rather than queued, because the auto-sized
 `gpu_memory_utilization` (2026-09-01) turned the symptom from a failure into a
