@@ -778,3 +778,50 @@ checkpoint), so its `vram_gb` column is not a deployment figure.
 
 The larger-model sweep is still worth running — but to locate *where* the crossing is,
 not to ask whether there is one.
+
+### SINQ's remaining knobs: A-SINQ is free, 2D is not, and neither moves the crossover (2026-09-01)
+
+Both variants needed a harness change to reach at all. **2D-tiled checkpoints quantize
+and serve correctly but do not survive `save_pretrained` -> `from_pretrained`** (a shape
+mismatch at the first forward; verified in-process generation is fine, so it is the
+serialization that is broken). **A-SINQ is refused outright by the transformers
+integration**, which points at the official repo. `TransformersBackend` therefore gained
+`options.quantize`, which runs SINQ's own `quantize_model()` on the freshly loaded bf16
+model — also just cheaper for a sweep, at ~1.5 s and no checkpoint per point. Its storage
+accounting agrees with the on-disk figure to four decimals on the configs that can be
+saved (4.2761 / 4.1432).
+
+All arms bf16 head and embedding, group 64:
+
+| | bpw_layer | vram_gb | ppl | KLD | vs 1D SINQ |
+|---|---|---|---|---|---|
+| SINQ 4bit 1D | 4.28 | 0.5090 | 20.67 | 0.13125 | — |
+| SINQ 4bit 2D | 4.52 | 0.5213 | 20.73 | 0.12958 | −1.3% for **+5.6% bits** |
+| A-SINQ 4bit 1D | 4.28 | 0.5090 | 20.57 | 0.12448 | **−5.2% at equal bits** |
+| A-SINQ 4bit 2D | 4.52 | 0.5213 | 20.47 | 0.11952 | −8.9% for +5.6% bits |
+| SINQ 3bit 1D | 3.48 | 0.4680 | 37.62 | 0.73542 | — |
+| SINQ 3bit 2D | 3.72 | 0.4803 | 38.96 | 0.76999 | **+4.7% for +6.9% bits** |
+| A-SINQ 3bit 1D | 3.48 | 0.4680 | 36.56 | 0.71145 | **−3.3% at equal bits** |
+| A-SINQ 3bit 2D | 3.72 | 0.4803 | 36.19 | 0.69214 | −5.9% for +6.9% bits |
+| EXL3 4.00 bpw | 4.02 | 0.7858 | 29.97 | 0.50170 | |
+| EXL3 3.00 bpw | 3.02 | 0.7346 | 34.44 | 0.64263 | |
+
+**A-SINQ is a free 3-5%.** Identical bitrate, strictly better at both widths. Use it;
+it changes no conclusion.
+
+**2D tiling costs 0.24 bpw and does not repay it.** Counted honestly it buys 1.3% of KLD
+for 5.6% more bits at 4 bits, and at 3 bits with plain SINQ it is *strictly dominated* —
+worse KLD **and** more bits. Only in combination with A-SINQ does it come close to
+paying, and the comparison it needs (1D at the same 4.52 bpw) is not in this table. The
+bpw column is the whole reason this is visible; on a bits-nominal axis 2D looks like a
+free win.
+
+**The crossover does not move.** The best 3-bit configuration available — A-SINQ 2D at
+0.69214 — is still worse than EXL3 at 3.00 bpw (0.64263) **while spending 23% more bits**
+(3.72 vs 3.02). At 4 bits the advantage instead grows slightly: A-SINQ 1D is 4x better
+than EXL3 at 4.00 with 6% more bits.
+
+So the parameter axis is exhausted, and it did not extend SINQ's strong range downward at
+all. **What remains open is the model-size axis**, which is the sweep worth running: the
+question is whether a larger model moves the crossing below 3 bpw, and nothing measured
+here bears on it.
