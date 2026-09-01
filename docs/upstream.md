@@ -365,13 +365,30 @@ It also prints `Found gemlite installation, fast SINQ-ference for 4-bit models` 
 **stdout** on the way, unconditionally, from `sinqlinear.py:19` and `sinqlinear_hf.py:24`,
 which corrupts the output of any program whose stdout is parsed.
 
-*Why it is worth their time*: three separable defects, each with an easy fix, and none of
-them require them to agree with anything of ours. `sitecustomize` is reserved for the
-environment's owner — only one file can hold the name, so **whichever package installs it
-last silently wins**, and a library taking it will eventually break someone else's. A
-`.pth` that registers a lazy import hook, or documenting the env var, would do the same
-job without the collision. The eager import should be lazy regardless. And the banner
-belongs on a logger at debug level, or on stderr at worst.
+**And installing it destroys a pre-existing `sitecustomize.py`, silently.** Reproduced
+2026-09-01 in a throwaway venv holding a local customization that sets an env var and
+prints a banner:
+
+1. `pip install --no-deps sinq` → **"Successfully installed sinq-0.2.0"**, no warning, no
+   mention of the file it just overwrote. The local customization stops taking effect;
+   its env var reads `None`.
+2. In an environment where torch is not importable, the replacement *fails* — so a
+   working customization is swapped for `[SINQ] autopatch failed: No module named 'torch'`
+   on **every interpreter start**, permanently.
+3. `pip uninstall sinq` → **the file is deleted outright**. The original is not restored,
+   because pip has no idea it ever existed. The user is left with no `sitecustomize.py`
+   at all and nothing in either command's output that would explain why.
+
+That is unrecoverable data loss from a routine install/uninstall cycle, and it is silent
+at every step.
+
+*Why it is worth their time*: four separable defects, each with an easy fix, and none of
+them require the maintainers to agree with anything of ours. `sitecustomize` is reserved
+for the environment's owner — only one file can hold the name, so **whichever package
+installs it last silently wins**. A `.pth` under a package-specific name registering a
+lazy hook, or simply documenting the env var, does the same job with no collision and no
+destruction. The eager import should be lazy regardless. And the banner belongs on a
+logger at debug level, or on stderr at worst.
 
 *Carried locally*: the venv's `sitecustomize.py` is neutered with the default inverted —
 `SINQ_AUTO_PATCH=1` restores it — with the original kept beside it as
