@@ -337,6 +337,19 @@ against a model that loaded without a word. Either the HF-integration path shoul
 the layers ready or it should refuse at load. Costs them nothing to accept: no format
 change, no dependency, no agreement with anything of ours.
 
+**2D-tiled checkpoints do not survive a save/load round trip.** `tiling_mode="2D"`
+quantizes and generates correctly in process, but after `save_pretrained` the reload
+raises `RuntimeError: The size of tensor a (64) must match the size of tensor b (1024) at
+non-singleton dimension 2` at the first forward. Isolated both ways on
+`Qwen/Qwen3-0.6B-Base`, 4 bits, group 64, 2026-09-01: in-process generation is coherent,
+the round trip is not — so the defect is in serialization, not in 2D itself. Same shape
+as their `device_map` bug: it fails at a matmul rather than at load.
+
+*Also worth telling them, since it is the reason anyone would care*: counted with its
+metadata, 2D costs **0.24 bpw** over 1D at group 64, and on Qwen3-0.6B at 3 bits it is
+strictly dominated by 1D — worse KLD at more bits. If that generalizes, the option's
+documentation should say what it costs.
+
 *Second, smaller, and separable*: SINQ's weights are attached as plain tensor attributes
 rather than parameters or buffers, so `named_parameters()` and `named_buffers()` see
 nothing on a quantized model. Any parameter-walking size or memory tool reports only the
