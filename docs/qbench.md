@@ -628,3 +628,81 @@ alongside the metrics. A harness fix to the *accounting* therefore does not inva
 anything — a rerun replays the stale numbers and looks like the fix failed. Delete the
 matching `results_*.json` (the manifest maps hashes to labels) when changing how storage
 is measured.
+
+### The full cross-format table, and which thirds of it are comparable (2026-09-01)
+
+SINQ folded into `qwen-0.6b.yaml`. The result looks, at first glance, like SINQ beating
+EXL3 by 3x. It is not that, and the reason is worth being precise about.
+
+| | engine | bpw_layer | bpw_head | bpw_embed | vram_gb | ppl | KLD |
+|---|---|---|---|---|---|---|---|
+| HF BF16 (reference) | transformers | 16.00 | 16.00 | 16.00 | 1.3999 | 18.20 | — |
+| Noise floor | transformers | 16.00 | 16.00 | 16.00 | 1.3999 | 18.21 | 0.00159 |
+| **BF16 via vLLM** (control) | vllm | 16.00 | 16.00 | 16.00 | 1.3999 | 18.20 | **0.00150** |
+| SINQ 4bit g64 | transformers | 4.28 | 16.00 | 16.00 | 0.5090 | 20.68 | 0.13145 |
+| SINQ 4bit g128 | transformers | 4.14 | 16.00 | 16.00 | 0.5022 | 21.52 | 0.16827 |
+| AutoRound 4bit | vllm | 4.18 | 16.00 | 16.00 | 0.5040 | 31.31 | 0.54395 |
+| AWQ 4bit | vllm | 4.16 | 16.00 | 16.00 | 0.5029 | 34.21 | 0.63316 |
+| EXL3 4.00 bpw | vllm | 4.02 | 6.02 | 6.02 | 0.3152 | 29.98 | 0.50243 |
+| EXL3 3.50 bpw | vllm | 3.52 | 6.02 | 6.02 | 0.2896 | 31.88 | 0.55904 |
+| EXL3 3.00 bpw | vllm | 3.02 | 6.02 | 6.02 | 0.2639 | 34.49 | 0.64493 |
+| EXL3 2.75 bpw | vllm | 2.77 | 5.02 | 5.02 | 0.2329 | 37.54 | 0.72497 |
+| Q4_K_M | llamacpp | 4.78 | 6.56 | 4.50 | 0.4452 | 30.67 | 0.53008 |
+| IQ3_M | llamacpp | 3.67 | 6.56 | 3.44 | 0.3694 | 35.18 | 0.66610 |
+| IQ2_M | llamacpp | 2.76 | 5.50 | 3.44 | 0.3032 | 74.72 | 1.40830 |
+
+**First suspicion, and it was wrong.** Every non-`transformers` arm scores KLD ≥ 0.50 and
+every `transformers` arm ≤ 0.17, with nothing in between, across three engines and five
+formats from 2.75 to 4.78 bpw. A gap that lands exactly on engine boundaries rather than
+on a bitrate axis is the signature of an engine artifact, and SINQ shares its engine with
+the reference — which would have handed it a free advantage.
+
+**The control refutes that.** The same unquantized bf16 weights through vLLM score
+**KLD 0.00150 / ppl 18.199** against the transformers reference — *below* the reference's
+own noise floor of 0.00159. The engines agree to four decimal places on ppl. Whatever
+separates these arms, it is not the engine, and no cross-engine correction is warranted.
+`~/qbench/qwen-0.6b-enginectl.yaml`; **this control should exist in every cross-engine
+project file**, because it costs one arm and it is the only thing standing between a
+format claim and an engine claim.
+
+**So the table is real — but it contains one clean comparison, one other clean
+comparison, and one that is not a comparison at all.**
+
+*Clean, and the headline:* **SINQ vs AWQ vs AutoRound.** All four arms carry a bf16 head
+*and* a bf16 embedding, and land within 1.3% of each other on total bytes
+(0.5022–0.5090 GiB). Everything but the body quantizer is held fixed. SINQ is **3.2x
+better than AutoRound and 3.8x better than AWQ**, calibration-free, on a 1.8-second
+quantization. That result stands as measured.
+
+*Clean:* **EXL3 vs GGUF.** Both quantize head and embedding, so both are honest on the
+vram axis. EXL3 4.00 bpw beats Q4_K_M at 0.502 vs 0.530 KLD using **29% fewer bytes**.
+
+*Not a comparison:* **SINQ vs EXL3.** It is confounded twice, both ways favouring SINQ.
+EXL3 carries a **6.02-bit head and embedding** against SINQ's bf16 — and the head is the
+tensor that produces the logits KLD is computed on, at 26% of this model's weights
+(151936 x 1024 of 596M). And SINQ occupies **0.5022 GiB against EXL3-vLLM's 0.3152 —
+59% more memory**. The EXL3 arm at SINQ's footprint would sit well above 4 bpw, off the
+top of the measured range. Read down the `vram_gb` column rather than the `bpw_layer`
+column and the two are not near each other at all.
+
+That EXL3 at 4.02 bpw *already beats* AWQ at 4.16 (0.502 vs 0.633) **while also
+quantizing its head to 6 bits**, where AWQ pays nothing for its bf16 head, is the
+measurement that shows how large the handicap is.
+
+**What a controlled sweep needs.** The interesting question — how does calibration-free
+dual-scaling compare with a calibrated trellis at matched *total bytes* — is untouched by
+this table. The cheap way to reach it is to stop excluding SINQ's embedding: this run
+passed `modules_to_not_convert=["lm_head"]`, and on a tied model that leaves 311 MiB of
+bf16 embedding, **57% of the checkpoint**. Quantize it and SINQ lands near EXL3's
+footprint, where the comparison means something. The alternative — EXL3 arms converted at
+`head_bits 16` — answers the same question from the other side and costs a conversion per
+point. Prefer the first: total bytes is the axis the appliance cares about, and it is the
+axis this file exists to keep honest.
+
+Two notes for whoever runs it. The head/embed treatment splits by *format family*, not by
+bitrate, so any table mixing families needs the `bpw_head` and `bpw_embed` columns
+visible or it will be misread exactly the way this one was. And [the head-bitrate
+study](#head-bitrate-6-is-defensible-and-the-lever-does-not-want-pulling-2026-08-25) does
+not transfer: it was budget-neutral, trading head bits against body bits at constant
+bytes, so it says the optimum trade is 5-6 — not what a bf16 head buys at a fixed body
+bitrate, which is the quantity that matters here and is unmeasured.
