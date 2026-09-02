@@ -89,11 +89,35 @@ on a 16 GiB card.
 the KV-layout refactor but these lines are untouched, and the only recent commit to it is
 an unrelated MLA fix).
 
-*Not offered with it*: the remaining three buffers are inherent to assembling a
-contiguous cached+chunk K/V for the flash call, and bounding them means chunking the KV
-dimension with flash-style accumulation. That is a real piece of work and a separate
-conversation -- see [kernels.md](kernels.md) for why it matters (the cost is 8192
-B/token, linear in context, against FlashInfer's fixed 394 MiB workspace).
+*Confirmed in situ*: three buffers remain live at the peak (`1080` k_full, `1081`
+v_full, `1065` the rotation) at 232 MiB each on a 118,784-token context, where four would
+have been 928 MiB. The isolated measurement and the served one agree.
+
+*Not offered, and not pursued* -- the other two candidates were costed and declined:
+
+- **Eliminating `1065`, the rotation temporary** (a third of what is left). Layout is not
+  the obstacle: `k_full[:cached_len, h, :]` is a strided view with `ldc = Hk*D`, and
+  `torch.mm` writes into one at zero cost, so a per-head loop of four small mms would drop
+  the allocation outright. The obstacle is dtype -- the rotation is fp16 by design
+  (`_tq_Pi_half = H.to(torch.float16)`) while `k_full` follows the query into bf16, and
+  `mm` will not write fp16 inputs into a bf16 out. The clean version makes the dequant
+  kernel emit bf16 so the path is single-dtype, which is a change to *their* numerics for
+  *our* memory, argued from one card.
+- **Chunking the KV dimension** with flash-style accumulation, the only thing that changes
+  the shape rather than the slope. That is a rewrite of an attention backend we do not own.
+
+Neither is plausibly monkeypatchable, neither is a patch worth carrying against a moving
+backend, and neither matches the shape of ask that has been landing (see *Priority, and
+the reasoning*). The asymmetry is the point: one line recovered 232 MiB because it asked
+nothing of anyone's design; the remaining 692 MiB would cost a fork.
+
+*The consequence, which is now a fact about the path rather than a pending fix*:
+TurboQuant's prefill transient stays at **6144 B/token, linear in cached context** -- an
+axis the profile run never varies, so vLLM reports the same peak activation for a 4K
+session and a 130K one. TQ headroom cannot be validated by a short prompt, and the
+`--kv-cache-memory` pin stays load-bearing on tight configs. fp8 has no equivalent
+problem: its transient is chunk-scaled, and the chunk is exactly what the profiler
+varies.
 
 ### Blocked on a design decision that is not ours
 

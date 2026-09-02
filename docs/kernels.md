@@ -428,3 +428,24 @@ Two things worth keeping:
   estimated against a 0.105 GiB capture). The tighter the activation footprint
   gets, the less slack absorbs that, so `--kv-cache-memory` becomes *more*
   load-bearing as configs improve, not less.
+
+### Where the remaining peak lives, after tiling (2026-09-02)
+
+Same model, two KV paths, both at ~119K context with a 2K chunk:
+
+- **fp8 + triton, 0.265 GiB.** The plugin is **18.4 MiB of it -- 7%**, down from 86%
+  before tiling. The rest is `fla`'s GDN kernels: `chunk_gated_delta_rule` ~105 MiB
+  across `chunk_delta_h`/`wy_fast`/`chunk_o`/`solve_tril`, `causal_conv1d` 30.6,
+  `fused_gdn_prefill_post_conv` 30.6, and ~64 MiB of compiled-graph buffers. All of it
+  chunk-scaled, so all of it visible to vLLM's profiler and tunable by the chunk size.
+  There is no remaining plugin-side win worth chasing on this path.
+- **turboquant_4bit_nc, 0.828 GiB.** Three `_continuation_prefill` buffers at 232 MiB
+  each. The `copy_` fix removed the fourth exactly as measured in isolation; the peak fell
+  less than 232 because the chunk-scaled remainder grew 4x with the larger chunk.
+
+The two paths differ in *shape*, not just size, and that is the durable finding: TQ's
+transient is **6144 B/token, linear in cached context**, on an axis the profile run never
+varies. fp8's is chunk-scaled. So a short test prompt validates an fp8 config and tells
+you nothing about a TQ one. Removing the rest of TQ's would mean changing a dequant
+kernel's dtype or rewriting an attention backend we do not own; both were costed and
+declined -- see [upstream.md](upstream.md).
