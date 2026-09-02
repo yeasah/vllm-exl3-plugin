@@ -1017,22 +1017,49 @@ is most of why the GGUF arms look competitive:
   *as shipped*.
 - Q4_K_M lands on the Pareto frontier between EXL3 3.5 and 4.0, at 4.676 GiB.
 
-At the block-quantized 4.25 bpw that `tools/quantize_embedding.py` already produces, that
-embedding costs 0.308 GiB instead of 1.159 — **0.851 GiB off every EXL3 arm**:
+### Measured, not projected: what a block-quantized embedding buys (2026-09-01)
 
-| | measured | with a blockq embedding | KLD |
+`tools/quantize_embedding.py` rewrites the embedding at **4.5312 bpw** in **5.9 seconds**,
+hardlinking every shard it does not touch — 1.159 GiB down to 0.328, **0.831 GiB saved** —
+on each of the 4.0 and 3.0 bpw checkpoints. Served through the vLLM plugin, which is what
+understands the format; the `exllamav3` engine does not.
+
+**The quality cost is below the noise floor.** Same weights, dense embedding vs blockq:
+
+| | KLD dense | KLD + bq | cost | vs noise floor (0.000992) |
+|---|---|---|---|---|
+| 4.0 bpw | 0.014638 | 0.014749 | **+0.000111** | 11% of it |
+| 3.0 bpw | 0.058529 | 0.058890 | **+0.000361** | 36% of it |
+
+Quantizing 622M embedding parameters from 16 bpw to 4.53 costs, at 4 bits, about one ninth
+of what this harness can resolve. Perplexity moved the *other* way at 4.0 bpw (15.5854
+against 15.6156), which at this magnitude says the same thing. So the whole 0.831 GiB is
+saving, and the byte axis landed where predicted — 4.003 GiB measured against 3.983
+projected, 3.194 against 3.174.
+
+**Both GGUF wins reverse.** The Pareto frontier on `vram_gb` is the two bq arms and
+nothing else:
+
+| | vram_gb | KLD | |
 |---|---|---|---|
-| EXL3 4.0 bpw | 4.834 | **3.983** | 0.01426 |
-| EXL3 3.5 bpw | 4.429 | **3.578** | 0.03326 |
-| EXL3 3.0 bpw | 4.025 | **3.174** | 0.05833 |
-| EXL3 2.5 bpw | 3.621 | **2.770** | 0.15215 |
-| Q4_K_M (already quantized) | 4.676 | 4.676 | 0.02454 |
-| IQ3_M (already quantized) | 3.622 | 3.622 | 0.08272 |
+| **EXL3 3.0 bpw + bq** | **3.194** | **0.05889** | frontier |
+| IQ3_M | 3.622 | 0.08272 | **dominated** — 13% larger *and* 1.40x worse |
+| EXL3 2.5 bpw | 3.621 | 0.15215 | dominated |
+| **EXL3 4.0 bpw + bq** | **4.003** | **0.01475** | frontier |
+| EXL3 3.0 bpw | 4.025 | 0.05833 | dominated |
+| EXL3 3.5 bpw | 4.429 | 0.03326 | dominated |
+| Q4_K_M | 4.676 | 0.02454 | **dominated** — 17% larger *and* 1.66x worse |
+| EXL3 4.0 bpw | 4.834 | 0.01426 | best KLD, at 0.83 GiB for 0.0005 |
+| AWQ 4bit | 5.679 | 0.04925 | dominated |
+| A-SINQ / SINQ 4bit | 5.770 | 0.04579 / 0.05147 | dominated |
 
-EXL3 4.0 would beat Q4_K_M by **1.7x on quality at 15% fewer bytes**, and EXL3 3.0 would
-beat IQ3_M at 12% fewer bytes. Everything above is a projection from the measured
-embedding size, not a measured arm — but it is arithmetic on a tensor whose size is known
-exactly, and the format work to realise it is already written. **This is the clearest
-statement the project has of what `quantized-embeddings` is worth**, and it is worth more
-than the body-bitrate choices being argued over elsewhere: 0.851 GiB is larger than the
-entire gap between adjacent EXL3 rungs.
+The section above said the embedding tax was "most of why the GGUF arms look competitive".
+That is now measured rather than argued: **IQ3_M's low-end win was entirely the
+embedding**, and once EXL3 stops carrying 1.159 GiB of fp16 lookup table it is smaller
+*and* better at both ends of the range. Every arm here that is not an EXL3+bq arm is
+Pareto-dominated by one of the two.
+
+**Consequence for `quantized-embeddings` and `repair-tool`:** the case is no longer
+inferential. 0.831 GiB is larger than the gap between adjacent EXL3 rungs on this model,
+it costs a ninth of the noise floor, and it takes six seconds per checkpoint. On a tied
+model the same saving needs no tooling at all.
