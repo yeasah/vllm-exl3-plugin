@@ -280,3 +280,50 @@ parameter name deep inside an AOT-compiled artifact. **Set
 `VLLM_DISABLE_COMPILE_CACHE=1` while working on this plugin.** Toggling
 `EXL3_DEQUANTIZE` forces it automatically, since there the mismatch is
 guaranteed.
+
+
+## Where reconstruct overtakes the fused kernel, measured (2026-09-02)
+
+`RECONSTRUCT_THRESHOLD = 144` is inherited from exllamav3's `AUTO_RECONSTRUCT_THRESHOLD`
+and had never been checked against our shapes on this card. End-to-end serving establishes
+only that the switch matters — disabling it costs 40-80% of prefill throughput on
+Qwen3.8-27B — and cannot locate it, because a long prompt presents `chunk_size` rows on
+every chunk and never exercises the region the threshold decides. `tools/reconstruct_
+crossover.py` measures it directly: real weights, both paths, across row counts, with the
+reconstruct cost inside the timed region since serving pays it per call.
+
+Ratio of fused to reconstruct time on Qwen3.8-27B @4.00bpw, RTX 5070 Ti (sm_120); >1 means
+reconstruct+cuBLAS is faster:
+
+| shape | 32 | 64 | 128 | 144 | 192 | 256 | crossover |
+|---|---|---|---|---|---|---|---|
+| down_proj 17408x5120 | 0.28 | 0.54 | 0.96 | 0.97 | 1.23 | 1.41 | **144-192** |
+| gate/up 5120x17408 | 0.27 | 0.54 | 0.99 | 0.94 | 1.23 | 1.38 | **144-192** |
+| q_proj 5120x12288 | 0.28 | 0.55 | 1.01 | 0.96 | 1.22 | 1.43 | 96-128 |
+| o_proj 6144x5120 | 0.38 | 0.71 | 1.16 | 1.16 | 1.48 | 1.67 | 96-128 |
+| **k/v_proj 5120x1024** | **1.52** | **2.61** | **3.45** | **3.03** | 3.66 | 4.44 | **16-32** |
+
+**The inherited constant is vindicated for the shapes that dominate prefill.** The two MLP
+weights and `down_proj` account for most of the FLOPs and cross between 144 and 192, so
+144 is within one measurement step of optimal for them. That is a real confirmation: the
+number transfers across quantizer, card and model generation.
+
+**But it is a compromise, and `k_proj`/`v_proj` pay for it.** They cross 5-9x earlier and
+sit on the fused path where reconstruct is up to **3.45x faster**, throughout the 32-144
+row band — which is exactly where interactive serving lives, since prefix caching leaves
+only a short uncached suffix per turn. The pattern points at output width rather than size:
+`n = 1024` gives the cooperative kernel too few output tiles to fill the device, while
+`n >= 5120` is fine.
+
+**Worth roughly 2% of prefill and nearly free in memory.** `k`+`v` are 10.5M of ~372M
+weights per layer, so 3.4x on 2.8% of the work is small — but their reconstruct scratch is
+only 10 MiB each against `gate_proj`'s 170, so a shape-aware threshold costs almost
+nothing to carry. A rule keyed on output width would beat a global scalar; the scalar is
+merely well-chosen for the average.
+
+**Hazard, and it is not in the code comment.** The threshold must exceed the largest CUDA
+graph capture size. Allocations made inside a capture go to the graph's private pool and
+are retained for the life of the graph, so a threshold below a captured batch size turns
+the transient dense weight into a permanent per-layer allocation. Observed as an immediate
+OOM at thresholds 1-8 with `--cudagraph-capture-sizes 1 2 4`; the default of 144 hides it,
+and it is only reachable by someone lowering the threshold to save memory.
