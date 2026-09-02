@@ -325,10 +325,11 @@ merely well-chosen for the average.
 graph capture size. Allocations made inside a capture go to the graph's private pool and
 are retained for the life of the graph, so a threshold below a captured batch size turns
 the transient dense weight into a permanent per-layer allocation. The test in `ops.py` is
-`rows > RECONSTRUCT_THRESHOLD`, so with captures at `[1, 2, 4]` a threshold of 1 makes
-both 2 and 4 reconstruct during capture and a threshold of 2 makes 4 do so — both observed
-as immediate OOMs. A threshold of 4 should be safe by that arithmetic (`4 > 4` is false);
-it was reported as failing too, which is unexplained and would need a rerun to confirm.
+`rows > RECONSTRUCT_THRESHOLD`, and the observed boundary lands exactly where that puts
+it. With captures at `[1, 2, 4]`: threshold **1** makes both 2 and 4 reconstruct during
+capture, threshold **2** makes 4 do so — both OOM immediately — and threshold **4** is
+fine, because `4 > 4` is false. Predicted and then confirmed, so the rule is simply:
+**the threshold must be >= the largest captured batch size.**
 
 **Note the capture list is small by default**, so the reachable window is narrow:
 `vllm.py:1885` sets `max_graph_size = min(max_num_seqs * decode_query_len * 2, 512)`,
