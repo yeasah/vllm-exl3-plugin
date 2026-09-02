@@ -391,3 +391,40 @@ does not tile a 1B test model at all -- without that the test would pass while
 exercising nothing. It asserts the tile count and the offsets, not just the
 result, and `test_budget_bounds_the_scratch` asserts the peak actually falls.
 Both were confirmed to fail with tiling disabled before being kept.
+
+### In situ: what it was worth (2026-09-02)
+
+Peak *dynamic* VRAM on Qwen3.8-27B at 3.00bpw, measured with `tools/memprof.py`
+on a real completion, across three attention configurations:
+
+| config | peak | what dominates it |
+|---|---|---|
+| turboquant_4bit_nc | 0.930 GiB | 4x `_continuation_prefill` buffers, 8192 B/token |
+| fp8 + FlashInfer | 0.635 GiB | one 394 MiB FlashInfer workspace, fixed |
+| fp8 + triton | 0.242 GiB | **170 MiB of it ours** -- the dense reconstruct weight |
+| fp8 + triton, tiled | **0.105 GiB** | nothing above 30 MiB |
+
+Served context on a 16 GiB card went **94K -> 128,576 tokens**, with the prefill
+chunk raised from 512 to 2048 rather than lowered. Most of that came from being
+able to run `gpu_memory_utilization=0.98` and a 2K chunk at all, which the old
+peak did not allow -- the tiling is what made the rest of the budget legible.
+
+Two things worth keeping:
+
+- **The budget normalizes the allocation size.** `tile_n` is derived as
+  `budget / (k * 2)`, so every tiled decode lands at ~30 MiB whatever `k` is.
+  Before, the allocator's large pool held a spread of one-off block sizes (170
+  MiB gate/up, 68 MiB down, 20 MiB qkv), each cycled tens of thousands of times
+  and none reusable for the others. Uniform blocks are a fragmentation win
+  independent of the peak win, and fragmentation is what makes a profile run's
+  estimate fail to transfer to real traffic. vLLM's profiler, which used to
+  overallocate and OOM above a 512-token chunk on this model, now profiles
+  cleanly at 2048.
+- **Shrinking the transients shrinks a cushion that was hiding something.**
+  `gpu_worker.py` budgets KV as `requested - consumed - peak_activation`, with
+  no CUDA-graph term -- the comment above the recommendation text says so
+  outright. On this config that is 0.14 GiB of graph memory nobody accounted
+  for, surviving only because `peak_activation` is over-reserved (0.49 GiB
+  estimated against a 0.105 GiB capture). The tighter the activation footprint
+  gets, the less slack absorbs that, so `--kv-cache-memory` becomes *more*
+  load-bearing as configs improve, not less.
