@@ -174,6 +174,26 @@ model keeps serving.
 
 ### Reports, not patches
 
+**CUDA graph capture sizes ignore `max_num_seqs`, and on a tight card that prevents
+startup.** `CompilationConfig` derives the capture list from the token budget —
+`range(256, max_cudagraph_capture_size + 1, 16)`, with the max defaulted from
+`max_num_batched_tokens` — so a server started with `--max-num-seqs 1` still captures
+graphs at batch 256, 272, 288 ... 512. Decode on that server never exceeds batch 1, so
+none of them can ever be used.
+
+*Consequence*: on a 16 GiB card serving a 27B model, raising `--max-num-batched-tokens`
+from 256 to 512 makes capture OOM at startup. It is not diagnosable from the error, and it
+is not fixable with `--kv-cache-memory`, because capture is not governed by it — the
+natural remedy of shrinking the KV pin frees memory that capture then consumes anyway.
+`--cudagraph-capture-sizes 1 2 4` fixes it and recovers 60 MiB, measured 2026-09-02 on
+`Qwen3.8-27B`.
+
+*Why it is worth their time*: the capture list should be bounded by what the scheduler can
+actually produce. `max_num_seqs` is known at config time and already bounds decode batch
+size, so clamping the generated sizes to it costs nothing and removes a startup failure
+that presents as an unexplained OOM. Small-concurrency deployments — which is most
+single-GPU serving — currently pay memory for graphs that cannot execute.
+
 **There is no out-of-tree surface for a KV-cache dtype, and the kernel half already has
 one.** Read at v0.27.0, 2026-09-01. Weight quantization has
 `register_quantization_config`; attention backends have
