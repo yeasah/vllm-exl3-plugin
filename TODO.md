@@ -1003,11 +1003,9 @@ bits per weight, so it is a quality lever rather than a fallback.
 2026-09-01.** `Qwen3.8-27B` with a block-quantized embedding is **14.00 GiB at 4.00bpw**
 and 11.17 at 3.00, against 15.92 GiB of card — where the same checkpoint with a dense
 embedding is 15.70 GiB and cannot serve at all. **But "fits" is not "serves":** vLLM's
-fixed non-torch overhead is ~1.6 GiB (measured 2026-09-01, the same overshoot that
-mis-sized qbench's pool), so of the 1.92 GiB left after weights only ~0.3 GiB reaches the
-KV cache — about **9K tokens** even at `turboquant_4bit_nc`, with sporadic OOMs at
-startup or in flight as that overhead varies run to run. Reported from practice and
-confirmed by arithmetic: 0.29 GiB / 33.5 KB per token. The
+budget after weights
+reaches the KV cache as only ~0.4 GiB — about **9K tokens** even at
+`turboquant_4bit_nc`, with sporadic OOMs at startup or in flight. Reported from practice. The
 embedding is worth **1.70 GiB** at this scale, double the 0.83 it saves on an 8B, because
 vocab is 248320 against 151936 and hidden 5120 against 4096. So `quantized-embeddings`
 alone reaches the good part of the curve on a 27B, and the knee argument no longer
@@ -1019,9 +1017,23 @@ motivates offload by itself. See [docs/qbench.md](docs/qbench.md) for the curve 
 outsized effect* — 0.30 GiB more would roughly double the context. Three candidates, none
 of which is more body bits:
 
-- **vLLM's own ~1.6 GiB.** By far the largest single item and entirely unexamined. Some is
-  irreducible CUDA context, but FlashInfer/CUTLASS autotune workspaces, cudagraph capture
-  and the compile cache are all in there and some are switchable.
+- **Itemised 2026-09-02 from a real 4.00bpw serve, and my "~1.6 GiB of vLLM overhead"
+  guess was wrong.** Under `enforce_eager`, non-torch is only **0.21 GiB**. The budget at
+  `gpu_memory_utilization 0.95` is weights 13.50, non-torch 0.21, peak activation
+  **0.59**, KV **0.43** — plus a 0.41 GiB gap between nvidia-smi's 15.92 and vLLM's 15.51
+  "total", and 0.23 GiB of its own CUDA context. Two recoverable items, neither of them
+  overhead in the assumed sense:
+  - **0.78 GiB is never allocated at all**, left on the floor by util 0.95 — nearly twice
+    the entire KV cache. vLLM prints the fix itself:
+    `--kv-cache-memory=897712128` (0.84 GiB) "to fully utilize gpu memory".
+  - **Peak activation 0.59 GiB exceeds the KV cache.** It follows
+    `max_num_batched_tokens` / chunked prefill rather than anything fundamental; halving
+    it frees ~0.30 GiB.
+
+  Together ~2.6x the KV budget. **`--kv-cache-memory` is also the likely fix for the
+  *fragility* specifically**, since it pins the allocation instead of deriving it from a
+  startup measurement that varies run to run — which is the mechanism behind OOMs that
+  land at startup or in flight depending on where utilization is set.
 - **`head_bits` 6 -> 4** on a 1.27B untied head frees **0.30 GiB**. `head-bits` concluded
   5-6 is optimal, but that was budget-neutral against body bits; when *capacity* is the
   binding constraint the trade is a different one and the KLD curve now prices it.
