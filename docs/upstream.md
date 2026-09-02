@@ -402,6 +402,44 @@ norms and embedding, with no error. Registering `W_q` as a buffer would fix it f
 such tool at once. Worth raising as a question rather than a defect — there may be a
 reason, and asking is the honest first move.
 
+## llama-cpp-python
+
+**The CUDA pre-built wheels require AVX-512 and do not say so, and the requirement bites
+even when the CPU backend is never used.** Established 2026-09-01 on
+`llama_cpp_python-0.3.35-py3-none-manylinux_2_35_x86_64.whl` from
+`https://abetlen.github.io/llama-cpp-python/whl/cu132`.
+
+Importing works; constructing a model kills the process with **SIGILL** (exit 132, core
+dumped). `dmesg` names the library:
+
+    traps: python3[3636098] trap invalid opcode ip:7f7482422956 sp:7ffebdb93240
+           error:0 in libggml-cpu.so.0[1e956,7f7482417000+13e000]
+
+Disassembling the shipped `libggml-cpu.so.0.20.0` at that offset:
+
+    1e956:  62 f1 7d 48 6f 05 ...   vmovdqa32 0x1337e0(%rip),%zmm0
+
+An EVEX-encoded `vmovdqa32` into `%zmm0` — AVX-512F — and the symbol it sits in is
+**`ggml_cpu_init`**. So it executes during *backend initialization*, before any inference,
+and **regardless of `n_gpu_layers`**: a CUDA wheel is unusable on a non-AVX-512 host even
+when the GPU is doing all the work. There is no runtime feature dispatch guarding it.
+
+*Host*: Intel Core Ultra 9 285 (Arrow Lake) — `avx`, `avx2`, `avx_vnni`, `f16c`, `fma`
+present; `avx512f`, `avx512bw`, `avx512vnni`, `amx_tile`, `bf16` absent. Intel removed
+AVX-512 from consumer P+E designs, so this excludes every Alder/Raptor/Arrow Lake desktop
+— not an exotic configuration.
+
+*Why it is worth their time*: the documented requirements for the pre-built wheels list
+exactly three things — CUDA version, NVIDIA compute capability, and Python version — and
+no CPU requirement at all. A user meeting all three published requirements gets a core
+dump with no diagnostic beyond `dmesg`. The fixes are cheap and independent: state the CPU
+baseline in the wheel documentation; and/or build the bundled CPU backend at a baseline
+matching the manylinux tag, which does not imply AVX-512. The runtime dispatch that
+llama.cpp already has for CPU kernels apparently does not cover `ggml_cpu_init` itself.
+
+*Carried locally*: pinned back to 0.3.34, whose wheel is CPU-only but runs. GGUF arms in
+`qbench` therefore run on CPU; see [qbench.md](qbench.md).
+
 ## llm-compressor
 
 **`strategy: "channel"` is a trap for embeddings, and the docs offer it neutrally.**
