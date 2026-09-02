@@ -961,3 +961,78 @@ else.
 What survives from the small-model work: SINQ quantizes extremely fast (30 s for 12B), it
 is calibration-free, A-SINQ is a free improvement, 2D tiling costs more than it returns,
 and the sub-3-bit cliff is real. What does not survive is any claim about how it ranks.
+
+## Qwen3-8B: the first exemplar-grade cross-format table (2026-09-01)
+
+The replacement for the retired 0.6B comparison. Dense uniform attention, untied
+embeddings, official AWQ, published EXL3 ladder, bartowski GGUFs, SINQ quantized in
+process. Noise floor **0.000992** — the lowest of any exemplar here, so there is real
+resolvable range beneath every arm.
+
+| | group | bpw_l | head | emb | vram_gb | ppl | KLD |
+|---|---|---|---|---|---|---|---|
+| HF BF16 (reference) | — | 16.00 | 16.0 | 16.0 | 15.256 | 15.378 | — |
+| Noise floor | — | 16.00 | 16.0 | 16.0 | 15.256 | 15.406 | 0.00099 |
+| **EXL3 4.0 bpw** | exllamav3 | 4.01 | 6.0 | 16.0 | 4.834 | 15.590 | **0.01426** |
+| EXL3 4.0 bpw | vLLM | 4.01 | 6.0 | 16.0 | 4.834 | 15.616 | 0.01464 |
+| **Q4_K_M** | GGUF | 4.79 | 6.6 | **4.5** | 4.676 | 15.343 | **0.02454** |
+| **EXL3 3.5 bpw** | exllamav3 | 3.51 | 6.0 | 16.0 | 4.429 | 15.737 | **0.03326** |
+| EXL3 3.5 bpw | vLLM | 3.51 | 6.0 | 16.0 | 4.429 | 15.769 | 0.03355 |
+| A-SINQ 4bit | transformers | 4.27 | 16.0 | 16.0 | 5.770 | 15.628 | 0.04579 |
+| AWQ 4bit | vLLM | 4.16 | 16.0 | 16.0 | 5.679 | 15.903 | 0.04925 |
+| SINQ 4bit | transformers | 4.27 | 16.0 | 16.0 | 5.770 | 15.540 | 0.05147 |
+| EXL3 3.0 bpw | exllamav3 | 3.01 | 6.0 | 16.0 | 4.025 | 16.160 | 0.05833 |
+| EXL3 3.0 bpw | vLLM | 3.01 | 6.0 | 16.0 | 4.025 | 16.173 | 0.05853 |
+| **IQ3_M** | GGUF | 3.58 | 6.6 | **3.4** | 3.622 | 15.495 | **0.08272** |
+| EXL3 2.5 bpw | exllamav3 | 2.51 | 6.0 | 16.0 | 3.621 | 16.871 | 0.15215 |
+| EXL3 2.5 bpw | vLLM | 2.51 | 6.0 | 16.0 | 3.621 | 16.894 | 0.15262 |
+
+**The engine control holds across the whole ladder.** All four EXL3 rungs agree between
+`exllamav3` and `vllm` to **≤0.0005 KLD**, across a 10x range of damage (0.0143 to 0.152).
+Engine is not a confound in this table. (The bf16-through-vLLM control is separate, in
+`qwen3-8b-enginectl.yaml`; it is not needed for this conclusion.)
+
+**SINQ and AWQ are dominated, decisively.** EXL3 3.5 bpw is better than A-SINQ — the best
+of the three — at **1.34 GiB fewer bytes**: 0.0333 against 0.0458 at 4.429 GiB against
+5.770. That is 27% better quality for 23% less memory. SINQ's "3.8x better than AWQ"
+finding from the 0.6B table does not survive either: here the three cluster inside 12%,
+with A-SINQ marginally ahead of AWQ and plain SINQ marginally behind.
+
+**Perplexity would have ranked this table wrong.** Q4_K_M scores ppl **15.343**, *below*
+the bf16 reference's 15.378, while carrying 25x the noise floor in KLD. IQ3_M is +0.12 ppl
+over reference against EXL3 4.0's +0.21 — and 5.8x worse in KLD. A quantizer can keep the
+argmax well-ranked while substantially reshuffling the tail; ppl only asks about the
+target token. On a ppl plot IQ3_M looks competitive with EXL3 at 4 bits and it is not
+close.
+
+### The embedding tax, finally measured on a fair fight
+
+**Qwen3-8B is untied, and every EXL3 arm carries its embedding at 16 bpw** — 622M
+parameters, **1.159 GiB**, sitting inside `vram_gb` and contributing nothing to
+`bpw_layer`. GGUF quantizes it (4.5 bpw for Q4_K_M, 3.4 for IQ3_M). That single difference
+is most of why the GGUF arms look competitive:
+
+- **IQ3_M vs EXL3 2.5 bpw is a dead heat on bytes** — 3.622 against 3.621 GiB — and IQ3_M
+  wins on quality by **1.8x** (0.0827 vs 0.1522). At the low end GGUF is genuinely ahead
+  *as shipped*.
+- Q4_K_M lands on the Pareto frontier between EXL3 3.5 and 4.0, at 4.676 GiB.
+
+At the block-quantized 4.25 bpw that `tools/quantize_embedding.py` already produces, that
+embedding costs 0.308 GiB instead of 1.159 — **0.851 GiB off every EXL3 arm**:
+
+| | measured | with a blockq embedding | KLD |
+|---|---|---|---|
+| EXL3 4.0 bpw | 4.834 | **3.983** | 0.01426 |
+| EXL3 3.5 bpw | 4.429 | **3.578** | 0.03326 |
+| EXL3 3.0 bpw | 4.025 | **3.174** | 0.05833 |
+| EXL3 2.5 bpw | 3.621 | **2.770** | 0.15215 |
+| Q4_K_M (already quantized) | 4.676 | 4.676 | 0.02454 |
+| IQ3_M (already quantized) | 3.622 | 3.622 | 0.08272 |
+
+EXL3 4.0 would beat Q4_K_M by **1.7x on quality at 15% fewer bytes**, and EXL3 3.0 would
+beat IQ3_M at 12% fewer bytes. Everything above is a projection from the measured
+embedding size, not a measured arm — but it is arithmetic on a tensor whose size is known
+exactly, and the format work to realise it is already written. **This is the clearest
+statement the project has of what `quantized-embeddings` is worth**, and it is worth more
+than the body-bitrate choices being argued over elsewhere: 0.851 GiB is larger than the
+entire gap between adjacent EXL3 rungs.
