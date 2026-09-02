@@ -60,6 +60,41 @@ model on the Transformers backend needs. Untouched upstream through 0.28.
 [transformers-backend.md](transformers-backend.md) — it is the one place this could be
 wrong in a way review would catch and we would not.
 
+**`vllm-turboquant-continuation-prefill-copy` — one line each for K and V.**
+`TurboQuantAttentionImpl._continuation_prefill` assembles the cached + current K/V as
+
+```python
+k_full[:cached_len] = k_cached_trim.to(qdtype)
+v_full[:cached_len] = v_cached_trim.to(qdtype)
+```
+
+The inverse rotation immediately above emits **fp16** (deliberately -- the comment cites
+fp16 tensor cores), while `qdtype = query.dtype` follows the model and is **bf16** on
+every model that reaches this path. So `.to(qdtype)` is a real conversion, and being
+out-of-place it materializes a second full-context tensor that the slice assignment then
+reads once and drops. `Tensor.copy_` converts inside the copy:
+
+```python
+k_full[:cached_len].copy_(k_cached_trim)
+```
+
+*Evidence*: measured at the real shapes (Hk=4, D=256, cached_len=117,401, fp16 -> bf16
+through a transposed view) the assignment peaks at **230.0 MiB** and `copy_` at **0.0**,
+bit-identical output. A CUDA memory capture of a 117K-token prefill on Qwen3.8-27B put
+the four `_continuation_prefill` buffers at 914 MiB of a 930 MiB peak; this removes one
+of them outright and the V-side equivalent at its own peak. Worth ~10K tokens of context
+on a 16 GiB card.
+
+*Still present on main* (checked 2026-09-02 at `e3e1241003`; the file has diverged for
+the KV-layout refactor but these lines are untouched, and the only recent commit to it is
+an unrelated MLA fix).
+
+*Not offered with it*: the remaining three buffers are inherent to assembling a
+contiguous cached+chunk K/V for the flash call, and bounding them means chunking the KV
+dimension with flash-style accumulation. That is a real piece of work and a separate
+conversation -- see [kernels.md](kernels.md) for why it matters (the cost is 8192
+B/token, linear in context, against FlashInfer's fixed 394 MiB workspace).
+
 ### Blocked on a design decision that is not ours
 
 **`vllm-embed-quant-config` — the 86-file problem.** 86 of 131 vLLM model files omit
