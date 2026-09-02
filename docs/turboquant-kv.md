@@ -558,3 +558,68 @@ isolation supports — needs long context and more than one model first. Note th
 presents monkeypatching `get_boundary_skip_layers` to `[]` as a free gemma
 workaround; on a dense model that costs 6.5 points at 4 bits and 30 at k3v4, and
 that is worth telling them.
+
+## A worked 27B configuration, and why each awkward flag is there (2026-09-02)
+
+The first configuration to serve `Qwen3.8-27B` at 4.00bpw usefully on a 16 GiB card —
+**76800 tokens**, from a starting point where the same checkpoint with a dense embedding
+did not load at all. Kept in `~/ckpt/run-qwen3.8-27b.sh`. Three of its flags are
+counterintuitive enough that a future reader will be tempted to "fix" them, so the
+reasoning is recorded with them.
+
+```
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve \
+  Qwen3.8-27B-exl3-4.00bpw-bq \
+  --max-num-seqs 1 --max-model-len auto --language-model-only \
+  --kv-cache-dtype turboquant_4bit_nc --enable-prefix-caching \
+  --performance-mode interactivity \
+  --max-num-batched-tokens 256 --kv-cache-memory=1641152512 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+```
+
+**The checkpoint is `-bq`, and that is what makes any of this possible.** A
+block-quantized embedding takes 4.00bpw from 15.70 GiB of weights to 14.00 — the
+embedding is 1.70 GiB at this model's 248320 x 5120, and at 15.92 GiB of card the dense
+version does not load. See [qbench.md](qbench.md): the quality cost is ~1/9 of the harness
+noise floor.
+
+**`--kv-cache-memory=1641152512` rather than `--gpu-memory-utilization`.** vLLM's memory
+profiler is unreliable here: `--max-num-batched-tokens 256` consistently over-allocates
+and OOMs under the profiler while 128 profiles fine, though the true difference is 61 MiB
+against a much larger margin. Pinning bypasses the profiler. **Do not guess the value** —
+a "safe" 1 GiB costs a third of the context. Derive it: take the
+`--kv-cache-memory=X` that vLLM *prints* at a configuration which profiles successfully,
+then correct by the only term that changes, `(chunk_new - chunk_old) x vocab x 2` bytes.
+At vocab 248320 that is 61 MiB per doubling from 128, i.e. ~3.0K tokens.
+
+**`--max-num-batched-tokens 256` is a logits-buffer control, not a throughput knob.** The
+buffer scales `chunk x vocab`, and at this vocabulary it dominates every other activation
+term. Dropping it from the default took usable context from ~9K to ~46K. The cost is
+prefill latency — 256 makes a full-context prompt ~300 sequential forward passes — so the
+extreme is not the right point. **512 costs only ~5.9K tokens and halves the passes
+again**, and is worth trying from here.
+
+**CUDA graphs are on, and they are not the memory hazard they are assumed to be.**
+Capture reported **0.04 GiB**, and enabling them *raised* usable context 46K -> 67K:
+`enforce_eager` was the more expensive path on this model, presumably via a more
+conservative activation profile. Do not "save memory" by going eager here.
+
+**`--max-num-seqs 1`** keeps the linear-attention recurrent state at 0.074 GiB. This is a
+hybrid model (`full_attention_interval: 4`, 16 of 64 layers carry KV), and that state is
+*per sequence* — 16 concurrent would cost 1.2 GiB, which this budget does not have.
+Related: `boundary:N` is inert on this model, see the per-model table above.
+
+**`--language-model-only`** drops the vision and audio towers, which nothing in a
+text-serving path reads.
+
+**Measured KV rate: 21,369 bytes/token** (1.528 GiB / 76800), i.e. **5.22 bits/element**
+effective across 16 x 2 x 4 x 256 elements — 4-bit payload plus scales. Note this is
+*not* the `head_dim + 6` slot width used elsewhere in this note for page-geometry
+arithmetic; predicting capacity from that model overestimates by 57%. Use the measured
+rate for capacity work.
+
+**Untested, and the most likely remaining failure:** a logprobs request allocates roughly
+`positions x vocab` and is absent from the startup profile. With KV pinned it cannot grow
+at runtime, so the remaining OOM candidates are all request-shaped. The adversarial test
+is cheap and worth running deliberately: fill the KV to capacity, then issue a long
+request asking for logprobs.
