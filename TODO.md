@@ -1030,10 +1030,30 @@ of which is more body bits:
     `max_num_batched_tokens` / chunked prefill rather than anything fundamental; halving
     it frees ~0.30 GiB.
 
-  Together ~2.6x the KV budget. **`--kv-cache-memory` is also the likely fix for the
-  *fragility* specifically**, since it pins the allocation instead of deriving it from a
-  startup measurement that varies run to run — which is the mechanism behind OOMs that
-  land at startup or in flight depending on where utilization is set.
+  **But the 0.78 GiB is not waste, it is margin, and treating it as a lever is the wrong
+  read** (corrected 2026-09-02 from operating experience): post-startup OOM already occurs
+  at that margin and worsens as it shrinks, and for a serving appliance **stopping mid
+  session is the worst available outcome** — strictly worse than less context. A config
+  that serves 9K reliably beats one that serves 25K and dies on request 400.
+
+  **So the value of `--kv-cache-memory` is determinism, not size.** Today the margin is a
+  *residue*: whatever is left after `util x` a total that vLLM measures at startup and
+  that varies run to run, which is exactly why the same setting sometimes starts and
+  sometimes does not. Pinning KV makes the margin a *chosen quantity* — set it at today's
+  0.43 GiB and nothing gets faster or bigger, but the failure mode changes from
+  nondeterministic to reproducible, which is the precondition for tuning it at all.
+
+  **What still allocates after startup**, since weights and KV are both pre-allocated, is
+  the thing to characterise before spending any of the margin:
+  - **Activation peak is profiled, not bounded** — 0.59 GiB from a synthetic worst case at
+    startup, which real traffic shapes can exceed.
+  - **Logprobs**: roughly `positions x vocab`, and this model's vocab is **248320**. That
+    is the same allocation class that OOMed every vllm arm of the Qwen3-8B project at
+    1.16 GiB, and it is not in the startup profile.
+  - **Fragmentation**, which `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` addresses.
+    Untested here. Weak prior that it matters: the OOM traces from 2026-09-01 reported
+    only ~71 MiB "reserved but unallocated", so fragmentation was not the mechanism in
+    those. Cheap to test, but do not expect it to be the answer.
 - **`head_bits` 6 -> 4** on a 1.27B untied head frees **0.30 GiB**. `head-bits` concluded
   5-6 is optimal, but that was budget-neutral against body bits; when *capacity* is the
   binding constraint the trade is a different one and the KLD curve now prices it.
