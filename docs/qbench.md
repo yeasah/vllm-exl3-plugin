@@ -1083,6 +1083,40 @@ despite those being the two cheapest checkpoints to add.
 
 Stated as a rule: *plot every real operating point; fit only the unmixed ones.*
 
+### The curve that rule buys (2026-09-01)
+
+Four unmixed rungs, every one with the embedding block-quantized at 4.53 bpw, so nothing
+in the series is carrying a 1.159 GiB fp16 lookup table and the bytes axis means the same
+thing at every point:
+
+| rung | vram_gb | ppl | KLD | x noise floor | KLD ratio per bit |
+|---|---|---|---|---|---|
+| 2.0 bpw + bq | 2.386 | 18.112 | 0.30599 | 308x | — |
+| 3.0 bpw + bq | 3.194 | 16.185 | 0.05889 | 59x | **5.20x** |
+| 4.0 bpw + bq | 4.003 | 15.585 | 0.01475 | 15x | **3.99x** |
+| 6.0 bpw + bq | 5.620 | 15.355 | 0.00236 | **2.4x** | **2.50x** |
+
+**It saturates, and the saturation is the useful part.** Each bit is worth ~5x at the
+bottom of the range, 4x in the middle and 2.5x at the top — a curve bending toward the
+noise floor rather than a straight line, which is what it must do since nothing can score
+below the floor. Two consequences fall out:
+
+- **6.0 bpw is effectively lossless here** — 2.4x the floor, and a perplexity *below* the
+  bf16 reference (15.355 against 15.378). There is almost nothing left to recover above
+  it, so bits spent past ~4-5 bpw buy progressively less.
+- **2.0 bpw is a floor, not a configuration.** 308x the noise floor and +2.7 ppl. It marks
+  where the curve turns vertical, which is the number an appliance needs when deciding how
+  far down it can push, not a setting to serve.
+
+The middle of the range is where the bits are worth most: **3.0 -> 4.0 bpw costs 0.81 GiB
+and buys 4x**, which is the single best trade in the table — and it is very nearly the
+same 0.83 GiB that the embedding was wasting for free. Put the other way: **quantizing the
+embedding is worth about as much as a whole extra bit of body precision**, at 1/9th of the
+noise floor in quality instead of 4x.
+
+This is the first series in the project that may legitimately be fitted: no mixed-K
+targets, one embedding treatment, one engine, one model.
+
 **Consequence for `quantized-embeddings` and `repair-tool`:** the case is no longer
 inferential. 0.831 GiB is larger than the gap between adjacent EXL3 rungs on this model,
 it costs a ninth of the noise floor, and it takes six seconds per checkpoint. On a tied
