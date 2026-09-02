@@ -148,6 +148,23 @@ one full-attention layer, and *which* one differs:
 | Laguna-XS-2.1 | 40 | `{0,1,38,39}` | `{0}` | **first** |
 | gemma-4-12B | 48 | `{0,1,46,47}` | `{47}` | **last** |
 | Muse-Glimmer-30B | 52 | `{0,1,50,51}` | `{51}` | **last** |
+| Qwen3.8-27B | 64 | `{0,1,62,63}` | `{63}` | **last, and saturated** |
+
+**Qwen3.8-27B adds a third case, where the lever has no resolution at all.** It is hybrid
+with `full_attention_interval: 4`, so its KV-bearing layers are 3, 7, 11 ... 63 and the
+boundary set grows inward from two ends that are both linear attention. Protected
+KV layers by `n`: **n=0 -> none; n=1 -> {63}; n=2 -> {63}; n=3 -> {63}**. The lever
+saturates at n=1, so n=1, 2 and 3 are the same configuration and only 0-vs-1 is a real
+choice — one layer of sixteen, 6.25% of KV, ~550 tokens on a 9K-token budget and easily
+inside page rounding. Confirmed from practice 2026-09-01: sweeping `boundary:0..2` on this
+model produced no change in effective KV tokens, which is what the structure predicts for
+1 and 2 and very nearly predicts for 0.
+
+**The general form**: on a hybrid model the boundary set is indexed over *all* layers
+while only some carry KV, so `n` buys protection in steps of "however many full-attention
+layers happen to fall within n of an end" — which for an interval of 4 is one, then zero,
+then zero. Any model with `full_attention_interval > 2` will show the same saturation.
+Read the intersection, not the set.
 
 Read against the isolation above, that is a per-model recommendation rather than
 a general one. On **gemma-4 and Muse the protected layer is the last one** — the
