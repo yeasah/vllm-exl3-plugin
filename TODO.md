@@ -1001,13 +1001,32 @@ bits per weight, so it is a quality lever rather than a fallback.
 
 **The "only at 2.0-2.5bpw" premise this item used to carry is wrong, measured
 2026-09-01.** `Qwen3.8-27B` with a block-quantized embedding is **14.00 GiB at 4.00bpw**
-and 11.17 at 3.00, against 15.92 GiB of card — so 4bpw serves with 1.92 GiB left for KV,
-where the same checkpoint with a dense embedding is 15.70 GiB and cannot serve at all. The
+and 11.17 at 3.00, against 15.92 GiB of card — where the same checkpoint with a dense
+embedding is 15.70 GiB and cannot serve at all. **But "fits" is not "serves":** vLLM's
+fixed non-torch overhead is ~1.6 GiB (measured 2026-09-01, the same overshoot that
+mis-sized qbench's pool), so of the 1.92 GiB left after weights only ~0.3 GiB reaches the
+KV cache — about **9K tokens** even at `turboquant_4bit_nc`, with sporadic OOMs at
+startup or in flight as that overhead varies run to run. Reported from practice and
+confirmed by arithmetic: 0.29 GiB / 33.5 KB per token. The
 embedding is worth **1.70 GiB** at this scale, double the 0.83 it saves on an 8B, because
 vocab is 248320 against 151936 and hidden 5120 against 4096. So `quantized-embeddings`
 alone reaches the good part of the curve on a 27B, and the knee argument no longer
 motivates offload by itself. See [docs/qbench.md](docs/qbench.md) for the curve and
 [docs/embeddings.md](docs/embeddings.md) for the format.
+
+**And it identifies where the leverage actually is at this operating point.** With only
+~0.3 GiB reaching the KV cache, the *base is so small that every further byte freed has
+outsized effect* — 0.30 GiB more would roughly double the context. Three candidates, none
+of which is more body bits:
+
+- **vLLM's own ~1.6 GiB.** By far the largest single item and entirely unexamined. Some is
+  irreducible CUDA context, but FlashInfer/CUTLASS autotune workspaces, cudagraph capture
+  and the compile cache are all in there and some are switchable.
+- **`head_bits` 6 -> 4** on a 1.27B untied head frees **0.30 GiB**. `head-bits` concluded
+  5-6 is optimal, but that was budget-neutral against body bits; when *capacity* is the
+  binding constraint the trade is a different one and the KLD curve now prices it.
+- **The `boundary:N` lever** (`patches/vllm-tq-02-boundary-lever.patch`, drafted and
+  verified): +14.8% KV tokens on the one model measured, for free.
 
 **Which also settles the ordering between the two levers.** Per byte freed, blockq costs
 about a ninth of the harness noise floor in quality and nothing at all in throughput;
