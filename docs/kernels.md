@@ -336,3 +336,58 @@ fine, because `4 > 4` is false. Predicted and then confirmed, so the rule is sim
 which at `--max-num-seqs 1` is 2. The hazard is real but only bites someone who lowers the
 threshold below their largest captured batch — and the default of 144 is far above any
 capture size a single-sequence server will use.
+
+## Tiling the reconstruct path, and why it is free (2026-09-02)
+
+Above `RECONSTRUCT_THRESHOLD` the multiply runs against a decoded dense weight.
+That weight is transient, but on a 27B MLP it is 5120x17408 fp16 = **170 MiB
+held live across the multiply** -- and a memory capture of a real prefill step
+put it at 70% of *all* dynamic VRAM, larger than every vLLM allocation in the
+step combined. It is the single biggest thing the plugin does to peak memory.
+
+`reconstruct_slice` (already in the extension, alongside `reconstruct_had_slice`)
+decodes a column range, so the fix is to block the GEMM: decode one tile,
+`torch.mm` it into the matching slice of the output, repeat. `torch.mm` honours
+a strided `out=`, so cuBLAS writes into the output columns directly with no
+staging copy -- verified at zero extra bytes. The epilogue Hadamard mixes across
+output columns but runs after the loop, on the assembled `y`, so tiling is safe.
+
+Two details that are easy to get wrong:
+
+- **`reconstruct_slice` takes the tile's row stride from the width of the tensor
+  it is handed**, not from a stride argument, so a narrower view of a wider
+  buffer decodes garbage. Every tile is therefore the same width and the last
+  one is *pulled back* to end at `n` rather than narrowed, which recomputes a
+  small overlap but lets one buffer serve the whole loop.
+- **Rebinding the tile buffer inside the loop keeps two tiles alive**, because
+  the new `torch.empty` is evaluated before the old binding is dropped. The
+  measured peak sat a full tile above the budget until the buffer moved out of
+  the loop.
+
+Measured on the RTX 5070 Ti, K=3, against decoding whole (`EXL3_RECONSTRUCT_TILE_MB=0`):
+
+| shape | rows | whole | 32 MiB | ratio |
+|---|---|---|---|---|
+| 5120x17408 | 256 | 0.780 ms | 0.699 ms | **0.90x** |
+| 5120x17408 | 512 | 1.283 ms | 1.219 ms | **0.95x** |
+| 5120x17408 | 1024 | 2.262 ms | 2.267 ms | 1.00x |
+| 5120x17408 | 2048 | 4.286 ms | 4.426 ms | 1.03x |
+| 17408x5120 | 512 | 1.306 ms | 1.243 ms | **0.95x** |
+| 5120x5120 | 512 | 0.396 ms | 0.362 ms | **0.92x** |
+
+Peak scratch on the 5120x17408 shape falls **225 -> 50.8 MiB** at the 32 MiB
+default. The expected trade -- throughput for memory -- does not appear at the
+operating point: at the 256-512 rows a chunked prefill actually runs, tiling is
+*faster*, presumably because the working set stops evicting the activations from
+L2. Only above 1024 rows does it cost anything, and then 2-4%. An 8 MiB budget
+is consistently slower, which is what sets the default at 32.
+
+The extra activation reads are the reason this is nearly free: one pass over a
+512x5120 fp16 activation is 5 MiB against 170 MiB of weight traffic that is paid
+either way.
+
+**Tests.** `TestTiledReconstruct` forces the budget down, because the default
+does not tile a 1B test model at all -- without that the test would pass while
+exercising nothing. It asserts the tile count and the offsets, not just the
+result, and `test_budget_bounds_the_scratch` asserts the peak actually falls.
+Both were confirmed to fail with tiling disabled before being kept.

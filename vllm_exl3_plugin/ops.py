@@ -431,6 +431,17 @@ RECONSTRUCT_THRESHOLD = int(
     env.get("RECONSTRUCT_THRESHOLD", "144")
 )
 
+#: Scratch budget in MiB for the dense weight inside the reconstruct path.
+#: `reconstruct` decodes the whole (k, n) weight at once: on a 27B MLP that is
+#: 5120x17408 fp16 = 170 MiB held live across the multiply, which measured
+#: larger than every other dynamic allocation in a prefill step combined.
+#: Decoding one column tile at a time and letting cuBLAS write into the matching
+#: slice of the output bounds that scratch at this budget instead. The cost is
+#: one extra read of the activations per tile -- small against the weight
+#: traffic, which is paid either way. Set EXL3_RECONSTRUCT_TILE_MB=0 to decode
+#: the weight whole.
+RECONSTRUCT_TILE_MB = int(env.get("RECONSTRUCT_TILE_MB", "32"))
+
 
 def _out_features(trellis: torch.Tensor) -> int:
     return trellis.shape[1] * TILE
@@ -500,12 +511,57 @@ def _reconstruct_mm(
     """
     e = ext()
     bits = trellis.shape[2] // TILE
+    k = trellis.shape[0] * TILE
+    n = _out_features(trellis)
+
     a_had = torch.empty_like(a)
     e.had_r_128(a, a_had, suh, None, 1.0)
-    w = reconstruct(trellis, bits, mcg, mul1)  # (k, n), inner weight
-    y = a_had @ w
+
+    tile_n = _reconstruct_tile_n(k, n)
+    if tile_n >= n:
+        w = reconstruct(trellis, bits, mcg, mul1)  # (k, n), inner weight
+        y = a_had @ w
+    else:
+        y = torch.empty((a.shape[0], n), dtype=torch.half, device=a.device)
+        # `reconstruct_slice` takes the tile's row stride from the width of the
+        # tensor it is handed, so a narrower view of a wider buffer decodes
+        # wrong. Keeping every tile the same width lets one buffer serve the
+        # whole loop: the last tile is pulled back to end at `n` instead of
+        # being narrowed, recomputing the overlap rather than reallocating.
+        # cuBLAS writes each product straight into the output slice --
+        # `torch.mm` honours the stride, with no staging copy.
+        w = torch.empty((k, tile_n), dtype=torch.half, device=a.device)
+        off = 0
+        while off < n:
+            start = min(off, n - tile_n)
+            e.reconstruct_slice(w, trellis, bits, mcg, mul1, start)
+            torch.mm(a_had, w, out=y[:, start : start + tile_n])
+            off = start + tile_n
+
     e.had_r_128(y, y, None, svh, 1.0)
     return y
+
+
+def _reconstruct_tile_n(k: int, n: int) -> int:
+    """Column tile width for the reconstruct path, or `n` to decode whole.
+
+    `reconstruct_slice` requires the tile width and its offset both to be
+    multiples of `HAD_BLOCK`, which EXL3's padding already guarantees for `n`
+    itself; the guard is for anything that arrives unpadded.
+    """
+    if RECONSTRUCT_TILE_MB <= 0 or n % HAD_BLOCK:
+        return n
+    budget = (RECONSTRUCT_TILE_MB * 1024 * 1024) // (k * 2)
+    if budget >= n:
+        return n
+    # Split into the fewest tiles the budget allows, then even them out: tiles
+    # of `ceil(n / count)` waste far less on the pulled-back final tile than
+    # tiles at the budget ceiling would. A single 128-column tile that already
+    # exceeds the budget is taken anyway -- it is the narrowest the kernel
+    # decodes.
+    count = -(-n // max(budget, HAD_BLOCK))
+    tile = -(-(-(-n // count)) // HAD_BLOCK) * HAD_BLOCK
+    return min(max(tile, HAD_BLOCK), n)
 
 
 def _exl3_mm_fake(

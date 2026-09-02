@@ -168,9 +168,11 @@ class TestFusedKernel(unittest.TestCase):
     against exllamav3 by TestDequantOracle, which makes it a valid reference.
 
     The batch sizes straddle every dispatch boundary the kernel has: a GEMV
-    path for small m, the autotuned cooperative GEMM above it, and exllamav3's
-    own reconstruct threshold at 144 (which this plugin deliberately does not
-    follow -- reconstructing would defeat the memory saving).
+    path for small m, the autotuned cooperative GEMM above it, and
+    `RECONSTRUCT_THRESHOLD` at 144, above which `exl3_mm` stops calling the
+    fused kernel at all and multiplies against a decoded weight instead. So
+    145 and 512 are covering a different code path from the rest, not just a
+    larger batch on the same one.
     """
 
     BATCHES = (1, 2, 4, 17, 144, 145, 512)
@@ -525,6 +527,130 @@ class TestEmbedRows(unittest.TestCase):
         graph.replay()
         torch.cuda.synchronize()
         torch.testing.assert_close(out, dense[replay_ids], rtol=0, atol=0)
+
+
+@requires_gpu
+class TestTiledReconstruct(unittest.TestCase):
+    """Decoding the weight in column tiles must not change the answer.
+
+    Above `RECONSTRUCT_THRESHOLD` the multiply runs against a dense weight,
+    which on a 27B MLP is 5120x17408 fp16 = 170 MiB held live -- measured
+    larger than every other dynamic allocation in a prefill step combined.
+    `reconstruct_slice` bounds that by decoding one tile at a time, and the
+    only thing that has to hold is that the result is unchanged.
+
+    The default budget is far too generous to tile a 1B model's weights, so it
+    is forced down here. Without that this test would pass while decoding whole
+    every time, which is exactly the failure it exists to catch -- so the tile
+    count is asserted rather than assumed.
+    """
+
+    def test_tiling_does_not_change_the_result(self):
+        from unittest import mock
+
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = (
+            "turboderp/Llama-3.2-1B-Instruct-exl3",
+            "3.0bpw",
+            "model.layers.0.self_attn.q_proj",
+        )
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+
+        in_f, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+        bits = format.bits_from_trellis_shape(t["trellis"].shape)
+        mcg, mul1 = "mcg" in t, "mul1" in t
+        weight = ops.dense_weight(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1)
+
+        # Comfortably past RECONSTRUCT_THRESHOLD, so the reconstruct path runs.
+        torch.manual_seed(0)
+        x = torch.randn((512, in_f), dtype=torch.half, device="cuda:0") * 0.1
+        ref = torch.nn.functional.linear(x, weight)
+
+        budget = ops.RECONSTRUCT_TILE_MB
+        self.addCleanup(setattr, ops, "RECONSTRUCT_TILE_MB", budget)
+
+        # A budget of `mb` MiB holds `mb << 19` fp16 weights, i.e. that many
+        # bytes over a k-row column, so these are chosen to land on 2 and 4
+        # tiles for this shape.
+        for mb, tiles in ((in_f * out_f // 2 >> 19, 2), (in_f * out_f // 4 >> 19, 4)):
+            with self.subTest(tile_mb=mb):
+                ops.RECONSTRUCT_TILE_MB = mb
+                self.assertEqual(ops._reconstruct_tile_n(in_f, out_f), out_f // tiles)
+
+                calls = []
+                real = ops.ext().reconstruct_slice
+
+                def spy(*a, **kw):
+                    calls.append(a[-1])
+                    return real(*a, **kw)
+
+                with mock.patch.object(ops.ext(), "reconstruct_slice", spy):
+                    got = ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1)
+
+                self.assertEqual(len(calls), tiles, "tiling did not actually fire")
+                self.assertEqual(
+                    calls, [i * (out_f // tiles) for i in range(tiles)]
+                )
+                # Same computation, blocked differently: last-bit noise only.
+                torch.testing.assert_close(got, ref, rtol=2e-2, atol=5e-3)
+
+    def test_budget_bounds_the_scratch(self):
+        """The point of the exercise: peak scratch tracks the budget.
+
+        Asserted against `torch.cuda.max_memory_allocated`, since a version
+        that silently decoded whole would still return the right numbers.
+        """
+        from tests.remote_tensors import fetch_module_tensors
+        from vllm_exl3_plugin import format, ops
+
+        repo, revision, key = (
+            "turboderp/Llama-3.2-1B-Instruct-exl3",
+            "3.0bpw",
+            "model.layers.0.mlp.up_proj",
+        )
+        try:
+            t = fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+
+        in_f, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+        mcg, mul1 = "mcg" in t, "mul1" in t
+        torch.manual_seed(0)
+        x = torch.randn((512, in_f), dtype=torch.half, device="cuda:0") * 0.1
+
+        budget = ops.RECONSTRUCT_TILE_MB
+        self.addCleanup(setattr, ops, "RECONSTRUCT_TILE_MB", budget)
+
+        peaks = {}
+        for mb in (0, in_f * out_f // 4 >> 19):
+            ops.RECONSTRUCT_TILE_MB = mb
+            ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1)  # warm
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            before = torch.cuda.memory_allocated()
+            ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1)
+            torch.cuda.synchronize()
+            peaks[mb] = torch.cuda.max_memory_allocated() - before
+
+        whole, quartered = peaks[0], peaks[in_f * out_f // 4 >> 19]
+        # Three of the four tiles' worth of dense weight should be gone; allow
+        # slack for the output and the Hadamard scratch, which do not change.
+        saved = in_f * out_f * 2 * 3 // 4
+        self.assertLess(
+            whole - quartered,
+            saved * 11 // 10,
+            f"scratch fell by more than the weight tiling can explain: {peaks}",
+        )
+        self.assertGreater(
+            whole - quartered,
+            saved * 9 // 10,
+            f"tiling did not bound the scratch: {peaks}",
+        )
 
 
 if __name__ == "__main__":
