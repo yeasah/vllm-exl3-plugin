@@ -996,9 +996,25 @@ placeholders, and `process_weights_after_loading` then replaces those parameters
 objects the offloader never sees. **Both causes hit both backends** — `PrefetchOffloader`
 fails identically, just louder.
 
-**Why this is worth doing, and it is not capacity.** With `quantized-embeddings` and
-`repair-tool` landed, these models now fit 16 GiB — but only at 2.0-2.5bpw, well past
-the knee of the KLD curve. Offload trades PCIe bandwidth for bits per weight, which is
+**Why this is worth doing, and it is not capacity.** Offload trades PCIe bandwidth for
+bits per weight, so it is a quality lever rather than a fallback.
+
+**The "only at 2.0-2.5bpw" premise this item used to carry is wrong, measured
+2026-09-01.** `Qwen3.8-27B` with a block-quantized embedding is **14.00 GiB at 4.00bpw**
+and 11.17 at 3.00, against 15.92 GiB of card — so 4bpw serves with 1.92 GiB left for KV,
+where the same checkpoint with a dense embedding is 15.70 GiB and cannot serve at all. The
+embedding is worth **1.70 GiB** at this scale, double the 0.83 it saves on an 8B, because
+vocab is 248320 against 151936 and hidden 5120 against 4096. So `quantized-embeddings`
+alone reaches the good part of the curve on a 27B, and the knee argument no longer
+motivates offload by itself. See [docs/qbench.md](docs/qbench.md) for the curve and
+[docs/embeddings.md](docs/embeddings.md) for the format.
+
+**Which also settles the ordering between the two levers.** Per byte freed, blockq costs
+about a ninth of the harness noise floor in quality and nothing at all in throughput;
+offload costs a PCIe round trip on every token that touches an offloaded weight. Blockq is
+strictly the first thing to spend, and offload is what buys the *next* GiB after it is
+exhausted — on a 30B+ model, or to reach 5-6bpw where the curve says the last of the
+quality lives. Offload trades PCIe bandwidth for bits per weight, which is
 a quality lever rather than a fallback. **Sized on 2026-08-20, and the answer splits.** On the
 one routed MoE measured, vLLM frees only ~1 GiB of a claimed 8 and the reason is not
 yet understood; on dense models it offloads honestly, verified against awq, gptq and
