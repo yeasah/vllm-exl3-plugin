@@ -562,7 +562,7 @@ that is worth telling them.
 ## A worked 27B configuration, and why each awkward flag is there (2026-09-02)
 
 The first configuration to serve `Qwen3.8-27B` at 4.00bpw usefully on a 16 GiB card —
-**76800 tokens**, from a starting point where the same checkpoint with a dense embedding
+**73728 tokens**, from a starting point where the same checkpoint with a dense embedding
 did not load at all. Kept in `~/ckpt/run-qwen3.8-27b.sh`. Three of its flags are
 counterintuitive enough that a future reader will be tempted to "fix" them, so the
 reasoning is recorded with them.
@@ -573,7 +573,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve \
   --max-num-seqs 1 --max-model-len auto --language-model-only \
   --kv-cache-dtype turboquant_4bit_nc --enable-prefix-caching \
   --performance-mode interactivity \
-  --max-num-batched-tokens 256 --kv-cache-memory=1641152512 \
+  --max-num-batched-tokens 512 --cudagraph-capture-sizes 1 2 4 \
+  --kv-cache-memory=1577189376 \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
 ```
 
@@ -592,12 +593,27 @@ a "safe" 1 GiB costs a third of the context. Derive it: take the
 then correct by the only term that changes, `(chunk_new - chunk_old) x vocab x 2` bytes.
 At vocab 248320 that is 61 MiB per doubling from 128, i.e. ~3.0K tokens.
 
-**`--max-num-batched-tokens 256` is a logits-buffer control, not a throughput knob.** The
+**`--cudagraph-capture-sizes 1 2 4`, and without it 512 will not start.** vLLM derives its
+capture list from the *token budget*, not from `max_num_seqs`
+(`compilation.py`: `range(256, max_cudagraph_capture_size + 1, 16)`, with the max defaulted
+from `max_num_batched_tokens` and capped at 512). At chunk 128 that is a handful of tiny
+graphs — the 0.04 GiB measured. At chunk 512 it generates **17 capture sizes in steps of 16
+from 256 upward**, and capture OOMs. That failure is *upstream of the pin*: capture is not
+governed by `--kv-cache-memory`, which is why shrinking the pin does not rescue it and why
+the symptom differs from the chunk-256 profiler failure above.
+
+**On a `--max-num-seqs 1` server nearly all of that is waste** — decode never exceeds
+batch 1, so graphs captured at 256-512 can never be used. Pinning the list to `1 2 4` keeps
+the benefit where it exists (batch-1 decode launch overhead) and **recovered 60 MiB**,
+which paid for half the cost of doubling the chunk: the logits buffer grew 121 MiB, the pin
+only had to fall 61.
+
+**`--max-num-batched-tokens 512` is a logits-buffer control, not a throughput knob.** The
 buffer scales `chunk x vocab`, and at this vocabulary it dominates every other activation
 term. Dropping it from the default took usable context from ~9K to ~46K. The cost is
 prefill latency — 256 makes a full-context prompt ~300 sequential forward passes — so the
-extreme is not the right point. **512 costs only ~5.9K tokens and halves the passes
-again**, and is worth trying from here.
+extreme is not the right point. Measured at 512 with the capture list trimmed: **3072 tokens given up (-4%) to take
+full-context prefill from 300 sequential passes to 144**.
 
 **CUDA graphs are on, and they are not the memory hazard they are assumed to be.**
 Capture reported **0.04 GiB**, and enabling them *raised* usable context 46K -> 67K:
