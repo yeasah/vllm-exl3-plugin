@@ -1059,6 +1059,30 @@ embedding**, and once EXL3 stops carrying 1.159 GiB of fp16 lookup table it is s
 *and* better at both ends of the range. Every arm here that is not an EXL3+bq arm is
 Pareto-dominated by one of the two.
 
+### Which arms may be fitted, and which may only be plotted (2026-09-01)
+
+A convention, because the two uses of this table pull in opposite directions and the
+fractional-bitrate result above decides between them.
+
+**Fractional EXL3 rungs stay in the cross-format arms.** 2.5 and 3.5 bpw are published,
+downloadable checkpoints someone may actually choose, and the size axis exists precisely
+because a reader treats it as "how big is this file". On a frontier plot the question is
+*what can I run in N GiB*, and a 3.5bpw checkpoint answers it whether or not it sits on a
+trend. They also carry the engine control: four paired `exllamav3`/`vllm` rungs span a 10x
+range of damage, where the two integer rungs alone would span 4x and sit entirely in the
+low-damage region — and that control has twice been the thing that distinguished a format
+result from an engine artifact.
+
+**But no curve may be fitted through them.** A fractional target is a mixture of K levels,
+so it sits ~31% above the trend through its integer neighbours by construction — of which
++22-27% is the arithmetic-versus-geometric mean of the endpoints and only +7-8% is the
+superposition penalty. Either way a fit over 2.5/3.0/3.5/4.0 is biased by a known offset
+on half its samples. **Any slope, trend or extrapolation uses integer rungs only** — which
+is why the blockq curve is built at 2.0/3.0/4.0/6.0 and deliberately skips 2.5 and 3.5,
+despite those being the two cheapest checkpoints to add.
+
+Stated as a rule: *plot every real operating point; fit only the unmixed ones.*
+
 **Consequence for `quantized-embeddings` and `repair-tool`:** the case is no longer
 inferential. 0.831 GiB is larger than the gap between adjacent EXL3 rungs on this model,
 it costs a ninth of the noise floor, and it takes six seconds per checkpoint. On a tied
