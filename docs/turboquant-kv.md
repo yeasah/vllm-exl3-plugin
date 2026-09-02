@@ -593,20 +593,14 @@ a "safe" 1 GiB costs a third of the context. Derive it: take the
 then correct by the only term that changes, `(chunk_new - chunk_old) x vocab x 2` bytes.
 At vocab 248320 that is 61 MiB per doubling from 128, i.e. ~3.0K tokens.
 
-**`--cudagraph-capture-sizes 1 2 4`, and without it 512 will not start.** vLLM derives its
-capture list from the *token budget*, not from `max_num_seqs`
-(`compilation.py`: `range(256, max_cudagraph_capture_size + 1, 16)`, with the max defaulted
-from `max_num_batched_tokens` and capped at 512). At chunk 128 that is a handful of tiny
-graphs — the 0.04 GiB measured. At chunk 512 it generates **17 capture sizes in steps of 16
-from 256 upward**, and capture OOMs. That failure is *upstream of the pin*: capture is not
-governed by `--kv-cache-memory`, which is why shrinking the pin does not rescue it and why
-the symptom differs from the chunk-256 profiler failure above.
-
-**On a `--max-num-seqs 1` server nearly all of that is waste** — decode never exceeds
-batch 1, so graphs captured at 256-512 can never be used. Pinning the list to `1 2 4` keeps
-the benefit where it exists (batch-1 decode launch overhead) and **recovered 60 MiB**,
-which paid for half the cost of doubling the chunk: the logits buffer grew 121 MiB, the pin
-only had to fall 61.
+**`--cudagraph-capture-sizes 1 2 4` is in the command line but is not doing anything**,
+and the reasoning that put it there was wrong (corrected 2026-09-02). vLLM already bounds
+the capture list by concurrency: `vllm.py:1885` sets
+`max_graph_size = min(max_num_seqs * decode_query_len * 2, 512)`, which at
+`--max-num-seqs 1` is **2**, so the default list is `[1, 2]`. Passing `1 2 4` therefore
+*adds* a capture size rather than trimming seventeen, and cannot have been what let chunk
+512 start — the pin dropped 61 MiB in the same change, and that was the real fix. Harmless
+to leave, but it buys nothing.
 
 **`--max-num-batched-tokens 512` is a logits-buffer control, not a throughput knob.** The
 buffer scales `chunk x vocab`, and at this vocabulary it dominates every other activation
