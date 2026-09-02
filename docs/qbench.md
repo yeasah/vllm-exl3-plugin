@@ -485,6 +485,24 @@ as TODO `qbench-noise-floor`.
 
 **No GGUF through `vllm-gguf-plugin`**, as above.
 
+**The `llamacpp` engine has always run on CPU**, and silently. The installed
+`llama-cpp-python` (0.3.34) is a CPU-only wheel — `libggml-cpu.so`, no `libggml-cuda.so`,
+zero CUDA symbols — so the engine's `n_gpu_layers = 999` default is accepted and ignored:
+no error, no warning, no offload. Established 2026-09-01 from `nvidia-smi` reading 0%
+against 2218% CPU, and confirmed by `llama_cpp.llama_supports_gpu_offload()` returning
+False. Every GGUF arm this project has run was therefore CPU-bound, which is the whole
+explanation for those arms feeling slow.
+
+**No recorded result is affected** — qbench has no time axis, and llama.cpp's CPU and CUDA
+paths agree on output; if anything the CPU path is the better reference, for the same
+reason the SINQ arms take its PyTorch path over gemlite's autotuned kernel. What it would
+affect is the cross-engine idea sketched below: comparing `vllm-gguf-plugin` against
+"native llama.cpp on the same checkpoint" is meaningless on *throughput* while one side is
+on CPU by accident, though still sound on quality. Building with CUDA needs a source
+install (`CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-binary llama-cpp-python
+llama-cpp-python`), and the engine should assert `llama_supports_gpu_offload()` rather
+than trust the flag.
+
 **`options.quantize` cannot reach a model larger than the box**, which is what stops SINQ
 arms being added to the gemma-4-12B project. It quantizes *after* an ordinary
 `from_pretrained`, so the full bf16 model has to be resident first: 22.3 GiB of weights
