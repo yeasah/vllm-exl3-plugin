@@ -74,6 +74,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
 | [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
+| [kvarn.md](docs/kvarn.md) | a low-bit KV cache ported, measured and shelved: +17% context for 3.5x prefill, and why the enum is the real find |
 | [exllamav3-arch.md](docs/exllamav3-arch.md) | where exllamav3 branches by GPU architecture |
 | [feasibility-2026-08-03.md](docs/feasibility-2026-08-03.md) | the original research report (frozen) |
 | [bench/README.md](bench/README.md) | the dependency-bump gate: what it captures and why |

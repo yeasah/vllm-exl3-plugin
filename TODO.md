@@ -1158,6 +1158,26 @@ to borrow a noise floor from another engine.
 
 → [docs/qbench.md](docs/qbench.md)
 
+## `kvarn-accuracy` — Does KVarN actually match FP16 accuracy?
+
+KVarN's published claim is "matches FP16 accuracy", which is strong vague language
+and untested by us. It lost on our axes -- +17% context for 3.5x slower prefill --
+but prefill cost amortizes across a queue, so if the accuracy claim survives
+measurement there is plausibly a place for it in **offline batched** work, which is
+the regime its design actually targets.
+
+Candidate approach: run the existing KV-targeted harnesses rather than building
+anything. `tools/gsm8k_kv.py` and `tools/niah_kv.py` take the KV dtype straight
+through `build_llm`, and their trial lists are seeded identically, so a KVarN arm
+pairs item-for-item against the TQ and fp8 runs already in
+`docs/data/turboquant-kv/` and the McNemar test applies unchanged. Use
+`kvarn_k4v2_g128`, not `k4v4` -- see the note for why k4v4 degenerates at head_dim
+256. Pin `KVARN_FUSED_VERIFY=0`: the routing crossover sits at exactly 8192 tokens,
+which is exactly the middle NIAH rung, so an unpinned arm spans two
+implementations. The engine lives at `~/git/vllm-kvarn`, branch `kvarn-port`.
+
+→ [docs/kvarn.md](docs/kvarn.md)
+
 ## `capability-suite` — Measuring capability through the served path
 
 **Outcome wanted:** task-level numbers for a configuration as it is actually served —
