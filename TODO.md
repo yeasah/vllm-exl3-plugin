@@ -1243,6 +1243,71 @@ implementations. The engine is branch `experiment/kvarn` in our vLLM fork.
 
 → [docs/kvarn.md](docs/kvarn.md)
 
+## `blockq-sidecar` — Ship the blockq embedding as an extra shard, not a rewrite
+
+`tools/quantize_embedding.py` hardlinks every shard except the one holding the
+embedding, which it rewrites to drop the dense tensor and add `bq_*`. That
+rewritten shard is the only duplicated data -- and for a single-file checkpoint
+it is the *whole model*: `Qwen3-8B-exl3-6.0bpw-bq` is one `model.safetensors`,
+so a few hundred MiB of `bq_*` costs a full copy. Across `~/ckpt` at most
+67.6 GiB of 155 sits in shards with no second link (an upper bound: a hardlink
+whose partner was deleted also reads as one link).
+
+Proposed mode: leave every original shard alone, write `bq_*` to a small extra
+shard, and index both. Disk cost falls to the `bq_*` tensors themselves,
+provided the original stays in the HF cache -- which is how this machine is
+already used (307 GiB of cache, every relevant exl3 repo present).
+
+Two things to know before starting. **Single-shard checkpoints have no
+`model.safetensors.index.json`** -- Muse-Glimmer has one, Qwen3-8B does not --
+so the sidecar has to synthesize an index from the shard headers, and that lands
+exactly on the checkpoints that gain most. And the plugin must tolerate a
+checkpoint holding *both* dense `embed_tokens.weight` and `bq_*`, preferring the
+latter and never loading the dense one; today the rewrite guarantees that state
+cannot arise. There is precedent for the skip in the tied-embedding path.
+
+Also worth fixing while in there: `link_or_copy` falls back to `shutil.copy2`
+without saying so, and the whole value of this mode is that the other shards
+cost nothing. It should report which it did.
+
+Regenerating the existing `-bq` checkpoints is the natural time to adopt this,
+so it is worth doing before re-generating any of them -- notably
+`Qwen3.8-27B-exl3-4.00bpw-bq`, whose original left the cache and needs a re-pull
+before its hardlinks can be restored at all.
+
+→ [docs/embeddings.md](docs/embeddings.md)
+
+## `blockq-on-load` — Quantize the embedding at load time instead of on disk
+
+Follow-on to `blockq-sidecar`, which builds the capability this needs: a plugin
+that serves `bq_*` for a checkpoint shipping a dense embedding. Once that
+exists, doing the encode at load time rather than reading it is a small step,
+and stock EXL3 checkpoints get the memory saving with no derived artifact at
+all.
+
+Feasible because `blockq.encode` is row-independent -- every reduction is inside
+a row -- and `encode_embedding` already streams in row chunks, so peak stays at
+chunk size and the dense embedding is never resident.
+
+The open question is determinism. `blockq.encode`'s docstring says results are
+"reproducible for a given device, not across devices" because `.round()` breaks
+ties differently, but adds that "the decoded values still agree to fp16
+rounding". That cannot be right as stated: a code off by one decodes a full
+quantization step away, not an fp16 ulp. Error stays +-0.5 step either way, so
+quality is unaffected and only the bytes differ -- but it means an on-the-fly
+encode need not reproduce the offline tool's output. Settle it by encoding one
+vocabulary on CPU and GPU and diffing codes *and* decoded tensors. Keeping the
+`bench/` blockq entries on pre-processed checkpoints sidesteps the question for
+the gate, at the cost of leaving this path unexercised there, so it wants an
+entry of its own if it ships.
+
+Default-on last, and not until the fallback is proven: `check_blockq_hidden`
+rejects some hidden sizes outright, and those must land cleanly on the existing
+dense path. The quality case is already made -- `blockq64` at 4.27 bpw measures
+1.16x the KLD floor -- so the risk is blast radius, not accuracy.
+
+→ [docs/embeddings.md](docs/embeddings.md)
+
 ## `capability-suite` — Measuring capability through the served path
 
 **Outcome wanted:** task-level numbers for a configuration as it is actually served —
