@@ -1158,6 +1158,71 @@ to borrow a noise floor from another engine.
 
 → [docs/qbench.md](docs/qbench.md)
 
+## `kv-pager` — Score-driven KV residency instead of eviction
+
+The outcome wanted is a KV cache where **being wrong costs latency, not
+correctness**. Every compression method we have evaluated -- TurboQuant, KVarN,
+TriAttention -- either shrinks KV or discards it, so a mistake is unrecoverable:
+a needle at an evicted position is gone. A pager keeps everything and decides
+only what is *resident*, so a mispredicted token is a stall rather than a lost
+one. That changes how aggressive a policy is allowed to be, and it is the only
+mechanism that decouples declared context from VRAM without paying in accuracy.
+
+It unblocks the appliance's binding constraint. On the 16 GiB card the 27B
+serves 128,576 tokens at fp8 today; at 50% residency the GPU budget covers the
+model's full 262,144-token context, with the remainder in host RAM and a disk
+tier available beyond that.
+
+**Phasing, gated so the cheap thing comes first.**
+
+1. **Block-table permutation test** (`tools/`, an afternoon). For a decode step,
+   attention output is `sum_i softmax(q.k_i) v_i` over the resident set, softmax
+   is permutation-invariant, and each cached K already carries its RoPE rotation
+   -- so block *order* should not matter and no mask, `null_block` or FA4 should
+   be needed. Permute a running request's block table between decode steps
+   (tail block last) and check the output is unchanged. If it holds, residency
+   can be managed by rewriting `req_to_blocks`, on FA2, with fp8 KV. If not,
+   something reads position from slot index and everything below changes.
+2. **A recency/LRU pager.** Policy-agnostic machinery: transport, granularity,
+   residency bookkeeping, the fault net, thrash behaviour. Worth building before
+   any scoring because it converts policy error into a tunable cost -- a recency
+   pager is StreamingLLM with an undo button, and shippable with no calibration.
+3. **Measure end to end**: latency and output quality at several residency
+   budgets. Only this can say whether the mass-captured proxy translates.
+4. **Then** swap in a better policy, against a harness that measures what
+   matters rather than a proxy.
+
+**What is already measured** (`~/git/triattention/scripts/attention_mass.py`,
+Qwen3-8B, keep 5%, GQA-shared -- the numbers a pager actually gets):
+
+| context | oracle | trig score | recency | score - recency |
+|---|---|---|---|---|
+| 4K | 87.8% | 76.7% | 70.7% | +6.0 |
+| 32K | 92.7% | 78.1% | 62.9% | +15.2 |
+
+Attention concentrates *further* as context grows, and the score's margin over
+recency grows monotonically -- so the regime where paging matters is the regime
+where it works best. The GQA union tax is ~1 point, so KV-granular residency is
+viable. Most remaining headroom is policy, not transport.
+
+**Transport, measured on this box.** Explicit pinned H2D 54.5 GB/s; CUDA managed
+memory faults at 9.4 GB/s bulk but only 3.5-7.6 GB/s scattered, and migration
+granularity is a knob -- 16-token pages get 4.1 GB/s, 128-token 7.6, 512-token
+16.0. So explicit prefetch is the transport and faulting is the correctness net,
+which must stay rare: faulting 5% of a 128K context costs most of a decode step.
+Page size should scale with the resident budget (~1-2% of it) or thrashing
+dominates.
+
+**Open questions**: one prompt at one query position, so no variance estimate;
+per-token rather than per-page granularity, which is the coarsening the hardware
+forces; single-step rather than compounding error over a generation; and whether
+mass-captured predicts output quality at all.
+
+Build it here -- `tools/gsm8k_kv.py`, `tools/niah_kv.py` and the TurboQuant work
+already live here -- and split the KV subsystem to its own repo if it has legs.
+
+→ [docs/turboquant-kv.md](docs/turboquant-kv.md), [docs/triattention.md](docs/triattention.md)
+
 ## `kvarn-accuracy` — Does KVarN actually match FP16 accuracy?
 
 KVarN's published claim is "matches FP16 accuracy", which is strong vague language
