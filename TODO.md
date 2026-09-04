@@ -1243,34 +1243,31 @@ implementations. The engine is branch `experiment/kvarn` in our vLLM fork.
 
 → [docs/kvarn.md](docs/kvarn.md)
 
-## `blockq-on-load` — Quantize the embedding at load time instead of on disk
+## `blockq-on-load` — Default-on, once the opt-in has soaked
 
-Follow-on to `blockq-sidecar`, which builds the capability this needs: a plugin
-that serves `bq_*` for a checkpoint shipping a dense embedding. Once that
-exists, doing the encode at load time rather than reading it is a small step,
-and stock EXL3 checkpoints get the memory saving with no derived artifact at
-all.
+The mechanism is built and opt-in behind `EXL3_BLOCKQ_ON_LOAD=1`: a stock EXL3
+checkpoint's dense embedding is encoded during weight loading, so the memory
+saving needs no derived artifact. Measured on MiniCPM5-1B, model loading falls
+0.79 -> 0.52 GiB, matching the offline tool's own 0.267 GiB saving, and the
+served result is token-identical to a pre-quantized checkpoint at
+|dlogprob| 0.000000e+00.
 
-Feasible because `blockq.encode` is row-independent -- every reduction is inside
-a row -- and `encode_embedding` already streams in row chunks, so peak stays at
-chunk size and the dense embedding is never resident.
+What remains is the decision to flip the default, and it wants evidence rather
+than a change. The determinism question is settled but constrains it: encoding
+happens on CPU deliberately, because `blockq.encode` does not reproduce across
+devices -- decoded values disagree by up to 2x a quantization step (measured;
+`bq_r`, the fp32 per-row affine range, differs in 52.9% of elements from
+reduction order alone). CPU is what makes on-load agree with the tool. A GPU
+encode would be faster and equally accurate but would silently produce a
+different model from the same weights, so if load time ever becomes the
+objection, that is the trade being made.
 
-The open question is determinism. `blockq.encode`'s docstring says results are
-"reproducible for a given device, not across devices" because `.round()` breaks
-ties differently, but adds that "the decoded values still agree to fp16
-rounding". That cannot be right as stated: a code off by one decodes a full
-quantization step away, not an fp16 ulp. Error stays +-0.5 step either way, so
-quality is unaffected and only the bytes differ -- but it means an on-the-fly
-encode need not reproduce the offline tool's output. Settle it by encoding one
-vocabulary on CPU and GPU and diffing codes *and* decoded tensors. Keeping the
-`bench/` blockq entries on pre-processed checkpoints sidesteps the question for
-the gate, at the cost of leaving this path unexercised there, so it wants an
-entry of its own if it ships.
-
-Default-on last, and not until the fallback is proven: `check_blockq_hidden`
-rejects some hidden sizes outright, and those must land cleanly on the existing
-dense path. The quality case is already made -- `blockq64` at 4.27 bpw measures
-1.16x the KLD floor -- so the risk is blast radius, not accuracy.
+Before flipping: soak it on the models in `bench/`, and confirm the load-time
+cost on a large vocabulary is acceptable -- MiniCPM5's 130560x1536 encodes in
+about 2.4 s wall, and the models that matter are several times that. The
+fallbacks are already proven by unit test rather than by argument: an
+indivisible hidden size, an unknown one, a tied model and an explicit
+`EXL3_DENSE_EMBED` all end on the dense path.
 
 → [docs/embeddings.md](docs/embeddings.md)
 

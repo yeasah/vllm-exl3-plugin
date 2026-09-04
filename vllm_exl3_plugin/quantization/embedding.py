@@ -44,7 +44,7 @@ import torch
 from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
-from .. import blockq, format, ops, tp
+from .. import blockq, env, format, ops, tp
 from ..log import init_logger
 from .linear import EXL3Parameter
 from .lm_head import EXL3LMHeadMethod
@@ -148,6 +148,50 @@ def _blockq_weight_loader(param, loaded_weight: torch.Tensor) -> None:
     param.store(param._take_row(loaded_weight, param.row_shard_size, param.tp_rank))
 
 
+def _encode_on_load(dense: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Encode a dense embedding into the three stored tensors, in row chunks.
+
+    On CPU deliberately, and that is a correctness choice rather than a
+    performance one. `blockq.encode` does not reproduce across devices -- the
+    per-row affine ranges come out of `amin`/`amax` reductions whose order
+    differs, and decoded values disagree by up to 2x a quantization step
+    (measured; see `blockq.encode`). Neither encoding is worse, but only one of
+    them matches what `tools/quantize_embedding.py` writes by default, and a
+    model served this way should not disagree with the same model served from a
+    checkpoint someone quantized offline.
+
+    Chunked because the encode needs the rows in fp32: a vocabulary-sized
+    temporary is several GiB, and the whole point here is not to materialize the
+    dense embedding. Every reduction in `encode` is inside a row, so chunking by
+    rows is exact rather than approximate.
+    """
+    chunk = max(1, int(env.get("BLOCKQ_ENCODE_CHUNK", "16384")))
+    names = tuple(n.removeprefix(".") for n in format.BLOCKQ_SUFFIXES)
+    parts = []
+    for start in range(0, dense.shape[0], chunk):
+        block = dense[start : start + chunk].to(device="cpu", dtype=torch.float32)
+        parts.append(blockq.encode(block))
+    return {n: torch.cat([p[n] for p in parts], dim=0) for n in names}
+
+
+def _make_on_load_loader(layer: torch.nn.Module):
+    """Receive the dense embedding and leave `bq_*` behind in its place.
+
+    The three parameters are filled exactly as a checkpoint would have filled
+    them -- same `store()`, same shards -- so everything downstream, including
+    the shape checks and the vocabulary padding in
+    `process_weights_after_loading`, is the path already exercised by
+    pre-quantized checkpoints rather than a parallel one.
+    """
+
+    def load(param, loaded_weight: torch.Tensor) -> None:
+        rows = param._take_row(loaded_weight, param.row_shard_size, param.tp_rank)
+        for name, tensor in _encode_on_load(rows).items():
+            getattr(layer, name).store(tensor)
+
+    return load
+
+
 class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
     """Token embedding served from block-scaled 4-bit storage (`blockq.py`).
 
@@ -198,6 +242,22 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
                     device=device,
                     weight_loader=_blockq_weight_loader,
                     role=tp.role_of(suffix),
+                    row_shard_size=rows_per_rank,
+                ),
+            )
+
+        if self.quant_config.blockq_is_on_load():
+            # Nothing in the checkpoint fills `bq_*` here, so a parameter has to
+            # exist for the dense tensor to arrive on. Sized zero: it is a
+            # landing point for a loader, never storage. The config renames
+            # `embed_tokens.weight` onto this name.
+            layer.register_parameter(
+                "bq_src",
+                EXL3Parameter(
+                    num_shards=1,
+                    device=device,
+                    weight_loader=_make_on_load_loader(layer),
+                    role=tp.role_of("bq_q"),
                     row_shard_size=rows_per_rank,
                 ),
             )
@@ -259,6 +319,11 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
             layer.register_parameter(name, Parameter(t, requires_grad=False))
         for param in params.values():
             param.release()
+        if hasattr(layer, "bq_src"):
+            # Its whole job was to catch the dense tensor; keeping it would
+            # leave a zero-size parameter on the layer forever.
+            layer.bq_src.release()
+            del layer.bq_src
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         """Row gather, replacing `F.embedding(input_, layer.weight)`.

@@ -96,6 +96,8 @@ class EXL3Config(QuantizationConfig):
         # Escape hatch for the quantized-embedding path; see
         # `embedding_is_quantized`.
         self._dense_embed = env.flag("DENSE_EMBED")
+        self._blockq_on_load = env.flag("BLOCKQ_ON_LOAD")
+        self._hidden_size: int | None = None
         # Where the token embedding lives in vLLM's module tree. Multimodal
         # wrappers nest it (`model.language_model.embed_tokens`), so this is
         # resolved from the model's own weights mapper in `apply_vllm_mapper`
@@ -211,6 +213,12 @@ class EXL3Config(QuantizationConfig):
             self.tie_word_embeddings = bool(
                 getattr(hf_config, "tie_word_embeddings", False)
             )
+            # Needed before any layer exists, to answer whether an on-load
+            # encode is even possible for this model -- BLOCKQ_BLOCK has to
+            # divide the hidden size, and falling back has to happen at method
+            # selection rather than at load.
+            text = getattr(hf_config, "text_config", None) or hf_config
+            self._hidden_size = getattr(text, "hidden_size", None)
 
     def _skip_hub_lookup(self, model_name: str, revision: str | None) -> bool:
         """Whether a metadata lookup would have to invent a revision to proceed.
@@ -419,6 +427,67 @@ class EXL3Config(QuantizationConfig):
         )
         return stored, dense_present
 
+    def blockq_is_on_load(self) -> bool:
+        """Serving a block-quantized embedding the checkpoint does not contain.
+
+        True only in the `EXL3_BLOCKQ_ON_LOAD` case: the method is the same, but
+        the three tensors come from encoding the dense embedding as it loads
+        rather than from `bq_*` a tool wrote. The distinction decides two
+        things -- whether the dense tensor is dropped or routed to the encoder,
+        and whether `create_weights` needs a parameter to receive it.
+        """
+        stored, _ = self._blockq_evidence()
+        return not stored and self.embedding_is_blockq()
+
+    def _on_load_is_possible(self) -> bool:
+        """Whether `EXL3_BLOCKQ_ON_LOAD` can be honoured for this model.
+
+        The flag asks for a quantized embedding on a checkpoint that ships a
+        dense one, encoding it during weight loading instead of reading `bq_*`
+        that a tool wrote. Two things can refuse it, and both have to refuse
+        *here* -- picking the method -- rather than at load time, where the
+        alternative is a half-built layer and an exception a long way from the
+        cause.
+
+        `BLOCKQ_BLOCK` must divide the hidden size: `check_blockq_hidden` is the
+        authority, and a model it rejects simply cannot be stored in this
+        format. And the hidden size has to be known at all; a config that does
+        not report one is not worth guessing about. Either way the answer is the
+        dense path, which is what would have happened without the flag.
+        """
+        if self.embedding_is_quantized():
+            # A tied model is already served from its quantized lm_head and
+            # never loads the dense embedding, so there is nothing here to
+            # save -- and encoding one anyway would store a second copy of the
+            # same matrix in a worse format than the trellis it already has.
+            logger.info(
+                "EXL3_BLOCKQ_ON_LOAD is set, but this model is tied and its "
+                "embedding is already served from the quantized lm_head. "
+                "Nothing to encode."
+            )
+            return False
+        if self._hidden_size is None:
+            logger.warning(
+                "EXL3_BLOCKQ_ON_LOAD is set but this model's config reports no "
+                "hidden size, so the embedding cannot be encoded at load. "
+                "Serving it dense."
+            )
+            return False
+        try:
+            format.check_blockq_hidden(self._hidden_size)
+        except format.EXL3FormatError as exc:
+            logger.warning(
+                "EXL3_BLOCKQ_ON_LOAD is set but this model cannot use the "
+                "format: %s. Serving the embedding dense.", exc
+            )
+            return False
+        logger.info(
+            "EXL3_BLOCKQ_ON_LOAD: encoding the dense embedding into %d-bit "
+            "block-scaled storage during load; no bq_* in the checkpoint.",
+            format.BLOCKQ_BITS,
+        )
+        return True
+
     def embedding_is_blockq(self) -> bool:
         """Whether the checkpoint carries a block-quantized `embed_tokens`.
 
@@ -434,6 +503,8 @@ class EXL3Config(QuantizationConfig):
         as the only evidence.
         """
         stored, dense_present = self._blockq_evidence()
+        if not stored and self._blockq_on_load and not self._dense_embed:
+            return self._on_load_is_possible()
         if stored and self._dense_embed:
             # A sidecar checkpoint keeps both encodings, so the flag can be
             # honoured: serve the dense copy and leave `bq_*` unread. This is
@@ -509,6 +580,16 @@ class EXL3Config(QuantizationConfig):
         # rule unnecessary by construction. A sidecar checkpoint keeps the dense
         # tensor, so the rule now does the work; on a rewritten checkpoint it
         # simply never matches.
+        # On-load is the one case where the dense embedding must *arrive*: it is
+        # the input to the encode, not redundant storage. Renamed rather than
+        # left alone so it lands on a parameter this method owns, instead of the
+        # `weight` that `VocabParallelEmbedding` would otherwise expect to find
+        # and that the block-quantized layer deliberately does not have.
+        if blockq_embed and not stored_blockq:
+            return mapper | WeightsMapper(
+                orig_to_new_suffix={".embed_tokens.weight": ".embed_tokens.bq_src"}
+            )
+
         rules: dict = {
             "orig_to_new_regex": {re.compile(r"(^|\.)embed_tokens\.weight$"): None}
         }

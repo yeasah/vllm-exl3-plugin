@@ -195,3 +195,72 @@ class NeverQueryMainTest(unittest.TestCase):
         self.assertTrue(calls, "the lookup never happened even with a revision")
         self.assertTrue(all(r == "3.0bpw" for _, _, r in calls),
                         f"a call used a substituted revision: {calls}")
+
+
+class BlockQOnLoadTest(unittest.TestCase):
+    """`EXL3_BLOCKQ_ON_LOAD` encodes a dense embedding while it loads.
+
+    The decision has to be made where the method is chosen, not at load time.
+    Every refusal below ends on the dense path -- exactly what would have
+    happened without the flag -- because the alternative is a layer built for
+    `bq_*` that nothing can fill, failing far from the cause.
+    """
+
+    def _cfg(self, *, on_load, hidden=1536, tied=False, stored=False):
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg._blockq_on_load = on_load
+        cfg._hidden_size = hidden
+        cfg.tie_word_embeddings = tied
+        if stored:
+            cfg._blockq_modules = {GEMMA_PREFIX}
+        return cfg
+
+    def test_flag_off_leaves_a_stock_checkpoint_dense(self):
+        cfg = self._cfg(on_load=False)
+        self.assertFalse(cfg.embedding_is_blockq())
+        self.assertFalse(cfg.blockq_is_on_load())
+
+    def test_flag_on_encodes_an_untied_checkpoint(self):
+        cfg = self._cfg(on_load=True)
+        self.assertTrue(cfg.embedding_is_blockq())
+        self.assertTrue(cfg.blockq_is_on_load())
+
+    def test_incompatible_hidden_size_falls_back_to_dense(self):
+        """BLOCKQ_BLOCK must divide the hidden size; 1000 is not divisible by 32."""
+        from vllm_exl3_plugin import format
+
+        with self.assertRaises(format.EXL3FormatError):
+            format.check_blockq_hidden(1000)
+        cfg = self._cfg(on_load=True, hidden=1000)
+        self.assertFalse(cfg.embedding_is_blockq(),
+                         "a model that cannot use the format must serve dense")
+
+    def test_unknown_hidden_size_falls_back_to_dense(self):
+        cfg = self._cfg(on_load=True, hidden=None)
+        self.assertFalse(cfg.embedding_is_blockq())
+
+    def test_a_stored_checkpoint_is_not_an_on_load_one(self):
+        """Pre-quantized checkpoints keep reading bq_*, flag or not."""
+        cfg = self._cfg(on_load=True, stored=True)
+        self.assertTrue(cfg.embedding_is_blockq())
+        self.assertFalse(cfg.blockq_is_on_load(),
+                         "would re-encode over tensors the checkpoint already has")
+
+    def test_dense_embed_flag_still_wins(self):
+        cfg = self._cfg(on_load=True)
+        cfg._dense_embed = True
+        self.assertFalse(cfg.embedding_is_blockq())
+
+    def test_the_dense_tensor_is_routed_not_dropped(self):
+        """On-load needs the dense embedding to arrive; every other mode drops it."""
+        cfg = self._cfg(on_load=True)
+        mapper = cfg.get_cache_scale_mapper()
+        name = "model.embed_tokens.weight"
+        mapped = mapper._map_name(name)
+        self.assertEqual(mapped, "model.embed_tokens.bq_src",
+                         "the encoder never receives the tensor it encodes")
+
+    def test_a_stored_checkpoint_still_drops_the_dense_tensor(self):
+        cfg = self._cfg(on_load=True, stored=True)
+        mapper = cfg.get_cache_scale_mapper()
+        self.assertIsNone(mapper._map_name("model.embed_tokens.weight"))

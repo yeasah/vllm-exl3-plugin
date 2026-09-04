@@ -67,10 +67,21 @@ def encode(weight: torch.Tensor, block: int = BLOCK) -> dict[str, torch.Tensor]:
     against the unquantized scale and reconstructing with the quantized one would
     measure better here and worse in the model.
 
-    Reproducible for a given device, not across devices: `.round()` breaks ties on
-    a computed float, and CPU and GPU disagree on a handful of codes per
-    vocabulary. The decoded values still agree to fp16 rounding, so this is a
-    byte-reproducibility caveat for a tool, not a correctness one for a model.
+    **Reproducible for a given device, not across devices, and the gap is wider
+    than it looks.** Measured on MiniCPM5-1B's 130560x1536 embedding, CPU
+    against CUDA: 0.03% of the 4-bit codes differ, but 52.9% of `bq_r` does --
+    that is the fp32 per-row affine range, so the dominant cause is
+    reduction-order drift in `amin`/`amax`, not `.round()` breaking ties.
+    Decoded, the two disagree by up to **1.51e-02**, which is 2.07x the median
+    quantization step and 886x an fp16 ulp at typical magnitude.
+
+    An earlier version of this docstring claimed the decoded values "still agree
+    to fp16 rounding". They do not, and the arithmetic says they cannot: a code
+    off by one decodes a full step away. What *is* true is that neither encoding
+    is worse -- max reconstruction error against the original is 8.483887e-03 on
+    both, to every digit. So this is a reproducibility caveat, not a quality one:
+    pin the device when two encodings have to match byte for byte, and do not
+    expect a GPU encode to reproduce a checkpoint the tool wrote on CPU.
     """
     if weight.dim() != 2:
         raise format.EXL3FormatError(f"embedding must be 2-D, got {list(weight.shape)}")
