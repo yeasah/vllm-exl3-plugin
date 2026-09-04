@@ -240,14 +240,16 @@ class TestSidecarOutput(unittest.TestCase):
     if an index is present, keeps only the files that index names
     (`filter_duplicate_safetensors_files`). A sidecar left out of the map is
     dropped without a word, and the symptom arrives much later as `bq_*` that
-    never loaded. Single-file checkpoints have no index and need no entry --
-    which is the opposite of the intuition, and the reason both shapes are
-    covered here.
+    never loaded.
+
+    The output is always renumbered into `model-0000i-of-0000N` with an index,
+    including from a single-file source. Several safetensors files with no
+    index does load under vLLM, which globs, but it is a layout that appears in
+    none of the published checkpoints surveyed and so is not one to emit.
     """
 
     def setUp(self):
         import subprocess, sys, tempfile, os
-        from safetensors.torch import save_file
 
         self._tmp = tempfile.TemporaryDirectory()
         self.root = self._tmp.name
@@ -285,46 +287,70 @@ class TestSidecarOutput(unittest.TestCase):
             json.dump({"tie_word_embeddings": False}, f)
         return src
 
-    def test_sharded_sidecar_is_listed_in_the_index(self):
-        import json, os
-
-        src = self._checkpoint("sharded", sharded=True)
-        dst = os.path.join(self.root, "sharded-bq")
-        r = self._run(src, dst, "--sidecar")
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-        side = os.path.join(dst, "model-blockq.safetensors")
-        self.assertTrue(os.path.exists(side))
-        with open(os.path.join(dst, "model.safetensors.index.json")) as f:
-            weight_map = json.load(f)["weight_map"]
-        for suffix in format.BLOCKQ_SUFFIXES:
-            name = f"model.embed_tokens{suffix}"
-            self.assertEqual(weight_map.get(name), "model-blockq.safetensors",
-                             f"{name} missing from the index; vLLM would drop the file")
-        # The dense embedding stays, and still points at its original shard.
-        self.assertIn("model.embed_tokens.weight", weight_map)
-
-    def test_single_file_sidecar_needs_no_index(self):
+    def _sidecar(self, name, sharded):
         import os
 
-        src = self._checkpoint("single", sharded=False)
-        dst = os.path.join(self.root, "single-bq")
+        src = self._checkpoint(name, sharded)
+        dst = os.path.join(self.root, name + "-bq")
         r = self._run(src, dst, "--sidecar")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(os.path.exists(os.path.join(dst, "model-blockq.safetensors")))
-        self.assertFalse(os.path.exists(os.path.join(dst, "model.safetensors.index.json")))
+        return dst
+
+    def _index(self, dst):
+        import json, os
+
+        with open(os.path.join(dst, "model.safetensors.index.json")) as f:
+            return json.load(f)
+
+    def test_index_names_the_sidecar(self):
+        """Missing here, vLLM drops the file and bq_* silently never load."""
+        for sharded in (True, False):
+            with self.subTest(sharded=sharded):
+                dst = self._sidecar(f"idx{sharded}", sharded)
+                weight_map = self._index(dst)["weight_map"]
+                for suffix in format.BLOCKQ_SUFFIXES:
+                    name = f"model.embed_tokens{suffix}"
+                    self.assertIn(name, weight_map)
+                # ... and the dense embedding survives, in its original shard.
+                self.assertIn("model.embed_tokens.weight", weight_map)
+
+    def test_output_uses_the_sharded_convention(self):
+        """Even from a single-file source: no bare model.safetensors, always an index."""
+        import os
+
+        for sharded, n in ((False, 2), (True, 3)):
+            with self.subTest(sharded=sharded):
+                dst = self._sidecar(f"conv{sharded}", sharded)
+                files = sorted(f for f in os.listdir(dst) if f.endswith(".safetensors"))
+                self.assertEqual(
+                    files, [f"model-{i:05d}-of-{n:05d}.safetensors"
+                            for i in range(1, n + 1)])
+                self.assertTrue(os.path.exists(
+                    os.path.join(dst, "model.safetensors.index.json")))
+
+    def test_every_tensor_is_indexed_and_every_file_used(self):
+        import os
+        from safetensors import safe_open
+
+        dst = self._sidecar("complete", sharded=True)
+        weight_map = self._index(dst)["weight_map"]
+        on_disk = {}
+        for f in os.listdir(dst):
+            if not f.endswith(".safetensors"):
+                continue
+            with safe_open(os.path.join(dst, f), framework="pt") as h:
+                for k in h.keys():
+                    on_disk[k] = f
+        self.assertEqual(weight_map, on_disk)
 
     def test_sidecar_hardlinks_every_original_shard(self):
         import os
 
-        src = self._checkpoint("links", sharded=True)
-        dst = os.path.join(self.root, "links-bq")
-        self.assertEqual(self._run(src, dst, "--sidecar").returncode, 0)
-        for name in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
-            st = os.stat(os.path.join(dst, name))
-            self.assertGreater(st.st_nlink, 1, f"{name} was copied, not linked")
-        # The sidecar is the only new data.
-        self.assertEqual(os.stat(os.path.join(dst, "model-blockq.safetensors")).st_nlink, 1)
+        dst = self._sidecar("links", sharded=True)
+        news = [f for f in os.listdir(dst) if f.endswith(".safetensors")
+                and os.stat(os.path.join(dst, f)).st_nlink == 1]
+        self.assertEqual(news, ["model-00003-of-00003.safetensors"],
+                         "only the sidecar should be new data")
 
     def test_sidecar_records_that_the_dense_copy_survives(self):
         """The flag that lets EXL3_DENSE_EMBED choose, on checkpoints with no index."""

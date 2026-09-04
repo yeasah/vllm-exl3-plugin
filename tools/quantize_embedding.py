@@ -67,7 +67,6 @@ from vllm_exl3_plugin import blockq, format
 
 EMBED_SUFFIX = format.EMBED_WEIGHT_SUFFIX
 INDEX_NAME = "model.safetensors.index.json"
-SIDECAR_NAME = "model-blockq.safetensors"
 
 
 def find_embedding(shard_files):
@@ -107,30 +106,31 @@ _DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8, "I16": 2, "I32": 4, "I8
                 "U8": 1}
 
 
-def write_index(src_index, dst_index, bq_named):
-    """Copy the safetensors index, adding the sidecar's tensors to the map.
+def write_index(src, dst_index, weight_map):
+    """Write a safetensors index describing the sidecar output.
 
-    Required, not cosmetic. vLLM globs `*.safetensors` and then, *if an index
-    exists*, keeps only the files the index mentions
+    Required, not cosmetic. vLLM globs `*.safetensors` and then, if an index
+    exists, keeps only the files the index mentions
     (`filter_duplicate_safetensors_files`, added so a checkpoint shipping both
     sharded and consolidated files does not load both). A sidecar missing from
-    the map is therefore dropped silently, and the failure surfaces later as
-    `bq_*` that never loaded.
+    the map is dropped silently, and the failure surfaces later as `bq_*` that
+    never loaded.
 
-    Single-file checkpoints have no index at all, which is why they need no
-    equivalent: the filter returns early and the glob finds both files.
+    Written even where the source had none, because the alternative -- several
+    safetensors files and no index -- is a layout no published checkpoint here
+    uses, and one that works only because a particular loader happens to glob.
     """
-    with open(src_index) as f:
-        index = json.load(f)
-    index.setdefault("weight_map", {}).update(
-        {name: SIDECAR_NAME for name in bq_named}
+    meta = {}
+    src_index = os.path.join(src, INDEX_NAME)
+    if os.path.exists(src_index):
+        with open(src_index) as f:
+            meta = json.load(f).get("metadata", {}) or {}
+    meta["total_size"] = sum(
+        os.path.getsize(os.path.join(os.path.dirname(dst_index), name))
+        for name in sorted(set(weight_map.values()))
     )
-    meta = index.setdefault("metadata", {})
-    if "total_size" in meta:
-        meta["total_size"] += sum(t.numel() * t.element_size()
-                                  for t in bq_named.values())
     with open(dst_index, "w") as f:
-        json.dump(index, f, indent=2)
+        json.dump({"metadata": meta, "weight_map": weight_map}, f, indent=2)
 
 
 def link_or_copy(src, dst):
@@ -233,10 +233,27 @@ def main() -> None:
         # rewritten, so nothing is duplicated: the output costs the `bq_*`
         # bytes plus directory entries, provided the source stays around for
         # the links to point at.
-        for path in shards:
-            link_or_copy(path, os.path.join(dst, os.path.basename(path)))
-        save_file(bq_named, os.path.join(dst, SIDECAR_NAME),
-                  metadata={"format": "pt"})
+        #
+        # The output is always renumbered into the sharded convention with an
+        # index, even from a single-file source. Adding a second file beside a
+        # bare `model.safetensors` and no index does load here -- vLLM globs --
+        # but that layout appears in none of the 69 published checkpoints on
+        # this machine, so it is not a shape to emit on the strength of one
+        # consumer's loader. `model-0000i-of-0000N` plus an index is what the
+        # sharded ones use, and `openbmb/MiniCPM5-1B` shows a single shard
+        # named that way with an index too.
+        total = len(shards) + 1
+        weight_map: dict[str, str] = {}
+        for i, path in enumerate(shards, start=1):
+            name = f"model-{i:05d}-of-{total:05d}.safetensors"
+            link_or_copy(path, os.path.join(dst, name))
+            with safe_open(path, framework="pt") as h:
+                for k in h.keys():
+                    weight_map[k] = name
+        side = f"model-{total:05d}-of-{total:05d}.safetensors"
+        save_file(bq_named, os.path.join(dst, side), metadata={"format": "pt"})
+        weight_map.update({k: side for k in bq_named})
+        write_index(src, os.path.join(dst, INDEX_NAME), weight_map)
     else:
         # Rewrite only the shard that held the embedding; hardlink the rest.
         for path in shards:
@@ -258,8 +275,7 @@ def main() -> None:
         if not os.path.isfile(srcf):
             continue
         if args.sidecar and name == INDEX_NAME:
-            write_index(srcf, os.path.join(dst, name), bq_named)
-            continue
+            continue  # regenerated above, against the new shard names
         link_or_copy(srcf, os.path.join(dst, name))
 
     # Describe the new tensors the way the rest of the checkpoint describes its
