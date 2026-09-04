@@ -133,18 +133,27 @@ def write_index(src, dst_index, weight_map):
         json.dump({"metadata": meta, "weight_map": weight_map}, f, indent=2)
 
 
-def link_or_copy(src, dst):
-    """Hardlink, resolving symlinks first.
+def link_or_copy(src, dst) -> bool:
+    """Hardlink, resolving symlinks first. True if linked, False if copied.
 
     A Hugging Face cache snapshot is a directory of symlinks into `blobs/` with
     relative targets, so linking the link itself yields something that dangles
     from anywhere else. Resolve to the blob and hardlink that.
+
+    The fallback is silent and consequential, which is why the caller reports
+    it. Hardlinking is the entire economy of `--sidecar`: the output is supposed
+    to cost the `bq_*` bytes and nothing else. Across a filesystem boundary
+    every "linked" shard is a full copy instead, and the mode quietly does
+    nothing at all -- observed writing a scratch directory on another mount,
+    where a 770 MiB shard was duplicated to add 110 MiB of `bq_*`.
     """
     src = os.path.realpath(src)
     try:
         os.link(src, dst)
+        return True
     except OSError:
         shutil.copy2(src, dst)
+        return False
 
 
 def is_tied(src: str) -> bool | None:
@@ -244,9 +253,11 @@ def main() -> None:
         # named that way with an index too.
         total = len(shards) + 1
         weight_map: dict[str, str] = {}
+        copied = 0
         for i, path in enumerate(shards, start=1):
             name = f"model-{i:05d}-of-{total:05d}.safetensors"
-            link_or_copy(path, os.path.join(dst, name))
+            if not link_or_copy(path, os.path.join(dst, name)):
+                copied += 1
             with safe_open(path, framework="pt") as h:
                 for k in h.keys():
                     weight_map[k] = name
@@ -254,6 +265,11 @@ def main() -> None:
         save_file(bq_named, os.path.join(dst, side), metadata={"format": "pt"})
         weight_map.update({k: side for k in bq_named})
         write_index(src, os.path.join(dst, INDEX_NAME), weight_map)
+        if copied:
+            print(f" !! {copied} of {len(shards)} shard(s) were COPIED, not "
+                  f"hardlinked -- output and source are on different "
+                  f"filesystems, so --sidecar saved nothing. Write the output "
+                  f"beside the source.", file=sys.stderr)
     else:
         # Rewrite only the shard that held the embedding; hardlink the rest.
         for path in shards:

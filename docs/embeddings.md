@@ -685,6 +685,29 @@ shared per-row" operating point is **superseded on encoding**: fp8 is the shape 
 if it is built.
 
 
+
+### Shipping it as a sidecar rather than a rewrite
+
+`tools/quantize_embedding.py` rewrites the shard that held the embedding, so the
+output duplicates that shard. For a single-file checkpoint that is the whole
+model: `Qwen3-8B-exl3` at 6.0bpw spent 5.62 GiB of new data to add 0.33 GiB of
+`bq_*`. `--sidecar` instead hardlinks every original shard, writes `bq_*` in a
+shard of their own, and renumbers the result into `model-0000i-of-0000N` with an
+index. The cost falls to the `bq_*` bytes, provided the source stays where the
+links can reach it — measured across the twelve local checkpoints, **67.62 GiB
+of unshared data became 5.00 GiB**, and every `bq_*` tensor came out
+byte-identical to the rewrite's.
+
+The trade is that a sidecar checkpoint is not self-contained: it depends on the
+source, and it carries *both* encodings, since the dense embedding is never
+removed. That second property is useful rather than incidental —
+`EXL3_DENSE_EMBED=1` then serves the dense copy and ignores `bq_*`, which is the
+only way to measure the two against each other on one set of weights. On
+MiniCPM5-1B that reads as identical greedy tokens with logprobs 1.5e-1 apart.
+
+Hardlinking is the whole economy, so the tool now says when it could not: across
+a filesystem boundary every shard is copied instead and the mode saves nothing.
+
 ## Choosing depths: what the repair tool should default to
 
 *Partly superseded by "Is GGUF the right storage format?" below, which changed the storage
