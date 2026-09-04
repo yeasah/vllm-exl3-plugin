@@ -136,3 +136,95 @@ class ProvenanceScopeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlessGuardTest(unittest.TestCase):
+    """`bless` refuses from a tree with uncommitted tracked changes.
+
+    This used to be a warning, and it looked at the plugin tree only -- a dirty
+    vLLM was normal back when the patches lived in its working tree as unstaged
+    edits. Both dependencies are pinned submodules now, so a dirty one means
+    somebody edited a submodule without committing, which is the drift pinning
+    them was meant to end. A baseline blessed from that names a state no
+    checkout can return to.
+
+    The distinction these pin down is `diff_sha` versus `dirty_files`: only the
+    former means *tracked* modifications, and keying on the latter refuses on a
+    tree whose only sin is a scratch file.
+    """
+
+    def setUp(self):
+        from unittest import mock
+
+        self._tmps = [tempfile.TemporaryDirectory() for _ in range(2)]
+        self.plugin, self.dep = (t.name for t in self._tmps)
+        for repo, rel in ((self.plugin, "pkg/mod.py"), (self.dep, "vllm/mod.py")):
+            _git(repo, "init", "-q")
+            _git(repo, "config", "user.email", "t@example.invalid")
+            _git(repo, "config", "user.name", "test")
+            _write(repo, rel, "x = 1\n")
+            _write(repo, "bench/expected/entry.json", "{}\n")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-qm", "initial")
+
+        from bench import run
+        self.run = run
+        self._patch = mock.patch.object(
+            core, "_source_trees",
+            lambda: {"plugin": self.plugin, "vllm": self.dep},
+        )
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        for t in self._tmps:
+            t.cleanup()
+
+    def guard(self, allow_dirty=False):
+        """Return code, with the guard's own output swallowed."""
+        import contextlib, io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.run.refuse_if_dirty(allow_dirty)
+        return rc, buf.getvalue()
+
+    def test_clean_trees_allow_bless(self):
+        rc, _ = self.guard()
+        self.assertEqual(rc, 0)
+
+    def test_modified_plugin_refuses(self):
+        _write(self.plugin, "pkg/mod.py", "x = 2\n")
+        rc, out = self.guard()
+        self.assertEqual(rc, 1)
+        self.assertIn("plugin", out)
+
+    def test_modified_dependency_refuses(self):
+        """The flip: a dirty submodule is an anomaly now, not the normal state."""
+        _write(self.dep, "vllm/mod.py", "x = 2\n")
+        rc, out = self.guard()
+        self.assertEqual(rc, 1)
+        self.assertIn("vllm", out)
+
+    def test_untracked_only_reports_but_allows(self):
+        """`dirty_files` counts untracked lines too; `diff_sha` is the real test."""
+        _write(self.dep, "vllm/scratch.txt", "notes\n")
+        self.assertTrue(core.source_provenance(self.dep)["dirty_files"])
+        self.assertIsNone(core.source_provenance(self.dep)["diff_sha"])
+        rc, out = self.guard()
+        self.assertEqual(rc, 0)
+        self.assertIn("untracked", out)
+
+    def test_allow_dirty_overrides(self):
+        _write(self.dep, "vllm/mod.py", "x = 2\n")
+        self.assertEqual(self.guard()[0], 1)
+        rc, out = self.guard(allow_dirty=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("--allow-dirty", out)
+
+    def test_blessed_baselines_are_not_dirt(self):
+        """The exclusion still holds: writing a baseline must not block a bless."""
+        _write(self.plugin, "bench/expected/entry.json", '{"new": true}\n')
+        _write(self.plugin, "bench/expected/added.json", "{}\n")
+        rc, _ = self.guard()
+        self.assertEqual(rc, 0)

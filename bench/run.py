@@ -319,7 +319,8 @@ def run_perf_entry(entry: suite.Entry, out_path: str, timeout: int,
 
 
 def cmd_perf_bless(args) -> int:
-    warn_if_plugin_dirty()
+    if refuse_if_dirty(getattr(args, "allow_dirty", False)):
+        return 1
     tag = platform_tag(args)
     target = os.path.join(PERF_EXPECTED, tag)
     os.makedirs(target, exist_ok=True)
@@ -534,30 +535,75 @@ def cmd_capture(args) -> int:
     return 0
 
 
-def warn_if_plugin_dirty() -> None:
-    """A baseline blessed from a dirty plugin tree records a state that never recurs.
+def refuse_if_dirty(allow_dirty: bool = False) -> int:
+    """A bless from a dirty tree records a state nobody can return to.
 
-    A dirty vLLM used to be normal here, back when `patches/` lived in its
-    working tree; now that it is a pinned submodule, `source_provenance` records
-    that separately and a dirty one is an anomaly rather than the baseline. This
-    warning is about the plugin's own tree, which is different: `diff_sha` then
-    names a working state nobody can return to, and a later `check` cannot tell
-    whether it is comparing against committed code or against a half-finished
-    edit. Worse, editing during a long `bless` gives *different* entries
-    different provenance, which is how this warning came to exist.
+    `check` tolerates dirt -- comparing a work in progress against the baseline
+    is the normal way to use it. `bless` is the opposite: it writes the
+    reference every later run is judged against, so an uncommitted edit bakes a
+    working state into `bench/expected/` that no checkout reproduces, and a
+    later `check` cannot tell whether it disagrees with committed code or with
+    a half-finished edit. Worse, editing *during* a long bless gives different
+    entries different provenance, which is how this check first came to exist
+    as a warning.
+
+    It covers all three trees now, not just the plugin. A dirty vLLM used to be
+    normal here, back when `patches/` lived in its working tree; both
+    dependencies are pinned submodules since, so a dirty one means somebody
+    edited a submodule without committing -- the drift that pinning them was
+    meant to end, and precisely the state a durable baseline must not record.
+
+    Only *tracked* modifications refuse. Untracked files are reported but do
+    not block: an untracked `.py` inside a package really does change what a
+    baseline means, but so does every scratch file, and this cannot tell the
+    two apart without guessing. `--allow-dirty` overrides; provenance records
+    the dirt either way, so the resulting baseline is at least self-describing.
+
+    So the field to key on is `diff_sha`, which is `None` exactly when nothing
+    tracked has been modified -- not `dirty_files`, which counts porcelain
+    status lines and so includes untracked ones. bench/README.md has said that
+    for as long as the fields have existed; this guard's first cut used the
+    wrong one anyway, and refused on a tree whose only sin was a scratch file.
     """
-    prov = core.source_provenance(ROOT, core._PROVENANCE_EXCLUDE) or {}
-    if prov.get("dirty_files"):
-        print(f"  ! plugin tree is dirty ({prov['dirty_files']} files, "
-              f"diff_sha {prov.get('diff_sha')}).")
-        print("    Baselines will record a working state that cannot be "
-              "recovered later; commit first if these are meant to last.")
-        print("    Do not edit the tree while this runs -- entries blessed "
-              "before and after would disagree about what produced them.")
+    dirty, loose = {}, {}
+    for name, path in core._source_trees().items():
+        exclude = core._PROVENANCE_EXCLUDE if name == "plugin" else ()
+        prov = core.source_provenance(path, exclude) or {}
+        if prov.get("diff_sha") is not None:
+            dirty[name] = prov
+        elif prov.get("untracked"):
+            loose[name] = prov
+
+    for name, prov in loose.items():
+        print(f"  ! {name}: {prov['untracked']} untracked file(s) at "
+              f"{prov.get('describe')} -- not blocking, but an untracked .py "
+              f"inside a package still changes what this records.")
+
+    if not dirty:
+        return 0
+
+    for name, prov in dirty.items():
+        extra = (f", plus {prov['untracked']} untracked"
+                 if prov.get("untracked") else "")
+        print(f"  ! {name} tree has uncommitted changes at "
+              f"{prov.get('describe')}: diff_sha {prov['diff_sha']}{extra}")
+
+    if allow_dirty:
+        print("    Blessing anyway (--allow-dirty). These baselines record a "
+              "working state\n    that cannot be recovered later; do not edit "
+              "the trees while this runs.")
+        return 0
+
+    print("\n  refusing to bless from a dirty tree. Commit first -- a baseline "
+          "is a durable\n  reference, and one blessed from uncommitted code "
+          "names a state no checkout\n  can return to. Pass --allow-dirty if "
+          "you really mean it.")
+    return 1
 
 
 def cmd_bless(args) -> int:
-    warn_if_plugin_dirty()
+    if refuse_if_dirty(getattr(args, "allow_dirty", False)):
+        return 1
     os.makedirs(EXPECTED, exist_ok=True)
     blessed = 0
     for e in suite.by_tier(args.tier):
@@ -660,6 +706,10 @@ def main() -> int:
                         "blessed manifest")
     p.set_defaults(func=cmd_check)
     p = sub.add_parser("bless"); p.add_argument("--tier", default="fast")
+    p.add_argument("--allow-dirty", action="store_true",
+                   help="bless even though a source tree has uncommitted "
+                        "changes; the baselines will name a state no checkout "
+                        "can return to")
     p.set_defaults(func=cmd_bless)
     p = sub.add_parser("capture"); p.add_argument("entry"); p.add_argument("out")
     p.set_defaults(func=cmd_capture)
@@ -670,6 +720,9 @@ def main() -> int:
         p.add_argument("--platform", default=None,
                        help="operator's name for this machine; perf baselines "
                             "are per-machine. Or set BENCH_PLATFORM.")
+        p.add_argument("--allow-dirty", action="store_true",
+                       help="bless even though a source tree has uncommitted "
+                            "changes (ignored by perf-check)")
         p.set_defaults(func=fn)
 
     args = ap.parse_args()

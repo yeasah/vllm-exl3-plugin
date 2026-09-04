@@ -19,6 +19,18 @@ Run `check` before and after a vLLM or exllamav3 bump. `bless` only after readin
 a failure and deciding the change is intended — blessing is how a real regression
 becomes the new normal, so it is a separate verb on purpose.
 
+**`bless` refuses from a tree with uncommitted tracked changes** — the plugin's
+or either dependency's. `check` tolerates dirt, because comparing a work in
+progress against the baseline is the normal way to use it; `bless` writes the
+reference every later run is judged against, so an uncommitted edit bakes in a
+state no checkout reproduces and a later failure cannot be attributed. Untracked
+files are reported but do not block. `--allow-dirty` overrides.
+
+This covers the dependencies because they are pinned submodules now: a dirty one
+means somebody edited a submodule without committing, which is the drift that
+pinning them was meant to end. It used to be the reverse — a dirty vLLM was
+normal, back when the patches lived in its working tree as unstaged edits.
+
 ## Why it captures what it captures
 
 This exists because two silent defects got through everything else we had (see
