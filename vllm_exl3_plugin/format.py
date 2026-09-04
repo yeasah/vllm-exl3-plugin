@@ -51,6 +51,12 @@ BLOCKQ_BLOCK = 32
 BLOCKQ_BITS = 4
 
 #: Tensors a block-quantized embedding stores, alongside the model's own.
+#: The dense token embedding, as every EXL3 checkpoint stores it. Named here
+#: because two places need to agree on it: `tools/quantize_embedding.py` finds
+#: the tensor by this name, and the config decides from it whether a checkpoint
+#: still carries a dense copy beside its `bq_*` ones.
+EMBED_WEIGHT_SUFFIX = ".embed_tokens.weight"
+
 BLOCKQ_SUFFIXES = (".bq_q", ".bq_s", ".bq_r")
 
 #: Subset that must be present for an embedding to count as block-quantized.

@@ -34,6 +34,19 @@ Two properties make this safe to run on a published checkpoint:
 The output is a complete checkpoint directory: same weights, same config, minus
 the fp16 embedding, plus three small tensors and a `quantization_config.json`
 entry describing them.
+
+`--sidecar` writes the same `bq_*` into a shard of their own and leaves every
+original shard alone, dense embedding included. Nothing is rewritten, so nothing
+is duplicated: the output costs the `bq_*` bytes and nothing else, as long as the
+source stays where the hardlinks can reach it. That is the better trade whenever
+the original is being kept anyway -- a single-file checkpoint otherwise
+duplicates the *whole model* to add a few hundred MiB, since the shard holding
+the embedding is the only shard. It is the worse trade if the output has to
+stand alone, because it is larger in total and depends on the source.
+
+A sidecar checkpoint carries both encodings, which is also the only way to
+compare them on one set of weights: `EXL3_DENSE_EMBED=1` serves the dense
+embedding and ignores `bq_*`.
 """
 
 from __future__ import annotations
@@ -52,7 +65,9 @@ from safetensors.torch import save_file
 
 from vllm_exl3_plugin import blockq, format
 
-EMBED_SUFFIX = ".embed_tokens.weight"
+EMBED_SUFFIX = format.EMBED_WEIGHT_SUFFIX
+INDEX_NAME = "model.safetensors.index.json"
+SIDECAR_NAME = "model-blockq.safetensors"
 
 
 def find_embedding(shard_files):
@@ -90,6 +105,32 @@ def encode_embedding(path, key, chunk):
 #: safetensors spells dtypes its own way in headers ("BF16", not "torch.bfloat16").
 _DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8, "I16": 2, "I32": 4, "I8": 1,
                 "U8": 1}
+
+
+def write_index(src_index, dst_index, bq_named):
+    """Copy the safetensors index, adding the sidecar's tensors to the map.
+
+    Required, not cosmetic. vLLM globs `*.safetensors` and then, *if an index
+    exists*, keeps only the files the index mentions
+    (`filter_duplicate_safetensors_files`, added so a checkpoint shipping both
+    sharded and consolidated files does not load both). A sidecar missing from
+    the map is therefore dropped silently, and the failure surfaces later as
+    `bq_*` that never loaded.
+
+    Single-file checkpoints have no index at all, which is why they need no
+    equivalent: the filter returns early and the glob finds both files.
+    """
+    with open(src_index) as f:
+        index = json.load(f)
+    index.setdefault("weight_map", {}).update(
+        {name: SIDECAR_NAME for name in bq_named}
+    )
+    meta = index.setdefault("metadata", {})
+    if "total_size" in meta:
+        meta["total_size"] += sum(t.numel() * t.element_size()
+                                  for t in bq_named.values())
+    with open(dst_index, "w") as f:
+        json.dump(index, f, indent=2)
 
 
 def link_or_copy(src, dst):
@@ -137,6 +178,14 @@ def main() -> None:
     ap.add_argument("output", help="directory to write the repaired checkpoint to")
     ap.add_argument("--chunk", type=int, default=16384, help="rows per encode step")
     ap.add_argument("--device", default="cpu", help="device to encode on")
+    ap.add_argument(
+        "--sidecar", action="store_true",
+        help="add bq_* in their own shard and leave every original shard "
+             "alone, instead of rewriting the one holding the embedding. "
+             "Costs only the bq_* bytes, but the dense embedding stays in the "
+             "output, so this is for keeping the original alongside rather "
+             "than replacing it.",
+    )
     args = ap.parse_args()
 
     src, dst = args.checkpoint, args.output
@@ -176,25 +225,42 @@ def main() -> None:
     if args.device != "cpu":
         stored = {k: v.to(args.device) for k, v in stored.items()}
 
-    # Rewrite only the shard that held the embedding; hardlink the rest.
-    for path in shards:
-        out = os.path.join(dst, os.path.basename(path))
-        if path != embed_file:
-            link_or_copy(path, out)
-            continue
-        with safe_open(path, framework="pt") as h:
-            meta = h.metadata()
-            keep = {k: h.get_tensor(k) for k in h.keys() if k != embed_key}
-        keep.update({f"{prefix}.{n}": t for n, t in stored.items()})
-        save_file(keep, out, metadata=meta)
+    bq_named = {f"{prefix}.{n}": t for n, t in stored.items()}
+
+    if args.sidecar:
+        # Every original shard is left exactly as it is, including the dense
+        # embedding, and `bq_*` go in a shard of their own. Nothing is
+        # rewritten, so nothing is duplicated: the output costs the `bq_*`
+        # bytes plus directory entries, provided the source stays around for
+        # the links to point at.
+        for path in shards:
+            link_or_copy(path, os.path.join(dst, os.path.basename(path)))
+        save_file(bq_named, os.path.join(dst, SIDECAR_NAME),
+                  metadata={"format": "pt"})
+    else:
+        # Rewrite only the shard that held the embedding; hardlink the rest.
+        for path in shards:
+            out = os.path.join(dst, os.path.basename(path))
+            if path != embed_file:
+                link_or_copy(path, out)
+                continue
+            with safe_open(path, framework="pt") as h:
+                meta = h.metadata()
+                keep = {k: h.get_tensor(k) for k in h.keys() if k != embed_key}
+            keep.update(bq_named)
+            save_file(keep, out, metadata=meta)
 
     # Everything else in the checkpoint travels unchanged.
     for name in os.listdir(src):
         if name.endswith(".safetensors") or name == "quantization_config.json":
             continue
-        s = os.path.join(src, name)
-        if os.path.isfile(s):
-            link_or_copy(s, os.path.join(dst, name))
+        srcf = os.path.join(src, name)
+        if not os.path.isfile(srcf):
+            continue
+        if args.sidecar and name == INDEX_NAME:
+            write_index(srcf, os.path.join(dst, name), bq_named)
+            continue
+        link_or_copy(srcf, os.path.join(dst, name))
 
     # Describe the new tensors the way the rest of the checkpoint describes its
     # own, so `EXL3Config` sees them without a special case.
@@ -214,6 +280,11 @@ def main() -> None:
         "quant_format": "exl3_blockq",
         "bits_per_weight": format.BLOCKQ_BITS,
         "block_size": format.BLOCKQ_BLOCK,
+        # Sidecar output keeps the dense embedding, so both encodings ship and
+        # EXL3_DENSE_EMBED can choose between them. Recorded here rather than
+        # inferred from the safetensors index, because a single-file checkpoint
+        # has no index and that is exactly the shape sidecar mode is best on.
+        "dense_embedding_retained": bool(args.sidecar),
     }
     with open(os.path.join(dst, "quantization_config.json"), "w") as f:
         json.dump(qc, f, indent=2)

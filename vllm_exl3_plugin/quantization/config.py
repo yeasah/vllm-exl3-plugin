@@ -76,6 +76,8 @@ class EXL3Config(QuantizationConfig):
         # Module keys carrying a block-quantized embedding, from the safetensors
         # index when there is one.
         self._blockq_modules: set[str] = set()
+        self._dense_embed_present: bool = False
+        self._warned_dense_embed: bool = False
         # Modules the *checkpoint* quantizes, from the safetensors index. Takes
         # precedence over tensor_storage, which can omit some (see
         # _load_index_modules). None means "no index was readable".
@@ -239,6 +241,16 @@ class EXL3Config(QuantizationConfig):
             return
         self.quantized_modules = format.quantized_module_keys(weight_map)
         self._blockq_modules = format.blockq_module_keys(weight_map)
+        # Whether the dense embedding survives alongside `bq_*`. It does in a
+        # sidecar checkpoint, which adds the quantized tensors in their own
+        # shard rather than rewriting the one holding the dense matrix, so both
+        # encodings are present and `EXL3_DENSE_EMBED` can mean something. Only
+        # knowable where an index exists; `None` is "no index, cannot say".
+        self._dense_embed_present = any(
+            n.endswith(format.EMBED_WEIGHT_SUFFIX)
+            or n == format.EMBED_WEIGHT_SUFFIX.lstrip(".")
+            for n in weight_map
+        )
         self._ancestors = None
 
     def _load_tensor_storage(self, model_name: str, revision: str | None) -> None:
@@ -340,6 +352,29 @@ class EXL3Config(QuantizationConfig):
             return False
         return bool(self.tie_word_embeddings) and self._head_storage_exists()
 
+    def _blockq_evidence(self) -> tuple[bool, bool]:
+        """Whether `bq_*` are stored, and whether a dense embedding survives too.
+
+        Split out because two callers need the same answer and must not
+        disagree: `embedding_is_blockq` decides which method serves the lookup,
+        and `get_cache_scale_mapper` decides which of the two encodings to drop
+        from the weight stream. Disagreement there is not a wrong answer, it is
+        a load failure -- whichever tensors are not dropped arrive at a module
+        with nowhere to put them.
+        """
+        stored = bool(self._blockq_modules) or any(
+            entry.get("quant_format") == "exl3_blockq"
+            for entry in (self.tensor_storage or {}).values()
+        )
+        # The index is ground truth where there is one, but sidecar mode is
+        # most valuable on single-file checkpoints, which have none. The tool
+        # records the fact for that case.
+        dense_present = self._dense_embed_present or any(
+            entry.get("dense_embedding_retained")
+            for entry in (self.tensor_storage or {}).values()
+        )
+        return stored, dense_present
+
     def embedding_is_blockq(self) -> bool:
         """Whether the checkpoint carries a block-quantized `embed_tokens`.
 
@@ -354,21 +389,27 @@ class EXL3Config(QuantizationConfig):
         truth, but single-file checkpoints have no index, leaving the storage map
         as the only evidence.
         """
-        stored = bool(self._blockq_modules) or any(
-            entry.get("quant_format") == "exl3_blockq"
-            for entry in (self.tensor_storage or {}).values()
-        )
+        stored, dense_present = self._blockq_evidence()
         if stored and self._dense_embed:
-            # EXL3_DENSE_EMBED exists to isolate a *tied* model's embedding from
-            # everything else by loading the dense copy instead. A repaired
-            # checkpoint has no dense copy -- removing it is the point -- so
-            # honoring the flag here would fail later, on a missing
-            # `embed_tokens.weight`, far from the cause.
-            logger.warning(
-                "EXL3_DENSE_EMBED is set, but this checkpoint stores a "
-                "block-quantized embedding and no dense one. Serving it "
-                "quantized; the flag only applies to tied models."
-            )
+            # A sidecar checkpoint keeps both encodings, so the flag can be
+            # honoured: serve the dense copy and leave `bq_*` unread. This is
+            # the only way to A/B the two on one checkpoint.
+            if dense_present:
+                logger.info(
+                    "EXL3_DENSE_EMBED is set and this checkpoint carries both "
+                    "encodings; serving the dense embedding and ignoring bq_*."
+                )
+                return False
+            # Otherwise the dense copy was removed by the rewrite -- that being
+            # the point of it -- so honoring the flag would fail later, on a
+            # missing `embed_tokens.weight`, far from the cause.
+            if not self._warned_dense_embed:
+                self._warned_dense_embed = True
+                logger.warning(
+                    "EXL3_DENSE_EMBED is set, but this checkpoint stores a "
+                    "block-quantized embedding and no dense one. Serving it "
+                    "quantized; the flag only applies to tied models."
+                )
         return stored
 
     def get_cache_scale_mapper(self):
@@ -388,23 +429,48 @@ class EXL3Config(QuantizationConfig):
         the rename depend on this checkpoint being tied.
         """
         mapper = super().get_cache_scale_mapper()
-        if not self.embedding_is_quantized():
-            return mapper
+        tied_head_here = self.embedding_is_quantized()
+        blockq_embed = self.embedding_is_blockq()
 
         import re
 
         from vllm.model_executor.models.utils import WeightsMapper
 
-        return mapper | WeightsMapper(
-            # Drop the dense embedding unread -- this is the actual saving, and
-            # it has to go because the module no longer has a `weight` to put it
-            # in. Matched on the checkpoint's own name: regex rules run before
-            # the prefix rules below (`models/utils.py:101` vs `:121`), so this
-            # sees `...embed_tokens.weight` and never the renamed `lm_head.*`,
-            # which end in `.trellis`/`.suh`/`.svh`.
-            orig_to_new_regex={re.compile(r"(^|\.)embed_tokens\.weight$"): None},
-            orig_to_new_prefix={"lm_head.": f"{self.embed_prefix}."},
-        )
+        # A sidecar checkpoint ships both encodings, and exactly one of them has
+        # a home. When EXL3_DENSE_EMBED turns the block-quantized one off, its
+        # tensors still arrive and the embedding module has only a dense
+        # `weight` to put them in, so they have to go the same way the dense
+        # copy normally does.
+        stored_blockq, dense_present = self._blockq_evidence()
+        if stored_blockq and dense_present and not blockq_embed:
+            return mapper | WeightsMapper(
+                orig_to_new_regex={
+                    re.compile(r"\.bq_[qsr]$"): None,
+                }
+            )
+
+        if not (tied_head_here or blockq_embed):
+            return mapper
+
+        # Drop the dense embedding unread -- this is the actual saving, and it
+        # has to go because the module no longer has a `weight` to put it in.
+        # Matched on the checkpoint's own name: regex rules run before the
+        # prefix rules below (`models/utils.py:101` vs `:121`), so this sees
+        # `...embed_tokens.weight` and never the renamed `lm_head.*`, which end
+        # in `.trellis`/`.suh`/`.svh`.
+        #
+        # Needed for a block-quantized embedding for exactly the same reason,
+        # and not only for a tied head. It was tied-only while the only way to
+        # get `bq_*` was a rewrite that deleted the dense tensor, which made the
+        # rule unnecessary by construction. A sidecar checkpoint keeps the dense
+        # tensor, so the rule now does the work; on a rewritten checkpoint it
+        # simply never matches.
+        rules: dict = {
+            "orig_to_new_regex": {re.compile(r"(^|\.)embed_tokens\.weight$"): None}
+        }
+        if tied_head_here:
+            rules["orig_to_new_prefix"] = {"lm_head.": f"{self.embed_prefix}."}
+        return mapper | WeightsMapper(**rules)
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper) -> None:
         """Translate `tensor_storage` keys into vLLM's module naming.
