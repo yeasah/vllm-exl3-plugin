@@ -135,7 +135,7 @@ the diagnostic history, kept because two of the three walls were misdiagnosed on
 way.*
 
 **Status 2026-08-29: Laguna serves, patched.** The three fixes are in
-[patches/vllm-tq-01-sliding-window-kv-pages.patch](patches/vllm-tq-01-sliding-window-kv-pages.patch)
+[`vllm-tq-01-sliding-window-kv-pages`](patches.md)
 and the measurement is at the end of this item. Still open: the quality question
 (`qbench` on tq4), gemma-4 and Muse-Glimmer (neither fits the local card), and
 reporting any of it upstream. The history below is kept because it is what the
@@ -316,7 +316,7 @@ anything this item depends on.
 
 **Answered 2026-08-29, and Laguna serves.** The answer to the bounded question was
 yes, but the two known fixes were not the load-bearing one. See
-[patches/vllm-tq-01-sliding-window-kv-pages.patch](patches/vllm-tq-01-sliding-window-kv-pages.patch)
+[`vllm-tq-01-sliding-window-kv-pages`](patches.md)
 for all three.
 
 - **The primary page was priced by the wrong backend.**
@@ -475,7 +475,7 @@ Open:
   layers native regardless? Cheaply separable by compressing Laguna's sliding layers too
   once that path exists, or by testing a dense model of Laguna's depth.
 - **The upstream lever is drafted** as
-  [patches/vllm-tq-02-boundary-lever.patch](patches/vllm-tq-02-boundary-lever.patch): the
+  [`vllm-tq-02-boundary-lever`](patches.md): the
   `key=int` fix plus `boundary:N` in `--kv-cache-dtype-skip-layers`, default unchanged
   at 2. Verified end to end. What is left is filing it — as a reachability gap rather
   than a defaults change, with the Qwen3-4B frontier as the motivation.
@@ -533,7 +533,7 @@ monkeypatched.
 Four things remain, in rough order of how much they would cost to discover late.
 
 1. **Most architectures never ask for an embedding quant method**, and the fix is
-   carried in `patches/vllm-embed-quant-config.patch` rather than upstream. 86 of 131
+   carried in `vllm-embed-quant-config` rather than upstream. 86 of 131
    vLLM model files omit `quant_config` when constructing their
    `VocabParallelEmbedding`, so neither shape can serve there — silently dense for a
    tied model, a load failure for a block-quantized one. The patch is one file
@@ -1057,7 +1057,7 @@ of which is more body bits:
 - **`head_bits` 6 -> 4** on a 1.27B untied head frees **0.30 GiB**. `head-bits` concluded
   5-6 is optimal, but that was budget-neutral against body bits; when *capacity* is the
   binding constraint the trade is a different one and the KLD curve now prices it.
-- **The `boundary:N` lever** (`patches/vllm-tq-02-boundary-lever.patch`, drafted and
+- **The `boundary:N` lever** (`vllm-tq-02-boundary-lever`, drafted and
   verified): +14.8% KV tokens on the one model measured, for free.
 
 **Which also settles the ordering between the two levers.** Per byte freed, blockq costs

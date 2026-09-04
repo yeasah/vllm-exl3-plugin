@@ -2,3 +2,7 @@
 	path = deps/exllamav3
 	url = https://github.com/yeasah/exllamav3.git
 
+[submodule "deps/vllm"]
+	path = deps/vllm
+	url = https://github.com/yeasah/vllm.git
+	branch = appliance/v0.28.0

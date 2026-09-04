@@ -176,20 +176,37 @@ can change model output and fields that only change throughput, and `--compare` 
 two boxes while classifying each difference. Exit 1 refuses a box (uncorrected ECC,
 mismatched GPUs, or an output-relevant difference from the baseline).
 
-`patches/` holds changes to *vLLM*, applied to a source checkout. Against the
-current pin, **v0.28.0**, these four are the whole set: applying them in any
-order to a pristine `v0.28.0` reproduces the tree the baselines in
-`bench/expected/` were captured from, verified by digest
-(`src.vllm.diff_sha 31b747b753fb`).
+The plugin needs a patched vLLM, vendored as the `deps/vllm` submodule: our fork
+on branch `appliance/v0.28.0`, which is the **v0.28.0** pin plus the commits
+below. It reproduces the tree the baselines in `bench/expected/` were captured
+from. [patches.md](patches.md) is the index — what each commit does, and how to
+offer one upstream.
 
-| patch | why | still needed because |
+    git submodule update --init deps/vllm
+    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=<v0.28.0 wheel> \
+    pip install --no-deps --no-build-isolation -e deps/vllm
+
+Use the precompiled path: the branch is pure Python, so a source build is half
+an hour for nothing — and its default job count OOMs on consumer hardware.
+[patches.md](patches.md) has the exact command and why.
+
+These changes used to live as `.patch` files applied by hand to a checkout
+outside the project; the submodule replaces that.
+
+| commit | why | still needed because |
 |---|---|---|
-| `vllm-fused-param-capability-check.patch` | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it | `handles_fused_shards` has 0 occurrences upstream |
-| `vllm-replicated-linear-weight-loader-v2.patch` | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend | still no `weight_loader_v2` branch upstream |
-| `vllm-embed-quant-config.patch` | 86 of 131 model files never pass `quant_config` to their `VocabParallelEmbedding`, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from the config being built under, in one place rather than 86 | `VocabParallelEmbedding` still calls `get_quant_method` only when `quant_config` is passed explicitly. Still worth filing |
-| `vllm-transformers-backend-logit-softcap.patch` | the Transformers backend reads only `logit_scale`, never MuseGlimmer's `output_multiplier`, and `LogitsProcessor` applies its scale *after* the cap where the model needs it before | upstream landed `soft_cap=final_logit_softcapping` at 0.28 but neither of the other two. This is the halved remainder: the alias, and the fold-into-cap identity `tanh(z/(T/m))·(T/m)·m == T·tanh(z·m/T)` |
+| [`vllm-fused-param-capability-check`](patches.md) | lets a parameter declare that it splits fused checkpoint tensors itself; Qwen3.5 will not load without it | `handles_fused_shards` has 0 occurrences upstream |
+| [`vllm-replicated-linear-weight-loader-v2`](patches.md) | `ReplicatedLinear` is the one `LinearBase` subclass with no `weight_loader_v2` branch; needed to serve multimodal models through vLLM's Transformers backend | still no `weight_loader_v2` branch upstream |
+| [`vllm-embed-quant-config`](patches.md) | 86 of 131 model files never pass `quant_config` to their `VocabParallelEmbedding`, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from the config being built under, in one place rather than 86 | `VocabParallelEmbedding` still calls `get_quant_method` only when `quant_config` is passed explicitly. Still worth filing |
+| [`vllm-transformers-backend-logit-softcap`](patches.md) | the Transformers backend reads only `logit_scale`, never MuseGlimmer's `output_multiplier`, and `LogitsProcessor` applies its scale *after* the cap where the model needs it before | upstream landed `soft_cap=final_logit_softcapping` at 0.28 but neither of the other two. This is the halved remainder: the alias, and the fold-into-cap identity `tanh(z/(T/m))·(T/m)·m == T·tanh(z·m/T)` |
+
+Three further commits on the branch are TurboQuant-specific and are covered in
+[patches.md](patches.md) and [docs/turboquant-kv.md](docs/turboquant-kv.md): the
+sliding-window page-size fixes, the `boundary:N` lever, and the
+`_continuation_prefill` copy that drops a full-context temporary.
 
 ### Retired at the 0.28 bump
+
 
 Kept here as a record, since "why did this stop being needed" is the question a
 future bump asks:

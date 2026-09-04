@@ -79,7 +79,7 @@ Measured directly: MiniCPM5-1B and Llama-3.2-1B both load and generate correctly
 through the Transformers backend with **no** patch, because their decoder layers are
 all column/row/QKV/merged-column.
 
-`patches/vllm-replicated-linear-weight-loader-v2.patch` adds the missing branch and
+`vllm-replicated-linear-weight-loader-v2` adds the missing branch and
 a `weight_loader_v2` that does a whole-tensor load, since a replicated layer
 partitions nothing. `BasevLLMParameter.load_row_parallel_weight` is exactly that
 no-narrowing load, and is what `PerTensorScaleParameter` already relies on for the
@@ -199,7 +199,7 @@ into the cap:
     tanh(z / (T/m)) * (T/m) * m  ==  T * tanh(z * m / T)
 
 so `soft_cap = T/m` with `scale = m`, reducing to the plain cap at `m == 1`. Fixed by
-`patches/vllm-transformers-backend-logit-softcap.patch`, with no change to
+`vllm-transformers-backend-logit-softcap`, with no change to
 `LogitsProcessor` itself.
 
 ### Who else these hit

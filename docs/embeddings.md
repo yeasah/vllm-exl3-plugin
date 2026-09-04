@@ -1258,7 +1258,7 @@ embedding — Phase A quietly does nothing, and has been able to quietly do noth
 since it shipped. A *block-quantized* checkpoint fails to load, complaining that
 `embed_tokens.bq_q` does not exist, which points nowhere near the cause.
 **The fix is one file, not 86.** `VocabParallelEmbedding.__init__` only consults a
-config its caller passed, so `patches/vllm-embed-quant-config.patch` defaults it
+config its caller passed, so `vllm-embed-quant-config` defaults it
 from the config being built under — `get_current_vllm_config()`, already how
 `linear.py` and `logits_processor.py` read ambient construction state. Every
 architecture is reached at once, and configs that do not quantize embeddings are

@@ -116,7 +116,7 @@ vLLM does have the right escape hatch — a branch that hands the whole tensor t
 `type(param) in (RowvLLMParameter, BasevLLMParameter)`, an exact type check that
 excludes subclasses.
 
-**`patches/vllm-fused-param-capability-check.patch`** replaces it with a declared
+**`vllm-fused-param-capability-check`** replaces it with a declared
 capability, `BasevLLMParameter.handles_fused_shards`. Two earlier attempts were
 worse and are worth recording:
 

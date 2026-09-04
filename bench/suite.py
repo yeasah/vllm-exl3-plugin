@@ -242,7 +242,7 @@ ENTRIES: list[Entry] = [
         "three things: the quantized vision tower, the safetensors index as "
         "ground truth for is_quantized (this checkpoint's tensor_storage omits "
         "all 303 vision-tower modules), and "
-        "patches/vllm-replicated-linear-weight-loader-v2.patch, which 154 "
+        "vllm-replicated-linear-weight-loader-v2, which 154 "
         "unsharded submodules here depend on.\n\n"
         "Two predictions this entry exists to test at the bump, both from "
         "docs/transformers-backend.md, and both now read against v0.28.0 "

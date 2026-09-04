@@ -8,7 +8,7 @@ maintainer can act on and one they have to take on trust.
 | script | reproduces |
 |---|---|
 | `ct_embed_quantize.py` | llm-compressor's own documented embedding recipe, on `EleutherAI/pythia-160m` (their example family). Run in a **separate venv**: llmcompressor pins `transformers <= 5.14.1` and would downgrade a serving environment. |
-| `ct_embed_serve.py` | loading that checkpoint in vLLM. Stock v0.28.0 raises `no module or parameter named 'embed_in.weight_packed'`; with `patches/vllm-embed-quant-config.patch` it loads and generates. |
+| `ct_embed_serve.py` | loading that checkpoint in vLLM. Stock v0.28.0 raises `no module or parameter named 'embed_in.weight_packed'`; with the `vllm-embed-quant-config` commit in `deps/vllm` it loads and generates. |
 
 ```
 python -m venv ~/.venv-llmcompressor
