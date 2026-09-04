@@ -78,12 +78,15 @@ def source_provenance(path: str, exclude: tuple[str, ...] = ()) -> dict | None:
     base version is not -- it appears to be whatever was newest when the build
     was made. `git describe` says `v0.27.0-dirty`, which is the truth.
 
-    The worse problem is invisible rather than wrong. This project applies
-    `patches/` to vLLM as **unstaged working-tree changes**, and no version
-    string can see those. Two baselines could carry an identical `vllm` field
-    and have been produced by different patch stacks -- which, for a gate whose
-    whole job is spanning a dependency bump, is the difference most likely to
-    matter. `diff_sha` is what distinguishes them.
+    The worse problem used to be invisible rather than wrong. The patches to
+    vLLM lived as **unstaged working-tree changes**, which no version string can
+    see, so two baselines could carry an identical `vllm` field and have been
+    produced by different patch stacks -- for a gate whose whole job is spanning
+    a dependency bump, the difference most likely to matter. `diff_sha` is what
+    distinguished them. Both dependencies are now pinned submodules, so the head
+    commit identifies the code and `diff_sha` is normally `None`; a non-`None`
+    one means somebody edited a submodule without committing, which is the
+    failure mode pinning them was meant to end.
 
     Limits worth knowing: the digest covers tracked modifications only, so
     `untracked` is reported separately (an untracked `.py` inside a package

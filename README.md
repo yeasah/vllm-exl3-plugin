@@ -27,7 +27,7 @@ answer is checkpoint-specific and often surprising. See
 [docs/tensor-parallel.md](docs/tensor-parallel.md).
 
 **MoE** works on all three MoE checkpoints tried: gemma-4-26B-A4B (9.46 GiB),
-Qwen3.5-35B-A3B (10.63 GiB, needs the `patches/` change to load) and Laguna-XS-2.1
+Qwen3.5-35B-A3B (10.63 GiB, needs a `deps/vllm` commit to load) and Laguna-XS-2.1
 (256 experts at 2bpw, 8.54 GiB). Getting there needed a scale factor that EXL3
 checkpoints carry but do not record, which the plugin recovers by measuring the
 weights; and care about where that factor is applied, since inside the kernel it

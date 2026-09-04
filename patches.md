@@ -34,6 +34,14 @@ carries our commit and `.precompiled`:
 
     vllm-0.1.dev20058+g1f1617e26.precompiled
 
+Then fetch the tags into the submodule once. A submodule is cloned without
+them, so `git describe` in `deps/vllm` returns a bare hash and `bench/`
+provenance reads `src.vllm.describe: 1f1617e26` instead of naming the base:
+
+    git -C deps/vllm fetch --tags origin
+
+    v0.28.0-7-g1f1617e260    # base tag and patch count, both legible
+
 **If you do need a source build** (a change under `csrc/`, or a mismatched
 torch), cap the job count:
 

@@ -1239,7 +1239,7 @@ pairs item-for-item against the TQ and fp8 runs already in
 `kvarn_k4v2_g128`, not `k4v4` -- see the note for why k4v4 degenerates at head_dim
 256. Pin `KVARN_FUSED_VERIFY=0`: the routing crossover sits at exactly 8192 tokens,
 which is exactly the middle NIAH rung, so an unpinned arm spans two
-implementations. The engine lives at `~/git/vllm-kvarn`, branch `kvarn-port`.
+implementations. The engine is branch `experiment/kvarn` in our vLLM fork.
 
 → [docs/kvarn.md](docs/kvarn.md)
 

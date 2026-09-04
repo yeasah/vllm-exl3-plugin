@@ -7,7 +7,7 @@ Goal from the feasibility report: **MoE via `exl3_moe`/`exl3_mgemm` adapted to
 vLLM's `FusedMoE` interface.**
 
 **Status: working on all three MoE checkpoints.** `gemma-4-26B-A4B-it-exl3`
-(9.46 GiB), `Qwen3.5-35B-A3B-exl3` (10.63 GiB, needs the `patches/` change to
+(9.46 GiB), `Qwen3.5-35B-A3B-exl3` (10.63 GiB, needs a `deps/vllm` commit to
 load) and `Laguna-XS-2.1-exl3` (256 experts, 2bpw, 8.54 GiB) all answer
 correctly, lead with a real confident first token, and stay coherent when
 sampled at temperature. Laguna took two fixes rather than one — a scale factor
@@ -367,7 +367,8 @@ so.
 
 `Qwen3.5-35B-A3B-exl3` loads (10.63 GiB) and answers correctly, 4 runs out of 4
 in eager mode with the autotuner either on or off, leading with a real first
-token. It needs the `patches/` change to load at all, and its routed experts
+token. It needs `deps/vllm`'s `handles_fused_shards` commit (`8694dbf`) to load at
+all, and its routed experts
 carry no `interm_div`. It also runs under CUDA graphs at 123-125 tok/s — the hang
 that used to make graphs unusable here was the sm_90+ barrier, fixed above.
 

@@ -537,8 +537,10 @@ def cmd_capture(args) -> int:
 def warn_if_plugin_dirty() -> None:
     """A baseline blessed from a dirty plugin tree records a state that never recurs.
 
-    vLLM being dirty is normal here -- `patches/` lives in its working tree -- so
-    that is not worth a word. The plugin's own tree is different: `diff_sha` then
+    A dirty vLLM used to be normal here, back when `patches/` lived in its
+    working tree; now that it is a pinned submodule, `source_provenance` records
+    that separately and a dirty one is an anomaly rather than the baseline. This
+    warning is about the plugin's own tree, which is different: `diff_sha` then
     names a working state nobody can return to, and a later `check` cannot tell
     whether it is comparing against committed code or against a half-finished
     edit. Worse, editing during a long `bless` gives *different* entries

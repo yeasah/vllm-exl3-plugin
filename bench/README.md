@@ -190,11 +190,15 @@ detached at **v0.27.0**. The hash and date are right; the base version is not �
 it appears to be whatever was newest when the editable build was made. It is
 recorded as `vllm_reported` and should be read as a hint, never as the answer.
 
-The worse problem is invisible rather than wrong: this project applies
-`patches/` to vLLM as **unstaged working-tree changes**, and no version string
-can see those. Two baselines could carry an identical version field and have been
-produced by different patch stacks — which, for a gate whose entire job is
-spanning a dependency bump, is the difference most likely to matter.
+The worse problem used to be invisible rather than wrong: the patches to vLLM
+lived as **unstaged working-tree changes**, which no version string can see, so
+two baselines could carry an identical version field and have been produced by
+different patch stacks — for a gate whose entire job is spanning a dependency
+bump, the difference most likely to matter. Both dependencies are now pinned
+submodules, so the head commit identifies the code and `diff_sha` is normally
+`None` for them. That inverts what it is for: an uncommitted edit inside a
+submodule is now the anomaly, and it is exactly the failure mode that motivated
+pinning them in the first place.
 
 So each capture records `git` provenance for all three trees that decide what it
 means — the plugin, vLLM and exllamav3:

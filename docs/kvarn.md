@@ -30,7 +30,10 @@ the vLLM CLA, so adopting it is unencumbered.
 
 ## The port
 
-`~/git/vllm-kvarn`, branch `kvarn-port`, based on `v0.28.1rc0-235-g2fe5cef35e`.
+`experiment/kvarn` in [our fork](https://github.com/yeasah/vllm/tree/experiment/kvarn),
+based on `v0.28.1rc0-235-g2fe5cef35e` — upstream `main`, not the v0.28.0 tag the
+appliance branch uses, because the port targets the post-`TQ*Spec` contract.
+See [../patches.md](../patches.md).
 All 5,242 lines of new code apply unchanged; every vLLM symbol they import still
 exists. The work is entirely in the ~300 lines of hooks across 12 files, and two
 of those hooks turned out to be **deletions**:
@@ -219,10 +222,10 @@ two months, gated on five lines. See [upstream.md](upstream.md).
 
 ## Running it again
 
-    cd ~/git/vllm-kvarn && git checkout kvarn-port
+    git clone -b experiment/kvarn https://github.com/yeasah/vllm.git /tmp/kvarn
     # extensions: wheels.vllm.ai/<sha>/vllm-*-cp38-abi3-manylinux_2_28_x86_64.whl
     # extract the whole vllm/ prefix into the tree, then:
-    PYTHONPATH=~/git/vllm-kvarn python -m vllm.entrypoints.openai.api_server \
+    PYTHONPATH=/tmp/kvarn python -m vllm.entrypoints.openai.api_server \
       --model <model> --kv-cache-dtype kvarn_k4v2_g128 --block-size 128 \
       --max-num-seqs 1 --max-num-batched-tokens 512
 
