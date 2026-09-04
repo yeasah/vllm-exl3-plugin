@@ -68,8 +68,25 @@ against an event that, on the evidence in [docs/upstream.md](docs/upstream.md),
 has not been arriving. That note tracks which of these are worth offering, in
 what shape, and what to check first.
 
-`tq-sliding-window` in the fork is a separate branch, referenced by an open PR;
-it is not part of this stack.
+## Other branches in the fork
+
+The fork also holds work that is not part of the appliance stack. None of these
+is pinned by the submodule; check one out in a scratch clone to run it.
+
+- **`tq-sliding-window`** — referenced by an open upstream PR. Kept because that
+  reference has to stay valid, not because we depend on it.
+- **`experiment/kvarn`** — the KVarN port: PR 46812 carried onto the current
+  backend contract, the `layer_name` propagation from `Attention` to the impl
+  that made it actually produce correct output, a decode-path bisect knob, and
+  the appliance patches needed to load an EXL3 checkpoint at all. Based on
+  upstream `main` (`v0.28.1rc0-235`), *not* on v0.28.0: the port was written
+  against the post-`TQ*Spec` contract, and v0.28.0 is cut on a release branch
+  whose merge-base with `main` is far older (`v0.26.1rc0-844`), so there is no
+  cheap rebase — and rebasing would invalidate the measurements anyway.
+  Shelved; [docs/kvarn.md](docs/kvarn.md) has the verdict.
+- **`reference/kvarn-pr-46812`** — upstream PR 46812's own diff rebased onto
+  v0.28.0, original authorship intact. Not our code. Kept because the PR is
+  decaying upstream and the rebase was the expensive part.
 
 ## Retired
 
@@ -80,3 +97,10 @@ where they are referenced.
   equivalent; retired at v0.28.0. See [README.md](README.md).
 - `exllamav3-sm90-barrier.patch` — folded into our exllamav3 fork's history when
   we started tracking it. See [docs/exllamav3-arch.md](docs/exllamav3-arch.md).
+- *chat-template revision* — never a `.patch`, only ever an uncommitted edit in
+  a local v0.27.0 checkout, which is why it is recorded here now that it is
+  gone. `_try_get_processor_chat_template` did not pass a revision, so the
+  processor lookup fell back to `main`: wrong for any repo served off a
+  non-default branch, and it leaves a ref to an unfetched commit in the hub
+  cache. v0.28.0 fixes it and goes further, threading both `revision` and
+  `code_revision` and keying the cache on them. Retired at v0.28.0.
