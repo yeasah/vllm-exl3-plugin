@@ -66,7 +66,15 @@ def _git(path: str, *args: str) -> str | None:
 #: records `dirty_files: 1`, the third `2`, and a full bless can never record a
 #: clean plugin state no matter how clean the checkout was. Provenance is about
 #: the code that produced a measurement, not the measurement.
-_PROVENANCE_EXCLUDE = (":(exclude)bench/expected",)
+#:
+#: `agent-memory/` is excluded for a different reason: it is prose an assistant
+#: rewrites mid-session, and it cannot change what the engine serves. Counting
+#: it would let a note-taking edit refuse a bless of unrelated work, which is
+#: the guard firing on something it was never meant to catch.
+_PROVENANCE_EXCLUDE = (
+    ":(exclude)bench/expected",
+    ":(exclude)agent-memory",
+)
 
 
 def source_provenance(path: str, exclude: tuple[str, ...] = ()) -> dict | None:
