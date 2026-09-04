@@ -475,6 +475,18 @@ Project and raw results: `~/qbench/phi4mini-alloc.yaml`. Measurement JSONs in
 `~/qbench/sens/`, recipes in `~/qbench/recipes/`, and the tools built for this in
 `~/qbench/tools/` (all derived from exllamav3 `dev`; the pinned fork is untouched).
 
+The converted checkpoints themselves are gone -- 42 GiB of inputs to a finished
+study -- but their bit allocations are kept in
+[data/qbench/phi4mini-allocations.json](data/qbench/phi4mini-allocations.json):
+`bits`, `head_bits`, calibration shape, and the per-module assignment for each
+of the nine converted variants. That last part is the one worth keeping, because
+it is solved rather than chosen: `recipe-3.0` differs from `uniform-3.0` on 88
+of 225 modules and spans 1 to 6 bits, so re-deriving it means re-running the
+solver, where re-converting from a recorded recipe is merely slow.
+`microsoft/Phi-4-mini-instruct` is the source model. The two unquantized
+variants (`deq-3.0`, `mixed-marginal`) were dequantized rather than converted
+and carry no allocation, which is itself the thing to know about them.
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)
