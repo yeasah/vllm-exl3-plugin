@@ -212,6 +212,33 @@ class EXL3Config(QuantizationConfig):
                 getattr(hf_config, "tie_word_embeddings", False)
             )
 
+    def _skip_hub_lookup(self, model_name: str, revision: str | None) -> bool:
+        """Whether a metadata lookup would have to invent a revision to proceed.
+
+        Substituting `"main"` for an unknown revision is not a harmless default
+        here. EXL3 repos publish one branch per bit rate and `main` usually
+        carries no weights, so the request 404s -- but the commit was resolved
+        before the file was missed, and huggingface_hub records that resolution
+        as `refs/main` pointing at a snapshot it never fetched. A dangling ref
+        makes `scan_cache_dir` discard the **entire repo**, so `hf cache ls`,
+        `hf cache delete` and anything else built on it go blind to every
+        revision in it, including complete ones. The checkpoint looks lost and
+        is not; `tools/hfcache doctor --fix-refs` clears it.
+
+        Seen twice from different directions: vLLM's chat-template lookup
+        falling back to `"main"` (fixed upstream in v0.28.0), and a plain
+        `hf download <repo> <branch>` with the `--revision` flag omitted, where
+        the branch name is read as a filename and resolved against `main`.
+        Both leave the identical artifact, which is what makes it a property of
+        requesting `main` rather than of either caller.
+
+        A local directory is exempt: there is no revision to invent and no Hub
+        request to make, so the read proceeds normally.
+        """
+        if os.path.isdir(model_name):
+            return False
+        return revision is None
+
     def _load_index_modules(self, model_name: str, revision: str | None) -> None:
         """Modules that actually carry a trellis, from the safetensors index.
 
@@ -228,9 +255,16 @@ class EXL3Config(QuantizationConfig):
         """
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
+        if self._skip_hub_lookup(model_name, revision):
+            logger.debug(
+                "No revision for %s; skipping the safetensors index lookup "
+                "rather than querying main. tensor_storage is the fallback.",
+                model_name,
+            )
+            return
         try:
             index = get_hf_file_to_dict(
-                "model.safetensors.index.json", model_name, revision or "main"
+                "model.safetensors.index.json", model_name, revision
             )
         except Exception:
             index = None
@@ -257,12 +291,22 @@ class EXL3Config(QuantizationConfig):
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
         self._load_index_modules(model_name, revision)
-        try:
-            extra = get_hf_file_to_dict(
-                "quantization_config.json", model_name, revision or "main"
+        if self._skip_hub_lookup(model_name, revision):
+            logger.warning(
+                "No revision resolved for %s, so quantization_config.json is "
+                "not being fetched -- querying main would leave a dangling ref "
+                "that hides the whole repo from the cache tools. Falling back "
+                "to whatever the local config provides.",
+                model_name,
             )
-        except Exception:
             extra = None
+        else:
+            try:
+                extra = get_hf_file_to_dict(
+                    "quantization_config.json", model_name, revision
+                )
+            except Exception:
+                extra = None
         if extra:
             self.tensor_storage = extra.get("tensor_storage")
             self._ancestors = None
@@ -274,7 +318,7 @@ class EXL3Config(QuantizationConfig):
                     "the checkpoint quantizes anyway (e.g. %s). Trusting the "
                     "safetensors index instead; the storage map is metadata, "
                     "not the checkpoint.",
-                    model_name, revision or "main", len(missing),
+                    model_name, revision or "<unspecified>", len(missing),
                     ", ".join(sorted(missing)[:2]),
                 )
         elif self.quantized_modules is not None:
@@ -291,7 +335,7 @@ class EXL3Config(QuantizationConfig):
                 "layer is EXL3-quantized. This is correct for older text-only "
                 "checkpoints but will fail on a model with unquantized towers.",
                 model_name,
-                revision or "main",
+                revision or "<unspecified>",
             )
 
     def head_is_quantized(self) -> bool:

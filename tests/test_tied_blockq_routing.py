@@ -132,3 +132,66 @@ class CombinedMethodTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeverQueryMainTest(unittest.TestCase):
+    """The config must not invent a revision for a Hub metadata lookup.
+
+    Asking for `main` when the revision is unknown is not a harmless default:
+    EXL3 repos keep weights on per-bit-rate branches, so `main` 404s, but the
+    commit is resolved before the file is missed and huggingface_hub leaves
+    `refs/main` pointing at a snapshot it never fetched. A dangling ref makes
+    `scan_cache_dir` discard the entire repo, so every cache tool goes blind to
+    all of it -- the checkpoint looks lost while every byte is on disk.
+
+    A local directory is exempt: no revision to invent, no request to make.
+    """
+
+    def setUp(self):
+        self.cfg = EXL3Config(bits=3.0, head_bits=6)
+
+    def test_repo_id_without_revision_is_skipped(self):
+        self.assertTrue(self.cfg._skip_hub_lookup("turboderp/Qwen3-8B-exl3", None))
+
+    def test_repo_id_with_revision_proceeds(self):
+        self.assertFalse(self.cfg._skip_hub_lookup("turboderp/Qwen3-8B-exl3", "3.0bpw"))
+
+    def test_local_directory_proceeds_without_a_revision(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(self.cfg._skip_hub_lookup(d, None))
+
+    def test_no_hub_call_is_made_without_a_revision(self):
+        """The predicate is not the point; not reaching the network is."""
+        from unittest import mock
+
+        calls = []
+
+        def spy(filename, model, revision):
+            calls.append((filename, model, revision))
+            return None
+
+        with mock.patch(
+            "vllm.transformers_utils.repo_utils.get_hf_file_to_dict", spy
+        ):
+            self.cfg._load_tensor_storage("turboderp/Qwen3-8B-exl3", None)
+        self.assertEqual(calls, [], f"queried the Hub anyway: {calls}")
+
+    def test_a_revision_does_reach_the_lookup(self):
+        """The guard must not be so broad that it disables the feature."""
+        from unittest import mock
+
+        calls = []
+
+        def spy(filename, model, revision):
+            calls.append((filename, model, revision))
+            return None
+
+        with mock.patch(
+            "vllm.transformers_utils.repo_utils.get_hf_file_to_dict", spy
+        ):
+            self.cfg._load_tensor_storage("turboderp/Qwen3-8B-exl3", "3.0bpw")
+        self.assertTrue(calls, "the lookup never happened even with a revision")
+        self.assertTrue(all(r == "3.0bpw" for _, _, r in calls),
+                        f"a call used a substituted revision: {calls}")
