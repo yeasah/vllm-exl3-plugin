@@ -535,7 +535,7 @@ than once: `create_weights` registers its placeholders at `torch.empty(0).device
 recorded, and the post-load tensors carry different names (`exl3_trellis_N` against
 the checkpoint's `trellis`) so they would not match even if it had.
 
-## Ambient `quant_config`: what `vllm-embed-quant-config.patch` costs
+## Ambient `quant_config`: what `vllm-embed-quant-config` costs
 
 *Found 2026-08-20 while testing speculative decoding. The work is open — TODO
 `quantized-embeddings` item 1.*

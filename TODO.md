@@ -521,19 +521,22 @@ Serving the embedding quantized rather than dequantizing it at load. Dequantizin
 load proves the math and saves file storage and I/O, but leaves VRAM — the thing
 this project cares about most — completely unchanged.
 
-**Both shapes now serve.** Tied models come from the checkpoint's existing quantized
-`lm_head`, with the fp16 `embed_tokens` never loaded and no tooling needed. Untied
-models — which have no quantized copy to reuse — get one from
-`tools/quantize_embedding.py` in the block-scaled 4-bit format of
-`vllm_exl3_plugin/blockq.py`, served by `EXL3BlockQEmbeddingMethod`: Qwen3.5-9B goes
-1940 -> 549 MiB resident and 6.72 -> 5.36 GiB on disk, at a KLD tax at or below the
-model's own noise floor. All hooks are sanctioned vLLM extension points; nothing is
-monkeypatched.
+**Both shapes now serve, and an untied model no longer needs a derived checkpoint at
+all.** Tied models come from the checkpoint's existing quantized `lm_head`, with the
+fp16 `embed_tokens` never loaded and no tooling needed. Untied models — which have no
+quantized copy to reuse — get one either from `tools/quantize_embedding.py`, whose
+`--sidecar` mode adds `bq_*` beside the original shards instead of rewriting one, or
+from `EXL3_BLOCKQ_ON_LOAD=1`, which encodes the dense embedding during weight loading
+and reproduces the tool's output byte for byte. Either way it is the block-scaled
+4-bit format of `vllm_exl3_plugin/blockq.py`, served by `EXL3BlockQEmbeddingMethod`:
+Qwen3.5-9B goes 1940 -> 549 MiB resident, at a KLD tax at or below the model's own
+noise floor. All hooks are sanctioned vLLM extension points; nothing is monkeypatched.
 
-Four things remain, in rough order of how much they would cost to discover late.
+Three things remain, in rough order of how much they would cost to discover late.
 
 1. **Most architectures never ask for an embedding quant method**, and the fix is
-   carried in `vllm-embed-quant-config` rather than upstream. 86 of 131
+   carried in `vllm-embed-quant-config` (fork commit `c69d01e`) rather than
+   upstream. 86 of 131
    vLLM model files omit `quant_config` when constructing their
    `VocabParallelEmbedding`, so neither shape can serve there — silently dense for a
    tied model, a load failure for a block-quantized one. The patch is one file

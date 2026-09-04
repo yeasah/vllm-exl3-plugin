@@ -498,7 +498,7 @@ On stock 0.28.0 that fails in KV cache group construction:
     divisible by the maximum page size and cannot be padded.
 
 on layer 5 — a TurboQuant layer — which is the mispriced-primary bug. With
-`vllm-tq-01-sliding-window-kv-pages.patch` it serves, at 264,171 KV tokens.
+`86e3b1e` in `deps/vllm` it serves, at 264,171 KV tokens.
 
 **Note which half this exercises.** gemma-3-1b's boundary indices `{0,1,24,25}` are all
 sliding layers that were already held native, so no *full-attention* layer keeps a native
