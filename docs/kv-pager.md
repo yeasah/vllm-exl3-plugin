@@ -523,7 +523,7 @@ Four parts, three of which already exist as measured code.
    (disk) is out of scope until this one works.
 3. **The worker-side view** — built and measured, bit-exact when it drops
    nothing.
-4. **An invariant checker**, for the reason below.
+4. **An invariant checker** — built first, for the reason below.
 
 ### The decisions
 
@@ -554,6 +554,41 @@ should hold its own reserve of GPU blocks so a fetch is worker-local and
 immediate. Size it at the per-step fetch budget plus slack: 543 tokens/step at
 5% latency on the 27B at fp8 is ~34 blocks.
 
+### The guard, which exists
+
+`tools/kv_pager/guard.py`, built before the allocator because it is the only
+thing that will notice when the allocator is wrong. Four checks, each on the
+*resident prefix* only — everything past it is unread by construction, so
+checking it would reject correct behaviour:
+
+| check | catches |
+|---|---|
+| `ownership` | a view entry the request no longer owns — what a freed, reallocated block looks like from the worker's side |
+| `write_target` | this step's own key landing anywhere but the last resident block, read off the real slot mapping rather than a recomputed expectation |
+| `length` | `seq_len` and the row disagreeing with what the policy meant to be resident |
+| `exclusivity` | two requests' resident sets overlapping |
+
+`tools/kv_guard_selftest.py` injects each fault into a running engine at the
+same point a pager would impose residency, and every one is caught while a
+clean run reports nothing:
+
+    clean        14 steps checked,    0 violations (none)
+    stray        14 steps checked,   14 violations ['ownership']
+    tailswap     14 steps checked,   14 violations ['write_target']
+    shortview    14 steps checked,   14 violations ['length']
+    overlap      14 steps checked,   14 violations ['exclusivity', 'ownership']
+
+The clean row is not a formality: it says a correct full-residency view passes
+all four, so the invariants match what vLLM actually does rather than what this
+design assumes it does.
+
+One of the four had to be repaired before it could fail at all. The `length`
+check first compared `seq_len` against the block count *derived from* `seq_len`
+by division, which is true by construction — a check that cannot fire. It only
+became falsifiable once the policy's intended resident count was passed in from
+outside, which is the general shape of the mistake: an invariant stated in
+terms of one quantity twice.
+
 ### What "done" looks like
 
 One measurement, and it is the appliance's whole claim: **serve a context longer
@@ -571,6 +606,7 @@ thrash curves, fetch rates, policy comparisons — is instrumentation around tha
                                     [--needle] [--needle-block N] [--diagnose]
     tools/blocktable_evict.py   report OUT.json [OUT.json ...]
 
+    tools/kv_guard_selftest.py  MODEL [--ctx N] [--reqs N]
     tools/kv_roundtrip.py       run MODEL OUT.json [--block N] [--kv fp8]
     tools/kv_transport.py       sweep [--layers N] [--block-bytes N]
     tools/kv_transport.py       verify
