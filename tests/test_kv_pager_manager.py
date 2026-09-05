@@ -68,12 +68,38 @@ def null_positions(mgr, req_id):
             if b.block_id == null]
 
 
+def test_a_chosen_block_is_still_allocated_until_the_next_step():
+    """The copy-out window, which is the whole reason eviction is two-phase.
+
+    A block chosen for eviction must remain allocated and intact for one step,
+    because that is when the worker copies it to the host. Freeing it in the
+    same pass that chose it hands it to another request before anything has
+    read it -- and that corruption is silent.
+    """
+    mgr, pool = make_manager(budget=8)
+    give_blocks(mgr, pool, "r", 20)
+    free_before = pool.get_num_free_blocks()
+
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
+    chosen = set(mgr.pending_evictions["r"])
+    assert chosen, "nothing was chosen for eviction"
+    assert pool.get_num_free_blocks() == free_before, (
+        "a block was freed in the same pass that chose it"
+    )
+    null = mgr._null_block.block_id
+    assert all(mgr.req_to_blocks["r"][i].block_id != null for i in chosen), (
+        "a chosen block was nulled before its copy-out window"
+    )
+
+
 def test_eviction_returns_blocks_to_the_pool():
     """The assertion that a structurally-correct but useless manager fails."""
     mgr, pool = make_manager(budget=8)
     give_blocks(mgr, pool, "r", 20)
     free_before = pool.get_num_free_blocks()
 
+    # Decide, then the next pass frees what was decided.
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
     mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
 
     kept = set(Recency(budget=8, sink=2).resident(20, 20 * BLOCK))
@@ -112,6 +138,7 @@ def test_eviction_with_interior_holes_still_frees():
     give_blocks(mgr, pool, "r", 24)
 
     mgr.remove_skipped_blocks("r", processed_computed_tokens=24 * BLOCK)
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=24 * BLOCK)
     holes = set(null_positions(mgr, "r"))
     assert holes, "stress should have evicted something"
 
@@ -120,6 +147,7 @@ def test_eviction_with_interior_holes_still_frees():
     # holes.
     later = 24 * BLOCK + 6 * BLOCK
     free_before = pool.get_num_free_blocks()
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=later)
     mgr.remove_skipped_blocks("r", processed_computed_tokens=later)
 
     kept = set(mgr.policy.resident(24, later))
@@ -156,6 +184,7 @@ def test_full_policy_frees_nothing():
 def test_restores_are_planned_when_the_policy_asks_for_a_block_back():
     mgr, pool = make_manager(budget=8, policy="stress")
     give_blocks(mgr, pool, "r", 20)
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
     mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
     first = set(null_positions(mgr, "r"))
     assert first, "stress should have evicted something"
@@ -218,19 +247,37 @@ def test_reservation_matches_the_draw_across_a_long_run():
     simulate(mgr, pool, "r", blocks_total=60, budget=8)
 
 
-def test_paging_actually_bounds_the_blocks_held():
+def test_blocks_held_are_bounded_by_the_budget_not_the_context():
     """The assertion that makes this a pager rather than bookkeeping.
 
-    A request 60 blocks long must never hold more than its budget plus the
-    tail it is currently writing into. Without the eviction this is 60, so a
-    manager that nulled entries without returning them, or reserved without
-    freeing, fails here rather than somewhere subtle later.
+    Not a magic number: the property is that peak residency depends on the
+    *budget* and not on how far the context grows, which is the entire memory
+    claim. Doubling the context must not move it. A manager that nulled entries
+    without returning them, or reserved without freeing, fails here rather than
+    somewhere subtle and later.
+
+    The constant above the budget is the tail block being written into plus the
+    blocks sitting in their copy-out window -- both bounded per step, neither
+    growing with context.
     """
     budget = 8
-    mgr, pool = make_manager(budget=budget, num_blocks=512, policy="stress")
-    peak, restored = simulate(mgr, pool, "r", blocks_total=60, budget=budget)
-    assert peak <= budget + 2, f"held {peak} blocks against a budget of {budget}"
-    assert restored > 0, "nothing was ever restored; the fetch path is untested"
+    peaks = {}
+    for blocks_total in (30, 60, 120):
+        mgr, pool = make_manager(budget=budget, num_blocks=1024, policy="stress")
+        peak, restored = simulate(mgr, pool, "r", blocks_total, budget)
+        peaks[blocks_total] = peak
+        assert restored > 0, (
+            f"nothing was restored at {blocks_total} blocks; the fetch path is "
+            f"untested"
+        )
+    assert len(set(peaks.values())) == 1, (
+        f"peak residency grew with context: {peaks} -- the memory saving is "
+        f"not bounded by the budget"
+    )
+    peak = peaks[120]
+    assert peak <= budget + 4, (
+        f"held {peak} blocks against a budget of {budget}: {peaks}"
+    )
 
 
 def test_restored_blocks_land_at_their_own_indices():

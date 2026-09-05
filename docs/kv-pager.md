@@ -657,12 +657,39 @@ that restores repeatedly. And the reservation matches the draw at every step,
 which is the accounting bug that would otherwise surface as an OOM under load
 rather than as a wrong answer.
 
-**Still missing, and it is transport rather than bookkeeping:** nothing copies
-a block's KV to the host before it is freed, or back afterwards. A restored
-block today is correctly *placed* and holds whatever the pool last left in it,
-so this manages residency without preserving content. That is the next piece,
-and the ordering the design fixed — copy out at step N, free at N+1 — is what
-it has to respect.
+**Eviction is two-phase**, which is what makes the transport safe: a block
+chosen this step is freed on the *next* one, so there is a window in which it
+is still allocated, still holds its contents, and is already out of the view.
+That window is when the worker copies it out. Freeing in the pass that chose it
+would hand the block to another request before anything had read it, and the
+resulting corruption is silent — so the window is a tested property, not a
+convention, and the constant it adds to peak residency is visible in the bound
+test.
+
+### The host tier
+
+`tools/kv_pager/hosttier.py`. One pinned host buffer per layer, shaped like
+that layer's GPU cache, with its own slot count. Its single contract is that a
+block survives being freed and reused, and the tests exercise that directly on
+real GPU tensors without an engine: store it, **overwrite the GPU block**,
+restore it into a *different* physical block, require bit-exactness — the same
+shape as the end-to-end round trip, because a save/restore test that does not
+destroy the original in between passes even when the restore does nothing.
+
+Copies go through tensor indexing rather than `swap_blocks`, deliberately.
+`swap_blocks` derives byte offsets from a block stride and so assumes the cache
+is block-major and contiguous, while indexing is correct whatever
+`get_kv_cache_stride_order` did. It is the same cost class as the measured
+per-block path (17.2 GB/s), and the batched primitive is worth adopting behind
+a bit-exactness check rather than on the assumption that the layout is what it
+looks like. They are also synchronous: the two-phase window is what makes
+overlapping *possible*, but an async copy that has not landed before the pool
+reassigns the block is precisely what the guard exists for, so the fast version
+should arrive with an event to wait on rather than by deleting the wait.
+
+**What is still missing is the wiring**: the manager evicts and restores, the
+tier can hold and return a block, and nothing yet calls the second from the
+first. That is a worker-side pager, since the KV tensors live there.
 
 Two things worth keeping from building it.
 

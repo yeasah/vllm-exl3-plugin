@@ -31,10 +31,11 @@ new ids pair with `sorted(pending_restores)`. `restored[request_id]` records
 that pairing on this side so the two can be checked against each other rather
 than assumed equal.
 
-Still missing, and it is the transport rather than the bookkeeping: nothing
-copies a block's KV to the host before it is freed, or back afterwards. Until
-that exists a restored block is correctly *placed* and holds whatever the pool
-last left in it, so this manages residency without preserving content.
+Eviction is two-phase: a block chosen this step is freed on the *next* one, so
+there is a step in which it is still allocated, still holds its contents, and
+is already out of the view -- which is the window the worker copies it to the
+host in. Freeing in the same pass that decided it would hand the block to
+another request before anything had read it, and that failure is silent.
 """
 
 from __future__ import annotations
@@ -95,6 +96,10 @@ class PagedAttentionManager:
             POLICIES["full"]()
         #: row indices whose block was handed back and now lives on the host
         self.evicted: defaultdict[str, set[int]] = defaultdict(set)
+        #: decided this step, freed the next one -- the window in which the
+        #: worker copies the block out. Freeing in the same pass would hand the
+        #: block to another request before anything had read it.
+        self.pending_evictions: defaultdict[str, set[int]] = defaultdict(set)
         #: row indices the policy wants back but that have no block yet
         self.pending_restores: defaultdict[str, set[int]] = defaultdict(set)
         #: (row index, block id) for blocks restored in the last allocation,
@@ -120,18 +125,28 @@ class PagedAttentionManager:
         blocks = self.req_to_blocks.get(request_id)
         if not blocks:
             return
+
+        # Two-phase, and this is the phase that makes the transport safe: what
+        # was decided last step is freed now, having had a step in which the
+        # worker could copy it to the host. A block freed in the same pass that
+        # decided it can be handed to another request before its contents have
+        # been read anywhere.
+        due = sorted(self.pending_evictions[request_id])
+        self._free_indices(request_id, due)
+        self.evicted[request_id] |= set(due)
+        self.pending_evictions[request_id] = set()
+
         n_full = min(processed_computed_tokens // self.block_size, len(blocks))
         if n_full <= 0:
             return
         resident = set(self.policy.resident(n_full, processed_computed_tokens))
 
         null_id = self._null_block.block_id
-        drop = [i for i in range(n_full)
-                if i not in resident and blocks[i].block_id != null_id]
+        drop = {i for i in range(n_full)
+                if i not in resident and blocks[i].block_id != null_id}
         want = {i for i in resident if blocks[i].block_id == null_id}
 
-        self._free_indices(request_id, drop)
-        self.evicted[request_id] |= set(drop)
+        self.pending_evictions[request_id] = drop
         self.evicted[request_id] -= want
         self.pending_restores[request_id] = want
 
@@ -217,6 +232,7 @@ class PagedAttentionManager:
 
     def free(self, request_id: str) -> None:
         self.evicted.pop(request_id, None)
+        self.pending_evictions.pop(request_id, None)
         self.pending_restores.pop(request_id, None)
         self.restored.pop(request_id, None)
         super().free(request_id)
