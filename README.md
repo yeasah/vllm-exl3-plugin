@@ -176,6 +176,17 @@ can change model output and fields that only change throughput, and `--compare` 
 two boxes while classifying each difference. Exit 1 refuses a box (uncorrected ECC,
 mismatched GPUs, or an output-relevant difference from the baseline).
 
+`tools/transcript_sweep.py` mines this project's own conversation transcripts for
+findings that were established in a session and never written down — the failure
+mode of the exploratory work that produces most of them. `extract` pools every
+session file, drops tool traffic and dedupes by content so a forked or resumed
+session contributes each exchange once; `signature` surfaces the assistant
+passages that read like a finding; `check` asks whether a candidate is already in
+`docs/`, `TODO.md`, the memories or the field notes, which is the step that keeps
+a sweep from producing duplicates; `mark` records where it stopped so the next one
+knows where to start (`docs/data/sweeps.json`). Read `user-*.md` first — the human
+turns are about a fifth of the volume and carry most of the signal.
+
 The plugin needs a patched vLLM, vendored as the `deps/vllm` submodule: our fork
 on branch `appliance/v0.28.0`, which is the **v0.28.0** pin plus the commits
 below. It reproduces the tree the baselines in `bench/expected/` were captured
