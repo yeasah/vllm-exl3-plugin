@@ -153,10 +153,11 @@ positional meaning for full-attention layers.
 
 Not settled, in rough order of how much it matters to the next phase:
 
-1. **Nothing is freed.** Both tools impose a *view*; the allocator still holds
-   every block. Turning a view into reclaimed memory means the scheduler
-   releasing blocks and a transport bringing them back, which is the phase-2
-   machinery and is untested here.
+1. **The allocator is still not involved.** The data path is proven below --
+   a block survives being destroyed on the GPU and restored from host memory
+   into a different physical block -- but every tool here imposes a view while
+   vLLM's block pool still owns all of it. Reclaiming means the *scheduler*
+   freeing blocks and re-allocating them, which is phase 2's work.
 2. **Prefix caching was off for every run.** Its bookkeeping hashes a block by
    the token prefix leading to it, so a residency scheme that moves or drops
    blocks has to be reconciled with the cached-block registry. Untouched here.
@@ -291,9 +292,8 @@ positions, which is a whole region of context rather than a page, and coarse
 enough to wreck the sink structure the whole idea depends on. That curve is a
 property of **UM page migration**, and the design measured here does not fault:
 explicit pinned DMA's granularity floor is per-transfer overhead, which is much
-smaller. Block-granular residency is plausibly back on the table, and *what
-scattered explicit DMA actually costs at 16-token granularity is unmeasured* --
-it is the measurement that decides whether the policy scores blocks or spans.
+smaller. Measured below: block-granular residency is back on the table, and the
+policy scores blocks rather than spans.
 
 ### Still live
 
@@ -368,6 +368,105 @@ desperate: what makes a 4x RoPE-scaled 1M context unsatisfying as a *capability*
 cheap to page. You are paging a region the model has already decided not to
 look at.
 
+## Freeing and restoring a block, and what the transport costs
+
+The two questions phase 3 was gated on, both answered on 2026-09-05.
+
+### A block can be freed and restored on a running request
+
+`tools/kv_roundtrip.py`. Eviction has no reference, and neither does a
+restore -- unless the whole cycle happens inside one decode step, where it
+does. Each step, for one chosen block: its KV is copied out to pinned host
+memory for every layer, **the GPU block is filled with garbage** (standing in
+for the block being freed and handed to another request, which is what makes a
+pager save memory and what is most likely to corrupt it), the host copy is
+written into a *different* physical block, and the residency view is repointed
+at the new address.
+
+If every leg works the model reads exactly the bytes it would have read anyway,
+from a new address, and the output is bit-identical. It is:
+
+| config | backend | relocate | nocopy (same, restore skipped) |
+|---|---|---|---|
+| Llama-3.2-1B, bf16 KV | FLASH_ATTN | **bit-identical**, 31 round trips | diverges at step 1 |
+| Llama-3.2-1B, **fp8 KV** | FLASHINFER | **bit-identical**, 31 round trips | diverges at step 1 |
+| Llama-3.2-1B-**exl3** | FLASH_ATTN | **bit-identical**, 31 round trips | diverges at step 1 |
+
+`nocopy` is what makes that mean something: identical in every respect except
+that the restore is skipped, so the view names a block holding garbage. It
+diverges immediately and the reference's own top token falls out of the top-20
+entirely, so the destroy was real and the model was genuinely reading the
+relocated block. The tool also checks, inside the run, that the overwrite
+changed the source and that the source is *still* wreckage at the moment the
+restore is read -- three assertions that each catch a different way for this
+test to pass without meaning anything.
+
+**Physical relocation is the point.** A pager that had to restore a block to
+the address it came from would be a much weaker mechanism; this restores into
+an unrelated block near the top of the pool and repoints the view, which works
+for the same reason the permutation test worked -- block identity carries no
+positional meaning.
+
+The methodological trap, recorded because it cost a wrong answer first: **do
+not re-read the source block each iteration.** The first version saved and
+destroyed every step, so from step 2 on it was saving back the garbage the
+previous step had written, and it reported the round trip as lossy. Worse is
+the failure in the other direction -- a save/restore test that re-reads the
+source will happily pass even when the restore does nothing, because the second
+save reads back whatever the first restore wrote. Once a block is evicted its
+only copy lives on the host, and the test has to model that.
+
+Not covered: the block is relocated every step rather than left away for a
+while, though nothing writes to an absent block; and the scheduler still owns
+every block, so this is the data path and not the allocator integration.
+
+### Explicit DMA does not care about locality, only about transfer size
+
+`tools/kv_transport.py`, using vLLM's own `swap_blocks` and `swap_blocks_batch`
+(the latter submits every copy in one `cuMemcpyBatchAsync`) rather than a
+synthetic proxy. Geometry is per layer, because that is how a KV cache is laid
+out: moving one block of context means one copy per attention layer. Defaults
+model Qwen3.8-27B at fp8 -- 16 attention layers, 32 KiB per 16-token block.
+
+| granule | UM faulting (2026-09-04) | explicit, one copy per block | explicit, one copy per run |
+|---|---|---|---|
+| 16 tok | 4.1 GB/s | **17.2** | 17.2 |
+| 64 tok | — | **17.2** | 35.6 |
+| 128 tok | 6.1 | **17.2** | 43.2 |
+| 512 tok | 7.6 | **17.2** | 51.0 |
+| 1024 tok | 12.6 | **17.2** | 52.8 |
+
+Contiguous ceiling 54.4 GB/s. **The per-block column is flat**: scattering the
+blocks across the pool costs nothing at all, which is the opposite of the
+fault-driven curve that this design was previously being shaped around. What
+costs is submission, and the whole table collapses to
+
+    cost = copies x 1.30 us + bytes / 54 GB/s
+
+confirmed across two geometries -- 1.31 us per copy at 32 KiB (Qwen3.8-27B fp8,
+16 layers) and 1.26 us at 64 KiB (Qwen3-8B bf16, 36 layers), where the larger
+copy raises the per-block rate to 26 GB/s exactly as a fixed overhead predicts.
+
+**So granularity stops being a policy constraint and becomes a batching
+optimization.** A policy may score 16-token blocks and pay nothing for
+scattering them; coalescing runs into single descriptors is opportunistic
+profit when the chosen set happens to contain them. Attention sinks cost one
+block, not a 1024-token page -- which was the objection that made the coarse
+granularity unacceptable.
+
+In fetch budget, at a 5% latency allowance on a 20.7 ms decode step
+(Qwen3.8-27B, fp8, 32 KiB/token across all layers):
+
+| | tokens per step |
+|---|---|
+| fully scattered blocks | **543** |
+| 128-token runs coalesced | 1,364 |
+| contiguous | 1,718 |
+
+The 8B at bf16 is far tighter -- 184 tokens/step scattered, because it spends
+144 KiB per token across 36 layers. That is the arithmetic that makes fp8 and a
+hybrid stack matter to a pager, rather than being incidental preferences.
+
 ## Reproducing
 
     tools/blocktable_permute.py run MODEL OUT.json [--kv fp8] [--graphs]
@@ -377,6 +476,10 @@ look at.
     tools/blocktable_evict.py   run MODEL OUT.json [--budget N] [--sink N]
                                     [--needle] [--needle-block N] [--diagnose]
     tools/blocktable_evict.py   report OUT.json [OUT.json ...]
+
+    tools/kv_roundtrip.py       run MODEL OUT.json [--block N] [--kv fp8]
+    tools/kv_transport.py       sweep [--layers N] [--block-bytes N]
+    tools/kv_transport.py       verify
 
 The engine is forced in-process (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) because the
 hook has to run in the same interpreter as the model runner, and prefix caching

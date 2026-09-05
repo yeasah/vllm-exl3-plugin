@@ -1,0 +1,178 @@
+{
+ "latency_budget": 0.05,
+ "step_ms": 20.7,
+ "blocks": 256,
+ "layers": 36,
+ "block_bytes": 65536,
+ "tokens_per_block": 16,
+ "bytes_moved": 603979776,
+ "copies_per_call": 9216,
+ "contiguous": {
+  "ms": 11.210838317871094,
+  "gbps": 53.87463085942479,
+  "pct_step": 54.15863921676857
+ },
+ "rows": [
+  {
+   "granule_blocks": 1,
+   "granule_tokens": 16,
+   "granule_bytes": 65536,
+   "swap_blocks": {
+    "ms": 22.857579040527344,
+    "gbps": 26.42361095762247,
+    "pct_step": 110.42308715230601,
+    "tokens_per_step": 185.46846070108546
+   },
+   "swap_batch": {
+    "ms": 22.796192932128907,
+    "gbps": 26.494765060035622,
+    "pct_step": 110.12653590400438,
+    "tokens_per_step": 185.96789440332623
+   },
+   "coalesced": {
+    "ms": 23.051869201660157,
+    "gbps": 26.200902439464752,
+    "pct_step": 111.36168696454182,
+    "tokens_per_step": 183.9052600426298
+   }
+  },
+  {
+   "granule_blocks": 2,
+   "granule_tokens": 32,
+   "granule_bytes": 131072,
+   "swap_blocks": {
+    "ms": 23.04749755859375,
+    "gbps": 26.20587221951102,
+    "pct_step": 111.34056791591183,
+    "tokens_per_step": 183.94014314231978
+   },
+   "swap_batch": {
+    "ms": 23.04772033691406,
+    "gbps": 26.205618914624033,
+    "pct_step": 111.34164413968146,
+    "tokens_per_step": 183.93836518443382
+   },
+   "coalesced": {
+    "ms": 17.099140930175782,
+    "gbps": 35.32222925504545,
+    "pct_step": 82.60454555640474,
+    "tokens_per_step": 247.92824489320233
+   }
+  },
+  {
+   "granule_blocks": 4,
+   "granule_tokens": 64,
+   "granule_bytes": 262144,
+   "swap_blocks": {
+    "ms": 23.037530517578126,
+    "gbps": 26.217210023407265,
+    "pct_step": 111.29241795931462,
+    "tokens_per_step": 184.0197236750388
+   },
+   "swap_batch": {
+    "ms": 23.034991455078124,
+    "gbps": 26.220099850171685,
+    "pct_step": 111.28015195689916,
+    "tokens_per_step": 184.0400074932705
+   },
+   "coalesced": {
+    "ms": 14.125593566894532,
+    "gbps": 42.75783337101798,
+    "pct_step": 68.23958244876586,
+    "tokens_per_step": 300.1190696818279
+   }
+  },
+  {
+   "granule_blocks": 8,
+   "granule_tokens": 128,
+   "granule_bytes": 524288,
+   "swap_blocks": {
+    "ms": 23.031890869140625,
+    "gbps": 26.223629637341013,
+    "pct_step": 111.26517328087259,
+    "tokens_per_step": 184.06478322108256
+   },
+   "swap_batch": {
+    "ms": 23.027066040039063,
+    "gbps": 26.22912423796459,
+    "pct_step": 111.24186492772495,
+    "tokens_per_step": 184.10335005895558
+   },
+   "coalesced": {
+    "ms": 12.638750457763672,
+    "gbps": 47.787934259671225,
+    "pct_step": 61.056765496442864,
+    "tokens_per_step": 335.4255639564326
+   }
+  },
+  {
+   "granule_blocks": 16,
+   "granule_tokens": 256,
+   "granule_bytes": 1048576,
+   "swap_blocks": {
+    "ms": 23.022763061523438,
+    "gbps": 26.234026488740405,
+    "pct_step": 111.22107759190067,
+    "tokens_per_step": 184.1377591677946
+   },
+   "swap_batch": {
+    "ms": 23.021585083007814,
+    "gbps": 26.23536884286027,
+    "pct_step": 111.21538687443388,
+    "tokens_per_step": 184.14718120904124
+   },
+   "coalesced": {
+    "ms": 11.978665924072265,
+    "gbps": 50.421288967266825,
+    "pct_step": 57.86795132402061,
+    "tokens_per_step": 353.9091938010062
+   }
+  },
+  {
+   "granule_blocks": 32,
+   "granule_tokens": 512,
+   "granule_bytes": 2097152,
+   "swap_blocks": {
+    "ms": 23.0085693359375,
+    "gbps": 26.2502099622784,
+    "pct_step": 111.15250886926329,
+    "tokens_per_step": 184.25135166394142
+   },
+   "swap_batch": {
+    "ms": 23.00836944580078,
+    "gbps": 26.25043801659884,
+    "pct_step": 111.1515432164289,
+    "tokens_per_step": 184.2529523870158
+   },
+   "coalesced": {
+    "ms": 11.578841400146484,
+    "gbps": 52.16236712529451,
+    "pct_step": 55.936431884765625,
+    "tokens_per_step": 366.1298962041546
+   }
+  },
+  {
+   "granule_blocks": 64,
+   "granule_tokens": 1024,
+   "granule_bytes": 4194304,
+   "swap_blocks": {
+    "ms": 23.0055419921875,
+    "gbps": 26.253664278159878,
+    "pct_step": 111.13788402022948,
+    "tokens_per_step": 184.27559765554116
+   },
+   "swap_batch": {
+    "ms": 23.022805786132814,
+    "gbps": 26.233977804902974,
+    "pct_step": 111.22128399097977,
+    "tokens_per_step": 184.1374174538478
+   },
+   "coalesced": {
+    "ms": 11.377188873291015,
+    "gbps": 53.08690773499396,
+    "pct_step": 54.96226508836239,
+    "tokens_per_step": 372.6192864699894
+   }
+  }
+ ]
+}

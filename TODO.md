@@ -1218,16 +1218,25 @@ tier available beyond that.
    any scoring because it converts policy error into a tunable cost -- a recency
    pager is StreamingLLM with an undo button, and shippable with no calibration.
 
-   Two things to settle first, both cheap and both upstream of any policy.
-   **Can a nulled block slot be restored on a running request?** `RSWASpec`
-   already frees blocks from the middle of a running request and substitutes
-   `null_block`, which is the reclamation half neither tool here does -- but
-   every in-tree caller only slides forward and never restores, so that
-   direction is unexercised. **What does scattered explicit DMA cost at
-   16-token granularity?** The measured granularity curve is UM page migration,
-   which this design does not use; if explicit DMA is not scatter-sensitive,
-   the policy scores blocks rather than spans, and attention sinks stop costing
-   a whole page. See [docs/kv-pager.md](docs/kv-pager.md).
+   ~~Two things to settle first~~ **both settled 2026-09-05**
+   ([docs/kv-pager.md](docs/kv-pager.md)). **A block can be freed and restored
+   on a running request** -- `tools/kv_roundtrip.py` destroys a block's GPU
+   copy, restores it from host memory into a *different* physical block and
+   repoints the view, bit-identically, on bf16, fp8 and EXL3; the arm that
+   skips the copy diverges immediately, so the destroy was real. **And explicit
+   DMA does not care about locality** -- `tools/kv_transport.py` measures a flat
+   17.2 GB/s from 16-token blocks to 1024-token runs, against 4.1 -> 12.6 GB/s
+   for the UM faulting curve this design was previously shaped around. Cost is
+   `copies x 1.30 us + bytes / 54 GB/s`, so **the policy scores blocks, not
+   spans**, and coalescing is opportunistic rather than required.
+
+   What that leaves for the pager itself is the *allocator*: every tool so far
+   imposes a view while vLLM's block pool still owns everything, so nothing is
+   reclaimed yet. `RSWASpec` frees blocks from the middle of a running request
+   and substitutes `null_block`, which is the half that is missing; note that
+   the restore direction need not be in-place, since block order carries no
+   meaning, so an append is enough and the append-only worker protocol is not
+   the obstacle it looks like.
 
 4. **Measure end to end**: latency and output quality at several residency
    budgets. Only this can say whether the mass-captured proxy translates.
