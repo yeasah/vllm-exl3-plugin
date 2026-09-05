@@ -248,6 +248,126 @@ The needle is planted at an exact block boundary deliberately -- one straddling
 two blocks would survive the loss of either, and the arms would no longer
 differ in exactly one thing.
 
+## Design context carried forward
+
+Recorded 2026-09-04 from a design session that preceded the measurements above.
+Everything here is either superseded by them or still live, and it is labelled
+either way rather than left to be re-derived.
+
+### What the measurements superseded
+
+The design was pinned on a choice between two branches, and **the trade-off
+that made it a choice turned out to be false**:
+
+- *Branch A, reorder and compact.* No mask, runs on FA2, fp8 available. Thought
+  to break prefix-cache hashing, ALiBi and sliding window.
+- *Branch B, holes plus `null_block` plus `mask_mod`.* Logical positions
+  preserved, so prefix-cache hashing stays valid. Needs FA4 (not available on
+  consumer hardware) or FlexAttention, which is 16-bit only -- and bf16 at 50%
+  residency is exactly fp8 at 100%, so that carrier defeats the purpose.
+
+The mechanism measured here is a third option with both sets of properties,
+because residency is imposed as a **per-step view** rather than as a change to
+anything durable. The authoritative `req_to_blocks`, the allocator and the
+prefix-cache bookkeeping never see the compaction, so Branch B's best argument
+survives intact under Branch A's mechanism: **a pager relocates blocks rather
+than modifying them**, so a block's hash stays truthful and a hit on a
+non-resident block is a fetch rather than a wrong answer. That is the property
+that makes paging composable where TriAttention's compaction is not -- its
+compacted block holds a different set of tokens than its hash claims, which is
+unfixable in principle. Prefix caching was off in every run here, so this is a
+structural argument and not yet a measurement.
+
+Also superseded: FA4 and FlexAttention are not needed at all; ALiBi and T5
+relative bias remain the genuine exceptions, on a rule worth keeping --
+**position that is mixed into the hidden state before K is computed (RoPE,
+learned or sinusoidal absolute, NoPE) survives reordering; position computed
+from indices at attention time (ALiBi, T5 bias) does not.**
+
+**And the coarse-granularity worry was an artefact of the transport, not of
+paging.** A sweep of managed-memory fault migration put a 16-token granule at
+4.1 GB/s and only reached the plateau near 1 MiB -- 1024 consecutive token
+positions, which is a whole region of context rather than a page, and coarse
+enough to wreck the sink structure the whole idea depends on. That curve is a
+property of **UM page migration**, and the design measured here does not fault:
+explicit pinned DMA's granularity floor is per-transfer overhead, which is much
+smaller. Block-granular residency is plausibly back on the table, and *what
+scattered explicit DMA actually costs at 16-token granularity is unmeasured* --
+it is the measurement that decides whether the policy scores blocks or spans.
+
+### Still live
+
+**The reclamation precedent is R-SWA, and it is in-tree.** Nothing here frees
+anything: both tools impose views while the allocator keeps every block.
+`RSWASpec` (`kv_cache_interface.py`) already does the missing half --
+`_remove_blocks_in_range` (`single_type_kv_cache_manager.py`) frees blocks from
+the **middle** of a running request and substitutes `block_pool.null_block` in
+`req_to_blocks`, returning the memory to the pool. Two callers exist and the
+distinction matters: sliding window evicts a head prefix, R-SWA evicts a gap.
+The gap case is the pager's shape.
+
+The open question underneath it is sharp, and it is the next mechanical thing to
+find out: **R-SWA only ever slides forward, so it never restores a nulled slot.**
+Whether the block manager supports re-populating a `null_block` slot on a
+running request -- or whether R-SWA works precisely because it never asks -- is
+untested, and it is the one asymmetry between "sliding window" and "pager".
+
+**The fetch budget is absolute, not proportional.** At fp8 on the 27B, roughly
+1,700 tokens per decode step costs 5% latency, *whatever the context length*.
+So "keep 5% resident" is cheap at 32K and unaffordable at 300K, where 5% is
+14,800 tokens and about 44% of a step. A policy has to bound **tokens fetched
+per step**, not a fraction of context -- which is a different objective from the
+one every published eviction method optimizes.
+
+**Quest is the relevant literature; kvpress is the wrong shelf.** NVIDIA's
+kvpress carries 40+ methods and a RULER harness, but every one of them prunes
+permanently during prefill or compresses periodically during decode -- none
+decides *per decoding step* which parts of the cache to use, because permanence
+is baked into a compression suite's premise. Quest is the matching shape: per-page
+min/max bounds on the keys give an upper bound on that page's attention for the
+current query, and it selects top-k pages every step. Page-granular, query-aware,
+non-destructive, re-decided each step. `ExpectedAttentionPress` (estimating
+importance from the future-query distribution, the same family as TriAttention's
+scorer) remains interesting as the *content* of the decision; Quest is the
+*structure* of it.
+
+**Policy constraints already measured, that a first policy should not rediscover:**
+
+- **Aggregate a GQA group by mean, not max** -- 76.7% vs 69.6% of mass captured
+  at a 5% budget on Qwen3-8B. Max follows whichever head is most confident;
+  mean finds the consensus. A larger effect than the union tax itself (~1 point).
+- **Per-layer budgets are probably right and a single global budget probably
+  wrong**, since early layers are much more diffuse than late ones.
+- **Hybrid stacks change the arithmetic**: Qwen3.8-27B is 16 attention layers of
+  64, the rest GDN recurrent state that cannot be paged at all -- so there is 4x
+  less to page than the parameter count suggests, and 4x less to save.
+- Sliding-window layers are already bounded; there is nothing to page.
+  MLA compresses KV into a shared latent and changes the object entirely.
+
+**Concentration rises with context, and the score's margin over recency rises
+with it** (Qwen3-8B, keep 5%, GQA-shared -- the numbers a pager actually gets):
+
+| context | oracle | trig score | recency | score - recency |
+|---|---|---|---|---|
+| 4K | 87.8% | 76.7% | 70.7% | +6.0 |
+| 8K | 86.7% | 70.8% | 59.5% | +11.3 |
+| 16K | 91.3% | 80.7% | 68.3% | +12.4 |
+| 32K | 92.7% | 78.1% | 62.9% | +15.2 |
+
+The 8K dip appears in the **oracle** too, so it is a property of that prompt at
+that length rather than of any policy -- the single-prompt caveat asserting
+itself. The trend is the point: the regime where paging matters is the regime
+where it works best, which is backwards from how these costs usually scale.
+
+**A disk tier is coherent, and for very long contexts it is not optional.** A
+1M-token context at fp8 is ~32 GB, so GPU plus host covers roughly half of one
+on this box; disk measured 2.2 GB/s here (virtualised, so a floor rather than
+the hardware's number). The observation that makes it plausible rather than
+desperate: what makes a 4x RoPE-scaled 1M context unsatisfying as a *capability*
+-- the model does not attend densely that far out -- is exactly what makes it
+cheap to page. You are paging a region the model has already decided not to
+look at.
+
 ## Reproducing
 
     tools/blocktable_permute.py run MODEL OUT.json [--kv fp8] [--graphs]

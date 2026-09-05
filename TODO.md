@@ -1218,6 +1218,17 @@ tier available beyond that.
    any scoring because it converts policy error into a tunable cost -- a recency
    pager is StreamingLLM with an undo button, and shippable with no calibration.
 
+   Two things to settle first, both cheap and both upstream of any policy.
+   **Can a nulled block slot be restored on a running request?** `RSWASpec`
+   already frees blocks from the middle of a running request and substitutes
+   `null_block`, which is the reclamation half neither tool here does -- but
+   every in-tree caller only slides forward and never restores, so that
+   direction is unexercised. **What does scattered explicit DMA cost at
+   16-token granularity?** The measured granularity curve is UM page migration,
+   which this design does not use; if explicit DMA is not scatter-sensitive,
+   the policy scores blocks rather than spans, and attention sinks stop costing
+   a whole page. See [docs/kv-pager.md](docs/kv-pager.md).
+
 4. **Measure end to end**: latency and output quality at several residency
    budgets. Only this can say whether the mass-captured proxy translates.
 
