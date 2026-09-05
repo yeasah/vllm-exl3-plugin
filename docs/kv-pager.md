@@ -467,6 +467,100 @@ The 8B at bf16 is far tighter -- 184 tokens/step scattered, because it spends
 144 KiB per token across 36 layers. That is the arithmetic that makes fp8 and a
 hybrid stack matter to a pager, rather than being incidental preferences.
 
+## The allocator: design
+
+Everything measured so far imposes a *view* — the kernel is told to attend to a
+subset, while vLLM's block pool still owns every block, so no memory is saved.
+This is the design for the part that actually reclaims, written after the
+measurements rather than before so it inherits their constraints instead of
+guessing at them.
+
+### The finding that shapes the phasing: a recency pager never fetches
+
+Worth stating first because it changes what phase 2 is for. A recency policy
+keeps the last K blocks plus sinks, and its window only ever slides *forward*.
+Blocks leave the resident set and are never asked for again, so after warmup the
+**fetch rate is zero** — the machinery's restore path, which is the entire
+difference between paging and eviction, would go untested by the very policy
+chosen to test the machinery. A recency pager is StreamingLLM, and it is
+StreamingLLM precisely because it never notices it was wrong.
+
+Two consequences, and the second is architectural:
+
+- Phase 2 needs a **`stress` policy** alongside `recency`: one that rotates
+  residency deliberately, so the fetch path runs, the transport is exercised
+  against the measured cost model, and the thrash curve gets measured. That is
+  a test policy, not a shippable one, and it is the only way "policy error is a
+  tunable cost" gets demonstrated rather than asserted.
+- A real pager needs a **demand signal** — something resident that says "you
+  will want this block that is not here". Recency has none by construction, and
+  neither does any policy that only looks at what it kept. This is what Quest's
+  per-page min/max key bounds actually are: kept resident when the block
+  leaves, they give an upper bound on that page's attention for the current
+  query without its keys. So Quest is not merely a better policy than recency,
+  it is *the fault detector*, and without something in that shape a pager can
+  only evict on a schedule and hope.
+
+  The bounds are not free: `num_kv_heads x head_dim x 2` values per block per
+  layer, which for Qwen3.8-27B (4 KV heads, head_dim 256) is 4 KiB in fp16
+  against the block's own 32 KiB — **12.5% overhead, or 6.25% at fp8** — and it
+  comes out of the residency budget. Worth measuring rather than assuming, and
+  worth knowing before a policy is chosen.
+
+### Architecture
+
+Four parts, three of which already exist as measured code.
+
+1. **A registered spec and manager.** `KVCacheSpecRegistry.register(spec_cls,
+   manager_class=...)` supports out-of-tree specs, and
+   `Attention.get_kv_cache_spec` is where a layer's spec is chosen — so the
+   allocator can be a plugin rather than a fork patch. The manager subclasses
+   `SingleTypeKVCacheManager`, bounds a request's GPU blocks to its budget, and
+   frees the rest through `_remove_blocks_in_range`, which is R-SWA's existing
+   code and already does exactly this for a middle gap.
+2. **A host tier.** A pinned per-layer block pool, moved with `swap_blocks` at
+   `copies x 1.30 us + bytes / 54 GB/s`. Sized by host RAM; the third tier
+   (disk) is out of scope until this one works.
+3. **The worker-side view** — built and measured, bit-exact when it drops
+   nothing.
+4. **An invariant checker**, for the reason below.
+
+### The decisions
+
+**How the two sides agree, without a protocol change.** The scheduler owns
+freeing; the worker owns the view; the null substitution never travels between
+them. The cheapest correct answer is **one policy function, called on both
+sides**, deterministic in inputs both already have — `num_computed_tokens`, the
+budget, the block count. Not two implementations that agree by review: literally
+one function, imported by both, which keeps the whole thing plugin-shaped with
+no fork patch. This breaks the moment a policy is query-aware, because the
+worker will know something the scheduler cannot — and *that* is when a residency
+field in `SchedulerOutput` becomes necessary. Deferring it is deliberate, not an
+oversight.
+
+**Ordering, because the failure is silent.** A freed block that the view still
+admits means attention reads another request's KV: plausible garbage, no crash,
+no NaN. So the sequence is fixed — at step N the worker decides, copies the
+block out to host, and drops it from the view; at step N+1 the scheduler frees
+it. There is never a step in which the view names a block the pool has given
+away. The invariant checker asserts exactly that (every id in the view is still
+owned by this request), and it should be built *before* the freeing, because it
+is the only thing that will notice when this is wrong.
+
+**A reserve pool, so a fetch does not cost a step.** A restored block needs a
+destination, and asking the scheduler for one costs a scheduling round trip —
+which would make every miss a two-step stall rather than a transfer. The pager
+should hold its own reserve of GPU blocks so a fetch is worker-local and
+immediate. Size it at the per-step fetch budget plus slack: 543 tokens/step at
+5% latency on the 27B at fp8 is ~34 blocks.
+
+### What "done" looks like
+
+One measurement, and it is the appliance's whole claim: **serve a context longer
+than GPU KV capacity allows**, with output quality measured against the same
+model served conventionally at a context that does fit. Everything else —
+thrash curves, fetch rates, policy comparisons — is instrumentation around that.
+
 ## Reproducing
 
     tools/blocktable_permute.py run MODEL OUT.json [--kv fp8] [--graphs]
