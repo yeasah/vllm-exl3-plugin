@@ -634,6 +634,40 @@ from. `summary()` reports `active_checks` and `scheduler_visible` for exactly
 this. A number without that record is not evidence about paging, because
 nothing distinguishes it from a number taken with the guard switched off.
 
+### The manager, so far
+
+`tools/kv_pager/` — `policy.py` (the residency decision, a pure function both
+sides import), `manager.py` (the spec and manager, registered rather than
+patched), `guard.py`. Tested in `tests/test_kv_pager_manager.py` against a real
+`BlockPool` and a real `FullAttentionManager` subclass, with no GPU and no
+engine.
+
+**Stated plainly: this evicts, it does not yet page.** Restores are *planned* —
+the manager records which indices the policy has asked back — but not
+performed, because a restored block needs a destination allocated inside the
+accounting `get_num_blocks_to_allocate` does. Until that exists a paged request
+loses context permanently, which makes this an evictor carrying a pager's
+bookkeeping.
+
+Two things worth keeping from building it.
+
+**The in-tree range helper cannot be reused.** `_remove_blocks_in_range`
+iterates backward and breaks at the first block already nulled — correct for a
+sliding window, whose freed region only ever grows from the front, and wrong
+for a pager, whose freed set is whatever the policy stopped choosing and can
+gain holes anywhere. A range spanning an earlier eviction frees only the part
+above the topmost hole, and reports success.
+
+**A test that names a failure it cannot produce is worse than no test.** The
+first version of the test above used `recency`, whose dropped set is one
+contiguous middle — so the range helper works on it, and the test passed
+against a deliberately broken manager while claiming to prove the decision not
+to use it. It only became real once it used `stress`, whose roaming window
+leaves holes scattered through the region it is not keeping, plus an assertion
+that a newly dropped block actually sits below an existing hole so a backward
+scan would meet one. Both mutations — the range helper, and forgetting
+`free_blocks` entirely — are now caught by it.
+
 ### What "done" looks like
 
 One measurement, and it is the appliance's whole claim: **serve a context longer

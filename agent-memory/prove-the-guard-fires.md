@@ -18,5 +18,9 @@ test is what forced the redesign to per-tensor classification.
 **How to apply:** demonstrate two cases where practical — the failure it was built for,
 and a harder variant where something legitimately large is missing for unrelated reasons.
 Pairs with [[verify-across-execution-modes]] and the project's habit of computing a figure
-two independent ways and requiring agreement.
+two independent ways and requiring agreement. A second failure shape worth checking for,
+found 2026-09-05: a check stated in terms of one quantity twice cannot fire at all -- the
+pager's length guard compared seq_len against the block count *derived from* seq_len by
+division, and only became falsifiable once the intended count came from outside. See
+[[silent-corruption-outranks-crashes]] for when to build the guard first.
 
