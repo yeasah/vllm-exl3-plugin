@@ -18,11 +18,23 @@ where the freed set is whatever the policy did not choose and can gain holes
 anywhere. Calling it on a range whose tail is already null would free nothing
 and report success.
 
-Scope, stated plainly: this evicts. Restores are *planned* here and not yet
-performed, because a restored block needs a destination allocated inside the
-accounting `get_num_blocks_to_allocate` does, and that is the next piece rather
-than something to bolt on quietly. Until then a paged request loses context
-permanently, which makes this an evictor with a pager's bookkeeping.
+Restores use the same shape the in-tree copy-on-write redirect does: reserve
+the extra block in `get_num_blocks_to_allocate`, draw it in
+`allocate_new_blocks`, and write it into the row *in place* rather than
+appending. That keeps every positional invariant while still handing the block
+to the worker through the ordinary new-block channel.
+
+The worker learns which logical index each restored block belongs to without a
+protocol change, because the pairing is implied: restored blocks are returned
+before appended ones and in ascending index order, so the first `len(restored)`
+new ids pair with `sorted(pending_restores)`. `restored[request_id]` records
+that pairing on this side so the two can be checked against each other rather
+than assumed equal.
+
+Still missing, and it is the transport rather than the bookkeeping: nothing
+copies a block's KV to the host before it is freed, or back afterwards. Until
+that exists a restored block is correctly *placed* and holds whatever the pool
+last left in it, so this manages residency without preserving content.
 """
 
 from __future__ import annotations
@@ -85,7 +97,11 @@ class PagedAttentionManager:
         self.evicted: defaultdict[str, set[int]] = defaultdict(set)
         #: row indices the policy wants back but that have no block yet
         self.pending_restores: defaultdict[str, set[int]] = defaultdict(set)
+        #: (row index, block id) for blocks restored in the last allocation,
+        #: in the order they are handed to the worker
+        self.restored: defaultdict[str, list] = defaultdict(list)
         self.blocks_freed = 0
+        self.blocks_restored = 0
 
     # -- the per-step hook -------------------------------------------------
 
@@ -118,6 +134,50 @@ class PagedAttentionManager:
         self.evicted[request_id] |= set(drop)
         self.evicted[request_id] -= want
         self.pending_restores[request_id] = want
+
+    # -- restores ----------------------------------------------------------
+
+    def get_num_blocks_to_allocate(self, request_id: str, *args, **kwargs) -> int:
+        """Reserve the restores alongside the ordinary growth.
+
+        Called after `remove_skipped_blocks` in `allocate_slots`, so
+        `pending_restores` is already populated for this step. Reserving here
+        and drawing in `allocate_new_blocks` is the same contract the partial
+        prefix-cache hit uses for its CoW block.
+        """
+        base = super().get_num_blocks_to_allocate(request_id, *args, **kwargs)
+        return base + len(self.pending_restores.get(request_id, ()))
+
+    def allocate_new_blocks(self, request_id: str, *args, **kwargs) -> list:
+        """Restored blocks first, then ordinary growth.
+
+        Order is load-bearing: these become the request's new block ids in
+        this order, and the worker pairs the leading ones with
+        `sorted(pending_restores)` to recover which logical index each holds.
+        """
+        restored = self._restore_blocks(request_id)
+        grown = super().allocate_new_blocks(request_id, *args, **kwargs)
+        return restored + list(grown)
+
+    def _restore_blocks(self, request_id: str) -> list:
+        want = sorted(self.pending_restores.get(request_id, ()))
+        self.restored[request_id] = []
+        if not want:
+            return []
+        req_blocks = self.req_to_blocks[request_id]
+        want = [i for i in want if i < len(req_blocks)]
+        if not want:
+            return []
+        blocks = self.block_pool.get_new_blocks(len(want))
+        for idx, block in zip(want, blocks):
+            req_blocks[idx] = block
+        self.restored[request_id] = [
+            (idx, block.block_id) for idx, block in zip(want, blocks)
+        ]
+        self.evicted[request_id] -= set(want)
+        self.pending_restores[request_id] = set()
+        self.blocks_restored += len(want)
+        return list(blocks)
 
     def _free_indices(self, request_id: str, indices) -> None:
         """Hand specific row positions back to the pool, nulling them in place.
@@ -158,6 +218,7 @@ class PagedAttentionManager:
     def free(self, request_id: str) -> None:
         self.evicted.pop(request_id, None)
         self.pending_restores.pop(request_id, None)
+        self.restored.pop(request_id, None)
         super().free(request_id)
 
 

@@ -176,3 +176,85 @@ def test_freeing_the_request_clears_paging_state():
     mgr.free("r")
     assert "r" not in mgr.evicted
     assert "r" not in mgr.pending_restores
+
+
+def simulate(mgr, pool, req_id, blocks_total, budget):
+    """Drive a request through the real allocate path, block by block.
+
+    Mirrors `allocate_slots`' order -- `remove_skipped_blocks`, then ask how
+    many blocks are needed, then draw them -- because the two overrides have to
+    agree with each other and the only way to find out is to run them in the
+    sequence the scheduler uses.
+
+    `num_cached_block` is seeded so `get_num_blocks_to_allocate` takes the
+    running-request fast path, which is the branch a decoding request is on.
+    """
+    mgr.num_cached_block[req_id] = 0
+    peak_real = 0
+    restored_total = 0
+    for step in range(blocks_total):
+        computed = step * BLOCK
+        mgr.remove_skipped_blocks(req_id, processed_computed_tokens=computed)
+        want = int(pool.get_num_free_blocks())
+        n = mgr.get_num_blocks_to_allocate(req_id, computed + BLOCK, [], computed, computed, computed + BLOCK)
+        drawn = mgr.allocate_new_blocks(req_id, computed + BLOCK, computed + BLOCK)
+        assert len(drawn) == n, (
+            f"step {step}: reserved {n} blocks and drew {len(drawn)} -- the "
+            f"reservation and the draw have drifted apart"
+        )
+        assert want - pool.get_num_free_blocks() == n, (
+            f"step {step}: the pool lost a different number of blocks than "
+            f"were reserved"
+        )
+        restored_total += len(mgr.restored[req_id])
+        null = mgr._null_block.block_id
+        real = sum(1 for b in mgr.req_to_blocks[req_id] if b.block_id != null)
+        peak_real = max(peak_real, real)
+    return peak_real, restored_total
+
+
+def test_reservation_matches_the_draw_across_a_long_run():
+    mgr, pool = make_manager(budget=8, num_blocks=512, policy="stress")
+    simulate(mgr, pool, "r", blocks_total=60, budget=8)
+
+
+def test_paging_actually_bounds_the_blocks_held():
+    """The assertion that makes this a pager rather than bookkeeping.
+
+    A request 60 blocks long must never hold more than its budget plus the
+    tail it is currently writing into. Without the eviction this is 60, so a
+    manager that nulled entries without returning them, or reserved without
+    freeing, fails here rather than somewhere subtle later.
+    """
+    budget = 8
+    mgr, pool = make_manager(budget=budget, num_blocks=512, policy="stress")
+    peak, restored = simulate(mgr, pool, "r", blocks_total=60, budget=budget)
+    assert peak <= budget + 2, f"held {peak} blocks against a budget of {budget}"
+    assert restored > 0, "nothing was ever restored; the fetch path is untested"
+
+
+def test_restored_blocks_land_at_their_own_indices():
+    mgr, pool = make_manager(budget=8, num_blocks=512, policy="stress")
+    mgr.num_cached_block["r"] = 0
+    give_blocks(mgr, pool, "r", 24)
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=24 * BLOCK)
+
+    later = 24 * BLOCK + 6 * BLOCK
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=later)
+    want = sorted(mgr.pending_restores["r"])
+    assert want, "stress asked for nothing back"
+
+    mgr.get_num_blocks_to_allocate("r", later + BLOCK, [], later, later, later + BLOCK)
+    mgr.allocate_new_blocks("r", later + BLOCK, later + BLOCK)
+
+    pairs = mgr.restored["r"]
+    assert [i for i, _ in pairs] == want, "restores are not in ascending order"
+    null = mgr._null_block.block_id
+    for idx, block_id in pairs:
+        got = mgr.req_to_blocks["r"][idx].block_id
+        assert got == block_id != null, (
+            f"index {idx} holds {got}, not the restored block {block_id}"
+        )
+    assert not (set(want) & set(null_positions(mgr, "r"))), (
+        "a restored index is still null"
+    )

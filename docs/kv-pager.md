@@ -642,12 +642,27 @@ patched), `guard.py`. Tested in `tests/test_kv_pager_manager.py` against a real
 `BlockPool` and a real `FullAttentionManager` subclass, with no GPU and no
 engine.
 
-**Stated plainly: this evicts, it does not yet page.** Restores are *planned* —
-the manager records which indices the policy has asked back — but not
-performed, because a restored block needs a destination allocated inside the
-accounting `get_num_blocks_to_allocate` does. Until that exists a paged request
-loses context permanently, which makes this an evictor carrying a pager's
-bookkeeping.
+Restores work, and they use the shape the in-tree copy-on-write redirect
+already uses: reserve the extra block in `get_num_blocks_to_allocate`, draw it
+in `allocate_new_blocks`, write it into the row *in place*. The worker learns
+which logical index each restored block belongs to with no protocol change,
+because the pairing is implied — restored blocks are returned before grown ones
+and in ascending index order, so the leading new ids pair with
+`sorted(pending_restores)`, and `restored[request_id]` records that pairing on
+this side so the two can be checked rather than assumed equal.
+
+The assertion that makes it a pager rather than bookkeeping: a 60-block request
+on a budget of 8 never holds more than **budget + 2** real blocks, across a run
+that restores repeatedly. And the reservation matches the draw at every step,
+which is the accounting bug that would otherwise surface as an OOM under load
+rather than as a wrong answer.
+
+**Still missing, and it is transport rather than bookkeeping:** nothing copies
+a block's KV to the host before it is freed, or back afterwards. A restored
+block today is correctly *placed* and holds whatever the pool last left in it,
+so this manages residency without preserving content. That is the next piece,
+and the ordering the design fixed — copy out at step N, free at N+1 — is what
+it has to respect.
 
 Two things worth keeping from building it.
 
