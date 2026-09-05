@@ -118,6 +118,26 @@ instance count needed for the same number of informative pairs rises several-fol
 right choice is the most diverse suite on which the model still lands near half, not
 the hardest one available.
 
+## Context exhaustion is a harness failure, and needs its own policy
+
+A bench with no context management measures itself as much as the model. When a request
+outgrows the window, a real agent harness would compact and continue; this one fails, and
+the failure is not even labelled consistently -- hitting the limit on the *prompt* raises
+an explicit error, while hitting it on *output* is not terminal (the agent is told to be
+less chatty and retries) and surfaces later under an unrelated category. Both are the same
+event.
+
+Scoring them as model failures is wrong on its own terms, too: spending more of the
+context window is a legitimate strategy, and "it should have finished sooner" is not a
+claim the harness is entitled to make.
+
+**The policy, for a paired comparison:** if both arms hit context on the same instance,
+it is a null result -- drop the pair, which turns it into the increased sampling error it
+actually is. If exactly one arm hits it, the pair needs manual inspection and does not
+count toward the statistic either way. Both cases must be reported with `n`, since a
+benchmark that quietly discards its hardest instances flatters whichever arm ran out
+first.
+
 ## Comparative runs on rented hardware: a preflight problem, not a procurement one
 
 `bench/` makes the operator name the platform, because a throughput number is a fact

@@ -14,6 +14,27 @@ whole file.
 This note records what was established before any of it was built, so the decisions are
 auditable and the work is resumable.
 
+## Why upstream leaves the embedding dense, in their own words
+
+Worth stating before any of the measurements below, because it changes what the gap
+*is*. On the Qwen3.8-27B model card, turboderp writes that the EXL3 quant "contains
+2.4 GiB of (unquantized) embeddings, **not counted since they're not loaded into VRAM
+during inference**" ([discussion 2](https://huggingface.co/turboderp/Qwen3.8-27B-exl3/discussions/2),
+read 2026-08-28).
+
+That is true of their serving path and false of ours. exllamav3 keeps the embedding on
+the host and gathers rows there; vLLM's `VocabParallelEmbedding` is a device tensor in
+the model graph, so every byte lands in VRAM. So this is not an oversight upstream failed
+to notice — it is a decision that is correct for their deployment and simply does not
+transfer to a paged, batched, GPU-resident server.
+
+Two things follow. The bpw figures on those model cards are consistent within their own
+frame rather than misleading, and **the language elsewhere in this repo about upstream
+"mistakes" or "underperformance" on this axis is harsher than the facts warrant**. What
+is actually true is narrower and still worth the whole effort: an EXL3 checkpoint carries
+a tensor that costs us gigabytes of VRAM and costs them nothing, and nobody upstream has
+a reason to fix it.
+
 ## The prize, measured
 
 Embed/head share of real EXL3 checkpoints (bytes off the shard headers, `tools/`-free --
