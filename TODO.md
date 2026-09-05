@@ -1238,6 +1238,17 @@ tier available beyond that.
    meaning, so an append is enough and the append-only worker protocol is not
    the obstacle it looks like.
 
+   **The hazard to design around is that the null substitution never leaves the
+   scheduler.** `_remove_blocks_in_range` mutates `req_to_blocks` in place, and
+   `get_block_ids` only ever ships *newly allocated* blocks, so the worker's
+   row still names a block the pool has already handed to someone else --
+   verified 2026-09-05, `null_block` appears nowhere in the scheduler, the
+   scheduler output or the live runner. R-SWA is safe because its mask stops
+   attention reading those positions at all. A view-based pager is safe for the
+   same reason by a different route, but only while the two sides agree every
+   step: free a block the view still admits and the kernel reads another
+   request's KV, which is plausible garbage rather than a crash.
+
 4. **Measure end to end**: latency and output quality at several residency
    budgets. Only this can say whether the mass-captured proxy translates.
 
