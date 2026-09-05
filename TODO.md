@@ -1178,14 +1178,25 @@ tier available beyond that.
 
 **Phasing, gated so the cheap thing comes first.**
 
-1. **Block-table permutation test** (`tools/`, an afternoon). For a decode step,
-   attention output is `sum_i softmax(q.k_i) v_i` over the resident set, softmax
-   is permutation-invariant, and each cached K already carries its RoPE rotation
-   -- so block *order* should not matter and no mask, `null_block` or FA4 should
-   be needed. Permute a running request's block table between decode steps
-   (tail block last) and check the output is unchanged. If it holds, residency
-   can be managed by rewriting `req_to_blocks`, on FA2, with fp8 KV. If not,
-   something reads position from slot index and everything below changes.
+1. ~~**Block-table permutation test**~~ **Done, it holds** --
+   `tools/blocktable_permute.py`, [docs/kv-pager.md](docs/kv-pager.md).
+   Permuting a running request's full blocks between decode steps leaves the
+   first attention that sees the rewrite within one representable step, on
+   FLASH_ATTN, FlashInfer and Triton, with fp8 KV, and on an EXL3 checkpoint,
+   while a single deliberately misplaced block moves 1405 of 2102 elements in
+   the same measurement. So residency *is* a block-table rewrite: no mask, no
+   `null_block`, no FA4. Three constraints came out of it and phase 2 inherits
+   them: the partial tail block must stay last; sliding-window groups must be
+   excluded (measured, not assumed -- permuting them moves layer 0 by 5.61 on a
+   scale of 11.4); and prefix caching was off throughout, because its
+   bookkeeping hashes a block by the token prefix leading to it.
+
+   The one thing it did *not* clear is the step phase 2 starts from: eviction
+   compacts the row, so the token at position `p` stops living at row index
+   `p // block_size`, which is what the slot-mapping kernel assumes. **A pager
+   needs its own slot-mapping path**, and that is a design decision rather than
+   a detail. Permuting proves index carries no positional meaning; it does not
+   prove the engine can be told a request has fewer blocks than positions.
 2. **A recency/LRU pager.** Policy-agnostic machinery: transport, granularity,
    residency bookkeeping, the fault net, thrash behaviour. Worth building before
    any scoring because it converts policy error into a tunable cost -- a recency
@@ -1224,7 +1235,9 @@ mass-captured predicts output quality at all.
 Build it here -- `tools/gsm8k_kv.py`, `tools/niah_kv.py` and the TurboQuant work
 already live here -- and split the KV subsystem to its own repo if it has legs.
 
-→ [docs/turboquant-kv.md](docs/turboquant-kv.md), [docs/triattention.md](docs/triattention.md)
+→ [docs/kv-pager.md](docs/kv-pager.md),
+[docs/turboquant-kv.md](docs/turboquant-kv.md),
+[docs/triattention.md](docs/triattention.md)
 
 ## `kvarn-accuracy` — Does KVarN actually match FP16 accuracy?
 
