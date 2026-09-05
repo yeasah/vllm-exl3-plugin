@@ -687,9 +687,60 @@ overlapping *possible*, but an async copy that has not landed before the pool
 reassigns the block is precisely what the guard exists for, so the fast version
 should arrive with an event to wait on rather than by deleting the wait.
 
-**What is still missing is the wiring**: the manager evicts and restores, the
-tier can hold and return a block, and nothing yet calls the second from the
-first. That is a worker-side pager, since the KV tensors live there.
+### Wired, end to end
+
+`tools/kv_pager/worker.py` and `state.py`, driven by `tools/kv_pager_run.py`.
+The manager publishes its per-step decision to a small state object and the
+worker consumes it — the worker never reaches into the manager, so replacing
+that object with a field on `SchedulerOutput` is the only change a
+multiprocess deployment needs.
+
+    off     no pager                                    the reference
+    full    the whole pager, evicting nothing           bit-identical to off
+    paged   budget 16 of 64 blocks, stress policy       78 out, 30 back,
+                                                        0 guard violations,
+                                                        0 restores unbacked
+
+`full` being bit-identical is the control arm the integrity section asked for,
+and it is doing real work: manager publishing, row sync, view, transport
+machinery and guard all active, with a policy that keeps everything resident.
+
+Two bugs on the way, and the interesting thing is that neither was caught by
+the thing built to catch bugs.
+
+**The pager silently did nothing.** `FullAttentionSpec.merge` rebuilds the
+group's spec by naming every field it knows about, so a subclass's own fields
+fall back to their defaults — `budget_blocks=0`, policy `full`. Nothing raised;
+the run simply paged nothing and looked like a baseline. It was found by a
+*transfer counter reading zero*, which is worth noting: the guard checks that
+what happens is legal, and a pager that does nothing is perfectly legal. The
+counters are the instrument for "did anything happen at all", and a paging
+result with no transfer counts attached is not evidence.
+
+**The new key was landing inside a restored block.** Restored blocks reach the
+worker through the append channel, so its row grows faster than the context
+does and index `p // block_size` stops meaning position `p` — but
+`compute_slot_mappings` indexes that row positionally. The guard's
+`write_target` check reported it immediately and precisely, which is exactly
+the case it was written for: a write going somewhere plausible and wrong. The
+fix is to copy the manager's mapping over the worker's row before the stock
+`prepare_attn` runs, so the slot mapping is right by construction instead of
+compensated for downstream.
+
+**The two sides run on different clocks, and must.** The manager frees against
+`total_computed_tokens - num_in_flight_tokens`, because an in-flight step is
+still reading blocks above that; the view has to describe where *this* step's
+key is written. Taking the manager's resident set wholesale puts the tail a
+block behind whenever they differ. So the policy's choice of full blocks comes
+from the manager — that is what it froze its freeing on — and everything from
+the manager's tail forward is kept unconditionally, those indices being
+unfreeable by construction. The mismatch is expected and counted rather than
+suppressed.
+
+**What is still missing** is the quality question: `paged` diverges from the
+baseline at step 2, which is what attending to 16 blocks of 64 should do, and
+nothing here says whether the output is any good. That is the capability
+measurement, and it now has the control arm that makes it readable.
 
 Two things worth keeping from building it.
 

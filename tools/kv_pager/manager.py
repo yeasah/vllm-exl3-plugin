@@ -42,7 +42,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from dataclasses import replace as dataclasses_replace
 
+from . import state as pager_state
 from .policy import POLICIES
 
 
@@ -82,6 +84,32 @@ def make_spec_class():
         sink_blocks: int = 2
         policy_name: str = "recency"
 
+        @classmethod
+        def merge(cls, specs):
+            """Carry the paging fields through the group merge.
+
+            `FullAttentionSpec.merge` rebuilds the spec by naming every field
+            it knows about, so a subclass's own fields silently fall back to
+            their defaults -- which for this one means `budget_blocks=0`, a
+            policy of `full`, and a pager that quietly does nothing at all.
+            Nothing raises; the run simply pages nothing and looks like a
+            baseline. Found by a transfer counter reading zero, not by a check.
+            """
+            merged = super().merge(specs)
+            first = specs[0]
+            for spec in specs[1:]:
+                if (spec.budget_blocks, spec.sink_blocks, spec.policy_name) != (
+                        first.budget_blocks, first.sink_blocks,
+                        first.policy_name):
+                    raise ValueError(
+                        "layers in one KV cache group disagree about paging")
+            return dataclasses_replace(
+                merged,
+                budget_blocks=first.budget_blocks,
+                sink_blocks=first.sink_blocks,
+                policy_name=first.policy_name,
+            )
+
     return PagedAttentionSpec
 
 
@@ -107,6 +135,7 @@ class PagedAttentionManager:
         self.restored: defaultdict[str, list] = defaultdict(list)
         self.blocks_freed = 0
         self.blocks_restored = 0
+        self.state = pager_state.current()
 
     # -- the per-step hook -------------------------------------------------
 
@@ -149,6 +178,7 @@ class PagedAttentionManager:
         self.pending_evictions[request_id] = drop
         self.evicted[request_id] -= want
         self.pending_restores[request_id] = want
+        self._publish(request_id, processed_computed_tokens, drop)
 
     # -- restores ----------------------------------------------------------
 
@@ -172,6 +202,7 @@ class PagedAttentionManager:
         """
         restored = self._restore_blocks(request_id)
         grown = super().allocate_new_blocks(request_id, *args, **kwargs)
+        self._refresh(request_id)
         return restored + list(grown)
 
     def _restore_blocks(self, request_id: str) -> list:
@@ -192,7 +223,44 @@ class PagedAttentionManager:
         self.evicted[request_id] -= set(want)
         self.pending_restores[request_id] = set()
         self.blocks_restored += len(want)
+        published = self.state.get(request_id)
+        if published is not None:
+            published.restored = list(self.restored[request_id])
         return list(blocks)
+
+    def _publish(self, request_id: str, num_computed: int, drop) -> None:
+        """Record this step's eviction choice for the worker side.
+
+        Only the choice. `row` and `resident` are filled in by `_refresh`
+        after allocation, because this runs *before* it: a step that grows a
+        block or takes one back would otherwise publish a view that predates
+        the block the model is about to write into, and the guard's
+        `write_target` check catches exactly that -- which is how this was
+        found rather than shipped.
+        """
+        blocks = self.req_to_blocks[request_id]
+        step = pager_state.RequestStep(
+            evicting=[(i, blocks[i].block_id) for i in sorted(drop)],
+            num_computed=num_computed,
+        )
+        self.state.block_size = self.block_size
+        self.state.publish(request_id, step)
+
+    def _refresh(self, request_id: str) -> None:
+        """Publish the mapping and the view as they finally stand.
+
+        Called at the end of allocation, which is the last thing that changes a
+        request's blocks in a scheduling pass, so what the worker reads is what
+        the worker will see.
+        """
+        step = self.state.get(request_id)
+        if step is None:
+            return
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks:
+            return
+        step.row = [b.block_id for b in blocks]
+        step.resident = self.resident_indices(request_id, step.num_computed)
 
     def _free_indices(self, request_id: str, indices) -> None:
         """Hand specific row positions back to the pool, nulling them in place.
@@ -220,14 +288,18 @@ class PagedAttentionManager:
     def resident_indices(self, request_id: str, num_computed: int) -> list[int]:
         """What the policy says should be resident, including the tail.
 
-        The worker calls the same policy with the same arguments; this exists
-        so a caller on this side does not reimplement the tail rule.
+        The tail is the block holding the key this step is about to write. It
+        is index `num_computed // block_size` and it is never a policy choice:
+        it must exist, be resident, and be last. Callers must run this *after*
+        allocation, since a growing request has no block at that index until
+        then.
         """
         blocks = self.req_to_blocks.get(request_id, ())
         n_full = min(num_computed // self.block_size, len(blocks))
         keep = self.policy.resident(n_full, num_computed)
-        if n_full < len(blocks):
-            keep = keep + [n_full]
+        tail = num_computed // self.block_size
+        if tail < len(blocks):
+            keep = [i for i in keep if i != tail] + [tail]
         return keep
 
     def free(self, request_id: str) -> None:
@@ -235,6 +307,7 @@ class PagedAttentionManager:
         self.pending_evictions.pop(request_id, None)
         self.pending_restores.pop(request_id, None)
         self.restored.pop(request_id, None)
+        self.state.drop(request_id)
         super().free(request_id)
 
 
