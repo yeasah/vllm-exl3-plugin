@@ -1191,12 +1191,27 @@ tier available beyond that.
    scale of 11.4); and prefix caching was off throughout, because its
    bookkeeping hashes a block by the token prefix leading to it.
 
-   The one thing it did *not* clear is the step phase 2 starts from: eviction
-   compacts the row, so the token at position `p` stops living at row index
-   `p // block_size`, which is what the slot-mapping kernel assumes. **A pager
-   needs its own slot-mapping path**, and that is a design decision rather than
-   a detail. Permuting proves index carries no positional meaning; it does not
-   prove the engine can be told a request has fewer blocks than positions.
+1b. ~~**Fewer blocks than positions**~~ **Done, it works** --
+   `tools/blocktable_evict.py`. 17 blocks stood in for 2076 positions, the
+   residency path is bit-exact when it drops nothing, nothing past the resident
+   prefix is read, and a needle planted in a known block is retrieved when that
+   block is in the budget and lost when the same budget spends the slot
+   elsewhere. Keeping 16 of 128 blocks reproduced the full-context answer
+   *token for token*, which is the pager's premise in miniature.
+
+   **The seam is `AttentionMetadataBuilder.build`, and phase 2 must use it.**
+   Lowering `input_batch.seq_lens` instead does not fail, it hangs: the sampler
+   tests `seq_len < prefill_len` to decide whether a row is still prefilling,
+   so `seq_lens` means both "keys to read" and "progress through the prompt" —
+   the two numbers a pager needs to differ. `CommonAttentionMetadata` carries
+   its own copies of `seq_lens` and the block table, so the view can be handed
+   to the kernel without the rest of the engine seeing it. Two mechanics fall
+   out free there: `slot_mapping` is already computed from the untouched row,
+   so this step's key needs no surgery, and the tail block stays last.
+
+   What is still untouched is the allocator: both tools impose a *view*, so
+   nothing is freed and no memory is saved yet. That is phase 2's actual work,
+   and it is plumbing rather than a research risk.
 2. **A recency/LRU pager.** Policy-agnostic machinery: transport, granularity,
    residency bookkeeping, the fault net, thrash behaviour. Worth building before
    any scoring because it converts policy error into a tunable cost -- a recency

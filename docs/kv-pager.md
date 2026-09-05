@@ -1,4 +1,4 @@
-# Block order does not matter: the gate on score-driven KV residency
+# KV residency is a block-table rewrite: the gate on score-driven paging
 
 A pager that manages KV residency by rewriting `req_to_blocks` only works if a
 request's block table can be reordered without changing what the model computes.
@@ -153,24 +153,110 @@ positional meaning for full-attention layers.
 
 Not settled, in rough order of how much it matters to the next phase:
 
-1. **Eviction is not permutation.** A pager that drops blocks compacts the row,
-   and then the token at position `p` no longer lives at row index
-   `p // block_size` -- which is the assumption the slot-mapping kernel is
-   built on, so the new token would be written to the wrong place. Compaction
-   therefore needs its own slot-mapping path, and that is the first real design
-   decision of the pager rather than something this test cleared.
+1. **Nothing is freed.** Both tools impose a *view*; the allocator still holds
+   every block. Turning a view into reclaimed memory means the scheduler
+   releasing blocks and a transport bringing them back, which is the phase-2
+   machinery and is untested here.
 2. **Prefix caching was off for every run.** Its bookkeeping hashes a block by
    the token prefix leading to it, so a residency scheme that moves or drops
    blocks has to be reconciled with the cached-block registry. Untouched here.
-3. **CUDA graphs**, per above.
-4. Single GPU only; no TP, no MLA backend, no mamba/hybrid state groups beyond
+3. **CUDA graphs**, per above -- and the eviction runs are eager-only too.
+4. **One policy shape, one model, one budget.** Whether recency or a score
+   keeps the right blocks is the phase-3 measurement; the needle here says only
+   that the mechanism honours whatever the policy decides.
+5. Single GPU only; no TP, no MLA backend, no mamba/hybrid state groups beyond
    gemma's sliding layers; decode steps only, never a prefill chunk.
+
+## Fewer blocks than positions: the step the permutation test did not clear
+
+Permutation proves block index carries no positional meaning. A pager needs
+more than that: it drops blocks, so the row gets *shorter than the context*,
+and the token at position `p` stops living at row index `p // block_size`.
+`tools/blocktable_evict.py` measures whether the engine can be handed a request
+in that state. **It can** -- 17 blocks stood in for 2076 positions, and the
+model attended to exactly those and nothing else.
+
+### `seq_lens` is overloaded, and that is what makes the naive approach hang
+
+The obvious implementation -- lower `input_batch.seq_lens` to the resident
+count and shorten the row -- does not fail, it *hangs*, with the engine
+spinning on `execute_model` and the request never producing a token.
+`gpu/sample/sampler.py` decides whether a row emits an output token by testing
+`seq_len < prefill_len`, the condition that marks a chunked-prefill request as
+not yet finished. So `seq_lens` means two things at once -- how many keys
+attention should read, and how far through its prompt the request is -- and a
+pager is exactly the thing that needs those two numbers to differ.
+
+The seam that separates them is `AttentionMetadataBuilder.build`.
+`CommonAttentionMetadata` carries its *own* `seq_lens` and `block_table_tensor`
+and has a `replace()` helper, so the view can be handed to the kernel as a copy
+while `input_batch.seq_lens` keeps saying what is really cached. The rest of
+the engine then sees an ordinary request. Anything built on this should impose
+residency there, not upstream of it.
+
+Two further mechanics fall out for free, and both are worth keeping:
+
+- the rewrite runs **after** the real `prepare_attn`, so `slot_mapping` was
+  already computed from the untouched row -- this step's own key lands where it
+  always would, and no slot surgery is needed anywhere;
+- the view keeps the partial **tail block last**, the same invariant the
+  permutation test needed, so the kernel's valid-token count for it stays
+  `seq_len` minus the full blocks in front.
+
+### What was checked
+
+Only the per-step view is rewritten. The persistent rows, the scheduler and the
+allocator are untouched, so **nothing is freed and no memory is saved**: this
+asks whether the *kernel* can be told, which is the part that could have
+derailed the plan. Reclaiming the blocks afterwards is ordinary work vLLM
+already does on preemption.
+
+Llama-3.2-1B, 2048-token context, budget 16 of 128 full blocks (2 sink + 14
+most recent), FLASH_ATTN, bf16 KV:
+
+| check | arm | result |
+|---|---|---|
+| the residency arithmetic is right | `viewfull` — every block resident, through the eviction path | **bit-identical** to control |
+| a real budget runs at all | `evict` — 112 of 128 blocks dropped | runs; 17 blocks for 2072 positions |
+| nothing past the resident prefix is read | `poison` — trailing row entries overwritten with a duplicate resident block | **bit-identical** to `evict` |
+| the engine is still reproducible | `control2` | **bit-identical** to control |
+
+`viewfull` is the load-bearing one. It drops nothing, so it must reproduce the
+control exactly, and it is the only place a tail count or a `seq_len` that is
+wrong by one would show up -- an off-by-one there is invisible in every arm
+that actually evicts, because those have no reference to be wrong against.
+
+### The needle: eviction is exact, not approximate
+
+The numbers above cannot say whether the kernel attends to the resident set or
+merely to *something*. A magic number planted at a known token offset can:
+the block holding it is known, and two arms spend the **same budget** differing
+only in whether that one block survives.
+
+| arm | resident | answer |
+|---|---|---|
+| control | all 128 blocks | `918273` found |
+| `keep_needle` | 16 blocks, one of them the needle's | `918273` found — and the generated tokens are *identical to the full-context run* |
+| `drop_needle` | 16 blocks, that slot spent on recency instead | `3` — lost |
+
+Retrieval flips with one block out of 128, which is what "attends to exactly
+the resident set" means operationally. The `keep_needle` row is also the whole
+premise of the pager in miniature: **87.5% of the KV dropped, output unchanged**,
+because what was dropped was not being attended to.
+
+The needle is planted at an exact block boundary deliberately -- one straddling
+two blocks would survive the loss of either, and the arms would no longer
+differ in exactly one thing.
 
 ## Reproducing
 
     tools/blocktable_permute.py run MODEL OUT.json [--kv fp8] [--graphs]
                                     [--ctx N] [--tokens N] [--all-groups]
     tools/blocktable_permute.py report OUT.json [OUT.json ...]
+
+    tools/blocktable_evict.py   run MODEL OUT.json [--budget N] [--sink N]
+                                    [--needle] [--needle-block N] [--diagnose]
+    tools/blocktable_evict.py   report OUT.json [OUT.json ...]
 
 The engine is forced in-process (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) because the
 hook has to run in the same interpreter as the model runner, and prefix caching

@@ -510,7 +510,7 @@ def compare(ref, arm):
     n = min(len(ref["ids"]), len(arm["ids"]))
     first = next((i for i in range(n) if ref["ids"][i] != arm["ids"][i]), None)
     upto = n if first is None else first + 1
-    kls, dtop = [], []
+    kls, dtop, gone = [], [], 0
     for i in range(upto):
         a, b = ref["steps"][i], arm["steps"][i]
         if not a or not b:
@@ -519,17 +519,27 @@ def compare(ref, arm):
         t = max(a, key=a.get)
         if t in b:
             dtop.append(abs(a[t] - b[t]))
+        else:
+            # The reference's own choice is not even in the other arm's top-k.
+            # That is the largest divergence this metric can see, and it is
+            # invisible in `dlogprob_max`, which averages over what remains.
+            gone += 1
     finite = [v for v in kls if v == v]
     return {
         "steps": upto,
         "first_divergence": first,
         "ids_match": first is None and len(ref["ids"]) == len(arm["ids"]),
         "kl_max": max(finite) if finite else 0.0,
-        "dlogprob_max": max(dtop) if dtop else 0.0,
-        "dlogprob_mean": sum(dtop) / len(dtop) if dtop else 0.0,
+        # No comparable entry means the reference's top token fell out of the
+        # other arm's top-k entirely, which is a large divergence -- reporting
+        # it as 0.0 would read as agreement.
+        "dlogprob_max": max(dtop) if dtop else (0.0 if not kls else float("nan")),
+        "dlogprob_mean": (sum(dtop) / len(dtop) if dtop
+                          else (0.0 if not kls else float("nan"))),
         # Step 0 is the prefill's own output: it must be identical in every
         # arm, and if it is not, the run's premise is broken rather than its
         # result interesting.
+        "top_token_gone": gone,
         "prefill_step_clean": len(kls) > 0 and kls[0] == 0.0,
         "clean_kl": kls[1] if len(kls) > 1 else float("nan"),
         "clean_dlogprob": dtop[1] if len(dtop) > 1 else float("nan"),
