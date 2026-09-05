@@ -1191,7 +1191,7 @@ tier available beyond that.
    scale of 11.4); and prefix caching was off throughout, because its
    bookkeeping hashes a block by the token prefix leading to it.
 
-1b. ~~**Fewer blocks than positions**~~ **Done, it works** --
+2. ~~**Fewer blocks than positions**~~ **Done, it works** --
    `tools/blocktable_evict.py`. 17 blocks stood in for 2076 positions, the
    residency path is bit-exact when it drops nothing, nothing past the resident
    prefix is read, and a needle planted in a known block is retrieved when that
@@ -1212,13 +1212,16 @@ tier available beyond that.
    What is still untouched is the allocator: both tools impose a *view*, so
    nothing is freed and no memory is saved yet. That is phase 2's actual work,
    and it is plumbing rather than a research risk.
-2. **A recency/LRU pager.** Policy-agnostic machinery: transport, granularity,
+
+3. **A recency/LRU pager.** Policy-agnostic machinery: transport, granularity,
    residency bookkeeping, the fault net, thrash behaviour. Worth building before
    any scoring because it converts policy error into a tunable cost -- a recency
    pager is StreamingLLM with an undo button, and shippable with no calibration.
-3. **Measure end to end**: latency and output quality at several residency
+
+4. **Measure end to end**: latency and output quality at several residency
    budgets. Only this can say whether the mass-captured proxy translates.
-4. **Then** swap in a better policy, against a harness that measures what
+
+5. **Then** swap in a better policy, against a harness that measures what
    matters rather than a proxy.
 
 **What is already measured** (`~/git/triattention/scripts/attention_mass.py`,
