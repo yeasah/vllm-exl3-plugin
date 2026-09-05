@@ -29,10 +29,13 @@ Only the *resident prefix* is examined -- the first `cdiv(seq_len, block_size)`
 entries. Everything past it is unread by construction (measured: a poisoned
 tail changes nothing), so checking it would reject correct behaviour.
 
-The guard reaches into the scheduler, so it needs the engine in-process
-(`VLLM_ENABLE_V1_MULTIPROCESSING=0`). That makes it a debug instrument rather
-than a production assertion, which is the right shape for something whose job
-is to fail a test rather than a request.
+Only `ownership` needs the scheduler, and therefore an in-process engine
+(`VLLM_ENABLE_V1_MULTIPROCESSING=0`). The other three read nothing but the
+worker's own step, so they run wherever the pager runs -- which matters because
+the failure this guards against does not announce itself, and a check that only
+runs during debugging is absent exactly when a corrupted run is being folded
+into an accuracy number. Pass `scheduler=None` to get the three; `summary()`
+reports which were active so a result can carry that rather than imply it.
 """
 
 from __future__ import annotations
@@ -63,19 +66,32 @@ class ResidencyGuard:
     without belonging to the request. Everything else in a view is a bug.
     """
 
-    def __init__(self, scheduler, reserve=(), group: int = 0):
+    #: Checks that need no state beyond the step being executed.
+    WORKER_LOCAL = ("write_target", "length", "exclusivity")
+    #: ...and the one that needs the scheduler's allocation table.
+    NEEDS_SCHEDULER = ("ownership",)
+
+    def __init__(self, scheduler=None, reserve=(), group: int = 0):
         self.scheduler = scheduler
         self.reserve = set(reserve)
         self.group = group
         self.violations: list[Violation] = []
         self.checked = 0
 
+    @property
+    def active_checks(self) -> tuple[str, ...]:
+        return self.WORKER_LOCAL + (
+            self.NEEDS_SCHEDULER if self.scheduler is not None else ())
+
     def owned(self, req_id: str) -> set[int] | None:
         """Block ids the scheduler currently has allocated to `req_id`.
 
-        Returns None when the scheduler does not know the request, which is not
-        a violation: the worker sees a step the scheduler has already retired.
+        Returns None when there is no scheduler to ask, or when it does not
+        know the request -- neither is a violation. The worker can be a step
+        ahead of the scheduler's view of a retired request.
         """
+        if self.scheduler is None:
+            return None
         mgr = self.scheduler.kv_cache_manager.coordinator.single_type_managers
         blocks = mgr[self.group].req_to_blocks.get(req_id)
         if blocks is None:
@@ -83,6 +99,14 @@ class ResidencyGuard:
         return {b.block_id for b in blocks}
 
     def null_block_id(self) -> int:
+        """The reserved id that means "not resident", or -1 if unknowable.
+
+        -1 rather than a guess: `null_block` is conventionally block 0, and
+        assuming that would make the guard quietly ignore a real block 0 in a
+        view when it cannot ask.
+        """
+        if self.scheduler is None:
+            return -1
         pool = self.scheduler.kv_cache_manager.coordinator.block_pool
         return pool.null_block.block_id
 
@@ -167,4 +191,6 @@ class ResidencyGuard:
         return {"steps_checked": self.checked,
                 "violations": len(self.violations),
                 "by_check": by_check,
+                "active_checks": list(self.active_checks),
+                "scheduler_visible": self.scheduler is not None,
                 "first": [str(v) for v in self.violations[:3]]}

@@ -589,6 +589,51 @@ became falsifiable once the policy's intended resident count was passed in from
 outside, which is the general shape of the mistake: an invariant stated in
 terms of one quantity twice.
 
+### Keeping a pager bug out of an accuracy number
+
+The failure this guards against is worse than a crash in one specific way: it
+produces plausible text. A run corrupted by a stolen block does not stop, it
+just becomes slightly wrong, and if that happens during a capability
+measurement the damage is folded into the number and a design decision gets
+made on it. So mechanism error has to be separable from policy cost by
+construction, not by inspection.
+
+Three layers, because no one of them is sufficient:
+
+1. **The worker-local checks, always on.** Three of the four need nothing but
+   the step being executed, so they run in a deployed pager and not only under
+   a debugger. The self-test in worker-local mode shows exactly what that
+   buys and what it does not:
+
+       clean       0 violations                     stray       0 violations
+       tailswap   14 violations ['write_target']    shortview  14 ['length']
+       overlap     7 violations ['exclusivity']
+
+   `stray` reporting nothing is the honest result, not a bug in the test: a
+   block stolen by another request is precisely the fault the worker cannot
+   see, because deciding it requires the scheduler's allocation table.
+
+2. **A full-residency control arm on every quality measurement.** A pager
+   configured to evict nothing must reproduce the unpaged baseline
+   *bit-for-bit* — the same standard `viewfull` already meets. Any deviation is
+   a mechanism bug and voids the measurement, which is what separates "paging
+   costs two points" from "our pager has a bug", the confound that makes a
+   corrupted accuracy number dangerous. Necessary and **not sufficient**: it
+   cannot catch a bug that only manifests once eviction actually happens.
+
+3. **Shadow checksums, sampled.** Evicted blocks already have an authoritative
+   host copy, so corruption of their GPU image is harmless — it is refetched.
+   The exposure is a *resident* block being stolen, and it is catchable
+   out-of-process and cheaply: shadow a small random subset of resident blocks
+   and verify them each step. That is the only one of the three that detects
+   the damage during a real eviction run rather than its precondition.
+
+And the provenance rule that makes the rest usable: **a quality number records
+which layers were active**, the way `bench/` records the tree it was taken
+from. `summary()` reports `active_checks` and `scheduler_visible` for exactly
+this. A number without that record is not evidence about paging, because
+nothing distinguishes it from a number taken with the guard switched off.
+
 ### What "done" looks like
 
 One measurement, and it is the appliance's whole claim: **serve a context longer
@@ -606,7 +651,7 @@ thrash curves, fetch rates, policy comparisons — is instrumentation around tha
                                     [--needle] [--needle-block N] [--diagnose]
     tools/blocktable_evict.py   report OUT.json [OUT.json ...]
 
-    tools/kv_guard_selftest.py  MODEL [--ctx N] [--reqs N]
+    tools/kv_guard_selftest.py  MODEL [--ctx N] [--reqs N] [--worker-local]
     tools/kv_roundtrip.py       run MODEL OUT.json [--block N] [--kv fp8]
     tools/kv_transport.py       sweep [--layers N] [--block-bytes N]
     tools/kv_transport.py       verify

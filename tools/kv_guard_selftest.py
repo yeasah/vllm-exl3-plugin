@@ -124,6 +124,8 @@ def main():
     ap.add_argument("--tokens", type=int, default=8)
     ap.add_argument("--reqs", type=int, default=2)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--worker-local", action="store_true",
+                    help="run without the scheduler, as a deployed pager would")
     args = ap.parse_args()
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -150,17 +152,23 @@ def main():
     failures = 0
     for fault, expected in FAULTS.items():
         harness.fault = fault
-        harness.guard = ResidencyGuard(scheduler)
+        # Worker-local pass first: the three checks that need no scheduler are
+        # the ones that will be running when a quality number is produced, so
+        # they get exercised in the configuration they will actually run in.
+        harness.guard = ResidencyGuard(None if args.worker_local else scheduler)
         llm.generate(prompts, params)
         s = harness.guard.summary()
         fired = set(s["by_check"])
-        ok = (fired >= expected) and (expected or not fired)
+        active = set(harness.guard.active_checks)
+        want = expected & active
+        ok = (fired >= want) and (want or not fired)
         failures += not ok
         print(f"  {fault:10s} {s['steps_checked']:4d} steps checked, "
               f"{s['violations']:4d} violations {sorted(fired) or '(none)'}"
               f"   {'ok' if ok else 'UNGUARDED'}")
         if not ok:
-            print(f"      expected {sorted(expected) or '(none)'}")
+            print(f"      expected {sorted(want) or '(none)'} "
+                  f"(active: {sorted(active)})")
         for line in s["first"][:1]:
             print(f"      e.g. {line}")
 
