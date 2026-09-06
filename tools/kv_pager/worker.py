@@ -175,13 +175,17 @@ class WorkerPager:
         intended = {}
 
         for b in range(batch.num_reqs):
-            if int(batch.num_scheduled_tokens[b]) != 1:
-                continue                       # residency is a decode notion
             req_id = batch.req_ids[b]
             step = self.state.get(req_id)
             if step is None or not step.resident:
                 continue
-            self.steps += 1
+            # Transport follows the manager's decisions wherever they are made;
+            # the *view* is decode-only. Tying both to decode steps is what let
+            # a block be freed during a prefill chunk with nothing having
+            # copied it out -- silently, since the guard only inspects decode
+            # rows too.
+            decoding = int(batch.num_scheduled_tokens[b]) == 1
+            self.steps += decoding
             computed = int(batch.num_computed_tokens_np[b])
             if step.num_computed != computed:
                 self.clock_mismatch += 1
@@ -203,6 +207,9 @@ class WorkerPager:
             for idx, block_id in step.evicting:
                 self.tier.store((req_id, idx), caches, block_id)
                 self.copied_out += 1
+
+            if not decoding:
+                continue
 
             # 3. the view -- recorded here, applied at the metadata builder
             row = step.row

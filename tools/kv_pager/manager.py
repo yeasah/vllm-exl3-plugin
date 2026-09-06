@@ -155,6 +155,22 @@ class PagedAttentionManager:
         if not blocks:
             return
 
+        # Paging is decode-only, for now and deliberately. A chunked prefill
+        # issues a multi-token query whose causal mask is derived from
+        # `seq_len` and the query length, so shortening the context shifts the
+        # alignment and the mask stops meaning what it says -- unlike a decode
+        # step, where the single query attends to everything and there is no
+        # mask to get wrong. Every result this design rests on was measured on
+        # decode steps.
+        #
+        # The cost is real and worth naming: peak residency includes the whole
+        # prompt, so this bounds the *decode* footprint and not the prefill
+        # peak. Paging the prefill phase is a separate piece of work with its
+        # own correctness argument.
+        if num_prompt_tokens is not None and \
+                processed_computed_tokens < num_prompt_tokens:
+            return
+
         # Two-phase, and this is the phase that makes the transport safe: what
         # was decided last step is freed now, having had a step in which the
         # worker could copy it to the host. A block freed in the same pass that

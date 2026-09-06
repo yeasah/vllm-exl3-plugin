@@ -82,6 +82,67 @@ class Stress:
         return sorted(x for x in keep if 0 <= x < n_full)
 
 
+class Oracle:
+    """Recency, plus a set of blocks the caller says matter. The ceiling.
+
+    Not a policy that could exist in production -- it is told the answer. It
+    exists to separate two questions that a bad quality number cannot
+    distinguish on its own: whether the *machinery* can deliver good output at
+    a low budget, and whether a *policy* can find the right blocks. If the
+    oracle retrieves at a budget where recency does not, the mechanism is fine
+    and the remaining gap is policy, which is the phase this project is trying
+    to reach. If even the oracle fails, nothing about scoring will help.
+
+    `must_keep` is a class attribute because a policy is constructed from a
+    frozen spec with nowhere to thread a set through. That is fine for an
+    instrument and would not be for anything else.
+    """
+
+    name = "oracle"
+    must_keep: set = set()
+
+    def __init__(self, budget: int, sink: int = 2):
+        self.budget = budget
+        self.sink = sink
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        if n_full <= self.budget:
+            return list(range(n_full))
+        sink = min(self.sink, self.budget)
+        keep = set(range(sink))
+        keep |= {i for i in self.must_keep if 0 <= i < n_full}
+        keep = set(sorted(keep)[: self.budget])
+        recent = self.budget - len(keep)
+        keep |= set(range(n_full - recent, n_full))
+        return sorted(i for i in keep if 0 <= i < n_full)
+
+
+class OracleLate(Oracle):
+    """An oracle that only wants the block back after `after` tokens.
+
+    The point is the round trip, not the policy. Plain `Oracle` keeps the block
+    it was told about from the beginning, so it never restores anything and a
+    good answer from it proves only that residency works. This one lets the
+    block be evicted during prefill -- its contents going out to the host tier
+    -- and asks for it back at decode time, so answering correctly means the
+    bytes made the journey and still mean what they meant. That is the
+    end-to-end version of the bit-exactness the host tier proves in isolation,
+    and the only arrangement in which a needle can test it: the answer has to
+    be generated after the restore.
+    """
+
+    name = "oracle_late"
+    after: int = 1 << 60
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        if num_computed < self.after:
+            keep = set(range(min(self.sink, self.budget)))
+            recent = self.budget - len(keep)
+            keep |= set(range(n_full - recent, n_full))
+            return sorted(i for i in keep if 0 <= i < n_full)
+        return super().resident(n_full, num_computed)
+
+
 class Full:
     """Everything resident. The control arm, and it must be bit-exact.
 
@@ -99,4 +160,4 @@ class Full:
         return list(range(n_full))
 
 
-POLICIES = {p.name: p for p in (Recency, Stress, Full)}
+POLICIES = {p.name: p for p in (Recency, Stress, Oracle, OracleLate, Full)}

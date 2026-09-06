@@ -737,10 +737,57 @@ the manager's tail forward is kept unconditionally, those indices being
 unfreeable by construction. The mismatch is expected and counted rather than
 suppressed.
 
-**What is still missing** is the quality question: `paged` diverges from the
-baseline at step 2, which is what attending to 16 blocks of 64 should do, and
-nothing here says whether the output is any good. That is the capability
-measurement, and it now has the control arm that makes it readable.
+### Does a paged request still answer the question?
+
+`tools/kv_pager_quality.py`. A magic number at a known token offset, so the
+block holding it is known and an oracle can be told about it. Llama-3.2-1B,
+2048 tokens of context, **budget 16 of 129 blocks — 12.4% resident**:
+
+| arm | needle | output |
+|---|---|---|
+| `off` — no pager | **found** | the reference |
+| `full` — pager, evicting nothing | **found** | bit-identical to `off` |
+| `recency` — sinks + newest | **lost** | diverges at step 2 |
+| `oracle` — recency + the needle's block | **found** | **tokens identical to the reference** |
+
+That is the result the phasing was built to get to. At 12% residency the
+machinery reproduces the full-context answer *token for token* when the right
+blocks are kept, and loses it entirely when they are not — so **the mechanism
+is not the limit, the policy is**. A quality number from here on is
+attributable, which is the whole reason the control arm exists.
+
+`recency` losing it is not a defect, it is what recency is: its window only
+slides forward, it never asks for anything back, and a needle behind the window
+is gone. That is StreamingLLM, and it is the baseline a scoring policy has to
+beat.
+
+Two limits found while building this, both worth more than the table.
+
+**Paging is decode-only.** The manager returns early while a request is still
+prefilling. A chunked prefill issues a multi-token query whose causal mask is
+derived from `seq_len` and the query length, so shortening the context shifts
+the alignment and the mask stops meaning what it says — unlike a decode step,
+where one query attends to everything and there is no mask to get wrong. Every
+result this design rests on was measured on decode steps. The cost is real:
+peak residency includes the whole prompt, so this bounds the *decode* footprint
+and not the prefill peak, and paging prefill is separate work with its own
+correctness argument.
+
+**Transport and the view are not the same schedule.** They were tied together
+at first — both applied only on decode steps — and that let the manager evict
+during a prefill chunk with nothing copying those blocks out, so they were
+freed with their only copy still on the GPU. The guard did not catch it,
+because the guard inspects decode rows too. It surfaced as one restore that
+found nothing in the host tier, which is why `missing_host_copy` is counted
+rather than assumed to be zero. Transport now follows the manager's decisions
+wherever they are made; only the view is decode-only.
+
+The round trip is exercised here (`oracle_late` evicts the needle's block and
+asks for it back, and every restored block was backed by a host copy) but
+cannot be *shown to change an answer*: a needle answer arrives in the first
+token or two and the restore lands a few steps later. The end-to-end proof that
+a restored block still means what it meant stays with `kv_roundtrip.py`, where
+a destroyed and restored block gives bit-identical output through the model.
 
 Two things worth keeping from building it.
 
