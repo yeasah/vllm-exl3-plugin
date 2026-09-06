@@ -35,6 +35,19 @@ threshold this project uses for building the thing rather than redoing it.
    notes, open work to `TODO.md`. See the `ecosystem-field-notes` memory.
 6. `mark` records the boundary so the next sweep starts where this one stopped.
 
+**The pool should span related projects, not just related sessions.** The
+highest-value thing a sweep finds is a gap *between* pieces of work, and in a
+stack of several repos those gaps cross repo boundaries: a decision taken while
+working on one and never carried to another leaves no trace in either one's
+history. Keeping the whole stack under a single Claude Code project keeps them
+in one pool, which is a reason not to split projects for tidiness as repos
+multiply. The kv-pager is the worked example -- designed in this repo, moved to
+`vllm-virtualkv-plugin`, evidence left behind here on purpose -- and a
+per-repo pool could not see that arc.
+
+The cost is that the pool only grows, so `--since` and `mark` stop being a
+convenience and become the thing that keeps a sweep affordable.
+
 **Two mechanics that are not optional.**
 
 *Dedupe by content, not by session.* Sessions fork on `--resume` and on
