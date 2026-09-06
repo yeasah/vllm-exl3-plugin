@@ -838,6 +838,25 @@ that a newly dropped block actually sits below an existing hole so a backward
 scan would meet one. Both mutations — the range helper, and forgetting
 `free_blocks` entirely — are now caught by it.
 
+### Plugin shape: what rests on a real seam, and what does not
+
+Audited 2026-09-05, before moving this to its own repo, because the answer
+decides whether the move is a rename or a redesign. It is mostly a rename.
+
+| piece | seam | status |
+|---|---|---|
+| spec + manager | `KVCacheSpecRegistry.register` | supported, and documented for out-of-tree specs |
+| the view | `register_backend(AttentionBackendEnum.X)`, overriding a backend with a subclass whose metadata builder applies it | supported, with an "override an existing attention backend" example in the registry |
+| startup | `vllm.general_plugins` entry point | supported |
+| **choosing the paged spec per layer** | `Attention.get_kv_cache_spec` | **patched.** `customize_spec` is the intended hook and exists, but on the full-attention path its result is only used to compute a page size — the layer then builds a plain `FullAttentionSpec` and returns that. Its own docstring calls it "a temporary compatibility API" and says "the end state is for the backend to build and return the spec directly, at which point this hook goes away" (vllm#42449). So this becomes supported upstream; until then it is one patched method |
+| **worker row sync** | none | **patched.** `prepare_attn` is wrapped to copy the manager's mapping over the worker's row before `compute_slot_mappings` reads it positionally. Needed because restored blocks reach the worker through the append channel, so its row outgrows the context |
+
+Two patches, one of which upstream is actively removing. The second is the one
+to think about: it exists because the scheduler→worker protocol can only
+*append* block ids, and a pager needs to say "this block now lives at index
+`i`". That is the same protocol gap the design flagged as arriving when a
+policy goes query-aware, showing up a phase early.
+
 ### What "done" looks like
 
 One measurement, and it is the appliance's whole claim: **serve a context longer
