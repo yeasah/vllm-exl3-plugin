@@ -1230,7 +1230,16 @@ tier available beyond that.
    `copies x 1.30 us + bytes / 54 GB/s`, so **the policy scores blocks, not
    spans**, and coalescing is opportunistic rather than required.
 
-   What that leaves for the pager itself is the *allocator*: every tool so far
+   **The work continues in `vllm-virtualkv-plugin`**, which is where the
+   manager, host tier, residency guard and worker half now live — registered
+   through `KVCacheSpecRegistry` and `vllm.general_plugins` rather than
+   patched, with two named exceptions. What remains open there is the policy:
+   at 12% residency an oracle reproduces a full-context answer token for token
+   while recency loses it, so the mechanism is not the limit. The measurement
+   record and the instruments that produced it stay here, in
+   [docs/kv-pager.md](docs/kv-pager.md) and `docs/data/kv-pager/`.
+
+   What that left for the pager itself was the *allocator*: every tool so far
    imposes a view while vLLM's block pool still owns everything, so nothing is
    reclaimed yet. `RSWASpec` frees blocks from the middle of a running request
    and substitutes `null_block`, which is the half that is missing; note that

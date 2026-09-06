@@ -1,5 +1,13 @@
 # KV residency is a block-table rewrite: the gate on score-driven paging
 
+> **The plugin built on these measurements now lives in
+> `vllm-virtualkv-plugin`.** This note stays here because it is the record of
+> how each result was arrived at, and the instruments that produced them
+> (`tools/blocktable_permute.py`, `tools/blocktable_evict.py`,
+> `tools/kv_roundtrip.py`, `tools/kv_transport.py`) measure *vLLM's* behaviour
+> rather than the plugin's — they belong with the data in
+> `docs/data/kv-pager/`. The manager, host tier, guard and worker moved.
+
 A pager that manages KV residency by rewriting `req_to_blocks` only works if a
 request's block table can be reordered without changing what the model computes.
 The argument that it can is short: a decode step's attention output is
