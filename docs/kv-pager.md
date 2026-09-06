@@ -763,15 +763,45 @@ beat.
 
 Two limits found while building this, both worth more than the table.
 
-**Paging is decode-only.** The manager returns early while a request is still
-prefilling. A chunked prefill issues a multi-token query whose causal mask is
-derived from `seq_len` and the query length, so shortening the context shifts
-the alignment and the mask stops meaning what it says — unlike a decode step,
-where one query attends to everything and there is no mask to get wrong. Every
-result this design rests on was measured on decode steps. The cost is real:
-peak residency includes the whole prompt, so this bounds the *decode* footprint
-and not the prefill peak, and paging prefill is separate work with its own
-correctness argument.
+**Paging is decode-only**, and the reason is not the one stated when that
+restriction went in. The first version of this paragraph said a shortened
+context breaks the causal mask. It does not: `flash_attn_varlen_func`
+documents that "the causal mask is aligned to the bottom right corner", so
+query `i` of a chunk sees keys `<= i + seqlen_k - seqlen_q`. Drop `D` keys from
+the prefix and both sides move by `D`, which is the correct answer — and it has
+to be, or chunked prefill would not work for any model. Compaction is
+mask-safe.
+
+What actually differs, in order of how much work each is:
+
+1. **The tail is a run of blocks, not one.** A decode step writes one key into
+   one partial block, and the view keeps that block last. A prefill chunk
+   writes `N` keys spanning several blocks, so the invariant generalises to
+   "the chunk's whole write span is resident, contiguous, in order, and last".
+   The code hard-codes the single-block form. Mechanical, but it is not a
+   one-line change and it is exactly where an off-by-one would be invisible.
+2. **Block order becomes load-bearing.** This is the sharp one, because it
+   retracts a property the whole design leans on. At decode the visible bound
+   is `seqlen_k - 1` — everything — so order carries no meaning, which is what
+   `blocktable_permute.py` measured. Under bottom-right alignment with `N > 1`
+   the bound is *index-dependent*, so permuting retained blocks moves keys
+   across it: some that should be visible get masked and vice versa. **The
+   permutation result does not transfer to prefill.** The current
+   implementation happens to preserve ascending order — restores are placed
+   in-place, the view lists indices ascending — so this is not a live bug, but
+   any policy that exploits order-freedom would be correct at decode and wrong
+   at prefill.
+3. **Prefix-cache hashing is live during prefill.** Blocks are hashed and
+   registered as they fill, so evicting one means another request can hit that
+   hash and be handed a block whose contents were freed. Decode-time paging
+   with prefix caching off never meets this, and it is the genuinely new
+   correctness argument rather than a generalisation of an old one.
+4. **Nothing is measured.** Every result here — permutation invariance,
+   eviction, restore, bit-exactness — was taken with a query length of one.
+
+The cost of the restriction is real: peak residency includes the whole prompt,
+so this bounds the *decode* footprint and not the prefill peak, which for long
+prompts is where the binding constraint actually lives.
 
 **Transport and the view are not the same schedule.** They were tied together
 at first — both applied only on decode steps — and that let the manager evict
