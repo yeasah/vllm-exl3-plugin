@@ -42,29 +42,10 @@ from kv_pager.manager import build_manager_class, make_spec_class, register  # n
 
 
 def patch_spec(budget, sink, policy):
-    """Make every full-attention layer ask for a paged spec instead.
+    """Thin wrapper so the drivers and the plugin install the same way."""
+    from kv_pager.integration import Config, patch_spec as _patch
 
-    `Attention.get_kv_cache_spec` is where a layer's spec is chosen, so this is
-    the one place a plugin has to reach; the spec and manager themselves go in
-    through the registry with vLLM unmodified.
-    """
-    from vllm.model_executor.layers.attention import Attention
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-    paged_cls = make_spec_class()
-    register(paged_cls, build_manager_class())
-    original = Attention.get_kv_cache_spec
-
-    def hooked(self, vllm_config):
-        spec = original(self, vllm_config)
-        if type(spec) is not FullAttentionSpec:
-            return spec               # sliding window and friends are not ours
-        common = {f.name: getattr(spec, f.name) for f in fields(spec)}
-        return paged_cls(**common, budget_blocks=budget, sink_blocks=sink,
-                         policy_name=policy)
-
-    Attention.get_kv_cache_spec = hooked
-    return original
+    return _patch(Config(budget=budget, sink=sink, policy=policy))
 
 
 def build(model, args, budget, policy):

@@ -857,6 +857,22 @@ to think about: it exists because the scheduler→worker protocol can only
 `i`". That is the same protocol gap the design flagged as arriving when a
 policy goes query-aware, showing up a phase early.
 
+Both now live in `tools/kv_pager/integration.py`, so "what does this
+monkeypatch" has a one-file answer — for review, for the move, and for
+noticing when upstream makes one of them unnecessary. Configuration is
+environment-driven (`VLLM_KVPAGER_BUDGET`, `_POLICY`, `_SINK`, `_HOST_SLOTS`,
+`_VERIFY`) because a plugin loaded through an entry point is constructed by
+vLLM before anything of ours runs and has no argument to receive. The config
+validates rather than trusts: an unknown policy, a sink larger than the budget
+or an empty host tier are rejected at startup instead of becoming a strange
+result later.
+
+**The repo this moves to is `vllm-virtualkv-plugin`.** Virtual memory is what
+the mechanism actually is — the block table is a page table, the residency view
+is address translation, the host tier is swap — and unlike "pager" it does not
+imply a particular replacement policy, which matters given that the scoring
+work is the point of the move.
+
 ### What "done" looks like
 
 One measurement, and it is the appliance's whole claim: **serve a context longer
