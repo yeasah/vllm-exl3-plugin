@@ -77,11 +77,16 @@ first and the rest slot into the same rental rather than earning trips of their 
 | Transformers backend | no MoE and no TP has ever gone through it | `transformers-backend` |
 | comparator arm | Qwen3.8-27B unquantized is ~27 GiB and cannot run on the dev card at all | `comparator` |
 
-**Two things to arrange before the meter starts**, both of which otherwise waste
+**Three things to arrange before the meter starts**, all of which otherwise waste
 rental time: the second TP=8 checkpoint has to be downloaded ahead (nothing on hand
-clears preflight), and `tools/host_survey.py` should run on contact, since GPU
+clears preflight); `tools/host_survey.py` should run on contact, since GPU
 architecture, driver, card count, VRAM and uncorrected ECC are what move tokens and
-are all checkable before any real work.
+are all checkable before any real work; and **the wheel builder no longer runs**.
+`~/podman/vast-vllm/build.sh` still pins `VLLM_VERSION=v0.27.0` and applies
+`patches/vllm-*.patch`, so it fails at `git apply` against a directory that has not
+existed since both deps became submodules (vLLM now on `appliance/v0.28.0`). Fixing
+it is a bench, not a rental, task -- discovering it on a metered box is the expensive
+way. Note also that it lives outside version control entirely, and is the only copy.
 
 **Explicitly not a `vast` item:** the Laguna TP=4 `exl3_mgemm` performance bug. It is
 narrowed to two exact kernel instantiations with both autotuners ruled out, so closing
