@@ -55,6 +55,75 @@ counted rather than only the tensors that participate in the bit-rate target, to
 as competitive as that bit-rate target implies. [docs/qbench.md](docs/qbench.md) has the measurement that establishes
 the gap is real on the served path.
 
+That is the biggest win on *format* competitiveness. The most urgent work is
+`turboquant-prefill-transient`, which as of 2026-09-08 is the only remaining lever on
+declared context per card: `kv-pager` is dead, and KV eviction/offload with it.
+
+## `turboquant-prefill-transient` — Stop TQ's prefill cost scaling with context
+
+The outcome wanted is a TurboQuant prefill whose VRAM cost is set by the chunk,
+not by how much context is already cached. Today the path spends VRAM on cached
+context twice: `_continuation_prefill` holds **6144 B/token of cached context**
+live at its peak (the rotation result, `k_full`, `v_full`, 2048 B/token each at
+Hk=4/D=256), and `TurboQuantMetadataBuilder._reserve_workspace` reserves two
+fp16 dequant buffers sized by **`max_model_len`** rather than by anything a
+request does — 4096 B/token of *declarable* context, whether or not a
+continuation ever runs.
+
+It unblocks the appliance's binding constraint, and it is now the only thing
+that does: with `kv-pager` dead and KV eviction/offload categorically out,
+declared context on a fixed card is a compression question again, TQ is the only
+4-bit KV path we have, and this transient is what keeps `--kv-cache-memory`
+load-bearing while making a profile-run estimate untransferable — vLLM never
+varies cached length, so it reports the same peak activation for a 4K session and
+a 130K one.
+
+**Candidate approach, cheapest first; each step is independently shippable.**
+
+1. **Slab-chunk the rotation.** `k_flat @ Pi_half` materializes the whole
+   inverse-rotated K in fp16 before `k_full[:cached_len].copy_()` reads it once.
+   Rotating in slabs of a few thousand tokens and copying each slab in makes that
+   buffer O(slab) instead of O(context): −2048 B/token, a third of the transient.
+   It is the candidate because it is the only one of the three that argues with
+   nobody — no dtype change, no upstream numerics, no design claim, just a loop
+   bound. (The `out=`-into-a-strided-view version is still dtype-blocked, and the
+   make-dequant-emit-bf16 version is still a change to their numerics for our
+   memory; see the note.) *Verify bit-exactness rather than assuming it* — same
+   dtype and same per-row dot products, but a smaller M may pick a different
+   cuBLAS kernel.
+
+2. **Bound the workspace reservation by what a chunk needs.** Reserving at
+   `max_model_len` prices the *declaration*, which is the one axis the appliance
+   sells. First find out whether it is even resident in the numbers we have: the
+   0.828 GiB capture in [docs/kernels.md](docs/kernels.md) accounts for three
+   232 MiB transients and does not obviously include a ~486 MiB reservation, so
+   `tools/memprof.py` has to say which side of `consumed`/`peak_activation` this
+   lands on before anything is designed. Falls out free if step 3 lands.
+
+3. **Chunked-KV accumulation — worth re-costing, and cheaper than "rewrite a
+   backend" looked.** This is the only step that changes the *shape* rather than
+   the slope, removing `k_full`/`v_full` and letting the dequant run per chunk.
+   What has changed since it was declined is that both primitives ship in the
+   tree: `flash_attn_varlen_func` takes `return_softmax_lse=` and `out=`, and
+   `vllm/v1/attention/ops/merge_attn_states.py` is written for exactly this split
+   — prefix output/LSE from cache, suffix from the current chunk, with a
+   `prefill_tokens_with_context` argument. Upstream's own FLASH_ATTN backend
+   already merges that way in five places. The real work is the causal
+   bookkeeping across chunks, not the merge.
+
+**0.29 is not a reason to wait, and the risk is not where it was expected**
+(checked 2026-09-08, see [docs/upstream.md](docs/upstream.md) *What a 0.29 bump
+costs the TQ patches*). TQ's own code is frozen upstream: one 39-line refactor in
+`turboquant_attn.py` since v0.28.0, with `_continuation_prefill`, `_tq_Pi_half`
+and every `turboquant*` op and quantization file byte-identical. All the churn is
+in the KV-spec plumbing our *other* two TQ patches sit on, and it is still
+moving. So this work can start on the pin and rebase cleanly; what a bump
+threatens is `turboquant-sliding-window`, not this.
+
+→ [docs/upstream.md](docs/upstream.md) (the costing, and what was declined for
+whom), [docs/kernels.md](docs/kernels.md) (the in-situ captures),
+[docs/turboquant-kv.md](docs/turboquant-kv.md)
+
 ## `bench-suite` — A TP tier for the bump gate
 
 `bench/` gates vLLM and exllamav3 bumps on token ids, per-position logprobs and
@@ -1166,142 +1235,6 @@ to borrow a noise floor from another engine.
 
 → [docs/qbench.md](docs/qbench.md)
 
-## `kv-pager` — Score-driven KV residency instead of eviction
-
-The outcome wanted is a KV cache where **being wrong costs latency, not
-correctness**. Every compression method we have evaluated -- TurboQuant, KVarN,
-TriAttention -- either shrinks KV or discards it, so a mistake is unrecoverable:
-a needle at an evicted position is gone. A pager keeps everything and decides
-only what is *resident*, so a mispredicted token is a stall rather than a lost
-one. That changes how aggressive a policy is allowed to be, and it is the only
-mechanism that decouples declared context from VRAM without paying in accuracy.
-
-It unblocks the appliance's binding constraint. On the 16 GiB card the 27B
-serves 128,576 tokens at fp8 today; at 50% residency the GPU budget covers the
-model's full 262,144-token context, with the remainder in host RAM and a disk
-tier available beyond that.
-
-**Phasing, gated so the cheap thing comes first.**
-
-1. ~~**Block-table permutation test**~~ **Done, it holds** --
-   `tools/blocktable_permute.py`, [docs/kv-pager.md](docs/kv-pager.md).
-   Permuting a running request's full blocks between decode steps leaves the
-   first attention that sees the rewrite within one representable step, on
-   FLASH_ATTN, FlashInfer and Triton, with fp8 KV, and on an EXL3 checkpoint,
-   while a single deliberately misplaced block moves 1405 of 2102 elements in
-   the same measurement. So residency *is* a block-table rewrite: no mask, no
-   `null_block`, no FA4. Three constraints came out of it and phase 2 inherits
-   them: the partial tail block must stay last; sliding-window groups must be
-   excluded (measured, not assumed -- permuting them moves layer 0 by 5.61 on a
-   scale of 11.4); and prefix caching was off throughout, because its
-   bookkeeping hashes a block by the token prefix leading to it.
-
-2. ~~**Fewer blocks than positions**~~ **Done, it works** --
-   `tools/blocktable_evict.py`. 17 blocks stood in for 2076 positions, the
-   residency path is bit-exact when it drops nothing, nothing past the resident
-   prefix is read, and a needle planted in a known block is retrieved when that
-   block is in the budget and lost when the same budget spends the slot
-   elsewhere. Keeping 16 of 128 blocks reproduced the full-context answer
-   *token for token*, which is the pager's premise in miniature.
-
-   **The seam is `AttentionMetadataBuilder.build`, and phase 2 must use it.**
-   Lowering `input_batch.seq_lens` instead does not fail, it hangs: the sampler
-   tests `seq_len < prefill_len` to decide whether a row is still prefilling,
-   so `seq_lens` means both "keys to read" and "progress through the prompt" —
-   the two numbers a pager needs to differ. `CommonAttentionMetadata` carries
-   its own copies of `seq_lens` and the block table, so the view can be handed
-   to the kernel without the rest of the engine seeing it. Two mechanics fall
-   out free there: `slot_mapping` is already computed from the untouched row,
-   so this step's key needs no surgery, and the tail block stays last.
-
-   What is still untouched is the allocator: both tools impose a *view*, so
-   nothing is freed and no memory is saved yet. That is phase 2's actual work,
-   and it is plumbing rather than a research risk.
-
-3. **A recency/LRU pager.** Policy-agnostic machinery: transport, granularity,
-   residency bookkeeping, the fault net, thrash behaviour. Worth building before
-   any scoring because it converts policy error into a tunable cost -- a recency
-   pager is StreamingLLM with an undo button, and shippable with no calibration.
-
-   ~~Two things to settle first~~ **both settled 2026-09-05**
-   ([docs/kv-pager.md](docs/kv-pager.md)). **A block can be freed and restored
-   on a running request** -- `tools/kv_roundtrip.py` destroys a block's GPU
-   copy, restores it from host memory into a *different* physical block and
-   repoints the view, bit-identically, on bf16, fp8 and EXL3; the arm that
-   skips the copy diverges immediately, so the destroy was real. **And explicit
-   DMA does not care about locality** -- `tools/kv_transport.py` measures a flat
-   17.2 GB/s from 16-token blocks to 1024-token runs, against 4.1 -> 12.6 GB/s
-   for the UM faulting curve this design was previously shaped around. Cost is
-   `copies x 1.30 us + bytes / 54 GB/s`, so **the policy scores blocks, not
-   spans**, and coalescing is opportunistic rather than required.
-
-   **The work continues in `vllm-virtualkv-plugin`**, which is where the
-   manager, host tier, residency guard and worker half now live — registered
-   through `KVCacheSpecRegistry` and `vllm.general_plugins` rather than
-   patched, with two named exceptions. What remains open there is the policy:
-   at 12% residency an oracle reproduces a full-context answer token for token
-   while recency loses it, so the mechanism is not the limit. The measurement
-   record and the instruments that produced it stay here, in
-   [docs/kv-pager.md](docs/kv-pager.md) and `docs/data/kv-pager/`.
-
-   What that left for the pager itself was the *allocator*: every tool so far
-   imposes a view while vLLM's block pool still owns everything, so nothing is
-   reclaimed yet. `RSWASpec` frees blocks from the middle of a running request
-   and substitutes `null_block`, which is the half that is missing; note that
-   the restore direction need not be in-place, since block order carries no
-   meaning, so an append is enough and the append-only worker protocol is not
-   the obstacle it looks like.
-
-   **The hazard to design around is that the null substitution never leaves the
-   scheduler.** `_remove_blocks_in_range` mutates `req_to_blocks` in place, and
-   `get_block_ids` only ever ships *newly allocated* blocks, so the worker's
-   row still names a block the pool has already handed to someone else --
-   verified 2026-09-05, `null_block` appears nowhere in the scheduler, the
-   scheduler output or the live runner. R-SWA is safe because its mask stops
-   attention reading those positions at all. A view-based pager is safe for the
-   same reason by a different route, but only while the two sides agree every
-   step: free a block the view still admits and the kernel reads another
-   request's KV, which is plausible garbage rather than a crash.
-
-4. **Measure end to end**: latency and output quality at several residency
-   budgets. Only this can say whether the mass-captured proxy translates.
-
-5. **Then** swap in a better policy, against a harness that measures what
-   matters rather than a proxy.
-
-**What is already measured** (`~/git/triattention/scripts/attention_mass.py`,
-Qwen3-8B, keep 5%, GQA-shared -- the numbers a pager actually gets):
-
-| context | oracle | trig score | recency | score - recency |
-|---|---|---|---|---|
-| 4K | 87.8% | 76.7% | 70.7% | +6.0 |
-| 32K | 92.7% | 78.1% | 62.9% | +15.2 |
-
-Attention concentrates *further* as context grows, and the score's margin over
-recency grows monotonically -- so the regime where paging matters is the regime
-where it works best. The GQA union tax is ~1 point, so KV-granular residency is
-viable. Most remaining headroom is policy, not transport.
-
-**Transport, measured on this box.** Explicit pinned H2D 54.5 GB/s; CUDA managed
-memory faults at 9.4 GB/s bulk but only 3.5-7.6 GB/s scattered, and migration
-granularity is a knob -- 16-token pages get 4.1 GB/s, 128-token 7.6, 512-token
-16.0. So explicit prefetch is the transport and faulting is the correctness net,
-which must stay rare: faulting 5% of a 128K context costs most of a decode step.
-Page size should scale with the resident budget (~1-2% of it) or thrashing
-dominates.
-
-**Open questions**: one prompt at one query position, so no variance estimate;
-per-token rather than per-page granularity, which is the coarsening the hardware
-forces; single-step rather than compounding error over a generation; and whether
-mass-captured predicts output quality at all.
-
-Build it here -- `tools/gsm8k_kv.py`, `tools/niah_kv.py` and the TurboQuant work
-already live here -- and split the KV subsystem to its own repo if it has legs.
-
-→ [docs/kv-pager.md](docs/kv-pager.md),
-[docs/turboquant-kv.md](docs/turboquant-kv.md),
-[docs/triattention.md](docs/triattention.md)
-
 ## `kvarn-accuracy` — Does KVarN actually match FP16 accuracy?
 
 KVarN's published claim is "matches FP16 accuracy", which is strong vague language
@@ -1440,6 +1373,19 @@ divergence is deliberately all qbench measures),
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `kv-pager` — closed 2026-09-08, dead on the merits, see
+  [docs/kv-pager.md](docs/kv-pager.md) "Why this closed". The mechanism worked and was
+  verified — bit-identical under 523k block moves, zero guard violations across ~230k
+  guarded steps at 84k-token contexts — and the *premise* is what failed, which is why the
+  result transfers. A scored policy lost **14 of 14** configurations, and oracles with true
+  attention mass, true marginal output shift and the optimal *set* all tie or lose to
+  keeping the most recent blocks, so no estimator could have won. Capacity never depended
+  on the policy and does not survive PCIe: +10% context for 2x step latency at 24 GiB, a
+  bpw-for-bandwidth trade at 16 GiB. The one remaining thread, sub-block-64 granularity,
+  forfeits prefix caching inherently. `vllm-virtualkv-plugin` is archived and **KV
+  eviction/offload is off the table categorically**, which leaves bytes-per-token as the
+  only lever on context per card and is what promotes `turboquant-prefill-transient`.
 
 - `head-bits` — answered 2026-08-25, see [docs/qbench.md](docs/qbench.md) "Head bitrate:
   6 is defensible". Budget-neutral sweep on phi-4-mini, five points within 0.041% of each

@@ -72,11 +72,17 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [embeddings.md](docs/embeddings.md) | quantized embeddings, block-scaled vs. trellis, storage format, depth selection, serving under torch.compile |
 | [blockq-format.md](docs/blockq-format.md) | the block-scaled embedding format itself: layout, decode/encode reference, invariants, how to produce and consume it |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
+| [capability-suite.md](docs/capability-suite.md) | whether a served configuration still *does the work*: two SWE-bench runs, what a paired comparison has to hold fixed, and why discriminating power peaks near 50% resolved |
 | [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
+| [media-encoders.md](docs/media-encoders.md) | how many bytes a vision/audio tower is — up to 12.7% of a low-bpw exl3 checkpoint — why evicting one is nearly free, and the structural reason nothing can today |
+| [turboquant-kv.md](docs/turboquant-kv.md) | TurboQuant's KV page geometry: the mispriced page that stopped a quantized cache coexisting with sliding-window layers, and what first/last-N boundary protection costs |
 | [kvarn.md](docs/kvarn.md) | a low-bit KV cache ported, measured and shelved: +17% context for 3.5x prefill, and why the enum is the real find |
 | [triattention.md](docs/triattention.md) | a KV *eviction* method: four integration defects fixed, compaction corrupting the cache, and the calibration work that outlived it |
+| [kv-pager.md](docs/kv-pager.md) | KV residency as a block-table rewrite: the measurements and the instruments that took them — and **closed 2026-09-08**, three exits that put KV eviction and offload off the table categorically |
 | [exllamav3-arch.md](docs/exllamav3-arch.md) | where exllamav3 branches by GPU architecture |
+| [pre-ampere.md](docs/pre-ampere.md) | Volta and Pascal below the sm_80 floor: the CUDA 13 toolchain is the wall rather than the kernels, Pascal ruled out for good, Volta parked |
+| [upstream.md](docs/upstream.md) | the outward-facing queue: patches we carry, what is worth offering and in what shape, what to check before filing, and what a 0.29 bump costs the TQ patches |
 | [feasibility-2026-08-03.md](docs/feasibility-2026-08-03.md) | the original research report (frozen) |
 | [bench/README.md](bench/README.md) | the dependency-bump gate: what it captures and why |
 

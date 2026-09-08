@@ -111,13 +111,40 @@ backend, and neither matches the shape of ask that has been landing (see *Priori
 the reasoning*). The asymmetry is the point: one line recovered 232 MiB because it asked
 nothing of anyone's design; the remaining 692 MiB would cost a fork.
 
-*The consequence, which is now a fact about the path rather than a pending fix*:
-TurboQuant's prefill transient stays at **6144 B/token, linear in cached context** -- an
-axis the profile run never varies, so vLLM reports the same peak activation for a 4K
-session and a 130K one. TQ headroom cannot be validated by a short prompt, and the
-`--kv-cache-memory` pin stays load-bearing on tight configs. fp8 has no equivalent
-problem: its transient is chunk-scaled, and the chunk is exactly what the profiler
-varies.
+*The consequence*: TurboQuant's prefill transient stays at **6144 B/token, linear in
+cached context** -- an axis the profile run never varies, so vLLM reports the same peak
+activation for a 4K session and a 130K one. TQ headroom cannot be validated by a short
+prompt, and the `--kv-cache-memory` pin stays load-bearing on tight configs. fp8 has no
+equivalent problem: its transient is chunk-scaled, and the chunk is exactly what the
+profiler varies.
+
+**Declining to *offer* these is not declining to *have* them, and that distinction became
+load-bearing on 2026-09-08**, when `kv-pager` died and KV eviction/offload went off the
+table categorically. Compression is the only remaining lever on declared context per card,
+so the 692 MiB is back in scope as work we carry -- tracked as `turboquant-prefill-transient`
+in [../TODO.md](../TODO.md). Two things reopen at the same time, and both were missed above
+because the framing was "what would upstream take":
+
+- **A third option on the rotation temporary that argues with nobody.** The costing went
+  straight from "per-head `mm` with `out=`" (dtype-blocked) to "make the dequant emit bf16"
+  (their numerics, our memory) without considering *slabs*: rotate a few thousand tokens at
+  a time and copy each slab into `k_full`, and the buffer is O(slab) with the dtypes,
+  kernels and arithmetic all unchanged. It is a loop bound, not a design change.
+- **Chunked-KV is not the rewrite it was priced as.** Both primitives already ship:
+  `flash_attn_varlen_func` takes `return_softmax_lse=` and `out=`, and
+  `vllm/v1/attention/ops/merge_attn_states.py` is written for precisely this split --
+  prefix output/LSE from cache, suffix from the current chunk, with a
+  `prefill_tokens_with_context` argument -- and upstream's own FLASH_ATTN backend merges
+  that way in five places. The remaining work is causal bookkeeping across chunks.
+
+**And there is a second cost the captures may not have counted.**
+`TurboQuantMetadataBuilder._reserve_workspace` reserves the two fp16 dequant buffers at
+`round_up(max_model_len - 1, block_size)` whenever chunked prefill is on and
+`max_num_batched_tokens > 128` -- 4096 B/token of *declarable* context, ~486 MiB at 128K
+on Hk=4/D=256, independent of whether a continuation ever runs. Unlike the transient it
+prices the declaration rather than the request, which is the axis the appliance sells. It
+is not obviously inside the 0.828 GiB figure in [kernels.md](kernels.md), and which side of
+`consumed`/`peak_activation` it lands on has to be measured before it is designed around.
 
 ### Blocked on a design decision that is not ours
 
@@ -304,6 +331,31 @@ fix worth filing should be judged against both.
 checkpoint tensors itself. Qwen3.5 will not load without it and `handles_fused_shards`
 has no upstream equivalent, but it is a hook shaped around how this plugin loads. No
 second consumer is known, so it is ours to maintain until one appears.
+
+### What a 0.29 bump costs the TQ patches
+
+Checked 2026-09-08 against upstream `main` at `28a2ccee78` (560 commits past `v0.28.0`)
+and the `v0.29.0rc6` tag; there is no `v0.29.0` final yet.
+
+**TurboQuant's own code is effectively frozen upstream.** `turboquant_attn.py` has one
+39-line change since `v0.28.0` -- `get_kv_cache_shape()` removed in favour of
+`supported_kv_cache_layouts() -> (KVCacheLayout.LBNHC,)`, present in rc6 as well -- and
+`_continuation_prefill`, `_tq_Pi_half`, every file under `vllm/v1/attention/ops/turboquant*`
+and `flydsl*`, and all of `layers/quantization/turboquant/` are byte-identical. So no
+amount of waiting improves the ground the prefill-transient work stands on, and none of
+that work has to be rebased to be started.
+
+**The churn is all in the KV-spec plumbing the other two TQ patches sit on**, which is
+exactly where a bump will hurt: `v1/kv_cache_interface.py` 478 changed lines,
+`config/cache.py` 96, `model_executor/layers/attention/attention.py` 55,
+`platforms/interface.py` 32 -- the files
+[`86e3b1eef`](https://github.com/yeasah/vllm/commit/86e3b1eef) (page geometry, which
+rewrites how `_align_heterogeneous_kv_block_size` picks the pricing backend) and
+[`ce1685699`](https://github.com/yeasah/vllm/commit/ce1685699) (`boundary:N`) modify. And
+it has not settled: `kv_cache_interface.py` moved another 98 lines between rc6 and main.
+Recheck at the bump whether the refactor happened to fix the mispriced page on its own --
+the mechanism our patch corrects is still there on main, but its surroundings are not the
+ones we diagnosed.
 
 ---
 

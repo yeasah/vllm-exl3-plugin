@@ -446,6 +446,9 @@ Same model, two KV paths, both at ~119K context with a 2K chunk:
 The two paths differ in *shape*, not just size, and that is the durable finding: TQ's
 transient is **6144 B/token, linear in cached context**, on an axis the profile run never
 varies. fp8's is chunk-scaled. So a short test prompt validates an fp8 config and tells
-you nothing about a TQ one. Removing the rest of TQ's would mean changing a dequant
-kernel's dtype or rewriting an attention backend we do not own; both were costed and
-declined -- see [upstream.md](upstream.md).
+you nothing about a TQ one. Removing the rest of TQ's was costed as changing a dequant
+kernel's dtype or rewriting an attention backend we do not own, and both were declined as
+things to *offer*; that decision was reopened on 2026-09-08 as work to carry, with a
+cheaper third option and a `max_model_len`-sized workspace reservation these captures may
+not include -- see [upstream.md](upstream.md) and `turboquant-prefill-transient` in
+[../TODO.md](../TODO.md).

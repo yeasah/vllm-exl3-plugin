@@ -8,13 +8,14 @@
 > rather than the plugin's — they belong with the data in
 > `docs/data/kv-pager/`. The manager, host tier, guard and worker moved.
 >
-> **That project is suspended as of 2026-09-08**, and several "still live"
-> items below are now closed. The demand signal lost to recency against three
-> oracles (`vllm-virtualkv-plugin` `docs/demand-signal.md`); the fetch-budget
-> arithmetic recorded here is what closes the capacity path, worked through in
-> `docs/capacity.md` there; and no published eviction method scores a quantity
-> outside the bound (`docs/eviction-survey.md`). The transport measurements
-> below stand — they are the input to that verdict, not a casualty of it.
+> **That project is archived as of 2026-09-08, and with it KV eviction and
+> offload are off the table for this project categorically** — not shelved for
+> lack of time, and not awaiting a better policy. Three independent exits close
+> it; see *Why this closed* at the foot of this note. Several "still live" items
+> below are answered there rather than outstanding. **The transport and
+> permutation measurements here stand** — they are the input to that verdict,
+> not a casualty of it, and they are the reason the verdict is trustworthy: the
+> mechanism was proven before the premise was tested.
 
 A pager that manages KV residency by rewriting `req_to_blocks` only works if a
 request's block table can be reordered without changing what the model computes.
@@ -312,6 +313,11 @@ smaller. Measured below: block-granular residency is back on the table, and the
 policy scores blocks rather than spans.
 
 ### Still live
+
+*Answered, all of it — see [*Why this closed*](#why-this-closed-eviction-and-offload-are-off-the-table)
+at the foot. Kept as written because two of these framed the questions the
+`vllm-virtualkv-plugin` work went on to answer, and the fetch-budget paragraph
+below is the seed of the arithmetic that closed the capacity path.*
 
 **The reclamation precedent is R-SWA, and it is in-tree.** Nothing here frees
 anything: both tools impose views while the allocator keeps every block.
@@ -896,6 +902,68 @@ than GPU KV capacity allows**, with output quality measured against the same
 model served conventionally at a context that does fit. Everything else —
 thrash curves, fetch rates, policy comparisons — is instrumentation around that.
 
+## Why this closed: eviction and offload are off the table
+
+Recorded here, in the repo that will keep making context-per-card decisions,
+because the conclusion is *categorical* and a later session should not have to
+reconstruct it from an archived repo. The measurement record is
+`vllm-virtualkv-plugin` `docs/demand-signal.md`, `docs/capacity.md`,
+`docs/granularity.md` and `docs/eviction-survey.md`; what follows is only enough
+to know that the question is settled and on what grounds.
+
+**Nothing here failed to work.** `full` and `churn` were bit-identical to running
+without the plugin under 523k block moves, zero guard violations across ~230k
+guarded steps at 84k-token contexts, correct on a four-group hybrid and on an
+EXL3 checkpoint. The premise is what failed, and it failed against a working
+mechanism — which is why the result transfers rather than being a fact about one
+implementation.
+
+**Exit 1 — selection is bounded, and the bound ties recency.** A scored policy
+lost **fourteen of fourteen** configurations (two architectures, three budgets,
+five block sizes, two model families) while paying 1.5–2.5× the copy-out traffic.
+At a fixed budget on an 84k-token agent session, `recency` (position only) scored
+0.2374 agreement, a *true* attention-mass oracle 0.2372, a *true* marginal-output-
+shift oracle 0.2052, and a greedy optimal-*set* oracle 0.2121. Perfect knowledge
+of the quantity every published method estimates ties a policy that ignores it,
+so no estimator could have won — there is nothing in that quantity to estimate.
+Four confounds were cleared before this was believed: a sinkless strawman
+baseline (two blocks of 112 hold 0.4580 of all mass), unrepresentative decode
+volume (138 vs 617 tokens/turn *reversed* a result), contexts under ~5k, and
+block granularity swept 16.5× on a model where block size is free.
+
+**Exit 2 — capacity never depended on the policy, and does not survive its own
+transport arithmetic.** 20 ms of PCIe 5.0 x16 moves 1.05 GB, ~16k tokens on this
+geometry, against ~156k already resident on a 24 GiB card: **+10% context for 2×
+step latency**, in the favourable case. On 16 GiB it stops being a context trade
+and becomes "+1.0 bpw for 43% of throughput", arguable on the one 16 GiB card
+with a 5.0 x16 link and dead on the rest, which are x8. The configuration that
+*does* survive — recency with a host tier nothing ever reads — is a serving-time
+sliding window needing none of this machinery.
+
+**Exit 3 — the one remaining thread ends in a structural wall.** Outcome was
+never measured below block 64, and a sharp sub-64 regime is consistent with
+everything measured; acting on it means token-granular eviction with physical
+compaction, which forfeits prefix caching for the compacted region *inherently*
+(a compacted block holds a different set of tokens than its hash claims). That
+rules out every multi-turn case the appliance serves, and block-and-above is
+where exit 1 already ran.
+
+**What this means for work in this repo.** Declared context per card is a
+**bytes-per-token** question and nothing else: compression of what is resident,
+not selection of what to keep or where to put it. That is what promotes
+`turboquant-prefill-transient` to the most urgent item in [TODO.md](../TODO.md) —
+it is now the only remaining lever on the appliance's binding constraint.
+Two findings outlive the negative and are worth having before building anything
+KV-shaped: **a fixed-size per-block summary does not scale down** (Quest-style
+min/max bounds exceed the block they describe below block 72; a quantized key
+summary is a flat 6.25% at any size), and **contiguity is not a heuristic, it is
+the answer** — three oracles with exact knowledge tie or lose to keeping the most
+recent blocks.
+
+*Not closed by any of this*: KV **compression** at fixed residency (`turboquant-*`,
+`kvarn-accuracy`), which shrinks bytes per token rather than choosing which tokens
+survive, and is the category all three exits leave untouched.
+
 ## Reproducing
 
     tools/blocktable_permute.py run MODEL OUT.json [--kv fp8] [--graphs]
@@ -922,5 +990,5 @@ the negative control cannot act on.
 The runs above are in [data/kv-pager/](data/kv-pager/); all were taken on the
 RTX 5070 Ti (sm120) box.
 
-→ [TODO.md](../TODO.md) `kv-pager`, [turboquant-kv.md](turboquant-kv.md),
-[triattention.md](triattention.md)
+→ [turboquant-kv.md](turboquant-kv.md), [triattention.md](triattention.md),
+and `vllm-virtualkv-plugin` (archived) for the plugin and the negative result
