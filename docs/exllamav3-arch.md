@@ -41,6 +41,9 @@ Everything below is flagged for whether it sits under one of those.
 | `compat.cuh` | `< 750 \|\| CUDART < 11000` | `tanh_opt` fallback | no (we are sm_80+) |
 | `cache/lmq.cuh` | `defined()` only | host/device clamp macro | no (cache code, unused) |
 
+Below sm_80 the question stops being one of gates and becomes one of whether the
+kernels assemble at all; [pre-ampere.md](pre-ampere.md) has that measurement.
+
 Only four distinct thresholds exist in the whole extension: `> 890`, `== 860`,
 `>= 800`, `< 750`. The `== 860` pair is interesting mainly as precedent — it
 shows the project does ship narrowly-scoped per-arch code paths that other
