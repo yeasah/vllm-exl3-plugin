@@ -7,6 +7,14 @@
 > `tools/kv_roundtrip.py`, `tools/kv_transport.py`) measure *vLLM's* behaviour
 > rather than the plugin's — they belong with the data in
 > `docs/data/kv-pager/`. The manager, host tier, guard and worker moved.
+>
+> **That project is suspended as of 2026-09-08**, and several "still live"
+> items below are now closed. The demand signal lost to recency against three
+> oracles (`vllm-virtualkv-plugin` `docs/demand-signal.md`); the fetch-budget
+> arithmetic recorded here is what closes the capacity path, worked through in
+> `docs/capacity.md` there; and no published eviction method scores a quantity
+> outside the bound (`docs/eviction-survey.md`). The transport measurements
+> below stand — they are the input to that verdict, not a casualty of it.
 
 A pager that manages KV residency by rewriting `req_to_blocks` only works if a
 request's block table can be reordered without changing what the model computes.
