@@ -246,4 +246,8 @@ pre-bump baseline, so upstream's mechanism and ours agree exactly.
 | `EXL3_DEQUANTIZE` | 0 | Phase 0 behaviour: dequantize at load. Correctness oracle, no memory saving |
 | `EXL3_DENSE_EMBED` | 0 | keep a tied model's embedding dense instead of serving it from the quantized `lm_head` (see [docs/embeddings.md](docs/embeddings.md)) |
 | `EXL3_EMBED_BLOCK_CHUNK` | 256 | distinct 128-row blocks decoded per pass in the quantized-embedding gather; lower bounds peak memory |
+| `EXL3_BLOCKQ_ON_LOAD` | 0 | block-quantize an untied model's dense embedding while it loads, so a stock checkpoint gets the saving with no derived artifact (see [docs/embeddings.md](docs/embeddings.md)) |
+| `EXL3_BLOCKQ_CACHE` | 1 | keep the on-load encoding under `~/.cache/vllm-exl3-plugin/blockq-embeddings/`, keyed by the checkpoint's resolved commit; 0 re-encodes every start |
+| `EXL3_BLOCKQ_CACHE_DIR` | `$XDG_CACHE_HOME/vllm-exl3-plugin/blockq-embeddings` | where that cache lives. Safe to delete at any time |
+| `EXL3_BLOCKQ_ENCODE_CHUNK` | 16384 | rows encoded per pass by the on-load encoder; lower bounds the fp32 temporary |
 | `VLLM_DISABLE_COMPILE_CACHE` | 0 | set to 1 while editing this plugin — vLLM's compile cache cannot see plugin code |

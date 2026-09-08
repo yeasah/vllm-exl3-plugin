@@ -86,6 +86,15 @@ class EXL3Config(QuantizationConfig):
         # Also from maybe_update_config, which is the only hook that sees
         # hf_config. None means "not yet known".
         self.tie_word_embeddings: bool | None = None
+        # Which checkpoint is being served. `revision` is what the metadata
+        # lookups below ask the Hub for and is whatever the user gave -- usually
+        # an EXL3 bit-rate branch. `commit_hash` is what that actually resolved
+        # to, and it is the one the on-load encode cache keys on: a branch gets
+        # re-pushed, so `X-exl3@3.00bpw` does not name a particular embedding
+        # matrix and a cache entry under it would outlive the tensor it holds.
+        self.model_name: str | None = None
+        self.revision: str | None = None
+        self.commit_hash: str | None = None
         # Phase 0's dequantize-at-load path, kept as a correctness oracle: it
         # is a transcription of exllamav3's own dequantization, so serving the
         # same prompts both ways isolates a kernel bug from a plumbing bug.
@@ -200,14 +209,20 @@ class EXL3Config(QuantizationConfig):
         hf_config: Any = None,
         revision: str | None = None,
     ) -> None:
-        if revision is None and hf_config is not None:
-            # vLLM does not pass `revision` here (there is a TODO about it on
-            # the base class), and defaulting to "main" is actively wrong: EXL3
-            # repos publish one branch per bit rate, and `main` frequently has
-            # no quantization_config.json at all. transformers records the
-            # commit it actually resolved the config from, which is exactly the
-            # revision being served.
-            revision = getattr(hf_config, "_commit_hash", None)
+        # transformers records the commit it actually resolved the config from,
+        # which is the only stable name for what is being served.
+        commit_hash = (
+            getattr(hf_config, "_commit_hash", None) if hf_config is not None else None
+        )
+        if revision is None:
+            # vLLM does not always pass `revision` here (there is a TODO about
+            # it on the base class), and defaulting to "main" is actively wrong:
+            # EXL3 repos publish one branch per bit rate, and `main` frequently
+            # has no quantization_config.json at all.
+            revision = commit_hash
+        self.model_name = model_name
+        self.revision = revision
+        self.commit_hash = commit_hash
         self._load_tensor_storage(model_name, revision)
         if hf_config is not None:
             self.tie_word_embeddings = bool(
@@ -747,7 +762,11 @@ class EXL3Config(QuantizationConfig):
             # `"model.embed_tokens"` default while the rename still fired --
             # routing 755 MiB of trellis to a module path a nested model does
             # not have, dropping it silently, and serving garbage.
-            self.embed_prefix = prefix
+            # `or` rather than a plain assignment: llama.py and the families
+            # built on it construct their embedding without passing a prefix at
+            # all, so this arrives empty and would otherwise overwrite the
+            # default with a name that renames `lm_head.*` onto nothing.
+            self.embed_prefix = prefix or self.embed_prefix
 
             blockq_embed = self.embedding_is_blockq()
             # `embedding_is_quantized` answers a question about the *head's*
@@ -767,10 +786,12 @@ class EXL3Config(QuantizationConfig):
                     # Tied *and* repaired: this module owns the `bq_*` tensors
                     # for the lookup and receives the head's trellis for the
                     # logits matmul. Each role gets the encoding built for it.
-                    return EXL3BlockQTiedEmbeddingMethod(self)
+                    return EXL3BlockQTiedEmbeddingMethod(self, self.embed_prefix)
                 # Untied. Nothing is renamed onto this module: the tensors are
-                # its own, and the head has its own method.
-                return EXL3BlockQEmbeddingMethod(self)
+                # its own, and the head has its own method. The prefix goes with
+                # it: `embed_prefix` names the last embedding constructed, and
+                # the on-load cache needs the one this method actually serves.
+                return EXL3BlockQEmbeddingMethod(self, self.embed_prefix)
 
             # EXL3 never quantizes the input embedding -- `embed_tokens.weight`
             # is dense in every checkpoint inspected -- but a *tied* model ships

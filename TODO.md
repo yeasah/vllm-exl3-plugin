@@ -1348,6 +1348,21 @@ fallbacks are already proven by unit test rather than by argument: an
 indivisible hidden size, an unknown one, a tied model and an explicit
 `EXL3_DENSE_EMBED` all end on the dense path.
 
+**The per-start cost is now paid once per checkpoint** (2026-09-08, asked for by
+`vllm-untwisted`, whose profiling starts an engine per configuration). The
+encoding is cached under `~/.cache/vllm-exl3-plugin/blockq-embeddings/`, keyed on
+the resolved commit hash rather than the bit-rate branch -- branches get
+re-pushed, and an entry under a branch name would hand a re-quantized checkpoint
+the previous embedding without saying so. `EXL3_BLOCKQ_CACHE=0` disables it.
+
+**The large-vocabulary number the flip was waiting on is in:** Qwen3.5-9B's
+248320x4096 encodes in **5.8 s**, taking model loading from 1.96 s to 9.99 s on
+a cold start and back to 1.96 s on every warm one, at an identical 5.48 GiB
+resident. So the objection is now specifically about *first* loads -- 5.8 s of
+CPU before a 9B model serves its first token, once per checkpoint -- rather than
+about every start. That is the number the default flip has to be argued on, and
+what remains unmeasured is a vocabulary well past 248K.
+
 → [docs/embeddings.md](docs/embeddings.md)
 
 ## `capability-suite` — Measuring capability through the served path

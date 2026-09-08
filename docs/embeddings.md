@@ -1380,6 +1380,108 @@ decoder — the reason to keep two implementations of a format that must agree.
   The shared-tensor optimization stays deferred on the same grounds as before: it needs an
   integer GEMM for the head role, and gemma-4 is nearly its whole constituency.
 
+## On-load encoding, and paying for it once
+
+*Added 2026-09-08, at the request of the appliance project (`vllm-untwisted`).*
+
+`EXL3_BLOCKQ_ON_LOAD=1` gets the saving above on a checkpoint nobody has repaired:
+the dense `embed_tokens.weight` is encoded into `bq_*` while it loads, and the fp16
+matrix is never resident. That removes the derived-artifact step entirely — no
+`tools/quantize_embedding.py` run, no second copy of the checkpoint on disk, no
+sidecar to keep in sync with the original — which is what makes it the right default
+for a system that serves whatever HF checkpoints happen to exist.
+
+It is opt-in, and the reasons are in TODO.md under `blockq-on-load`. Two constraints
+shape everything below. The encode runs **on CPU**, because `blockq.encode` does not
+reproduce across devices — a GPU encode is equally accurate and produces a *different*
+model from the same weights, which would mean a model served this way disagreed with
+the same model quantized offline. And it runs **per engine start**, which is the cost
+this section is about: about 0.6–1.6 s for MiniCPM5-1B's 130560x1536, and
+proportionally more for a real vocabulary.
+
+### Why that cost needed removing rather than reducing
+
+Engine startup is not a one-time cost in the workload this is for. A profiling sweep
+starts an engine per configuration — per bit rate, per KV dtype, per TP width — and
+re-encodes the identical matrix every time, from identical bytes, on the CPU, while
+the GPU sits idle. The work is a pure function of the dense tensor, so the answer is
+not a faster encoder but a cache.
+
+`~/.cache/vllm-exl3-plugin/blockq-embeddings/` holds one safetensors file per encoded
+embedding, in the same three-tensor layout `tools/quantize_embedding.py` writes.
+`EXL3_BLOCKQ_CACHE=0` turns it off; `EXL3_BLOCKQ_CACHE_DIR` moves it; deleting the
+directory is always safe.
+
+### What an entry is keyed on, and why each part had to be there
+
+- **The resolved commit hash, not the revision that was asked for.** These differ in
+  the case this project sees constantly: EXL3 repos publish one branch per bit rate,
+  the thing being served is `turboderp/X-exl3@3.00bpw`, and that branch gets
+  re-pushed when the quantization is redone. An entry keyed on the branch name would
+  outlive the tensor it holds and hand a re-quantized checkpoint the previous
+  embedding — silently, since a decoded embedding of the right shape produces
+  plausible text. `hf_config._commit_hash` is what transformers actually resolved,
+  and it is the only stable name for what is loaded. If no commit resolves, nothing
+  is cached: the same refusal `_skip_hub_lookup` makes rather than substituting
+  `"main"`.
+- **The tensor's name.** One embedding per model is today's shape, not a property of
+  the format — multimodal checkpoints already carry more than one embedding matrix,
+  and the day this path serves a second one, a per-checkpoint key would hand it the
+  first one's rows. Taken from the module prefix and recorded per method rather than
+  read off `EXL3Config.embed_prefix`, which holds whichever embedding was constructed
+  last.
+- **Vocabulary, hidden size, block size and bit width.** Implied by the two above and
+  in the key regardless, so that changing `BLOCKQ_BLOCK` or `BLOCKQ_BITS` orphans old
+  entries instead of misreading them. The shapes are re-checked on read; the key is
+  what makes a mismatch a miss rather than an error.
+
+A **local directory** has no commit to key on, so it is identified by a digest of its
+own files' names, sizes and mtimes. Weaker than a hash — `touch` invalidates, and a
+rewrite preserving both size and mtime would not — but it is the property a local
+checkout actually has, and it fails toward re-encoding rather than toward a wrong
+matrix.
+
+### Entries hold the whole vocabulary, and the reader slices
+
+Encoding is row-independent (every reduction in `blockq.encode` is inside a row), so a
+rank's shard of the encoding equals the encoding of its shard. Storing the full matrix
+therefore makes one entry serve every tensor-parallel width, which is the arrangement
+that matters here: sweeping TP=1,2,4 is one encode, not three, and each rank reads only
+its own rows back out through safetensors' slicing rather than materializing the
+vocabulary.
+
+The cost is that a *cold* load at TP=N has every rank encode the full matrix to write
+the same bytes. That is once per checkpoint, and it is why the **uncached** path still
+encodes only the local rows — with nothing to amortize there is no reason to do the
+other ranks' work.
+
+### Measured
+
+Qwen3.5-9B @4.00bpw, 248320x4096 embedding, one RTX 5070 Ti, `enforce_eager`:
+
+| | model loading | resident weights |
+|---|---|---|
+| cold (encode + write the entry) | 9.99 s | 5.48 GiB |
+| warm (read the entry) | 1.96 s | 5.48 GiB |
+
+The encode was 5.8 s of the cold figure, so it accounts for most but not all of the
+8.0 s difference; the rest is the OS page cache being warm on the second run, which
+the cache gets credit for only by accident. The resident footprint being *identical*
+is the check that matters — a cache that silently fell back to the dense embedding
+would also look like a speedup.
+
+Cold and warm serve **the same token ids** (`[11751, 13, 198, 32, 13, 2912, 198,
+33]` greedy from the same prompt), checked as ids rather than as rendered text.
+Same result on MiniCPM5-1B @3.00bpw, whose smaller 130560x1536 embedding encodes in
+0.6–1.6 s.
+
+### Nothing here is allowed to be fatal
+
+A read-only or full `~/.cache`, a truncated entry, an entry written by a layout this
+version does not understand: each is a miss and a log line, never a failure to serve.
+An appliance that stopped loading models because a cache directory filled up would
+have traded a startup cost for an outage.
+
 ## What llm-compressor's embedding quantization costs, and where its menu is a trap
 
 *Measured 2026-08-24, after the amendment at the top of this note. Every embedding arm

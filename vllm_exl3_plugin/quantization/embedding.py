@@ -39,12 +39,14 @@ The two tied-model shapes vLLM builds are handled differently:
 
 from __future__ import annotations
 
+import time
+
 import torch
 
 from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
-from .. import blockq, env, format, ops, tp
+from .. import blockq, blockq_cache, env, format, ops, tp
 from ..log import init_logger
 from .linear import EXL3Parameter
 from .lm_head import EXL3LMHeadMethod
@@ -174,7 +176,42 @@ def _encode_on_load(dense: torch.Tensor) -> dict[str, torch.Tensor]:
     return {n: torch.cat([p[n] for p in parts], dim=0) for n in names}
 
 
-def _make_on_load_loader(layer: torch.nn.Module):
+def _row_span(param, rows: int) -> tuple[int, int]:
+    """This rank's `[start, stop)` of the vocabulary, spelled out.
+
+    `EXL3Parameter._take_row` does the same slice, but as a slice: the cache
+    needs the bounds themselves, so that a hit can read only these rows out of
+    the file instead of materializing the vocabulary and throwing most of it
+    away. Clamped the way Python's own slicing clamps, because the last rank's
+    nominal span runs past the end -- vLLM's per-rank size covers the padded
+    vocabulary and the checkpoint stores the real one.
+    """
+    if param.tp_size == 1 or param.row_shard_size is None:
+        return 0, rows
+    first = param.tp_rank * param.row_shard_size
+    return min(first, rows), min(first + param.row_shard_size, rows)
+
+
+def _cache_entry(quant_config, tensor: str, rows: int, hidden: int):
+    """The cache entry for this encode, or `None` if it should not be cached."""
+    if not blockq_cache.enabled():
+        return None
+    identity = blockq_cache.checkpoint_identity(
+        getattr(quant_config, "model_name", None),
+        getattr(quant_config, "commit_hash", None),
+    )
+    if identity is None:
+        logger.debug(
+            "No commit hash resolved for this checkpoint, so the on-load encode "
+            "of %s is not being cached: an entry could not be told apart from "
+            "one belonging to a different commit of the same repo.",
+            tensor,
+        )
+        return None
+    return blockq_cache.entry(identity, tensor, rows, hidden)
+
+
+def _make_on_load_loader(layer: torch.nn.Module, method):
     """Receive the dense embedding and leave `bq_*` behind in its place.
 
     The three parameters are filled exactly as a checkpoint would have filled
@@ -182,11 +219,62 @@ def _make_on_load_loader(layer: torch.nn.Module):
     the shape checks and the vocabulary padding in
     `process_weights_after_loading`, is the path already exercised by
     pre-quantized checkpoints rather than a parallel one.
+
+    Two shapes of the same work, chosen by whether there is an entry to fill:
+
+    - **Cacheable.** Encode the whole vocabulary, store it, and hand this rank
+      its rows. The entry is then TP-independent, which is the point -- a
+      profiling sweep over TP=1,2,4 pays for one encode, not three. A cold load
+      at TP>1 has every rank encode the full matrix to write the same bytes,
+      which is once per checkpoint and the price of that independence.
+    - **Not cacheable** (`EXL3_BLOCKQ_CACHE=0`, or a revision that never
+      resolved). Encode only this rank's rows, exactly as before the cache
+      existed. There is nothing to amortize, so there is no reason to do the
+      other ranks' work.
     """
 
     def load(param, loaded_weight: torch.Tensor) -> None:
-        rows = param._take_row(loaded_weight, param.row_shard_size, param.tp_rank)
-        for name, tensor in _encode_on_load(rows).items():
+        if loaded_weight.dim() != 2:
+            raise format.EXL3FormatError(
+                f"embedding must be 2-D, got {list(loaded_weight.shape)}"
+            )
+        rows, hidden = loaded_weight.shape
+        start, stop = _row_span(param, rows)
+        entry = _cache_entry(method.quant_config, method.embed_tensor, rows, hidden)
+
+        shards = None
+        if entry is not None:
+            shards = blockq_cache.read(
+                entry, rows=rows, hidden=hidden, row_start=start, row_stop=stop
+            )
+            if shards is not None:
+                logger.info(
+                    "Reusing the cached block-quantized encoding of %s (%s).",
+                    method.embed_tensor, entry.path,
+                )
+
+        if shards is None:
+            began = time.perf_counter()
+            encoded = _encode_on_load(
+                loaded_weight if entry is not None else loaded_weight[start:stop]
+            )
+            logger.info(
+                "Encoded %s (%d x %d) into the block-quantized embedding format "
+                "in %.1f s.",
+                method.embed_tensor, rows if entry is not None else stop - start,
+                hidden, time.perf_counter() - began,
+            )
+            if entry is not None:
+                if blockq_cache.write(entry, encoded):
+                    logger.info(
+                        "Cached it at %s; later loads of this checkpoint skip the "
+                        "encode. EXL3_BLOCKQ_CACHE=0 disables this.", entry.path,
+                    )
+                shards = {n: t[start:stop].contiguous() for n, t in encoded.items()}
+            else:
+                shards = encoded
+
+        for name, tensor in shards.items():
             getattr(layer, name).store(tensor)
 
     return load
@@ -206,8 +294,21 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
     calling a hand-written dequant kernel (docs/embeddings.md, "Build or adopt").
     """
 
-    def __init__(self, quant_config):
+    def __init__(self, quant_config, prefix: str | None = None):
         self.quant_config = quant_config
+        # Which embedding this is, in vLLM's naming, recorded per method rather
+        # than read off the config. `EXL3Config.embed_prefix` holds whichever
+        # embedding was constructed last, which is the same thing only while a
+        # model has exactly one -- and multimodal checkpoints already carry
+        # more. The on-load cache keys on this name, so a second embedding
+        # sharing a key with the first would serve the wrong matrix.
+        self.embed_prefix = prefix or quant_config.embed_prefix
+
+    @property
+    def embed_tensor(self) -> str:
+        """The dense tensor this method's storage was encoded from, named the
+        way the weight stream names it."""
+        return f"{self.embed_prefix}.weight"
 
     def create_weights(
         self,
@@ -256,7 +357,7 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
                 EXL3Parameter(
                     num_shards=1,
                     device=device,
-                    weight_loader=_make_on_load_loader(layer),
+                    weight_loader=_make_on_load_loader(layer, self),
                     role=tp.role_of("bq_q"),
                     row_shard_size=rows_per_rank,
                 ),
@@ -373,11 +474,13 @@ class EXL3BlockQTiedEmbeddingMethod(EXL3BlockQEmbeddingMethod, EXL3EmbeddingMeth
       only via the tied head's `exl3_tied_source`.
     """
 
-    def __init__(self, quant_config):
+    def __init__(self, quant_config, prefix: str | None = None):
         # Not `EXL3BlockQEmbeddingMethod.__init__`, which records only the
-        # config: the inherited `apply()` needs the codebook flags that
-        # `EXL3LinearMethod.__init__` derives.
+        # config and the prefix: the inherited `apply()` needs the codebook
+        # flags that `EXL3LinearMethod.__init__` derives. The prefix is then
+        # set by hand, since the base that would have done it was skipped.
         EXL3EmbeddingMethod.__init__(self, quant_config)
+        self.embed_prefix = prefix or quant_config.embed_prefix
 
     def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
         """Allocate both sets. Safe to run back to back: the parameter names are
