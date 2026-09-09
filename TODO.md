@@ -156,6 +156,12 @@ are all checkable before any real work; and **the wheel builder no longer runs**
 existed since both deps became submodules (vLLM now on `appliance/v0.28.0`). Fixing
 it is a bench, not a rental, task -- discovering it on a metered box is the expensive
 way. Note also that it lives outside version control entirely, and is the only copy.
+When it is fixed, it has to **fetch the submodule's tags before building** -- a submodule
+is cloned without them and setuptools-scm freezes `git describe`'s answer into the
+installed version at build time, so a tagless build calls itself `0.1.dev<N>` and that
+string is what lands in `bench/`'s env block. This is the box whose perf baselines are
+per-machine, so it is the worst place to bake it in; see *Installing it* in
+[patches.md](patches.md).
 
 **Explicitly not a `vast` item:** the Laguna TP=4 `exl3_mgemm` performance bug. It is
 narrowed to two exact kernel instantiations with both autotuners ruled out, so closing

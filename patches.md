@@ -20,6 +20,7 @@ the released v0.28.0 wheel are correct, and `VLLM_USE_PRECOMPILED=1` fetches
 them instead of spending half an hour compiling:
 
     git submodule update --init deps/vllm
+    git -C deps/vllm fetch --tags origin        # BEFORE installing -- see below
     VLLM_USE_PRECOMPILED=1 \
     VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/87/d7/97f6ecc2ae883e601e08d7cef87cb54ececeefcfe6b5e12d5d92f8d06d6b/vllm-0.28.0-cp38-abi3-manylinux_2_28_x86_64.whl \
     pip install --no-deps --no-build-isolation -e deps/vllm
@@ -30,17 +31,32 @@ by inferring a base commit in `main`. Neither works here: our HEAD has never
 been seen by `wheels.vllm.ai`, and the v0.28.0 tag is cut on a release branch
 rather than on `main`, so there is no nightly wheel for it either. The released
 PyPI wheel is the stable source. Confirm afterwards that the version string
-carries our commit and `.precompiled`:
+names the base tag, the patch count, our commit and `.precompiled`:
 
-    vllm-0.1.dev20058+g1f1617e26.precompiled
+    vllm-0.28.1.dev7+g1f1617e26.precompiled
 
-Then fetch the tags into the submodule once. A submodule is cloned without
-them, so `git describe` in `deps/vllm` returns a bare hash and `bench/`
-provenance reads `src.vllm.describe: 1f1617e26` instead of naming the base:
+**The tag fetch has to happen before the install, and this file used to have it
+after.** A submodule is cloned with no tags at all (the refspec is
+`+refs/heads/*` only), and vLLM versions itself with `setuptools-scm`, which
+runs `git describe` *at install time* and writes the answer into
+`vllm/_version.py` and the dist-info name, where it is then frozen. With no tag
+reachable, scm falls back to `0.1.dev<commits-since-root>`, and the install
+claims **`0.1.dev20058+g1f1617e26.precompiled`** — which is what this file used
+to tell you to expect. Nothing gates on it, but `vllm.__version__` is recorded
+in every `bench/` env block and in any bug report, and `0.1` names neither the
+base nor the patches. Fetching first costs nothing and produces the string
+above: `0.28.1` is scm's guess at the *next* release, `dev7` is our seven
+commits, `g1f1617e26` is which ones.
 
-    git -C deps/vllm fetch --tags origin
+The same fetch is what makes `git describe` legible in the submodule, so
+`bench/` provenance names the base instead of reading
+`src.vllm.describe: 1f1617e26`:
 
     v0.28.0-7-g1f1617e260    # base tag and patch count, both legible
+
+For a build where fetching tags is not wanted, `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM`
+overrides the whole computation — but it goes stale on the next commit, so it is
+an escape hatch and not the arrangement to standardize on.
 
 **If you do need a source build** (a change under `csrc/`, or a mismatched
 torch), cap the job count:
