@@ -241,7 +241,11 @@ fallback if neither holds, since the baselines were blessed at `-21` and the ent
 have not run clean since.
 
 *Not a 0.29 issue*: the tq4 entry fails identically on the 0.28 build, and the fp8 one
-passed there, so the bump at most moved the margin.
+passed there, so the bump at most moved the margin. What the 0.29 re-bless did add is
+the shape of the effect across the whole matrix -- every eager entry gained KV headroom
+and both CUDA-graph entries lost it, measured in
+[docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget". These two
+entries are eager, so they gained, and that is what left them nothing to serve with.
 
 → [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
 

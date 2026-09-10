@@ -446,7 +446,34 @@ Same model, two KV paths, both at ~119K context with a 2K chunk:
 The two paths differ in *shape*, not just size, and that is the durable finding: TQ's
 transient is **6144 B/token, linear in cached context**, on an axis the profile run never
 varies. fp8's is chunk-scaled. So a short test prompt validates an fp8 config and tells
-you nothing about a TQ one. Removing the rest of TQ's was costed as changing a dequant
+you nothing about a TQ one. ### What the 0.29 bump did to the budget (2026-09-10)
+
+The re-bless at vLLM 0.29 moved KV headroom on 14 of 14 entries, and the sign splits
+cleanly on execution mode -- same weights, same plugin, same card:
+
+| entry | mode | KV GiB |
+|---|---|---|
+| qwen3-0.6B 3.0bpw | eager | 12.20 -> 12.27 (+0.07) |
+| qwen3-0.6B 3.0bpw | **graphs** | 12.20 -> **11.19 (-1.01)** |
+| minicpm5-1B blockq | eager | 11.89 -> 12.00 (+0.11) |
+| minicpm5-1B blockq | **graphs** | 11.89 -> **11.61 (-0.28)** |
+| gemma-4-12B mul1 tied | eager | 6.50 -> 7.13 (+0.63) |
+| qwen3.8-27B blockq tq4 | eager | 0.65 -> 1.23 (+0.58) |
+
+Every eager entry gains, both graph entries lose, and the one eager exception is the
+MoE entry (1.79 -> 1.60), where 0.29's router change is the obvious suspect. So 0.29
+shrank something eager pays for and grew something CUDA-graph capture pays for, and in
+both directions the *KV cache absorbed the difference* -- which is the budget having no
+term for either, exactly as recorded above.
+
+**The gain is what broke the two tightest entries.** `qwen3.8-27B-blockq-MTP-fp8` and
+its tq4 sibling are `enforce_eager`, so they were handed **more** KV (1.05 -> 1.62 GiB)
+and then had nothing left for inference-time scratch: FlashInfer's autotuner asks 544
+MiB, fails, and the next kernel OOMs. A config that profiles successfully now fails to
+serve, and it fails *because* the transient footprint improved. Tracked as
+`kv-budget-margin` in [../TODO.md](../TODO.md).
+
+Removing the rest of TQ's was costed as changing a dequant
 kernel's dtype or rewriting an attention backend we do not own, and both were declined as
 things to *offer*; that decision was reopened on 2026-09-08 as work to carry, with a
 cheaper third option and a `max_model_len`-sized workspace reservation these captures may

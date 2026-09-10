@@ -15,28 +15,28 @@
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm_reported": "0.28.1.dev0+g2cf0a6915.d20260825",
-  "pkg.digest": "b288b05ac847",
-  "pkg.count": 239,
+  "vllm_reported": "0.29.1.dev7+g1a736c073",
+  "pkg.digest": "52a82858ccb5",
+  "pkg.count": 276,
   "pkg.transformers": "5.15.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "9dddd6e",
-   "head": "9dddd6e232",
+   "describe": "60db3c2",
+   "head": "60db3c227c",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
-   "describe": "v0.28.0",
-   "head": "2cf0a6915c",
-   "dirty_files": 4,
-   "diff_sha": "31b747b753fb",
+   "describe": "v0.29.0-7-g1a736c073e",
+   "head": "1a736c073e",
+   "dirty_files": 0,
+   "diff_sha": null,
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.4.3-20-gbb1d0f1",
-   "head": "bb1d0f12e1",
+   "describe": "v1.4.3-32-g2ce3086",
+   "head": "2ce3086631",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -1878,5 +1878,5 @@
   "FLASH_ATTN",
   "TURBOQUANT"
  ],
- "kv_cache_gib": 11.63
+ "kv_cache_gib": 11.74
 }
