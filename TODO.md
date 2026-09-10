@@ -208,6 +208,43 @@ is cross-entry rather than against a baseline, so it needs something
 
 → [bench/README.md](bench/README.md)
 
+## `kv-budget-margin` — Two entries OOM because the KV cache got *more* memory
+
+The outcome wanted is that a config which profiles successfully also serves. Today
+`qwen3.8-27B-3.0bpw-blockq-MTP-tq4` and its `-fp8` sibling both die at first inference
+on a 16 GiB card — the tq4 one on `exl3_gemv_int8.cu:110`, the fp8 one in `exl3_mm` with
+217 MiB free — while the profile run that sized their KV cache reported no problem.
+
+What it unblocks: the gate. Two of seventeen entries are unrunnable, one of them
+(`-fp8`) newly so, and a tier that cannot complete hides everything after the failure.
+It also decides whether `--kv-cache-memory` has to be pinned per config in the
+appliance, which is the deployment question underneath.
+
+**The mechanism is already written down, in the opposite direction.**
+[docs/kernels.md](docs/kernels.md) records that `gpu_worker.py` budgets KV as
+`requested - consumed - peak_activation` with no CUDA-graph term, and that shrinking
+transients makes `--kv-cache-memory` *more* load-bearing rather than less, because the
+freed memory is handed to the KV cache and the slack that used to absorb unaccounted
+consumers goes with it. These two entries look like that prediction coming true: the
+same entries took **1.05 -> 1.62 GiB** of KV against their blessed baselines, and what
+then runs out is inference-time scratch — FlashInfer's autotuner asks for 544 MiB,
+fails twice with allocator warnings, and saves 0 configs before the kernel that OOMs.
+
+Candidate approach, cheapest first: confirm the direction by re-running one entry with
+`--kv-cache-memory` pinned at the blessed figure, which costs one run and either
+implicates the budget or exonerates it. A live hypothesis worth testing in the same
+pass is that the plugin's own transient reduction moved memory into somebody's *static*
+buffer rather than leaving it free — the reconstruct tiling normalized allocation sizes
+deliberately, and a downstream consumer sizing itself against what it observes free
+would convert that into a permanent claim. Bisecting exllamav3 `v1.4.3-21..-32` is the
+fallback if neither holds, since the baselines were blessed at `-21` and the entries
+have not run clean since.
+
+*Not a 0.29 issue*: the tq4 entry fails identically on the 0.28 build, and the fp8 one
+passed there, so the bump at most moved the margin.
+
+→ [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
+
 ## `turboquant-sliding-window` — TurboQuant KV cache for sliding-window models
 
 *Written up in [docs/turboquant-kv.md](docs/turboquant-kv.md), Part 1. What follows is
@@ -506,6 +543,15 @@ gemma and every tied-model optimization inherited was downstream of the misdiagn
 and should be unwound with it. The divisibility wall — the remaining unknown when this
 was written — turned out to be three narrow bugs and is cleared. What is left is the
 quality question below, and whether gemma-4's multimodal blocker yields.
+
+**`bench/` does not cover this, and the 0.29 bump showed what that costs.** Every
+TurboQuant entry in the matrix is MiniCPM5-1B, which has no sliding window, so the
+page-geometry patch is verified only by hand against the `unsloth/gemma-3-1b-it`
+reproducer in the note. That model is the reason to fix it rather than an obstacle:
+1.86 GiB, ungated, text-only, `Gemma3ForCausalLM` on stock vLLM, and it fails loudly
+on an unpatched tree — so an entry holding the 22 sliding layers native gates the
+patch, and appending full-attention layer 5 gates the first/last-N sibling, which
+nothing exercises today. Cheap enough for the `fast` tier.
 
 → [docs/kernels.md](docs/kernels.md)
 

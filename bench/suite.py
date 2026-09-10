@@ -320,6 +320,13 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="qwen3.8-27B 3.0bpw blockq MTP fp8",
+        known_broken="OOMs at first inference on the 16 GiB dev card: exl3_mm "
+        "cannot get 272 MiB with 217 MiB free. Not a spec or dtype conflict, and "
+        "not the 0.29 bump -- it passed on the 0.28 build hours earlier. The KV "
+        "cache took 1.05 -> 1.62 GiB against this baseline, i.e. it was handed "
+        "memory that inference-time scratch used to have. Tracked as "
+        "`kv-budget-margin` in TODO.md; the one-run test is whether pinning "
+        "--kv-cache-memory at the blessed figure restores it.",
         model="turboderp/Qwen3.8-27B-exl3",
         revision="3.00bpw",
         tier="full",
@@ -365,6 +372,15 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="qwen3.8-27B 3.0bpw blockq MTP tq4",
+        known_broken="OOMs at first inference on the 16 GiB dev card, in "
+        "exl3_gemv_int8.cu:110, and fails the same way on the 0.28 build -- so "
+        "this is *not* a return of the MTP-vs-TurboQuant belief the note below "
+        "records as wrong. They still combine; there is simply no room left. "
+        "Same cause as the -fp8 sibling: KV took 1.05 -> 1.62 GiB and the "
+        "scratch that used to fit no longer does. Tracked as `kv-budget-margin` "
+        "in TODO.md. Note that `check` still *runs* it and the dead EngineCore "
+        "deadlocks capture.py for the full --timeout, which is 30 minutes of "
+        "nothing; that containment gap is recorded in the same item.",
         model="turboderp/Qwen3.8-27B-exl3",
         revision="3.00bpw",
         tier="full",
