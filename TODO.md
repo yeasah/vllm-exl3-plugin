@@ -209,48 +209,6 @@ OOM.
 
 → [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
 
-## `exl3-149-quality` — Is v1.4.9 better or worse, as opposed to different?
-
-The outcome wanted is a defensible answer to the question the exllamav3 bump raised and
-`bench/` cannot answer: whether v1.4.9's kernels are *more or less faithful*, not merely
-whether they compute something else. The gate compares a build to the previous build, so
-every possible answer looks the same to it; only a measurement against an fp16 reference
-distinguishes them, which is qbench.
-
-What it unblocks: the fork-or-not decision that was raised on 2026-09-10 and correctly
-not taken. Carrying a revert of an upstream kernel rework, or pinning exllamav3
-indefinitely, is a large commitment that should rest on a KLD number rather than on a
-regression gate's opinion about tokens.
-
-**What is already known, and it is not nothing.** With caches controlled, the worst
-small-model entry improved from 0.481 to 0.231 max |dlogprob|, its argmax flip
-disappeared and its greedy continuation matched -- so most of the apparent divergence was
-cache churn. What remains is stable and reproducible: two seeded runs of the same build
-agree to every digit, so the residual is a real difference between versions, each running
-its own best-tuned kernels. Stable, though, says nothing about *better*.
-
-**The trap, and the first thing to measure.** qbench has none of the cache discipline
-`bench/` now has, so a naive comparison across the bump measures cache state exactly as
-the gate did -- the same mistake, one level up. The reason to expect qbench survives it
-anyway is aggregation: a flipped near-tie dominates a 61-position greedy comparison and
-is negligible in a KLD over openwebtext 8x2048. **That is a hypothesis and it is cheap to
-test**: run qbench twice on one build with deliberately different cache states. Stable to
-three or four digits and the instrument carries the comparison as-is; otherwise it needs
-the same seeding treatment before any number from it is worth having.
-
-Then the comparison itself, on one representative model rather than a sweep: an fp16
-reference, v1.4.3-32 and v1.4.9 scored against it. That costs a rebuild in each direction
-(~10 min each, `MAX_JOBS=8`), which is why it wants doing in one sitting rather than
-being picked up twice.
-
-*Do not* reach for the historical figures in [docs/qbench.md](docs/qbench.md) and
-[docs/embeddings.md](docs/embeddings.md) as the v1.4.3 side. They were taken on older
-exllamav3 *and* older vLLM *and* uncontrolled caches, so a difference against them is
-attributable to nothing in particular -- which is the error this whole thread exists to
-stop repeating.
-
-→ [bench/README.md](bench/README.md) "Cache policy", `bench-cache-control`
-
 ## `bench-cache-control` — The gate cannot see its own inputs
 
 The outcome wanted is a bump gate whose result is a fact about the code. Today it is a
@@ -1644,6 +1602,19 @@ divergence is deliberately all qbench measures),
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `exl3-149-quality` — answered 2026-09-10, **no**, see [docs/qbench.md](docs/qbench.md)
+  "Did the exllamav3 v1.4.9 bump cost quality?". Dense (Qwen3-8B, 3.0 and 4.0 bpw) is
+  **bit-identical to full float precision** across the bump, which is the expected result
+  once you notice upstream's kernel work was MoE-scoped and a dense model never enters
+  those paths. MoE (Qwen3.5-35B-A3B) does change and by 0.011% of mean KLD — four orders
+  below the value. So the 12-of-16 gate failure that raised the fork-or-not question was
+  selection churn plus a max-over-63-positions statistic, and the one genuinely
+  path-scoped change is numerically negligible. No fork, no revert, no pin. Method notes
+  matter more than the numbers here: the MoE side needed no bf16 reference (EXL3 2.00bpw
+  scored against EXL3 3.00bpw puts both arms through MGEMM), which is what kept a 70 GiB
+  download unnecessary, and qbench's result cache is not keyed on engine version so the
+  first attempt silently replayed a nine-day-old run.
 
 - `kv-pager` — closed 2026-09-08, dead on the merits, see
   [docs/kv-pager.md](docs/kv-pager.md) "Why this closed". The mechanism worked and was

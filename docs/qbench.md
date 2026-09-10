@@ -193,6 +193,75 @@ their own calculator. Keep the two apart: **qbench answers "how big is this weig
 the appliance answers "will this configuration run on this hardware".** Capacity planning
 is a separate component, not a qbench flag.
 
+## Did the exllamav3 v1.4.9 bump cost quality? No (2026-09-10)
+
+The bump's regression gate failed 12 of 16 entries with two changed greedy
+continuations, which reads as a kernel catastrophe and was nearly escalated to a
+fork-or-not decision. It was not one. `bench/` compares a build to the previous build,
+so it detects *change* and cannot distinguish better from worse; this is the measurement
+that can.
+
+**Dense: bit-identical.** Qwen3-8B, the cross-format exemplar, scored against an HF BF16
+reference before and after the bump:
+
+| arm | ppl | KLD | median | p90 | x noise floor |
+|---|---|---|---|---|---|
+| HF BF16 reference | 15.3779 | — | — | — | — |
+| noise floor | 15.4057 | 0.000992 | 0.000729 | 0.001956 | 1x |
+| EXL3 3.0bpw | 16.1595 | 0.058331 | 0.024434 | 0.119763 | 58.8x |
+| EXL3 4.0bpw | 15.5905 | 0.014256 | 0.006184 | 0.029606 | 14.4x |
+
+Both EXL3 arms came back **identical to full float precision on every field** — not
+within tolerance, the same doubles. That is the expected result rather than a surprising
+one: upstream's kernel work was `MGEMM: Add sliced mode for better scheduling in mixed-N
+bundles` and MoE/CPU-MoE range filtering, and a dense model never enters those paths, so
+the executed kernel is unchanged and floating point is deterministic. (4.0bpw at 14.4x
+the floor also matches the ~15x this note cites elsewhere for a healthy model, so the
+harness is behaving.)
+
+**MoE: changed, and negligibly.** Qwen3.5-35B-A3B, which does exercise MGEMM:
+
+| | v1.4.3-32 | v1.4.9 | delta |
+|---|---|---|---|
+| ppl | 12.2393 | 12.2364 | -0.0029 (0.02%) |
+| KLD mean | 0.157762 | 0.157779 | **+0.000017 (+0.011%)** |
+| median | 0.090098 | 0.090131 | +0.00003 |
+| p90 | 0.302266 | 0.303359 | +0.0011 (0.36%) |
+
+Not bit-identical, which is correct — this is the path that changed. The magnitude is
+four orders below the KLD itself.
+
+**This resolves the apparent contradiction with the gate**, and the resolution is the
+general lesson. `bench/` reported 0.635 nats and KL 0.332 on this same model: the
+*maximum over 63 scored positions*. qbench reports the *mean over ~20,480 tokens*. A
+handful of near-ties flipping produces a large max and leaves the aggregate untouched.
+Both instruments were right about different quantities, and only one of them is a
+quality claim.
+
+### Two things about the method, because both nearly produced a wrong answer
+
+**qbench caches results per model and the key does not include the engine version.**
+`model_key` hashes engine, source, options, source stamp and noise — so a result computed
+under one exllamav3 build is served to a later run under a different one, silently. The
+first "v1.4.9" numbers taken here were a replay of a 2026-09-01 run, and the tell was
+weak in a specific way: the run took 69 minutes and printed plausible figures, but that
+time was the *reference* logits being recomputed after a cache eviction while both EXL3
+arms came off disk. `manifest.json` records the `seen` timestamp per arm and is the only
+thing that says which. Invalidate by moving `results_<key>.json` aside; the manifest key
+is in the same file.
+
+**The MoE comparison needs no bf16 reference at all**, which is what made it affordable —
+the matching reference is a 70 GiB download that was never pulled. Scoring EXL3 2.00bpw
+against EXL3 3.00bpw of the same model puts *both* arms through MGEMM, and the question
+is only whether the pair moves across the bump. The absolute KLD from such a run is a
+distance between two lossy models and must never be quoted as a quality figure; the
+project file says so at the top. Its one blind spot: a change shifting both arms
+identically would cancel, which is unlikely across two bitrates with different shapes but
+is a real limit. A bf16 reference is worth downloading only once such a screen says
+something moved.
+
+Project files: `~/qbench/qwen3-8b-exl3ver.yaml` and `~/qbench/qwen35-moe-exl3ver.yaml`.
+
 ## A third accounting bug, of the kind this file keeps finding
 
 `safetensors_storage_info` buckets a tensor whose suffix it does not recognize under its

@@ -585,6 +585,37 @@ and the alpha it biases — apply unchanged.
 
 ---
 
+### qbench: two defects found using it, 2026-09-10
+
+Both surfaced while measuring whether v1.4.9 cost quality (it did not --
+[qbench.md](qbench.md)). Neither is EXL3-specific and both are cheap to fix.
+
+**The results cache is not keyed on the engine's version, so it replays across an
+upgrade.** `model_key` in `eval/qbench.py` hashes engine, source, options, source stamp
+and noise. Nothing identifies *which build of exllamav3* produced a result, so a score
+computed under one version is served to a later run under another, silently and with no
+warning. This produced a wrong answer here: a run intended to measure v1.4.9 reported
+figures computed nine days earlier under the previous version, and the giveaway was not
+in the output at all -- only `manifest.json`'s per-arm `seen` timestamp shows it.
+`manifest.json` already records `engine`, so the fix is small; adding the engine version
+to the entry and to the key would make the stale case a miss instead of a lie.
+
+**The noise floor crashes on an `exllamav3` reference.** With
+`engine: exllamav3` on the reference arm, the floor pass dies in the per-layer noise
+injection:
+
+```
+RuntimeError: Expected a 'cpu' device type for generator but found 'cuda'
+```
+
+A torch generator is being created on CPU and used on a CUDA tensor (or the reverse),
+which newer torch refuses. It looks like a path only ever exercised with a
+`transformers` reference. Worked around with `noise_floor: false`, which is the right
+setting for a quantized reference anyway -- the floor would measure that quant's
+self-noise rather than fp16's -- so this only bites projects that use a non-transformers
+reference, which is a small set but includes any comparison that cannot afford the bf16
+weights.
+
 ## Priority, and the reasoning
 
 Ordered by *value to the recipient per unit of our effort*, not by how much each one
