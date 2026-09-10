@@ -238,18 +238,30 @@ describes cache state. Five stores on the dev box can steer kernel selection or 
 `vllm-exl3-plugin/blockq-embeddings` is the one that is safe, and it shows the shape of
 the answer: a deterministic encode keyed by commit hash.
 
-**Candidate approach, in order.** *Record* before *control*: add a cache manifest to
-`environment()` — per store, existence, file count, aggregate size and mtime — so a
-divergence at least becomes attributable instead of invisible. That is cheap, needs no
-GPU, and would have answered today's question immediately. Then *control* what can be
-controlled: exllamav3 exposes `force_shape_idx`, and `exl3_gemm.cu` disables autotune
-outright when it is positive (`autotune = force_shape_idx <= 0 && force_num_sms <= 0`),
-so a pinned shape would make the EXL3 path deterministic across machines and cache
-states — at the cost of measuring a kernel the deployment would not choose, which is a
-real trade and should be a `bench` flag rather than a default. Last, decide the policy
-for the rest: a gate run that clears every clearable cache measures cold-start behaviour
-and is slow; one that warms them measures steady state and is what users see. Both are
-defensible, *unrecorded* is not.
+**Built 2026-09-10** — recording, redirection, cold mode, a committed autotune fixture
+and a drift detector; see [bench/README.md](bench/README.md) *Cache policy*. The finding
+that shaped it: clearing the autotune cache does not give reproducibility, it gives fresh
+nondeterminism, because kernel choice is timed and therefore follows the clocks. Three
+cold runs with an empty cache spread 0.156–0.230 nats with argmax flips and an
+intermittent greedy change — as large as the version difference the gate was asked to
+measure. Two seeded from a frozen blob agree to every digit.
+
+**What remains.**
+
+1. **Generate the real fixture**: `freeze-tune --tier all`, then commit it. The blob is
+   per-device and must cover every entry the gate runs; a partial one is worse than none,
+   since it seeds some shapes and tunes the rest live.
+2. **Re-baseline everything under the policy.** No committed baseline was taken this way,
+   so none is a clean reference. That is the bill for the whole finding: `bless` at
+   v1.4.3-32 (a rebuild), then at v1.4.9, and only then is the exllamav3 bump decidable.
+3. **`force_shape_idx` is the untaken option**, kept in reserve: `exl3_gemm.cu` disables
+   autotune outright when it is positive, which would give determinism *across* versions
+   where a frozen blob cannot, at the cost of benchmarking a kernel no deployment would
+   choose. A flag, never a default, and only if cross-version comparison proves to need it.
+4. **flashinfer's autotune is the same class and is not yet frozen** — it lives under
+   `VLLM_CACHE_ROOT` so cold mode empties it, which by the argument above makes it
+   *freshly* nondeterministic rather than fixed. It has not been shown to move our numbers;
+   that is an assumption, not a measurement.
 
 *Do not* re-bless anything against a build whose caches were re-tuned mid-run until this
 is at least recorded — that is how a cache artifact becomes the committed definition of

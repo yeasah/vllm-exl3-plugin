@@ -273,6 +273,97 @@ def environment() -> dict:
     return env
 
 
+#: Every store that can change what a run computes, and the env var that moves it.
+#: Two classes, and they want opposite treatment (see bench/README.md). *Selection*
+#: caches hold timing-derived choices, so a hit and a miss run different kernels and
+#: the arithmetic differs -- exllamav3's autotune was measured doing exactly that.
+#: *Compilation* caches are content-keyed, so a hit and a miss should be semantically
+#: identical; their risk is staleness, and cold-vs-warm still moves the memory profile,
+#: which this suite gates on via weight_gib and reports via kv_cache_gib.
+#:
+#: blockq-embeddings is deliberately absent: it is a deterministic encode keyed by the
+#: checkpoint's commit hash, which is what the others should look like.
+CACHE_STORES = {
+    "exllamav3_autotune": ("EXLLAMAV3_TUNE_CACHE", "~/.cache/exllamav3/autotune", "selection"),
+    "vllm": ("VLLM_CACHE_ROOT", "~/.cache/vllm", "compilation+selection"),
+    "triton": ("TRITON_CACHE_DIR", "~/.triton/cache", "compilation"),
+    "flashinfer": ("FLASHINFER_WORKSPACE_BASE", "~/.cache/flashinfer", "compilation"),
+}
+
+
+def cache_manifest() -> dict:
+    """What state the caches were in, recorded so a divergence is attributable.
+
+    `environment()` records versions and git hashes and calls that the environment,
+    which is structurally unable to explain a difference produced by a cache: on
+    2026-09-10 deleting a 4 KB autotune file moved a model's greedy output further
+    than six upstream releases had. Recording is the cheap half of the fix -- it does
+    not make a run reproducible, it makes an irreproducible one *legible*.
+
+    Deliberately not part of `environment()`: these fields move on every run by
+    design, and drift reporting is an alarm. An alarm that always fires is one that
+    stops being read, which is the failure `split_environment_diff` exists to avoid.
+    """
+    import os
+    import pathlib
+
+    out = {}
+    for name, (var, default, kind) in CACHE_STORES.items():
+        path = pathlib.Path(os.path.expanduser(os.environ.get(var) or default))
+        entry = {"kind": kind, "path": str(path), "from_env": bool(os.environ.get(var))}
+        if not path.exists():
+            entry.update(exists=False, files=0, bytes=0, mtime=None)
+        else:
+            files = [f for f in path.rglob("*") if f.is_file()] if path.is_dir() else [path]
+            entry.update(
+                exists=True,
+                files=len(files),
+                bytes=sum(f.stat().st_size for f in files),
+                # Newest file: a cache that was written during the run says so.
+                mtime=max((int(f.stat().st_mtime) for f in files), default=None),
+            )
+        out[name] = entry
+    return out
+
+
+#: Ambient machine state, queried per run. Not gated and not compared -- it is
+#: forensic, and the reason to have it is exactly the failure that produced it:
+#: exllamav3 chooses kernels by *timing* them, so the card's clocks, temperature and
+#: throttle state at tune time are inputs to what the model then computes. Recording
+#: them costs one subprocess and turns "these two runs disagree" into something with
+#: a candidate explanation attached.
+_SMI_FIELDS = (
+    "temperature.gpu", "clocks.sm", "clocks.mem", "power.draw",
+    "utilization.gpu", "memory.used", "pstate", "clocks_throttle_reasons.active",
+    "persistence_mode", "fan.speed",
+)
+
+
+def hardware_state() -> dict:
+    """GPU state before the run, per device. Best-effort: absence is not an error."""
+    import shutil
+    import subprocess
+
+    if shutil.which("nvidia-smi") is None:
+        return {}
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={','.join(_SMI_FIELDS)}",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if out.returncode != 0:
+            return {}
+    except Exception:
+        return {}
+    devices = []
+    for line in out.stdout.strip().splitlines():
+        vals = [v.strip() for v in line.split(",")]
+        if len(vals) == len(_SMI_FIELDS):
+            devices.append(dict(zip(_SMI_FIELDS, vals)))
+    return {"gpu": devices} if devices else {}
+
+
 def environment_diff(a: dict, b: dict) -> list[str]:
     """Fields that differ between two `environment()` records.
 

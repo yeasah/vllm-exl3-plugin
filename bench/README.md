@@ -142,6 +142,64 @@ that reproduces standalone is **not** thereby a code change — it is reproducib
 *given this cache state*, which is a weaker claim than it looks. Clear the caches
 you can and re-run before concluding anything about a dependency.
 
+## Cache policy: what a run is allowed to depend on
+
+Every store that can change what a run computes is redirected to a bench-owned root,
+and the two verbs take opposite defaults:
+
+```
+bench/run.py freeze-tune [--tier all]   populate and commit this device's autotune blob
+bench/run.py check [--cold]             persistent caches by default; --cold for a clean room
+bench/run.py bless                      always cold, no flag
+```
+
+**`bless` is always cold** for the same reason it refuses a dirty tree: it writes the
+reference every later run is judged against, and a reference taken against caches nobody
+can reconstruct is not a fact about the code. **`check` defaults to a persistent
+bench-owned root**, because comparing work in progress is the normal way to use it and
+doubling every iteration to chase a confound that `--cold` settles on demand is the wrong
+trade.
+
+**Cold means seeded, not empty, and the distinction is the whole point.** Emptying the
+autotune cache does not make a run reproducible — it makes it *freshly* nondeterministic,
+because kernel choice is made by timing candidates and therefore follows the clocks.
+Measured on `qwen3-0.6B-3.0bpw-eager`, same build, same machine, minutes apart:
+
+| | prompt 0 | prompt 1 | argmax | greedy |
+|---|---|---|---|---|
+| 3 cold runs, **empty** cache | 8.2e-02 – 1.57e-01 | 1.56e-01 – 2.30e-01 | 0, 2, 2 | one changed |
+| 2 cold runs, **seeded** from the fixture | 6.875e-02 | 9.498e-02 | 2, 2 | both ok |
+
+Unseeded, the spread is as large as the upstream version difference the gate was asked to
+measure. Seeded, two runs agree to every digit reported.
+
+`freeze-tune` runs each entry once against an empty cache, so the blob covers exactly the
+shapes the gate needs — no more, since an unused entry is dead weight, and no less, since
+a missing shape is tuned live and puts the nondeterminism back. It is deliberate and rare,
+like a bless, because it decides which kernels every later run will use.
+
+**The fixture is keyed on the device, not on an operator tag** (`bench/expected/tune/<gpu>-sm<cap>/`),
+unlike `perf/`: what a tuned blob encodes is which kernel shapes are fastest, a property
+of the silicon rather than of the chassis, its neighbours or its cooling. A mis-key is
+caught rather than trusted — every run digests the blob before and after, and a write
+means some shape was tuned live, which is reported per entry and recorded as `tune_drift`.
+An upstream `COOP_AUTOTUNE_VERSION` bump makes *every* key miss, so it surfaces as that
+warning rather than as a silent re-tune.
+
+**What this does not do.** It cannot make a comparison across an exllamav3 version
+meaningful, because the version is part of the cache key, so a frozen blob is dead weight
+on the other side of a bump. Cross-version quality is a qbench question, measured with
+error bars over enough tokens that single near-tie flips do not dominate. And the fixture
+is per-GPU: a second platform needs its own, exactly as `perf/` does.
+
+**Also recorded, per capture, and gated by nothing:** `caches` (per store: path, whether
+it came from the environment, file count, bytes, newest mtime) and `hardware` (per GPU:
+temperature, SM and memory clocks, power, utilization, pstate, throttle reasons, fan),
+sampled before the model loads. Neither is compared -- they move every run by design, and
+an alarm that always fires is one that stops being read. They are there so that a
+divergence the environment cannot explain has somewhere to be attributed, and because the
+card's thermal state at tune time is an *input* to what the model computes.
+
 ## Two kinds of baseline, and why they are stored differently
 
 This is the distinction the layout exists to enforce:

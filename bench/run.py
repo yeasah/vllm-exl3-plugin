@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -127,12 +128,150 @@ def _env_with_nvcc() -> dict:
     return env
 
 
-def run_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
-    """Capture one entry in its own process, returning the measurement."""
+#: Where `check` keeps its caches when it is not running cold. Bench-owned rather
+#: than the operator's home, so an ordinary `check` is at least insulated from
+#: whatever else on the box has been compiling kernels.
+PERSISTENT_CACHE_ROOT = os.path.expanduser("~/.cache/vllm-exl3-plugin/bench-caches")
+
+
+def cache_policy(cold: bool, tmp: str) -> tuple[str, bool, str]:
+    """(root, warmup, description) for a run.
+
+    `bless` is always cold. It writes the reference every later run is judged
+    against, and a reference taken against caches nobody can reconstruct is not a
+    fact about the code -- the same reasoning that makes it refuse a dirty tree.
+    `check` defaults to the persistent root because comparing work in progress is
+    the normal way to use it, and doubling every iteration to chase a confound that
+    `--cold` settles on demand is the wrong trade.
+    """
+    if cold:
+        return os.path.join(tmp, "caches"), True, "cold (empty caches, warmup run per entry)"
+    return PERSISTENT_CACHE_ROOT, False, f"persistent ({PERSISTENT_CACHE_ROOT})"
+
+
+#: Committed autotune fixtures, one per GPU. Keyed on the device rather than on an
+#: operator tag, unlike `perf/`: what a tuned blob encodes is which kernel shapes are
+#: fastest, which is a property of the silicon and not of the chassis, its neighbours
+#: or its cooling. A mis-key is caught rather than trusted -- see `tune_drift`.
+TUNE_DIR = os.path.join(EXPECTED, "tune")
+TUNE_FILE = "coop_autotune_v1.bin"
+
+
+def tune_key() -> str:
+    """Device identity for the tune fixture. `BENCH_TUNE_KEY` overrides."""
+    override = os.environ.get("BENCH_TUNE_KEY")
+    if override:
+        return override
+    try:
+        import torch
+
+        name = torch.cuda.get_device_name(0)
+        cap = "".join(str(c) for c in torch.cuda.get_device_capability(0))
+        return re.sub(r"[^A-Za-z0-9]+", "-", f"{name}-sm{cap}").strip("-").lower()
+    except Exception:
+        return "unknown"
+
+
+def tune_fixture() -> str:
+    return os.path.join(TUNE_DIR, tune_key(), TUNE_FILE)
+
+
+def _blob_digest(path: str) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:12]
+    except OSError:
+        return None
+
+
+def install_tune_fixture(root: str | None) -> tuple[str | None, str | None]:
+    """Seed the run's autotune cache from the committed fixture.
+
+    Emptying this cache does not make a run reproducible, it makes it *freshly
+    nondeterministic*: three cold runs of one entry, same build and machine, spread
+    0.156-0.230 nats with argmax flips and an intermittent greedy change -- as large
+    as the upstream version difference the gate was asked to measure. Kernel choice
+    is timed, so it follows the clocks. Seeding a frozen blob removes the timing step
+    for every shape the blob covers, which is what makes the result a fact about the
+    code. Returns (destination, digest-at-seed).
+    """
+    if root is None:
+        return None, None
+    dest = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
+    src = tune_fixture()
+    if not os.path.exists(src):
+        return dest, None
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copyfile(src, dest)
+    return dest, _blob_digest(dest)
+
+
+def tune_drift(dest: str | None, before: str | None) -> str | None:
+    """Whether the run tuned anything, which is whether it is reproducible.
+
+    A write means some shape was missing from the fixture and got timed live, so
+    that shape's kernel -- and the arithmetic downstream of it -- was chosen by the
+    state of the card rather than by the fixture. Reported rather than corrected:
+    the fix is to re-freeze deliberately, not to silently accept whichever kernel
+    today's thermals preferred.
+    """
+    if dest is None:
+        return None
+    after = _blob_digest(dest)
+    if before is None and after is None:
+        return "no autotune fixture for this device; every shape was tuned live"
+    if before is None:
+        return "no autotune fixture for this device; the run tuned and wrote one"
+    if after != before:
+        return (f"autotune cache changed during the run ({before} -> {after}): the "
+                f"fixture is missing shapes this entry needs, so the result is not "
+                f"reproducible. Re-freeze with `bench/run.py freeze-tune`.")
+    return None
+
+
+def cache_env(env: dict, root: str | None) -> dict:
+    """Point every cache this suite knows about at `root`, or leave them ambient.
+
+    Ambient caches are an uncontrolled input the measurement cannot see: the same
+    build, re-run with only exllamav3's 4 KB autotune file deleted, changed a greedy
+    continuation this gate treats as exact. Redirecting them makes a run a fact about
+    the code plus a *named* cache state instead of the operator's home directory.
+    """
+    if root is None:
+        return env
+    env = dict(env)
+    os.makedirs(root, exist_ok=True)
+    for name, (var, _default, _kind) in core.CACHE_STORES.items():
+        path = os.path.join(root, name)
+        os.makedirs(path, exist_ok=True)
+        env[var] = path
+    return env
+
+
+def run_entry(entry: suite.Entry, out_path: str, timeout: int,
+              cache_root: str | None = None, warmup: bool = False) -> dict:
+    """Capture one entry in its own process, returning the measurement.
+
+    With `warmup`, the entry is run once and discarded before the run that counts.
+    That is what makes a cold cache root measurable rather than merely empty: the
+    first run pays every compile and every autotune, so the measured run sees the
+    steady state a served deployment sees, reached from a known starting point.
+    """
     cmd = [sys.executable, os.path.join(HERE, "capture.py"), entry.name,
            "--out", out_path]
-    env = _env_with_nvcc()
+    env = cache_env(_env_with_nvcc(), cache_root)
+    tune_dest, tune_before = install_tune_fixture(cache_root)
     print(f"  -- {entry.label}", flush=True)
+    if warmup:
+        print("     warming caches (discarded run)", flush=True)
+        warm_out = out_path + ".warmup"
+        subprocess.run([sys.executable, os.path.join(HERE, "capture.py"), entry.name,
+                        "--out", warm_out], cwd=ROOT, env=env, timeout=timeout,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        # A warmup that fails is not fatal on its own: the measured run below will
+        # fail the same way and report it properly, with the log the caller needs.
+        if os.path.exists(warm_out):
+            os.remove(warm_out)
     proc = subprocess.run(cmd, cwd=ROOT, env=env, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True)
@@ -151,7 +290,12 @@ def run_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
                          f"(exit {proc.returncode}); full log at {log_path}\n"
                          f"{detail}")
 
+    drift = tune_drift(tune_dest, tune_before)
+    if drift:
+        print(f"     ! {drift}")
+
     data = json.load(open(out_path))
+    data["tune_drift"] = drift
     found = WEIGHT_RE.findall(proc.stdout)
     # Under TP there is one line per worker; they are shards of one model, so
     # the total is what corresponds to the single-GPU number.
@@ -601,18 +745,65 @@ def refuse_if_dirty(allow_dirty: bool = False) -> int:
     return 1
 
 
+def cmd_freeze_tune(args) -> int:
+    """Populate and commit the autotune fixture for this device.
+
+    Deliberate and rare, like a bless: it decides which kernels every later run
+    will use, so it should happen when someone chose to, not as the side effect of
+    a cache that happened to be cold. Runs each entry once against an empty cache so
+    the blob covers exactly the shapes the gate needs -- no more, since an unused
+    entry is dead weight, and no less, since a missing one is tuned live and
+    reintroduces the nondeterminism this exists to remove.
+    """
+    import tempfile
+
+    key = tune_key()
+    dest = tune_fixture()
+    print(f"freezing autotune for {key}\n  -> {dest}\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "caches")
+        for e in suite.by_tier(args.tier):
+            if e.known_broken:
+                print(f"  -- {e.label}\n     ! known broken, skipped")
+                continue
+            try:
+                # No fixture seeded: this run *is* the tuning pass.
+                run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
+                          cache_root=root, warmup=False)
+            except SystemExit as exc:
+                print(f"     ! capture failed, its shapes will be missing: {exc}")
+        blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
+        if not os.path.exists(blob):
+            print("\nno autotune cache was produced; nothing to freeze")
+            return 1
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(blob, dest)
+    print(f"\nfroze {os.path.getsize(dest)} bytes at {_blob_digest(dest)}")
+    print("commit it: this is now what every check and bless will run.")
+    return 0
+
+
 def cmd_bless(args) -> int:
+    import tempfile
+
     if refuse_if_dirty(getattr(args, "allow_dirty", False)):
         return 1
     os.makedirs(EXPECTED, exist_ok=True)
     blessed = 0
-    for e in suite.by_tier(args.tier):
-        if e.known_broken:
-            print(f"  -- {e.label}\n     ! known broken, not blessed: "
-                  f"{e.known_broken.splitlines()[0]}")
-            continue
-        run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout)
-        blessed += 1
+    with tempfile.TemporaryDirectory() as tmp:
+        # Always cold. A baseline is supposed to be reproducible somewhere other
+        # than this machine, and a warm ambient cache is neither recorded by it nor
+        # reconstructible from it.
+        root, warmup, how = cache_policy(True, tmp)
+        print(f"caches: {how}\n")
+        for e in suite.by_tier(args.tier):
+            if e.known_broken:
+                print(f"  -- {e.label}\n     ! known broken, not blessed: "
+                      f"{e.known_broken.splitlines()[0]}")
+                continue
+            run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout,
+                      cache_root=root, warmup=warmup)
+            blessed += 1
     # The manifest behind `environment()`'s pkg.digest: a digest says something
     # moved, this says what. One per bless, since a bless is one snapshot.
     try:
@@ -650,12 +841,15 @@ def cmd_check(args) -> int:
     known = []
     entries = suite.by_tier(args.tier)
     with tempfile.TemporaryDirectory() as tmp:
+        root, warmup, how = cache_policy(getattr(args, "cold", False), tmp)
+        print(f"caches: {how}\n")
         for e in entries:
             if e.known_broken:
                 # Still run it: the cheapest way to learn a known defect is
                 # fixed is for its entry to stop failing.
                 try:
-                    run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout)
+                    run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
+                              cache_root=root, warmup=warmup)
                 except SystemExit:
                     known.append(e.name)
                     print(f"     known broken, as expected")
@@ -668,7 +862,8 @@ def cmd_check(args) -> int:
                 print(f"  -- {e.label}\n     ! no baseline; run bless")
                 failed[e.name] = ["no baseline recorded"]
                 continue
-            fresh = run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout)
+            fresh = run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
+                              cache_root=root, warmup=warmup)
             problems = check_entry(e, fresh, json.load(open(baseline)))
             if problems:
                 failed[e.name] = problems
@@ -701,10 +896,16 @@ def main() -> int:
     p.set_defaults(func=cmd_env)
 
     p = sub.add_parser("check"); p.add_argument("--tier", default="fast")
+    p.add_argument("--cold", action="store_true",
+                   help="empty caches plus a warmup run per entry, as bless always "
+                        "does; slower, and the only mode whose result does not "
+                        "depend on this machine's cache state")
     p.add_argument("--strict-env", action="store_true",
                    help="refuse to run if the environment differs from the "
                         "blessed manifest")
     p.set_defaults(func=cmd_check)
+    p = sub.add_parser("freeze-tune"); p.add_argument("--tier", default="all")
+    p.set_defaults(func=cmd_freeze_tune)
     p = sub.add_parser("bless"); p.add_argument("--tier", default="fast")
     p.add_argument("--allow-dirty", action="store_true",
                    help="bless even though a source tree has uncommitted "

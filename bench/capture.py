@@ -27,6 +27,11 @@ def main() -> None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from bench import core, fixtures, suite
 
+    # Sampled before the model loads, so it describes the state the run *started*
+    # from rather than the heat the run itself produced. That is the state
+    # exllamav3's autotune times its candidate kernels against.
+    _hardware_before = core.hardware_state()
+
     entry = suite.by_name(args.entry)
 
     # A fixture entry serves a checkpoint derived from `model@revision` rather
@@ -97,6 +102,13 @@ def main() -> None:
                 # `check` say so instead of reporting a phantom regression.
                 "platform": os.environ.get("BENCH_PLATFORM"),
                 "environment": core.environment(),
+                # Recorded beside the environment rather than inside it: cache
+                # state moves on every run by design, so it must not reach the
+                # drift alarm. It is here so that a divergence the environment
+                # cannot explain has somewhere to be attributed -- see
+                # bench/README.md, "It is a finding now".
+                "caches": core.cache_manifest(),
+                "hardware": _hardware_before,
                 "prompts": prompts,
             },
             f,
