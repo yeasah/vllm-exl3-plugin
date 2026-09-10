@@ -173,6 +173,13 @@ Measured on `qwen3-0.6B-3.0bpw-eager`, same build, same machine, minutes apart:
 Unseeded, the spread is as large as the upstream version difference the gate was asked to
 measure. Seeded, two runs agree to every digit reported.
 
+**Determinism is relative to the fixture, and a re-freeze moves the numbers.** Two blobs
+frozen from different runs each give stable results, and different ones: the same entry
+read 6.875e-02 against a blob covering only itself and 7.524e-02 against the full-tier
+blob. That is inherent -- the fixture *is* the kernel selection -- so a baseline is only
+meaningful against the committed blob, and re-freezing means re-blessing. It is why this
+is a separate, deliberate verb rather than something a run does when it notices a gap.
+
 `freeze-tune` runs each entry once against an empty cache, so the blob covers exactly the
 shapes the gate needs — no more, since an unused entry is dead weight, and no less, since
 a missing shape is tuned live and puts the nondeterminism back. It is deliberate and rare,

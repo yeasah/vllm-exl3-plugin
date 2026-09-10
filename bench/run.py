@@ -249,7 +249,8 @@ def cache_env(env: dict, root: str | None) -> dict:
 
 
 def run_entry(entry: suite.Entry, out_path: str, timeout: int,
-              cache_root: str | None = None, warmup: bool = False) -> dict:
+              cache_root: str | None = None, warmup: bool = False,
+              report_drift: bool = True) -> dict:
     """Capture one entry in its own process, returning the measurement.
 
     With `warmup`, the entry is run once and discarded before the run that counts.
@@ -291,7 +292,7 @@ def run_entry(entry: suite.Entry, out_path: str, timeout: int,
                          f"{detail}")
 
     drift = tune_drift(tune_dest, tune_before)
-    if drift:
+    if drift and report_drift:
         print(f"     ! {drift}")
 
     data = json.load(open(out_path))
@@ -759,7 +760,8 @@ def cmd_freeze_tune(args) -> int:
 
     key = tune_key()
     dest = tune_fixture()
-    print(f"freezing autotune for {key}\n  -> {dest}\n")
+    print(f"freezing autotune for {key}\n  -> {dest}")
+    print("  every entry below tunes from empty; that is what is being captured\n")
     with tempfile.TemporaryDirectory() as tmp:
         root = os.path.join(tmp, "caches")
         for e in suite.by_tier(args.tier):
@@ -768,8 +770,11 @@ def cmd_freeze_tune(args) -> int:
                 continue
             try:
                 # No fixture seeded: this run *is* the tuning pass.
+                # Drift is not reported here: nothing is seeded during a freeze,
+                # so every entry tunes by construction. Saying so per entry would
+                # be an alarm that always fires, which is how one stops being read.
                 run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
-                          cache_root=root, warmup=False)
+                          cache_root=root, warmup=False, report_drift=False)
             except SystemExit as exc:
                 print(f"     ! capture failed, its shapes will be missing: {exc}")
         blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
