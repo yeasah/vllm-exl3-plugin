@@ -231,20 +231,35 @@ wants one for. Qwen3.8-27B at 3.00bpw with a 4-bit KV cache is the configuration
 - **Degenerate output**: an unclosed thinking block that generates forever with
   nothing reaching the client. With 0% acceptance a correct implementation would
   reproduce the target model's own output exactly, so *something beyond the drafter
-  is affected* -- which is the part that matters and the part not yet isolated.
+  is affected*. **The draft model is required for it**: dropping `--speculative-config`
+  and resizing the KV cache to a comparable size gives a correct short story, same
+  model, same `turboquant_4bit_nc`, same context budget (2026-09-10). So the quantized
+  KV path alone is fine at this context and the fault is in the draft/verify cycle.
 - vLLM says so itself at startup: `Fused multi-step draft decode is not supported by
   attention backend(s) TURBOQUANT; falling back to rebuilding attention metadata
   between draft steps` (`speculator.py`). The backend declares
   `_init_reorder_batch_threshold(1, supports_spec_as_decode=False)`, so a 4-query
   verification step is classified as a *prefill* rather than a decode.
 
-**The candidate approach is a 2x2 before any code**, because the one thing not yet
-known is whether spec decode is guilty or merely useless: the same serving command
-with and without `--speculative-config`, crossed with `turboquant_4bit_nc` and `fp8`.
-If TQ alone is degenerate at this context length, MTP is a red herring and the bug is
-in the TQ decode path; if only the MTP arms break, the draft/verify cycle is
-corrupting state the target model reads. It is the cheapest possible discriminator and
-nothing should be changed before it runs.
+**The 2x2 that would have discriminated this is half run and already decisive**: TQ
+without spec decode is correct, so the remaining question is not *whether* the draft
+cycle is at fault but *how*. The `fp8` + MTP arm is the one still worth running, since
+it says whether this is TurboQuant-specific or MTP-wide -- and the fp8 sibling entry in
+`bench/` is blocked on `kv-budget-margin`, so that arm comes free once the margin is.
+
+**Two readings of the code, one of which kills the obvious hypothesis.** The path a
+4-token verification batch takes is the small-continuation branch of
+`TurboQuantAttentionImpl.forward`, and it *does* handle causality: each query token is
+issued as its own decode request with an incrementing synthetic `seq_len`
+(`_arange_cache[cached_len + 1 : seq_len + 1]`), so token `j` attends to exactly
+`cached_len + j + 1` keys. "The verification batch is unmasked" was the first guess and
+it is wrong. Note the precondition stated in the comment above it, though: the branch
+assumes `do_kv_cache_update` has already written all `q_len` tokens to the cache -- so
+during verification, *rejected drafts are in the KV cache before they are rejected*.
+That is the seam worth probing next. Against it: the store takes a per-token
+`slot_mapping` and the metadata region is indexed per slot, so a rejected token's slot
+should be cleanly reusable rather than poisoning a block-shared scale -- which is the
+mechanism one would reach for first, and it does not obviously hold here.
 
 **Do not take a clean `bench/` capture as evidence either way.** Speculative decoding
 is output-preserving by construction, so a broken drafter and a working one produce

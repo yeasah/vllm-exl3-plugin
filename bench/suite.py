@@ -370,69 +370,6 @@ ENTRIES: list[Entry] = [
         "models in one engine, and a plugin that mis-handles the second would "
         "fail nowhere else",
     ),
-    Entry(
-        label="qwen3.8-27B 3.0bpw blockq MTP tq4",
-        known_broken="OOMs at first inference on the 16 GiB dev card, in "
-        "exl3_gemv_int8.cu:110, and fails the same way on the 0.28 build -- so "
-        "this is *not* a return of the MTP-vs-TurboQuant belief the note below "
-        "records as wrong. They still combine; there is simply no room left. "
-        "Same cause as the -fp8 sibling: KV took 1.05 -> 1.62 GiB and the "
-        "scratch that used to fit no longer does. Tracked as `kv-budget-margin` "
-        "in TODO.md. Note that `check` still *runs* it and the dead EngineCore "
-        "deadlocks capture.py for the full --timeout, which is 30 minutes of "
-        "nothing; that containment gap is recorded in the same item.",
-        model="turboderp/Qwen3.8-27B-exl3",
-        revision="3.00bpw",
-        tier="full",
-        fixture="blockq",
-        kv_cache_dtype="turboquant_4bit_nc",
-        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
-        language_model_only=True,
-        # Tight on a 16 GiB card, and the requirement is mostly a *constant*:
-        # halving max_model_len 4096 -> 2048 moved it only 0.88 -> 0.83 GiB,
-        # because 48 of this model's 64 layers are linear-attention whose state
-        # does not scale with context. So headroom comes from utilization, not
-        # from a shorter context -- the same 0.95 the tight-fit line in
-        # ~/ckpt/run-qwen3.8-27b.sh uses.
-        max_model_len=2048,
-        gpu_memory_utilization=0.95,
-        exercises="an MTP drafter, which is the coverage nothing else has: a "
-        "*second model instance* built by vLLM's speculative machinery from the "
-        "same checkpoint, whose modules go through `get_quant_method` "
-        "independently of the main model's. This checkpoint's MTP head is "
-        "genuinely EXL3-quantized (8 trellis modules, 202.5 MiB), so a plugin "
-        "that mishandled a secondary model would fail here and nowhere else.\n\n"
-        "It also stacks four lossy schemes -- blockq embedding, trellis "
-        "weights, turboquant KV, and speculative drafting -- on top of the "
-        "deployed `--language-model-only` shape.\n\n"
-        "**This entry was once read as evidence that MTP and TurboQuant "
-        "combine. It is not, and the reading was wrong.** It was added as "
-        "`known_broken` on the belief they do not; the first two runs then "
-        "failed on KV cache sizing (0.88 GiB needed against 0.28 available) "
-        "rather than on any spec conflict, and with utilization headroom it "
-        "captured cleanly -- which was taken as the belief being disproved.\n\n"
-        "**Speculative decoding is output-preserving by construction**, so that "
-        "inference cannot hold: a rejected draft falls back to the target "
-        "model's own token, and a drafter that is broken -- or that proposes "
-        "nothing at all -- still yields byte-identical output, at zero speedup. "
-        "A clean capture is what *every* such case looks like. This entry also "
-        "sets disable_log_stats=True, so no acceptance rate was ever recorded, "
-        "and its generated ids are identical to the non-MTP `blockq-tq4` "
-        "sibling, which is equally consistent with MTP contributing nothing.\n\n"
-        "Served on 2026-09-10 the combination gives **0.0% draft acceptance** "
-        "across 912 drafted tokens (per-position 0.000/0.000/0.000, after 2.9% "
-        "in the first window) and degenerate output -- an unclosed thinking "
-        "block generating forever with nothing reaching the client -- while "
-        "vLLM logs `Fused multi-step draft decode is not supported by attention "
-        "backend(s) TURBOQUANT`. So what this entry gates is that a short eager "
-        "capture is not *corrupted*. That is worth having; it is not what the "
-        "note claimed. Open work is `mtp-turboquant` in TODO.md.\n\n"
-        "The lesson is not about recollection, which is where the previous "
-        "version of this note put it. Both beliefs here were formed from a run: "
-        "the first from a crash that turned out to be KV sizing, the second "
-        "from a capture that could not have come out any other way. Ask what a "
-        "passing result would look like if the thing under test were broken",
-    ),
 ]
 
 
