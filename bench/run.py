@@ -770,11 +770,22 @@ def cmd_freeze_tune(args) -> int:
                 continue
             try:
                 # No fixture seeded: this run *is* the tuning pass.
-                # Drift is not reported here: nothing is seeded during a freeze,
-                # so every entry tunes by construction. Saying so per entry would
-                # be an alarm that always fires, which is how one stops being read.
+                # Warmup on, so the freeze performs the same sequence `--cold`
+                # measures. Note what this does *not* fix, since the comment here
+                # first claimed it did: turning warmup on produced a byte-identical
+                # blob, and the entry it was meant to help then tuned live anyway,
+                # writing a different blob on each of two runs. The requested shapes
+                # are not stable between runs -- vLLM sizing profiling batches from
+                # free memory is the likeliest reason -- so no freeze from any fixed
+                # sequence can be guaranteed complete. Warmup is kept because
+                # matching the measured sequence is still the right shape for this
+                # to have; tune_drift is what makes the residue visible.
+                #
+                # Drift is not reported here: nothing is seeded during a freeze, so
+                # every entry tunes by construction. Saying so per entry would be an
+                # alarm that always fires, which is how one stops being read.
                 run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
-                          cache_root=root, warmup=False, report_drift=False)
+                          cache_root=root, warmup=True, report_drift=False)
             except SystemExit as exc:
                 print(f"     ! capture failed, its shapes will be missing: {exc}")
         blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)

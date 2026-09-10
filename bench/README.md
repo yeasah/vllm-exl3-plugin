@@ -173,6 +173,23 @@ Measured on `qwen3-0.6B-3.0bpw-eager`, same build, same machine, minutes apart:
 Unseeded, the spread is as large as the upstream version difference the gate was asked to
 measure. Seeded, two runs agree to every digit reported.
 
+**The guarantee is conditional, and `tune_drift` is the condition.** A seeded run is
+reproducible only where the fixture covers *every* shape it asks for, and at least one
+entry does not ask for a stable set: `qwen3-0.6B-3.0bpw-eager` tuned live under a
+two-entry fixture on two consecutive runs, writing a **different** blob each time
+(`126a6266c5aa`, then `6cd9ad0a487f`), which rules out "one more warmup would cover it".
+The likeliest cause is that vLLM sizes profiling batches from free memory, so the GEMM's
+m dimension moves with whatever else the card is doing. The same entry is clean under the
+full-tier blob, because a fixture that covers more entries has absorbed more shapes -- so
+breadth *hides* this rather than fixing it, and a fixture that looks complete may only be
+lucky.
+
+So the claim is not "seeded runs are deterministic". It is: **a seeded run is
+reproducible when drift is silent, and drift says so when it is not** -- per entry, per
+run, recorded in the capture. That is weaker than it first appears and much stronger than
+an uncontrolled gate, where the same thing happened invisibly and got attributed to
+whichever dependency had most recently moved.
+
 **Determinism is relative to the fixture, and a re-freeze moves the numbers.** Two blobs
 frozen from different runs each give stable results, and different ones: the same entry
 read 6.875e-02 against a blob covering only itself and 7.524e-02 against the full-tier
