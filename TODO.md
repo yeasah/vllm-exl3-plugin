@@ -64,6 +64,14 @@ is about the ones we cannot, which is the half with direct evidence against it: 
 budget that overshoots what was asked for, and freed bytes that do not stay where they
 were freed to.
 
+**Which of the two goes first is close to arbitrary, and that is itself the finding**:
+taming TQ's transients does not pay out until the bytes it frees can reliably become KV
+space, so `kv-budget-margin` gates the *return* on
+`turboquant-prefill-transient` rather than merely sitting beside it. Doing the
+accounting first risks optimizing nothing; doing the transient first risks measuring a
+win that never reaches a served context. Whichever is picked, the other is what decides
+whether the number moved.
+
 ## `turboquant-prefill-transient` — Stop TQ's prefill cost scaling with context
 
 The outcome wanted is a TurboQuant prefill whose VRAM cost is set by the chunk,
