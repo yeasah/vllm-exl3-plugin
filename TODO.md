@@ -241,11 +241,12 @@ wants one for. Qwen3.8-27B at 3.00bpw with a 4-bit KV cache is the configuration
   `_init_reorder_batch_threshold(1, supports_spec_as_decode=False)`, so a 4-query
   verification step is classified as a *prefill* rather than a decode.
 
-**The 2x2 that would have discriminated this is half run and already decisive**: TQ
-without spec decode is correct, so the remaining question is not *whether* the draft
-cycle is at fault but *how*. The `fp8` + MTP arm is the one still worth running, since
-it says whether this is TurboQuant-specific or MTP-wide -- and the fp8 sibling entry in
-`bench/` is blocked on `kv-budget-margin`, so that arm comes free once the margin is.
+**The 2x2 is complete, and both controls point the same way.** TQ without spec decode
+is correct, so the KV path alone is fine; fp8 *with* MTP is correct on the same 0.29
+install, so the drafter and the verification machinery are fine. Only the crossing
+fails. The question is no longer whether the draft cycle is at fault, nor whether MTP
+is broken generally -- it is what TurboQuant does that fp8 does not, during
+verification.
 
 **Two readings of the code, one of which kills the obvious hypothesis.** The path a
 4-token verification batch takes is the small-continuation branch of
@@ -306,6 +307,22 @@ deliberately, and a downstream consumer sizing itself against what it observes f
 would convert that into a permanent claim. Bisecting exllamav3 `v1.4.3-21..-32` is the
 fallback if neither holds, since the baselines were blessed at `-21` and the entries
 have not run clean since.
+
+**Corroborated from serving, independently of `bench/`** (2026-09-10): utilizations
+above the default are no longer reliable at startup on this box, where 0.97 was the
+working figure before. Whether that is a 0.29 change or a standing fact of vLLM is not
+established -- but vLLM prints the arithmetic itself, and it does not balance. At
+`--gpu-memory-utilization 0.88` on a 15.51 GiB card it reports a 13.65 GiB budget
+against 11.34 consumed + 0.55 peak activation + 0.12 CUDA-graph + **1.75 KV in use** =
+13.76 GiB, i.e. 0.11 GiB past what was asked for, and recommends
+`--kv-cache-memory=1.48 GiB` "to fit into requested memory". That recommendation line is
+the instrument: it is the engine's own statement of how far the utilization path
+overshot, printed on every startup, and it costs nothing to read.
+
+*Also worth trying before hunting a leak*: the two 27B entries pin
+`gpu_memory_utilization=0.95` because that was the tight-fit figure when they were
+written. If high utilization is simply less reliable now, the fix is to lower theirs and
+re-bless rather than to find something that grew.
 
 *Not a 0.29 issue*: the tq4 entry fails identically on the 0.28 build, and the fp8 one
 passed there, so the bump at most moved the margin. What the 0.29 re-bless did add is
