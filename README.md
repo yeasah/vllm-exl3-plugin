@@ -194,13 +194,14 @@ knows where to start (`docs/data/sweeps.json`). Read `user-*.md` first — the h
 turns are about a fifth of the volume and carry most of the signal.
 
 The plugin needs a patched vLLM, vendored as the `deps/vllm` submodule: our fork
-on branch `appliance/v0.28.0`, which is the **v0.28.0** pin plus the commits
+on branch `appliance/v0.29.0`, which is the **v0.29.0** pin plus the commits
 below. It reproduces the tree the baselines in `bench/expected/` were captured
 from. [patches.md](patches.md) is the index — what each commit does, and how to
 offer one upstream.
 
     git submodule update --init deps/vllm
-    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=<v0.28.0 wheel> \
+    git -C deps/vllm fetch --tags origin        # before installing; see patches.md
+    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=<v0.29.0 wheel> \
     pip install --no-deps --no-build-isolation -e deps/vllm
 
 Use the precompiled path: the branch is pure Python, so a source build is half
@@ -221,6 +222,14 @@ Three further commits on the branch are TurboQuant-specific and are covered in
 [patches.md](patches.md) and [docs/turboquant-kv.md](docs/turboquant-kv.md): the
 sliding-window page-size fixes, the `boundary:N` lever, and the
 `_continuation_prefill` copy that drops a full-context temporary.
+
+### Retired at the 0.29 bump
+
+**Nothing.** All seven commits were checked against `v0.29.0` before rebasing and
+every one is still needed: the embedding `quant_config` default, `handles_fused_shards`,
+`ReplicatedLinear`'s v2 loader, the logit multiplier, both TurboQuant page-geometry
+fixes and the `_continuation_prefill` copy. Two needed conflict resolution rather than
+retirement — see *What the 0.29 bump actually cost* in [docs/upstream.md](docs/upstream.md).
 
 ### Retired at the 0.28 bump
 

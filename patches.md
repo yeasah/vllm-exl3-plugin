@@ -2,11 +2,11 @@
 
 The plugin needs a patched vLLM. Those patches used to live here as `.patch`
 files applied by hand to a checkout somewhere outside the project; they now live
-as commits on [`appliance/v0.28.0`](https://github.com/yeasah/vllm/tree/appliance/v0.28.0)
+as commits on [`appliance/v0.29.0`](https://github.com/yeasah/vllm/tree/appliance/v0.29.0)
 in our fork, vendored as the `deps/vllm` submodule. This file is the index: what
 each commit does and why, so the set can be read without checking out the fork.
 
-The branch is based on the **v0.28.0** tag, which is the pin the plugin, the
+The branch is based on the **v0.29.0** tag, which is the pin the plugin, the
 `bench/` baselines and every serving measurement in `docs/` are built against.
 It is not based on upstream `main` and is not rebased continuously — see
 *Offering these upstream* below.
@@ -16,24 +16,24 @@ It is not based on upstream `main` and is not rebased continuously — see
 
 Do **not** let it build the CUDA extensions. Every commit on this branch is pure
 Python -- none touches `csrc/`, `cmake/` or `setup.py` -- so the binaries from
-the released v0.28.0 wheel are correct, and `VLLM_USE_PRECOMPILED=1` fetches
+the released v0.29.0 wheel are correct, and `VLLM_USE_PRECOMPILED=1` fetches
 them instead of spending half an hour compiling:
 
     git submodule update --init deps/vllm
     git -C deps/vllm fetch --tags origin        # BEFORE installing -- see below
     VLLM_USE_PRECOMPILED=1 \
-    VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/87/d7/97f6ecc2ae883e601e08d7cef87cb54ececeefcfe6b5e12d5d92f8d06d6b/vllm-0.28.0-cp38-abi3-manylinux_2_28_x86_64.whl \
+    VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/ca/09/7f79450e21bd1c2a0897ab946a544816a4f7e04c54f0ca49849b14b12d6a/vllm-0.29.0-cp38-abi3-manylinux_2_28_x86_64.whl \
     pip install --no-deps --no-build-isolation -e deps/vllm
 
 The wheel location has to be given explicitly. Left to itself the precompiled
 path resolves a wheel *by commit* -- from `VLLM_PRECOMPILED_WHEEL_COMMIT`, else
 by inferring a base commit in `main`. Neither works here: our HEAD has never
-been seen by `wheels.vllm.ai`, and the v0.28.0 tag is cut on a release branch
+been seen by `wheels.vllm.ai`, and the v0.29.0 tag is cut on a release branch
 rather than on `main`, so there is no nightly wheel for it either. The released
 PyPI wheel is the stable source. Confirm afterwards that the version string
 names the base tag, the patch count, our commit and `.precompiled`:
 
-    vllm-0.28.1.dev7+g1f1617e26.precompiled
+    vllm-0.29.1.dev7+g1a736c073.precompiled
 
 **The tag fetch has to happen before the install, and this file used to have it
 after.** A submodule is cloned with no tags at all (the refspec is
@@ -41,18 +41,18 @@ after.** A submodule is cloned with no tags at all (the refspec is
 runs `git describe` *at install time* and writes the answer into
 `vllm/_version.py` and the dist-info name, where it is then frozen. With no tag
 reachable, scm falls back to `0.1.dev<commits-since-root>`, and the install
-claims **`0.1.dev20058+g1f1617e26.precompiled`** — which is what this file used
+claims **`0.1.dev20058+g1a736c073.precompiled`** — which is what this file used
 to tell you to expect. Nothing gates on it, but `vllm.__version__` is recorded
 in every `bench/` env block and in any bug report, and `0.1` names neither the
 base nor the patches. Fetching first costs nothing and produces the string
-above: `0.28.1` is scm's guess at the *next* release, `dev7` is our seven
-commits, `g1f1617e26` is which ones.
+above: `0.29.1` is scm's guess at the *next* release, `dev7` is our seven
+commits, `g1a736c073` is which ones.
 
 The same fetch is what makes `git describe` legible in the submodule, so
 `bench/` provenance names the base instead of reading
-`src.vllm.describe: 1f1617e26`:
+`src.vllm.describe: 1a736c073`:
 
-    v0.28.0-7-g1f1617e260    # base tag and patch count, both legible
+    v0.29.0-7-g1a736c073e    # base tag and patch count, both legible
 
 For a build where fetching tags is not wanted, `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM`
 overrides the whole computation — but it goes stale on the next commit, so it is
@@ -70,17 +70,17 @@ translation unit, so the default `-j 24` OOMs partway through.
 
 ## The commits
 
-Newest last; the branch applies them in this order on top of `v0.28.0`.
+Newest last; the branch applies them in this order on top of `v0.29.0`.
 
 | commit | what it fixes |
 |---|---|
-| [`c69d01ed8`](https://github.com/yeasah/vllm/commit/c69d01ed8) | **`VocabParallelEmbedding` never receives a `quant_config`.** 86 of 131 model files omit it, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from `get_current_vllm_config()` in one place rather than touching 86 call sites. |
-| [`8694dbfff`](https://github.com/yeasah/vllm/commit/8694dbfff) | **A parameter cannot declare that it splits fused checkpoint shards itself.** Adds a `handles_fused_shards` capability, checked before the generic fused-shard path. Qwen3.5 checkpoints do not load without it. |
-| [`d22146319`](https://github.com/yeasah/vllm/commit/d22146319) | **`ReplicatedLinear` has no `weight_loader_v2` branch** — the only `LinearBase` subclass without one, which any quantized model reaching it through the Transformers backend needs. |
-| [`344802e1b`](https://github.com/yeasah/vllm/commit/344802e1b) | **The Transformers backend reads only `logit_scale`**, never a model's own spelling (MuseGlimmer's `output_multiplier`), and applies the scale *after* the soft cap where such a model needs it before. Folds the multiplier into the cap via an identity that reduces to today's behaviour at 1. |
-| [`86e3b1eef`](https://github.com/yeasah/vllm/commit/86e3b1eef) | **A quantized KV cache could not coexist with sliding-window layers.** The quantized primary was priced through the *first* attention layer's backend, which with skip layers is usually a native one, so the page-size alignment arithmetic could not be satisfied. Policy-free: no default moves. |
-| [`ce1685699`](https://github.com/yeasah/vllm/commit/ce1685699) | **`boundary:N` is unreachable.** TurboQuant already computes a boundary of `n` native layers at each end of the stack, but `n` cannot be set, so the configurations on the memory/quality frontier cannot be expressed. Exposes it as a keyword in `--kv-cache-dtype-skip-layers`, which already carries a keyword vocabulary. Also fixes the parser rejecting non-integer entries. |
-| [`1f1617e26`](https://github.com/yeasah/vllm/commit/1f1617e26) | **`_continuation_prefill` materializes a full-context temporary.** `k_full[:n] = k.to(qdtype)` converts out-of-place where `copy_` would convert inside the copy. Measured at the real shapes: 230.0 MiB → 0.0, bit-identical. One of the four buffers that made up 914 MiB of a 930 MiB prefill peak. |
+| [`fe1cdc942`](https://github.com/yeasah/vllm/commit/fe1cdc942) | **`VocabParallelEmbedding` never receives a `quant_config`.** 86 of 131 model files omit it, so no quantized embedding can be served on those architectures — silently dense for a tied model, a load failure for a block-quantized one. Defaults it from `get_current_vllm_config()` in one place rather than touching 86 call sites. |
+| [`31b57b066`](https://github.com/yeasah/vllm/commit/31b57b066) | **A parameter cannot declare that it splits fused checkpoint shards itself.** Adds a `handles_fused_shards` capability, checked before the generic fused-shard path. Qwen3.5 checkpoints do not load without it. |
+| [`587400bd0`](https://github.com/yeasah/vllm/commit/587400bd0) | **`ReplicatedLinear` has no `weight_loader_v2` branch** — the only `LinearBase` subclass without one, which any quantized model reaching it through the Transformers backend needs. |
+| [`93b36225a`](https://github.com/yeasah/vllm/commit/93b36225a) | **The Transformers backend reads only `logit_scale`**, never a model's own spelling (MuseGlimmer's `output_multiplier`), and applies the scale *after* the soft cap where such a model needs it before. Folds the multiplier into the cap via an identity that reduces to today's behaviour at 1. |
+| [`81566217e`](https://github.com/yeasah/vllm/commit/81566217e) | **A quantized KV cache could not coexist with sliding-window layers.** The quantized primary was priced through the *first* attention layer's backend, which with skip layers is usually a native one, so the page-size alignment arithmetic could not be satisfied. Policy-free: no default moves. |
+| [`2778e4a20`](https://github.com/yeasah/vllm/commit/2778e4a20) | **`boundary:N` is unreachable.** TurboQuant already computes a boundary of `n` native layers at each end of the stack, but `n` cannot be set, so the configurations on the memory/quality frontier cannot be expressed. Exposes it as a keyword in `--kv-cache-dtype-skip-layers`, which already carries a keyword vocabulary. Also fixes the parser rejecting non-integer entries. |
+| [`1a736c073`](https://github.com/yeasah/vllm/commit/1a736c073) | **`_continuation_prefill` materializes a full-context temporary.** `k_full[:n] = k.to(qdtype)` converts out-of-place where `copy_` would convert inside the copy. Measured at the real shapes: 230.0 MiB → 0.0, bit-identical. One of the four buffers that made up 914 MiB of a 930 MiB prefill peak. |
 
 ## Offering these upstream
 

@@ -332,30 +332,42 @@ checkpoint tensors itself. Qwen3.5 will not load without it and `handles_fused_s
 has no upstream equivalent, but it is a hook shaped around how this plugin loads. No
 second consumer is known, so it is ours to maintain until one appears.
 
-### What a 0.29 bump costs the TQ patches
+### What the 0.29 bump actually cost
 
-Checked 2026-09-08 against upstream `main` at `28a2ccee78` (560 commits past `v0.28.0`)
-and the `v0.29.0rc6` tag; there is no `v0.29.0` final yet.
+Predicted 2026-09-08 against `v0.29.0rc6`, done 2026-09-09 against `v0.29.0`
+(`98dff2a81d`, 187 commits past `v0.28.0`). Recorded together because the prediction was
+half right in a way worth remembering.
 
-**TurboQuant's own code is effectively frozen upstream.** `turboquant_attn.py` has one
-39-line change since `v0.28.0` -- `get_kv_cache_shape()` removed in favour of
-`supported_kv_cache_layouts() -> (KVCacheLayout.LBNHC,)`, present in rc6 as well -- and
-`_continuation_prefill`, `_tq_Pi_half`, every file under `vllm/v1/attention/ops/turboquant*`
-and `flydsl*`, and all of `layers/quantization/turboquant/` are byte-identical. So no
-amount of waiting improves the ground the prefill-transient work stands on, and none of
-that work has to be rebased to be started.
+**Right about the patches.** All seven were checked against `v0.29.0` before rebasing and
+none had been fixed upstream, so nothing retired. TurboQuant's own code was frozen exactly
+as measured -- `_continuation_prefill` and `_tq_Pi_half` byte-identical -- and the rebased
+series is line-for-line the 0.28 series apart from two comment lines. Two commits needed
+resolution:
 
-**The churn is all in the KV-spec plumbing the other two TQ patches sit on**, which is
-exactly where a bump will hurt: `v1/kv_cache_interface.py` 478 changed lines,
-`config/cache.py` 96, `model_executor/layers/attention/attention.py` 55,
-`platforms/interface.py` 32 -- the files
-[`86e3b1eef`](https://github.com/yeasah/vllm/commit/86e3b1eef) (page geometry, which
-rewrites how `_align_heterogeneous_kv_block_size` picks the pricing backend) and
-[`ce1685699`](https://github.com/yeasah/vllm/commit/ce1685699) (`boundary:N`) modify. And
-it has not settled: `kv_cache_interface.py` moved another 98 lines between rc6 and main.
-Recheck at the bump whether the refactor happened to fix the mispriced page on its own --
-the mechanism our patch corrects is still there on main, but its surroundings are not the
-ones we diagnosed.
+- **`81566217e`** (page geometry, was `86e3b1eef`) in `v1/core/kv_cache_utils.py`, which is
+  the KV-spec plumbing the prediction named. Upstream replaced
+  `layer_spec.indexes_kv_by_block_stride` with `not isinstance(layer_spec, MLAAttentionSpec)`
+  and **deleted the attribute from the tree**, so keeping our side of that conflict would
+  have been an `AttributeError` at cache construction.
+- **`fe1cdc942`** (the embedding `quant_config` default, was `c69d01ed8`) in
+  `vocab_parallel_embedding.py`, which the prediction did not look at. Upstream added a
+  keyword-only `quant_method` for model-specific preselection and reshaped the dispatch, so
+  the fallback moved above it and is now gated on `quant_method is None` too.
+
+**Wrong about where the cost would land.** The patches were the cheap part. The expensive
+part was two *plugin* assumptions about how vLLM discards a tied model's `lm_head.*`, both
+silent until 0.29 stopped doing it: see
+[embeddings.md](embeddings.md) *A tied head vLLM used to throw away*. The lesson generalizes
+past this bump -- a survey of what our patches touch does not cover what our plugin
+*assumes*, and only the second kind fails silently.
+
+**Also worth knowing for the next bump.** MoE router logits changed on non-SM90 CUDA cards:
+`allow_cublas_router_gemm` used to require `allow_specialized_router_gemm` (SM90+, family-120
+excluded), so sm120 computed the router GEMM through `F.linear` in bf16 and copied to fp32;
+0.29 gates it on `(is_cuda() or is_rocm()) and no_bias`, so the same card now gets the cuBLAS
+bf16xbf16->fp32 epilogue with no intermediate rounding. Deterministic, reproducible, and
+*more* accurate -- but it moves top-k selection often enough to flip 3 of 63 argmax positions
+on `qwen3.5-35B-A3B` at 2.00bpw.
 
 ---
 
