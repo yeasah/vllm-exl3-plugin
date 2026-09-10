@@ -48,7 +48,7 @@ einops==0.8.2
 email-validator==2.3.0
 entry-points-txt==0.3.0
 evaluate==0.4.6
-exllamav3==1.4.3
+exllamav3==1.4.9
 fastapi-cli==0.0.32
 fastapi-cloud-cli==0.23.0
 fastapi==0.136.3

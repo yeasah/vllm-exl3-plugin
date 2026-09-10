@@ -16,13 +16,13 @@
   "gpu_count": 1,
   "capability": "12.0",
   "vllm_reported": "0.29.1.dev7+g1a736c073",
-  "pkg.digest": "52a82858ccb5",
+  "pkg.digest": "715aa8a7f202",
   "pkg.count": 276,
   "pkg.transformers": "5.15.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "60db3c2",
-   "head": "60db3c227c",
+   "describe": "32b5622",
+   "head": "32b56220c0",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -35,13 +35,67 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.4.3-32-g2ce3086",
-   "head": "2ce3086631",
+   "describe": "v1.4.9-33-gdc36e3b",
+   "head": "dc36e3bec3",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "driver": "610.57.04"
+ },
+ "caches": {
+  "exllamav3_autotune": {
+   "kind": "selection",
+   "path": "/tmp/tmpf763z3ph/caches/exllamav3_autotune",
+   "from_env": true,
+   "exists": true,
+   "files": 1,
+   "bytes": 2864,
+   "mtime": 1789065891
+  },
+  "vllm": {
+   "kind": "compilation+selection",
+   "path": "/tmp/tmpf763z3ph/caches/vllm",
+   "from_env": true,
+   "exists": true,
+   "files": 23,
+   "bytes": 1957855,
+   "mtime": 1789066018
+  },
+  "triton": {
+   "kind": "compilation",
+   "path": "/tmp/tmpf763z3ph/caches/triton",
+   "from_env": true,
+   "exists": true,
+   "files": 1487,
+   "bytes": 68798565,
+   "mtime": 1789065961
+  },
+  "flashinfer": {
+   "kind": "compilation",
+   "path": "/tmp/tmpf763z3ph/caches/flashinfer",
+   "from_env": true,
+   "exists": true,
+   "files": 9,
+   "bytes": 6860836,
+   "mtime": 1789066019
+  }
+ },
+ "hardware": {
+  "gpu": [
+   {
+    "temperature.gpu": "39",
+    "clocks.sm": "2445 MHz",
+    "clocks.mem": "14001 MHz",
+    "power.draw": "40.63 W",
+    "utilization.gpu": "0 %",
+    "memory.used": "4 MiB",
+    "pstate": "P0",
+    "clocks_throttle_reasons.active": "0x0000000000000000",
+    "persistence_mode": "Enabled",
+    "fan.speed": "31 %"
+   }
+  ]
  },
  "prompts": [
   {
@@ -4010,6 +4064,7 @@
    "generated_text": " to=self<|message|>I am comparing three approaches to quantizing large language models: trellis coding, group-wise integer quantization,"
   }
  ],
+ "tune_drift": null,
  "weight_gib": 10.31,
  "attn_backend": "FLASH_ATTN",
  "kv_cache_gib": 1.26
