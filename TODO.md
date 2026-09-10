@@ -208,6 +208,58 @@ is cross-entry rather than against a baseline, so it needs something
 
 → [bench/README.md](bench/README.md)
 
+## `mtp-turboquant` — Zero draft acceptance, and output that does not survive it
+
+The outcome wanted is either a working MTP drafter on a TurboQuant KV cache, or a
+refusal at startup. What happens today is the third thing: it runs, drafts at ~90
+tok/s, accepts **nothing**, and the output is degenerate.
+
+It unblocks the appliance's only speculative-decoding option on the model it most
+wants one for. Qwen3.8-27B at 3.00bpw with a 4-bit KV cache is the configuration the
+16 GiB card is built around, and MTP is the one draft method the checkpoint ships.
+
+**Measured 2026-09-10**, serving `turboderp/Qwen3.8-27B-exl3@3.00bpw` with
+`--kv-cache-dtype turboquant_4bit_nc` and `--speculative-config
+'{"method":"mtp","num_speculative_tokens":3,"revision":"3.00bpw"}'`, one-line prompt:
+
+- **0.0% acceptance across 912 drafted tokens**, per-position 0.000/0.000/0.000, after
+  2.9% (0.047/0.034/0.007) in the first window. Position 0 is the draft that depends
+  on nothing but the target's own hidden state, so 4.7% falling to 0.000 says the
+  drafter is wrong from its first proposal rather than degrading down the chain. (A
+  useful MTP head is far higher than that; we have no measured figure of our own for
+  this checkpoint, which is itself worth fixing before tuning anything.)
+- **Degenerate output**: an unclosed thinking block that generates forever with
+  nothing reaching the client. With 0% acceptance a correct implementation would
+  reproduce the target model's own output exactly, so *something beyond the drafter
+  is affected* -- which is the part that matters and the part not yet isolated.
+- vLLM says so itself at startup: `Fused multi-step draft decode is not supported by
+  attention backend(s) TURBOQUANT; falling back to rebuilding attention metadata
+  between draft steps` (`speculator.py`). The backend declares
+  `_init_reorder_batch_threshold(1, supports_spec_as_decode=False)`, so a 4-query
+  verification step is classified as a *prefill* rather than a decode.
+
+**The candidate approach is a 2x2 before any code**, because the one thing not yet
+known is whether spec decode is guilty or merely useless: the same serving command
+with and without `--speculative-config`, crossed with `turboquant_4bit_nc` and `fp8`.
+If TQ alone is degenerate at this context length, MTP is a red herring and the bug is
+in the TQ decode path; if only the MTP arms break, the draft/verify cycle is
+corrupting state the target model reads. It is the cheapest possible discriminator and
+nothing should be changed before it runs.
+
+**Do not take a clean `bench/` capture as evidence either way.** Speculative decoding
+is output-preserving by construction, so a broken drafter and a working one produce
+identical tokens; `qwen3.8-27B-3.0bpw-blockq-MTP-tq4` captured cleanly for exactly that
+reason and its note claimed too much for years. Any measurement here has to read
+acceptance rate, which means `disable_log_stats=False`.
+
+*A second finding from the same run, worth separating*: `--speculative-config` on a
+hybrid model silently switches Mamba-state checkpointing to **dense**
+(`arg_utils.py`: "Hybrid model with EAGLE speculative decoding: defaulting
+prefix_cache_retention_interval to dense checkpointing"), because EAGLE's tail-block
+drop makes the sparse retention unreachable. That is what puts KV occupancy at 40.6%
+for a one-line prompt on a 53,040-token context, and it is a large hidden cost of
+turning MTP on for this architecture regardless of whether acceptance is ever fixed.
+
 ## `kv-budget-margin` — Two entries OOM because the KV cache got *more* memory
 
 The outcome wanted is that a config which profiles successfully also serves. Today
@@ -246,6 +298,11 @@ the shape of the effect across the whole matrix -- every eager entry gained KV h
 and both CUDA-graph entries lost it, measured in
 [docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget". These two
 entries are eager, so they gained, and that is what left them nothing to serve with.
+
+Note separately that `--speculative-config` on this architecture forces *dense* Mamba
+checkpointing (see `mtp-turboquant`), which changes how far a given KV allocation goes
+rather than how large it is -- relevant to reading these two entries, but not why they
+OOM.
 
 → [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
 

@@ -10,50 +10,50 @@
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
   "gpu_count": 1,
   "capability": "12.0",
-  "vllm_reported": "0.28.1.dev0+g2cf0a6915.d20260825",
-  "pkg.digest": "b288b05ac847",
-  "pkg.count": 239,
+  "vllm_reported": "0.29.1.dev7+g1a736c073",
+  "pkg.digest": "52a82858ccb5",
+  "pkg.count": 276,
   "pkg.transformers": "5.15.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "9dddd6e",
-   "head": "9dddd6e232",
+   "describe": "41d061f",
+   "head": "41d061f9d3",
+   "dirty_files": 1,
+   "diff_sha": "ffbaf6c983f8",
+   "untracked": 0
+  },
+  "src.vllm": {
+   "describe": "v0.29.0-7-g1a736c073e",
+   "head": "1a736c073e",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
-  "src.vllm": {
-   "describe": "v0.28.0",
-   "head": "2cf0a6915c",
-   "dirty_files": 4,
-   "diff_sha": "31b747b753fb",
-   "untracked": 0
-  },
   "src.exllamav3": {
-   "describe": "v1.4.3-20-gbb1d0f1",
-   "head": "bb1d0f12e1",
+   "describe": "v1.4.3-32-g2ce3086",
+   "head": "2ce3086631",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "driver": "610.57.04"
  },
- "decode": 2725.1,
- "decode_spread_pct": 0.51,
+ "decode": 2948.6,
+ "decode_spread_pct": 0.2,
  "decode_samples": [
-  2727.3,
-  2716.5,
-  2730.5,
-  2716.6,
-  2725.1
+  2952.9,
+  2950.7,
+  2947.0,
+  2948.6,
+  2948.1
  ],
- "prefill": 34361.6,
- "prefill_spread_pct": 1.28,
+ "prefill": 33904.0,
+ "prefill_spread_pct": 1.59,
  "prefill_samples": [
-  34384.4,
-  34033.3,
-  34167.9,
-  34473.1,
-  34361.6
+  33953.1,
+  34347.3,
+  33890.1,
+  33808.1,
+  33904.0
  ]
 }
