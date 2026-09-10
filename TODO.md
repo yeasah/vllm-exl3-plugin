@@ -55,9 +55,14 @@ counted rather than only the tensors that participate in the bit-rate target, to
 as competitive as that bit-rate target implies. [docs/qbench.md](docs/qbench.md) has the measurement that establishes
 the gap is real on the served path.
 
-That is the biggest win on *format* competitiveness. The most urgent work is
-`turboquant-prefill-transient`, which as of 2026-09-08 is the only remaining lever on
-declared context per card: `kv-pager` is dead, and KV eviction/offload with it.
+That is the biggest win on *format* competitiveness. The most urgent work is bytes on
+the card: `kv-pager` died on 2026-09-08 and took KV eviction and offload with it, so
+**bytes per token is the only remaining lever on declared context per card**. Two items
+share that ground and are the top of this file for that reason —
+`turboquant-prefill-transient` removes a consumer we can name, and `kv-budget-margin`
+is about the ones we cannot, which is the half with direct evidence against it: a
+budget that overshoots what was asked for, and freed bytes that do not stay where they
+were freed to.
 
 ## `turboquant-prefill-transient` — Stop TQ's prefill cost scaling with context
 
@@ -123,6 +128,78 @@ threatens is `turboquant-sliding-window`, not this.
 → [docs/upstream.md](docs/upstream.md) (the costing, and what was declined for
 whom), [docs/kernels.md](docs/kernels.md) (the in-situ captures),
 [docs/turboquant-kv.md](docs/turboquant-kv.md)
+
+## `kv-budget-margin` — Where the bytes went, on a card that has none spare
+
+The outcome wanted is an accounting of GPU memory that holds: every byte on the card
+attributed to something, and a budget whose arithmetic balances, so that a declared
+context length is a promise the engine can keep rather than a guess that OOMs at first
+inference.
+
+This is primary-goal work, not gate maintenance. Declared context per card is the
+appliance's binding constraint, and since `kv-pager` closed, **bytes per token is the
+only lever left on it** — so memory that silently relocates from the KV cache to some
+other consumer is a direct subtraction from the product. It composes with
+`turboquant-prefill-transient`: that item removes a consumer we can name, this one is
+about the ones we cannot. Removing a transient only buys context if the freed bytes
+reach the KV cache and *stay* reachable, and right now there is direct evidence they do
+not.
+
+**The gate breakage is the symptom, and its fix is not this item's fix.** Two 27B
+entries die at first inference on the 16 GiB card, and `bench/` should simply lower
+their pinned `gpu_memory_utilization=0.95` and re-bless, because a gate exists to be
+runnable. That workaround is explicitly *not* an answer here — it moves the line rather
+than finding what crossed it.
+
+**The mechanism is already written down, in the opposite direction.**
+[docs/kernels.md](docs/kernels.md) records that `gpu_worker.py` budgets KV as
+`requested - consumed - peak_activation` with no CUDA-graph term, and that shrinking
+transients makes `--kv-cache-memory` *more* load-bearing rather than less, because the
+freed memory is handed to the KV cache and the slack that used to absorb unaccounted
+consumers goes with it. These two entries look like that prediction coming true: the
+same entries took **1.05 -> 1.62 GiB** of KV against their blessed baselines, and what
+then runs out is inference-time scratch — FlashInfer's autotuner asks for 544 MiB,
+fails twice with allocator warnings, and saves 0 configs before the kernel that OOMs.
+
+Candidate approach, cheapest first: confirm the direction by re-running one entry with
+`--kv-cache-memory` pinned at the blessed figure, which costs one run and either
+implicates the budget or exonerates it. A live hypothesis worth testing in the same
+pass is that the plugin's own transient reduction moved memory into somebody's *static*
+buffer rather than leaving it free — the reconstruct tiling normalized allocation sizes
+deliberately, and a downstream consumer sizing itself against what it observes free
+would convert that into a permanent claim. Bisecting exllamav3 `v1.4.3-21..-32` is the
+fallback if neither holds, since the baselines were blessed at `-21` and the entries
+have not run clean since.
+
+**Corroborated from serving, independently of `bench/`** (2026-09-10): utilizations
+above the default are no longer reliable at startup on this box, where 0.97 was the
+working figure before. Whether that is a 0.29 change or a standing fact of vLLM is not
+established -- but vLLM prints the arithmetic itself, and it does not balance. At
+`--gpu-memory-utilization 0.88` on a 15.51 GiB card it reports a 13.65 GiB budget
+against 11.34 consumed + 0.55 peak activation + 0.12 CUDA-graph + **1.75 KV in use** =
+13.76 GiB, i.e. 0.11 GiB past what was asked for, and recommends
+`--kv-cache-memory=1.48 GiB` "to fit into requested memory". That recommendation line is
+the instrument: it is the engine's own statement of how far the utilization path
+overshot, printed on every startup, and it costs nothing to read.
+
+*Also worth trying before hunting a leak*: the two 27B entries pin
+`gpu_memory_utilization=0.95` because that was the tight-fit figure when they were
+written. If high utilization is simply less reliable now, the fix is to lower theirs and
+re-bless rather than to find something that grew.
+
+*Not a 0.29 issue*: the tq4 entry fails identically on the 0.28 build, and the fp8 one
+passed there, so the bump at most moved the margin. What the 0.29 re-bless did add is
+the shape of the effect across the whole matrix -- every eager entry gained KV headroom
+and both CUDA-graph entries lost it, measured in
+[docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget". These two
+entries are eager, so they gained, and that is what left them nothing to serve with.
+
+Note separately that `--speculative-config` on this architecture forces *dense* Mamba
+checkpointing (see `mtp-turboquant`), which changes how far a given KV allocation goes
+rather than how large it is -- relevant to reading these two entries, but not why they
+OOM.
+
+→ [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
 
 ## `bench-suite` — A TP tier for the bump gate
 
@@ -275,68 +352,6 @@ prefix_cache_retention_interval to dense checkpointing"), because EAGLE's tail-b
 drop makes the sparse retention unreachable. That is what puts KV occupancy at 40.6%
 for a one-line prompt on a 53,040-token context, and it is a large hidden cost of
 turning MTP on for this architecture regardless of whether acceptance is ever fixed.
-
-## `kv-budget-margin` — Two entries OOM because the KV cache got *more* memory
-
-The outcome wanted is that a config which profiles successfully also serves. Today
-`qwen3.8-27B-3.0bpw-blockq-MTP-tq4` and its `-fp8` sibling both die at first inference
-on a 16 GiB card — the tq4 one on `exl3_gemv_int8.cu:110`, the fp8 one in `exl3_mm` with
-217 MiB free — while the profile run that sized their KV cache reported no problem.
-
-What it unblocks: the gate. Two of seventeen entries are unrunnable, one of them
-(`-fp8`) newly so, and a tier that cannot complete hides everything after the failure.
-It also decides whether `--kv-cache-memory` has to be pinned per config in the
-appliance, which is the deployment question underneath.
-
-**The mechanism is already written down, in the opposite direction.**
-[docs/kernels.md](docs/kernels.md) records that `gpu_worker.py` budgets KV as
-`requested - consumed - peak_activation` with no CUDA-graph term, and that shrinking
-transients makes `--kv-cache-memory` *more* load-bearing rather than less, because the
-freed memory is handed to the KV cache and the slack that used to absorb unaccounted
-consumers goes with it. These two entries look like that prediction coming true: the
-same entries took **1.05 -> 1.62 GiB** of KV against their blessed baselines, and what
-then runs out is inference-time scratch — FlashInfer's autotuner asks for 544 MiB,
-fails twice with allocator warnings, and saves 0 configs before the kernel that OOMs.
-
-Candidate approach, cheapest first: confirm the direction by re-running one entry with
-`--kv-cache-memory` pinned at the blessed figure, which costs one run and either
-implicates the budget or exonerates it. A live hypothesis worth testing in the same
-pass is that the plugin's own transient reduction moved memory into somebody's *static*
-buffer rather than leaving it free — the reconstruct tiling normalized allocation sizes
-deliberately, and a downstream consumer sizing itself against what it observes free
-would convert that into a permanent claim. Bisecting exllamav3 `v1.4.3-21..-32` is the
-fallback if neither holds, since the baselines were blessed at `-21` and the entries
-have not run clean since.
-
-**Corroborated from serving, independently of `bench/`** (2026-09-10): utilizations
-above the default are no longer reliable at startup on this box, where 0.97 was the
-working figure before. Whether that is a 0.29 change or a standing fact of vLLM is not
-established -- but vLLM prints the arithmetic itself, and it does not balance. At
-`--gpu-memory-utilization 0.88` on a 15.51 GiB card it reports a 13.65 GiB budget
-against 11.34 consumed + 0.55 peak activation + 0.12 CUDA-graph + **1.75 KV in use** =
-13.76 GiB, i.e. 0.11 GiB past what was asked for, and recommends
-`--kv-cache-memory=1.48 GiB` "to fit into requested memory". That recommendation line is
-the instrument: it is the engine's own statement of how far the utilization path
-overshot, printed on every startup, and it costs nothing to read.
-
-*Also worth trying before hunting a leak*: the two 27B entries pin
-`gpu_memory_utilization=0.95` because that was the tight-fit figure when they were
-written. If high utilization is simply less reliable now, the fix is to lower theirs and
-re-bless rather than to find something that grew.
-
-*Not a 0.29 issue*: the tq4 entry fails identically on the 0.28 build, and the fp8 one
-passed there, so the bump at most moved the margin. What the 0.29 re-bless did add is
-the shape of the effect across the whole matrix -- every eager entry gained KV headroom
-and both CUDA-graph entries lost it, measured in
-[docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget". These two
-entries are eager, so they gained, and that is what left them nothing to serve with.
-
-Note separately that `--speculative-config` on this architecture forces *dense* Mamba
-checkpointing (see `mtp-turboquant`), which changes how far a given KV allocation goes
-rather than how large it is -- relevant to reading these two entries, but not why they
-OOM.
-
-→ [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
 
 ## `turboquant-sliding-window` — TurboQuant KV cache for sliding-window models
 
