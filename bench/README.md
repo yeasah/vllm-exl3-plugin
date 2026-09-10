@@ -101,14 +101,46 @@ bench/run.py capture <entry> /tmp/x.json     # standalone, a few times
 ```
 
 The flip appeared only *within* a tier run, where that entry loads after seven
-other models. A plausible mechanism is that EXL3 autotunes kernel selection by
-timing, so a warmer or more fragmented GPU can select differently and change an
-fp16 accumulation order enough to flip one near-tie — **hypothesis, not a
-finding**; nothing has been instrumented to confirm it.
+other models. The mechanism proposed then was that EXL3 autotunes kernel selection
+by timing, so a warmer or more fragmented GPU can select differently and change an
+fp16 accumulation order enough to flip one near-tie. It was filed as **hypothesis,
+not a finding**.
 
-What matters operationally is that the gate behaved correctly: it flagged, the
-investigation was cheap and conclusive, and nothing was absorbed silently. An
-argmax failure that reproduces standalone is real; one that does not is this.
+### It is a finding now, and it is bigger than one intermittent (2026-09-10)
+
+Measured directly at the exllamav3 v1.4.9 bump. **Same build, same entry, same
+machine — only the autotune cache differs:**
+
+| `qwen3-0.6B-3.0bpw-eager` | argmax | \|dlogprob\| max | KL max | greedy |
+|---|---|---|---|---|
+| v1.4.9 warm cache vs v1.4.9 **cleared** cache | 1/61 | 1.603e-01 | 1.527e-02 | **CHANGED** |
+| v1.4.9 warm cache vs the v1.4.3-32 baseline | 0/61 | 1.443e-01 | 1.548e-02 | **CHANGED** |
+
+**Clearing a 4 KB cache file moves the output as much as six upstream releases
+do** — including a changed greedy continuation, which this gate treats as exact.
+`~/.cache/exllamav3/autotune/coop_autotune_v1.bin` is a machine-local binary
+outside the repo, and `COOP_AUTOTUNE_VERSION` is XORed into its key
+(`coop_autotune.cu`), so an upstream version bump silently invalidates every entry
+and re-tunes against whatever thermal and occupancy state the card is in.
+
+So the v1.4.9 tier result — FAIL, 12 of 16 entries — **cannot be attributed to
+upstream's kernels**, and a quality comparison between exllamav3 versions is
+confounded unless both sides are measured in the same cache state.
+
+**The general problem: `environment()` records 14 keys and none of them is a
+cache.** Five caches on this box can steer kernel selection or fusion —
+exllamav3 autotune (proven above), `vllm/torch_compile_cache` (2.5 G),
+`triton/cache` (675 M), `vllm/flashinfer_autotune_cache`, and `flashinfer`'s JIT
+store. Only `vllm-exl3-plugin/blockq-embeddings` is safe, being a deterministic
+encode keyed by commit hash. Two runs of identical code can therefore differ, and
+this gate will attribute the difference to code, because code is the only thing it
+records. Tracked as `bench-cache-control` in [../TODO.md](../TODO.md).
+
+What still holds operationally: the gate flagged, the investigation was cheap, and
+nothing was absorbed silently. What has changed is the reading. An argmax failure
+that reproduces standalone is **not** thereby a code change — it is reproducible
+*given this cache state*, which is a weaker claim than it looks. Clear the caches
+you can and re-run before concluding anything about a dependency.
 
 ## Two kinds of baseline, and why they are stored differently
 

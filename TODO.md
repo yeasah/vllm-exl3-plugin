@@ -209,6 +209,55 @@ OOM.
 
 → [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
 
+## `bench-cache-control` — The gate cannot see its own inputs
+
+The outcome wanted is a bump gate whose result is a fact about the code. Today it is a
+fact about the code *and* about five caches nobody records, so a green run and a red run
+can differ by nothing that is committed anywhere.
+
+What it unblocks: every dependency decision the gate is supposed to inform. On
+2026-09-10 the exllamav3 v1.4.9 bump failed 12 of 16 entries with two changed greedy
+continuations, which reads as "upstream rewrote the kernels" — and the same build,
+re-run with only `~/.cache/exllamav3/autotune/coop_autotune_v1.bin` deleted, moved the
+output *further* than six upstream releases had, greedy change included. The bump was
+one experiment away from being reported as a numerics regression and escalated to a
+fork-or-not decision, on the strength of a 4 KB file.
+
+**The mechanism generalizes past the one cache we caught.** `bench.core.environment()`
+records 14 keys — versions, git provenance, GPU, driver, torch, CUDA — and not one
+describes cache state. Five stores on the dev box can steer kernel selection or fusion:
+
+| cache | why it matters |
+|---|---|
+| `exllamav3/autotune` | **proven** to change greedy output; `COOP_AUTOTUNE_VERSION` is XORed into the key, so upstream bumps invalidate it silently |
+| `vllm/torch_compile_cache` | inductor fusion decisions; already known to be keyed on `vllm.__version__` |
+| `triton/cache` | JIT'd kernels |
+| `vllm/flashinfer_autotune_cache` | kernel selection, and observed saving 0 configs under memory pressure |
+| `flashinfer` JIT store | JIT'd kernels |
+
+`vllm-exl3-plugin/blockq-embeddings` is the one that is safe, and it shows the shape of
+the answer: a deterministic encode keyed by commit hash.
+
+**Candidate approach, in order.** *Record* before *control*: add a cache manifest to
+`environment()` — per store, existence, file count, aggregate size and mtime — so a
+divergence at least becomes attributable instead of invisible. That is cheap, needs no
+GPU, and would have answered today's question immediately. Then *control* what can be
+controlled: exllamav3 exposes `force_shape_idx`, and `exl3_gemm.cu` disables autotune
+outright when it is positive (`autotune = force_shape_idx <= 0 && force_num_sms <= 0`),
+so a pinned shape would make the EXL3 path deterministic across machines and cache
+states — at the cost of measuring a kernel the deployment would not choose, which is a
+real trade and should be a `bench` flag rather than a default. Last, decide the policy
+for the rest: a gate run that clears every clearable cache measures cold-start behaviour
+and is slow; one that warms them measures steady state and is what users see. Both are
+defensible, *unrecorded* is not.
+
+*Do not* re-bless anything against a build whose caches were re-tuned mid-run until this
+is at least recorded — that is how a cache artifact becomes the committed definition of
+correct.
+
+→ [bench/README.md](bench/README.md) "It is a finding now, and it is bigger than one
+intermittent"
+
 ## `bench-suite` — A TP tier for the bump gate
 
 `bench/` gates vLLM and exllamav3 bumps on token ids, per-position logprobs and

@@ -168,6 +168,24 @@ already treats KV cache as a separate, well-tooled budgeting step, with dedicate
 calculators; folding it in would make the comparison *less* legible to exactly the people
 who handle that axis competently.
 
+**This is now a standing merge policy for the exllamav3 fork, not a one-off
+resolution.** Upstream disagrees: as of v1.4.9 its GGUF walk excludes
+`token_embd.weight` (and `per_layer_token_embd`) from the size accounting outright. That
+is a legitimate choice for a comparison of *decoder* quantization, and it is the wrong
+one here for the reason above — the embed+head tax is the finding, and a number that
+omits it cannot show it. **Never adopt the exclusion on a merge.** The divergence is
+deliberate, permanent until the argument above changes, and recorded in
+`eval/qbench/engines.py`'s own docstring so it is visible at the point a merge would
+undo it.
+
+Two things make this worth stating as policy rather than leaving to judgement each time.
+It is a *silent* change — adopting upstream's version alters what the size axis means
+while every plot, table and CSV keeps rendering, so nothing fails and the numbers simply
+stop meaning what the surrounding documents say they mean. And it would break
+comparability with every figure already recorded in this note and in
+[embeddings.md](embeddings.md), which were all taken with the embedding counted. A merge
+that quietly re-baselines the axis invalidates the archive rather than extending it.
+
 The boundary matters because it will be tempting to cross later. Full "will this fit and
 run" capacity planning — weights plus KV cache at a target context length plus batching —
 belongs to the packaged appliance, whose users are precisely the ones who do *not* bring

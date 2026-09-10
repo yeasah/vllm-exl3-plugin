@@ -38,6 +38,17 @@ there is **no universal embedding bit-depth constant** — sensitivity spans 35x
 across models, so any heuristic fitted to one family is actively harmful on
 another. Detail in `docs/embeddings.md`.
 
+**Standing merge policy for the exllamav3 fork, set 2026-09-10:** upstream's qbench
+excludes `token_embd.weight` from its size accounting; our fork counts it. **Never
+adopt that exclusion on a merge** — it is the disagreement this whole line of work
+rests on, since a size number that omits the embedding cannot show the tax. It
+conflicts on every merge that touches `eval/qbench/engines.py` (it did at v1.4.9),
+and taking upstream's side is *silent*: every plot and table keeps rendering while
+the axis quietly stops meaning what the surrounding documents say, and comparability
+with every figure already in `docs/embeddings.md` and `docs/qbench.md` is lost. The
+reasoning is recorded in that engines.py docstring and in docs/qbench.md's "Scope"
+section. Upstream's orthogonal exclusions (NextN/MTP blocks) are fine to take.
+
 **How to apply:** when weighing embedding/head work against other tasks, price it
 against this competitive gap rather than against internal tidiness. The fork-side
 pipeline fix is worth attempting to upstream, with low expectation of it landing.
