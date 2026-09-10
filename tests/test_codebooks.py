@@ -200,10 +200,37 @@ class TestQuantizedHeadDetection(unittest.TestCase):
         self.assertFalse(no_head.head_is_quantized())
 
     def test_missing_file_falls_back(self):
-        """The 0.0.0-era repos have no quantization_config.json at all."""
+        """The 0.0.0-era repos have no quantization_config.json at all.
+
+        They do have a checkpoint, and since 2026-09-09 its safetensors header is
+        read wherever there is no index, so `tensor_storage is None` no longer
+        means nothing is known -- which is what let this repo's quantized
+        `lm_head` be found at all (see docs/embeddings.md, *A tied head vLLM used
+        to throw away*). The header names *checkpoint* modules, so a fused vLLM
+        prefix only resolves once `packed_modules_mapping` is populated; the
+        model class fills that in as it initializes, and a unit test has no model.
+        """
         cfg = self._config_for("turboderp/Llama-3.2-1B-Instruct-exl3", "3.0bpw")
         self.assertIsNone(cfg.tensor_storage)
-        # With no storage map, everything is assumed quantized.
+        self.assertIsNotNone(cfg.quantized_modules)
+        self.assertIn("lm_head", cfg.quantized_modules)
+        cfg.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        self.assertTrue(cfg.is_quantized("model.layers.0.self_attn.qkv_proj"))
+
+    def test_no_evidence_at_all_assumes_quantized(self):
+        """The blanket fallback, which is what remains once the header is gone.
+
+        A checkpoint whose tensors cannot be listed by any route -- no storage
+        map, no index, no readable header -- has to be assumed quantized, because
+        the alternative is handing every quantized module to
+        `UnquantizedLinearMethod` and allocating dense weights the checkpoint
+        does not contain.
+        """
+        from vllm_exl3_plugin.quantization.config import EXL3Config
+
+        cfg = EXL3Config.from_config({"quant_method": "exl3", "bits": 3.0})
+        self.assertIsNone(cfg.tensor_storage)
+        self.assertIsNone(cfg.quantized_modules)
         self.assertTrue(cfg.is_quantized("model.layers.0.self_attn.qkv_proj"))
 
 

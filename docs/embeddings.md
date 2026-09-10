@@ -270,6 +270,61 @@ Throughput cost, same checkpoint, eager, batch as noted:
 ~3% decode cost, on the model where the fixed per-step embedding work is amortized over
 the least layer compute it ever will be, in naive PyTorch with no kernel work.
 
+## A tied head vLLM used to throw away
+
+*2026-09-09, found by the v0.29.0 bump.* Phase A above measures
+`turboderp/Qwen3-0.6B-exl3`, whose `config.json` declares `head_bits: 6`. On
+`turboderp/Llama-3.2-1B-Instruct-exl3` the same path had **never run at all**, and
+nothing said so.
+
+Three signals tell the plugin a checkpoint stores a quantized head: the safetensors
+index, a `quantization_config.json` storage map, and `head_bits`. That checkpoint has
+none of them -- one `model.safetensors` with no index (the Hub 404s that path), no
+sidecar, and a `quantization_config` block whose keys are only `quant_method`,
+`version`, `bits` and `calibration` -- while carrying `lm_head.suh/svh/trellis` on
+disk. So `_head_storage_exists()` was False, the tie was declined, and vLLM 0.28
+discarded every `lm_head.*` weight for tied models (`skip_prefixes=["lm_head."]`).
+The trellis went on the floor, the dense `embed_tokens.weight` loaded in its place,
+and every logit was correct.
+
+**The gate recorded the fallback as the reference.** `llama-3.2-1B-3.0bpw-tied` was
+blessed at `weight_gib: 0.86`, which is 0.489 GiB of dense fp16 embedding plus ~0.37
+GiB of 3bpw layers -- the entry whose stated purpose is that the embedding is *not*
+loaded dense. A weight-bytes channel cannot catch a regression that was already
+present when the baseline was taken.
+
+vLLM 0.29 replaced the blanket skip with alias detection (`_get_tied_embedding_params`),
+which skips only `lm_head.weight` and refuses anything else unclaimed, turning a silent
+fallback into a load error. The fix reads the single file's header where there is no
+index -- the same question, asked of the only file there is.
+
+| | before | after |
+|---|---|---|
+| weight bytes | 0.86 GiB | **0.55 GiB** |
+| KV headroom | 11.42 GiB | 11.73 GiB |
+| greedy continuation | — | unchanged |
+| max abs dlogprob | — | 2.911e-01 |
+| KL max | — | 1.037e-01 |
+| argmax disagreements | — | 1 of 88 |
+
+**None of that deviation is the bump.** Held fixed at the dense embedding,
+0.29 reproduces the 0.28 baseline at *exactly* 0.000e+00 on both prompts, weight bytes
+included. The deviation is the embedding source, and it is larger than Phase A's
+because the shared tensor is coarser: Qwen3-0.6B's head is 6-bit, while this checkpoint
+declares no `head_bits` at all, so its head is quantized at the **body rate of 3.0bpw**.
+The same mechanism, four bits shallower.
+
+**Taken as-is rather than gated on depth.** A minimum-depth conditional was considered
+and rejected: head depth is what the fp8 shared-tensor plan addresses directly (*fp8 as
+the shared tensor*, above), and this entry is a baseline rather than something served,
+so the value here is having the explanation rather than a threshold nobody measured.
+
+**Declining a head is now an action, not an absence.** The same 0.29 change means an
+unclaimed trellis raises, so `get_cache_scale_mapper` has to drop `lm_head.*` explicitly
+wherever the config does not serve it. Without that, `EXL3_DENSE_EMBED=1` -- the switch
+whose whole purpose is isolating the embedding from every other change -- was the one
+setting under which a tied EXL3 checkpoint could not be loaded at all.
+
 ## Serving under torch.compile and CUDA graphs
 
 Every measurement above was taken **eager**, and that turned out to be hiding something:

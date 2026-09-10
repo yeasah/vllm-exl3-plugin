@@ -25,7 +25,10 @@ which is what exllamav3's converter did before it recorded anything.
 
 from __future__ import annotations
 
+import json
 import os
+import struct
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -42,6 +45,16 @@ from ..format import EXL3FormatError
 from ..log import init_logger
 
 logger = init_logger(__name__)
+
+#: A checkpoint small enough to ship as one file has no
+#: `model.safetensors.index.json`, so this file's header is the only place its
+#: tensor names are written down.
+_SINGLE_FILE = "model.safetensors"
+
+#: Safetensors puts its header length in the first 8 bytes. A real header is a
+#: few hundred KiB at most; the bound stops a corrupt or truncated file from
+#: turning a garbage length into an allocation.
+_MAX_HEADER_BYTES = 64 * 1024 * 1024
 
 #: Extra per-tensor codebook selector shipped by each codebook variant. The
 #: kernels only read whether the tensor is present, not its value -- the
@@ -293,11 +306,82 @@ class EXL3Config(QuantizationConfig):
             index = None
         weight_map = (index or {}).get("weight_map")
         if not weight_map:
-            # Single-file checkpoints have no index. `tensor_storage` remains
-            # the only map we have, so leave this unset and fall back to it.
+            # Single-file checkpoints have no index, so read the one header
+            # instead -- it names every tensor exactly as the index would.
+            # Without this, a checkpoint that also ships no
+            # `quantization_config.json` and no `head_bits` has *no* signal at
+            # all and its quantized `lm_head` is invisible.
+            names = self._single_file_tensor_names(model_name, revision)
+            quantized = format.quantized_module_keys(names)
+            blockq = format.blockq_module_keys(names)
+            if not quantized and not blockq:
+                # No header, or a header with no EXL3 storage in it. Neither is
+                # licence to declare the checkpoint dense: `tensor_storage` may
+                # still describe it, and an *empty* answer here would override
+                # it rather than defer to it. The header can only add knowledge.
+                return
+            self.quantized_modules = quantized
+            self._blockq_modules = blockq
             return
         self.quantized_modules = format.quantized_module_keys(weight_map)
         self._blockq_modules = format.blockq_module_keys(weight_map)
+
+    def _single_file_tensor_names(
+        self, model_name: str, revision: str | None
+    ) -> set[str]:
+        """Tensor names from a single-file checkpoint's safetensors header.
+
+        Same question the index answers, asked of the only file there is. A
+        checkpoint with one `model.safetensors`, no `quantization_config.json`
+        and no `head_bits` in `config.json` declares nothing about its own
+        storage, so every module looks unquantized however it is really stored
+        -- and for a *tied* model that means the quantized `lm_head` covering
+        the embedding is never found. `turboderp/Llama-3.2-1B-Instruct-exl3` is
+        exactly that shape: `lm_head.suh/svh/trellis` on disk, declared
+        nowhere. vLLM 0.28 hid it, skipping every `lm_head.*` weight on a tied
+        model; 0.29 loads them by alias instead and the unclaimed trellis is a
+        hard error, which is how this surfaced.
+
+        Reading the header costs no weights either way: locally it is the first
+        few KiB of a file already on disk, and remotely `get_safetensors_metadata`
+        range-requests it rather than fetching the tensors.
+        """
+        from vllm.transformers_utils.repo_utils import try_get_local_file
+
+        path = try_get_local_file(
+            model=model_name, file_name=_SINGLE_FILE, revision=revision
+        )
+        if isinstance(path, Path) and path.is_file():
+            try:
+                with open(path, "rb") as fh:
+                    (length,) = struct.unpack("<Q", fh.read(8))
+                    if not 0 < length <= _MAX_HEADER_BYTES:
+                        logger.debug(
+                            "%s: implausible safetensors header length %d; "
+                            "not reading it.", model_name, length,
+                        )
+                        return set()
+                    header = json.loads(fh.read(length))
+            except Exception:
+                logger.debug(
+                    "%s: could not read the safetensors header; falling back "
+                    "to tensor_storage.", model_name, exc_info=True,
+                )
+                return set()
+            return {key for key in header if key != "__metadata__"}
+
+        # Not on disk yet, so ask the Hub for the header alone. `revision` is
+        # never None here: `_skip_hub_lookup` has already returned for that.
+        try:
+            from huggingface_hub import get_safetensors_metadata
+
+            return set(get_safetensors_metadata(model_name, revision=revision).weight_map)
+        except Exception:
+            logger.debug(
+                "%s@%s: no safetensors header available; falling back to "
+                "tensor_storage.", model_name, revision, exc_info=True,
+            )
+            return set()
         # Whether the dense embedding survives alongside `bq_*`. It does in a
         # sidecar checkpoint, which adds the quantized tensors in their own
         # shard rather than rewriting the one holding the dense matrix, so both
@@ -513,9 +597,10 @@ class EXL3Config(QuantizationConfig):
         `tools/quantize_embedding.py` makes one.
 
         Both sources are consulted for the same reason `is_quantized` consults
-        both: the safetensors index names every tensor that exists and is ground
-        truth, but single-file checkpoints have no index, leaving the storage map
-        as the only evidence.
+        both: the tensor names are ground truth -- from the safetensors index,
+        or from the single file's own header where there is no index -- while
+        the storage map is metadata that can disagree with them, and is all
+        there is when neither can be read.
         """
         stored, dense_present = self._blockq_evidence()
         if not stored and self._blockq_on_load and not self._dense_embed:
@@ -549,10 +634,17 @@ class EXL3Config(QuantizationConfig):
         quantization config may rewrite the weight stream, and
         `AutoWeightsLoader` applies it *before* the skip filter
         (`models/utils.py:418` vs `:421`). That ordering is what makes this
-        possible at all: every tied model drops `lm_head.*` on the floor
-        (`skip_prefixes` for Qwen3-style, `skip_substrs` for gemma4-style), so
-        renaming those tensors first is what gets them to the embedding instead
-        of requiring the loader to be patched.
+        possible at all: a tied model's `lm_head.*` would otherwise be dropped
+        or refused, so renaming those tensors first is what gets them to the
+        embedding instead of requiring the loader to be patched.
+
+        Who drops what changed under us at vLLM 0.29. Through 0.28 a tied model
+        discarded *every* `lm_head.*` weight (`skip_prefixes` for Qwen3-style,
+        `skip_substrs` for gemma4-style), so a quantized head this config
+        declined to serve simply vanished. 0.29 skips only genuinely aliased
+        parameters -- `lm_head.weight` and nothing else -- so unclaimed trellis
+        tensors now raise instead. Declining therefore has to be explicit, which
+        is what the drop rule below does.
 
         Declared a `@staticmethod` on the base class but invoked on the
         instance, so overriding it as a normal method is safe and is what lets
@@ -565,6 +657,23 @@ class EXL3Config(QuantizationConfig):
         import re
 
         from vllm.model_executor.models.utils import WeightsMapper
+
+        # Nothing else will claim the head's storage if this config is not
+        # serving it: from 0.29 the loader no longer discards `lm_head.*` for
+        # tied models, so an unread trellis is a hard load error rather than a
+        # silent drop. Reached with EXL3_DENSE_EMBED=1 on any tied checkpoint
+        # whose head is quantized -- the escape hatch that isolates the
+        # embedding from every other change, and which would otherwise be the
+        # one thing that cannot be loaded.
+        if self._head_storage_exists() and not (
+            tied_head_here or self.head_is_quantized()
+        ):
+            suffixes = "|".join(
+                re.escape(suffix.lstrip(".")) for suffix in format.EXL3_SUFFIXES
+            )
+            mapper = mapper | WeightsMapper(
+                orig_to_new_regex={re.compile(rf"lm_head\.({suffixes})$"): None}
+            )
 
         # A sidecar checkpoint ships both encodings, and exactly one of them has
         # a home. When EXL3_DENSE_EMBED turns the block-quantized one off, its
