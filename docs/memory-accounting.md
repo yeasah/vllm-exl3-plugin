@@ -311,6 +311,57 @@ noting for the gate: `|dlogprob|` max over top-k is dominated by tail tokens and
 almost nothing about distribution here, where KL lands two orders under threshold. The
 fast tier does not move at all, because no entry's prompt is long enough to chunk.
 
+### What the one-quantum difference costs in accuracy
+
+Logprobs on one prompt do not answer that, so it was measured on the two tasks
+the TurboQuant survey uses, Qwen3-4B, `turboquant_4bit_nc`, chunked prefill at
+`max_num_batched_tokens=2048` and prefix caching off so every item re-prefills.
+Both tools now record how many calls each implementation served, because the
+first attempt at this returned a clean null with the path never executed.
+
+**Both controls -- the same configuration run twice -- came back at 0 discordant
+pairs and 100% per-item agreement.** Nothing below means anything without that:
+it is what makes a flip attributable to the decomposition rather than to the
+harness.
+
+**NIAH**, 32K context, 12 needles x 40 trials = 480 paired outcomes:
+
+| arm | continuation calls | acc | lost | gain | p |
+|---|---|---|---|---|---|
+| monolithic | 19456 mono | 92.71% | — | — | — |
+| monolithic, repeated | 19456 mono | 92.71% | 0 | 0 | control |
+| slab @ 1 MiB (~320 merges) | 19520 chunked | 92.50% | 11 | 10 | 1.00 |
+| slab @ 96 MiB (~3 merges) | 14400 chunked, 5120 mono | 92.50% | 21 | 20 | 1.00 |
+
+**GSM8K**, 42 shots (8218 tokens), monolithic against the worst-case slab:
+
+| sample | acc | lost | gain | p |
+|---|---|---|---|---|
+| first 200 problems | 90.50% -> 85.50% | 12 | 2 | 0.013 |
+| **200 fresh problems** | **88.50% -> 88.50%** | **6** | **6** | **1.00** |
+| pooled 400 | 89.50% -> 87.00% | 18 | 8 | 0.076 |
+
+**The reading.** Chunking reshuffles which marginal items come out right --
+4-9% of them -- without changing how many. Every comparison but one has flips
+balanced to within a single item.
+
+The exception is worth recording because it looked real and was not. The first
+200 GSM8K problems showed -5.00 points at p=0.013, directional at 12 lost
+against 2 gained. Three things retired it. A dose-response series found nothing
+at 2, 10 and 20 merges, so the loss appeared only at the extreme; the numerical
+error is *flat in slab count* (1-2 bf16 quanta from 1 slab to 192 -- the fp32
+accumulator and the log-sum-exp weighting make the per-partial bf16 roundings
+average rather than accumulate), so there is no mechanism for a merge-count
+threshold; and on 200 problems it had never been measured on, the effect was
+exactly zero with 6 flips each way. The hypothesis was generated on the first
+sample, so the replication is the test.
+
+**What this does not say.** These bound the cost, they do not show it is zero:
++-1.9 points on NIAH and +-2.5 on GSM8K at these sample sizes. Tightening that
+is more items, not a different task. And both tasks detect the perturbation
+easily at item level against a zero noise floor -- what they cannot resolve is
+an accuracy effect smaller than a couple of points.
+
 **Navigation trap, since it cost a wrong patch here.** The live model runner is
 `vllm/v1/worker/gpu/model_runner.py` and its helpers under `vllm/v1/worker/gpu/`; the
 older `vllm/v1/worker/gpu_model_runner.py` is a still-selectable fallback
