@@ -442,6 +442,59 @@ RECONSTRUCT_THRESHOLD = int(
 #: the weight whole.
 RECONSTRUCT_TILE_MB = int(env.get("RECONSTRUCT_TILE_MB", "32"))
 
+#: Reuse the reconstruct path's scratch buffers instead of allocating per call.
+#: Set EXL3_SCRATCH_POOL=0 to go back to per-call allocation, which is what makes
+#: the two comparable inside one build.
+SCRATCH_POOL = int(env.get("SCRATCH_POOL", "1"))
+
+
+#: Reusable scratch for the reconstruct path, one buffer per slot per device.
+#:
+#: Both transients it needs -- the decoded weight tile and the Hadamard-rotated
+#: activations -- are fully overwritten before they are read, and the path runs
+#: one layer at a time on one stream, so a single buffer per slot serves every
+#: call. Re-requesting them per call was 46 MiB of the 107 MiB transient peak
+#: measured during a 30K prefill, and that is the expensive 46 MiB: it is
+#: allocated after the memory profiler's window closes, so the KV budget cannot
+#: see it and the operator pays for it in utilization headroom instead
+#: (docs/memory-accounting.md). Held once, the high-water mark is reached during
+#: the profile run -- which runs at `max_num_batched_tokens`, the same width as
+#: the widest real chunk -- so it lands inside the profiled activation and the
+#: budget accounts for it.
+_SCRATCH: dict[tuple[str, torch.device, int], torch.Tensor] = {}
+
+
+def _scratch(
+    slot: str, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    """A reusable buffer for a transient that is written before it is read.
+
+    Grows to the high-water mark and stays there. Callers must not hold the
+    returned view past the point where the next call to the same slot could run,
+    and must not let it escape: the tensor returned to the caller of a kernel
+    wrapper is never a scratch view.
+
+    Allocating while a CUDA graph is capturing would put the buffer in that
+    graph's private pool, which is freed with the graph -- so a later replay, or
+    any eager call afterwards, would be writing into memory the allocator has
+    handed out again. Capture is rare on this path (it runs above
+    `RECONSTRUCT_THRESHOLD` rows, and capture sizes are decode-shaped), so the
+    guard simply declines to pool rather than trying to pool per graph.
+    """
+    nbytes = math.prod(shape) * dtype.itemsize
+    if not SCRATCH_POOL or torch.cuda.is_current_stream_capturing():
+        return torch.empty(shape, dtype=dtype, device=device)
+    # Keyed by stream as well as slot: under dual-batch overlap two ubatches run
+    # concurrently on different streams, and sharing one buffer between them
+    # would be a data race that corrupts quietly rather than failing. One buffer
+    # per stream is the same answer the attention workspace reaches with lanes.
+    key = (slot, device, torch.cuda.current_stream(device).cuda_stream)
+    buf = _SCRATCH.get(key)
+    if buf is None or buf.numel() < nbytes:
+        buf = torch.empty(nbytes, dtype=torch.uint8, device=device)
+        _SCRATCH[key] = buf
+    return buf[:nbytes].view(dtype).view(shape)
+
 
 def _out_features(trellis: torch.Tensor) -> int:
     return trellis.shape[1] * TILE
@@ -514,7 +567,7 @@ def _reconstruct_mm(
     k = trellis.shape[0] * TILE
     n = _out_features(trellis)
 
-    a_had = torch.empty_like(a)
+    a_had = _scratch("a_had", tuple(a.shape), a.dtype, a.device)
     e.had_r_128(a, a_had, suh, None, 1.0)
 
     tile_n = _reconstruct_tile_n(k, n)
@@ -530,7 +583,7 @@ def _reconstruct_mm(
         # being narrowed, recomputing the overlap rather than reallocating.
         # cuBLAS writes each product straight into the output slice --
         # `torch.mm` honours the stride, with no staging copy.
-        w = torch.empty((k, tile_n), dtype=torch.half, device=a.device)
+        w = _scratch("w", (k, tile_n), torch.half, a.device)
         off = 0
         while off < n:
             start = min(off, n - tile_n)
