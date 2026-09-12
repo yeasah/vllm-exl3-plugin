@@ -488,7 +488,8 @@ Removing the rest of TQ's was costed as changing a dequant
 kernel's dtype or rewriting an attention backend we do not own, and both were declined as
 things to *offer*; that decision was reopened on 2026-09-08 as work to carry, with a
 cheaper third option and a `max_model_len`-sized workspace reservation these captures may
-not include -- see [upstream.md](upstream.md) and `turboquant-prefill-transient` in
+not include -- see [upstream.md](upstream.md), [memory-accounting.md](memory-accounting.md)
+(where `turboquant-prefill-transient` closed) and
 [../TODO.md](../TODO.md).
 
 They did not include it. Measured 2026-09-12 at **1.000 GiB** — sized by the declared

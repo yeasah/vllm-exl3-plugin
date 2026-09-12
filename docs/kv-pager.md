@@ -951,8 +951,10 @@ where exit 1 already ran.
 **What this means for work in this repo.** Declared context per card is a
 **bytes-per-token** question and nothing else: compression of what is resident,
 not selection of what to keep or where to put it. That is what promotes
-`turboquant-prefill-transient` to the most urgent item in [TODO.md](../TODO.md) —
-it is now the only remaining lever on the appliance's binding constraint.
+`turboquant-prefill-transient` to the most urgent item in TODO.md — it was the only
+remaining lever on the appliance's binding constraint, and it closed on 2026-09-12
+(see [memory-accounting.md](memory-accounting.md)), leaving `kv-budget-margin` to
+convert the headroom it freed into declared context.
 Two findings outlive the negative and are worth having before building anything
 KV-shaped: **a fixed-size per-block summary does not scale down** (Quest-style
 min/max bounds exceed the block they describe below block 72; a quantized key

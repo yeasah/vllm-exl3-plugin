@@ -170,6 +170,11 @@ Chat-time growth, same three runs:
 FlashInfer's and Triton's chat peaks are identical — FlashInfer's whole extra cost is
 static workspace. TQ's is six times either.
 
+**TQ's row is now 154 MiB and no longer scales** ([`740dd8b6a`](../patches.md)); the
+window being 512 tokens wide stopped mattering for this backend because nothing in the
+path varies with the axis the window cannot vary. The section stands as the general
+statement of the trap, not as a live defect.
+
 ## TurboQuant's reserve is sized by declared context, not served context
 
 The two TQ runs settle this without reading the code. The at-ceiling run auto-fits
@@ -266,7 +271,45 @@ Two things it does **not** do, both load-bearing for what comes next:
 - **It does not change the per-token rate.** 588 MB over 150528 tokens is the same
   4096 B/token as 1.000 GiB over 262144 — the reserve still prices *declared* context,
   it is now merely declared-after-fitting. The table below is unchanged, and removing
-  the tax itself is steps 2 and 3 of `turboquant-prefill-transient`.
+  the tax itself was step 3, below.
+
+### And then the sizing itself went away
+
+Step 1 fixed *which* `max_model_len` the reserve reads. It left the 4096 B/token rate
+alone, and left the larger term — the ~6144 B/token of runtime transient — untouched.
+[`740dd8b6a`](../patches.md) removes both, by not needing the cached context in one
+piece at all.
+
+Every query in a continuation chunk attends to *all* of the cached prefix: the causal
+mask only starts biting inside the chunk. So the prefix can be cut anywhere and its
+partial attentions merged by log-sum-exp, and the chunk is plain causal self-attention
+against its own K/V. Both primitives were already in the tree —
+`flash_attn_varlen_func(return_softmax_lse=True)` and `merge_attn_states` — and the
+dequant kernels needed one argument to cover a slab. The buffers become the slab, the
+partials become the chunk, and nothing is sized by the context.
+
+Same model, card and prompt as above:
+
+| | before step 1 | after step 1 | after this |
+|---|---|---|---|
+| reserve | 1024 MiB | 588 | **96** (a budget, not a shape) |
+| occupancy at startup | 14810 MiB | 14370 | **13850** |
+| occupancy after a 99,923-token prefill | 15584 | 15164 | **14004** |
+| growth during that prefill | 774 MiB | 794 | **154**, and no longer scaling |
+
+1580 MiB back at the peak against the original, on a card whose whole KV cache is
+2.65 GiB. Prefill costs ~1% for it: 103.45s against 104.53s, best of three at 100K —
+less than the 2–4% the attention alone measures, because the path being replaced also
+allocated ~800 MiB per continuation step.
+
+**The decomposition is exact; the arithmetic is not, and the difference is the floor.**
+Per call the two implementations agree to 1.0–1.1 bf16 quanta — one representable step,
+which is the least a restructuring that outputs bf16 can differ by. Through 20 layers
+that reaches 1.06 nats on a *top-20 tail* token, while the top-1 moves 2.2e-03 and the
+KL 2.6e-04, with no argmax flips and an identical greedy continuation at 100K. Worth
+noting for the gate: `|dlogprob|` max over top-k is dominated by tail tokens and says
+almost nothing about distribution here, where KL lands two orders under threshold. The
+fast tier does not move at all, because no entry's prompt is long enough to chunk.
 
 **Navigation trap, since it cost a wrong patch here.** The live model runner is
 `vllm/v1/worker/gpu/model_runner.py` and its helpers under `vllm/v1/worker/gpu/`; the
@@ -280,13 +323,18 @@ one ran. Both carry the fix.
 
 | config | B/token KV | B/token workspace | effective |
 |---|---|---|---|
-| TQ 4bit_nc | 18,824 | 4,096 | 22,920 |
+| TQ 4bit_nc, before | 18,824 | 4,096 | 22,920 |
+| **TQ 4bit_nc, now** | **18,824** | **0** | **18,824** |
 | fp8 (Triton) | 35,003 | 0 | 35,003 |
 | fp8 (FlashInfer) | 35,461 | 0 | 35,461 |
 
-TurboQuant's gross saving over fp8 is 16,179 B/token. The invisible reserve spends 4,096
-of it back. **A quarter of TurboQuant's value proposition is going into a buffer nobody
-is accounting for**, before any runtime transient is counted.
+TurboQuant's gross saving over fp8 is 16,179 B/token. The reserve used to spend 4,096 of
+it back — **a quarter of the value proposition, going into a buffer nobody was
+accounting for**, before any runtime transient was counted. Since
+[`740dd8b6a`](../patches.md) the reserve is a 96 MiB constant and the per-token column
+is zero, so the whole 16,179 survives to the operator. The constant is still not in the
+budget; that is `kv-budget-margin`'s declaration hook, and a constant is the easy case
+for it.
 
 ## What is accountable and what is not
 
@@ -300,6 +348,14 @@ problem:
   accountable at any acceptable price. Reserving headroom for them means setting aside
   8 KB/token × 262144 ≈ 2 GiB against a prefill that may never run — worse than the
   disease on a 16 GiB card. This one has to be engineered away rather than budgeted for.
+
+**It has been**, for TurboQuant, in [`740dd8b6a`](../patches.md): the cached prefix is
+attended in slabs and merged by log-sum-exp, so neither the reserve nor the transient
+is sized by context any more. Both bullets above therefore now describe TurboQuant only
+as history — what is left of it is a 96 MiB constant, which the first bullet's
+declaration hook handles trivially. The shape of the argument stands for any backend
+that grows one: a context-scaled transient cannot be budgeted for, so it has to stop
+existing.
 
 ### The search this needs already exists
 

@@ -121,8 +121,9 @@ profiler varies.
 **Declining to *offer* these is not declining to *have* them, and that distinction became
 load-bearing on 2026-09-08**, when `kv-pager` died and KV eviction/offload went off the
 table categorically. Compression is the only remaining lever on declared context per card,
-so the 692 MiB is back in scope as work we carry -- tracked as `turboquant-prefill-transient`
-in [../TODO.md](../TODO.md). Two things reopen at the same time, and both were missed above
+so the 692 MiB is back in scope as work we carry -- and it was carried, on 2026-09-12:
+see [memory-accounting.md](memory-accounting.md). Both the reserve and the transient are
+gone, for 1580 MiB at the peak. Two things reopen at the same time, and both were missed above
 because the framing was "what would upstream take":
 
 - **A third option on the rotation temporary that argues with nobody.** The costing went

@@ -61,102 +61,18 @@ the card: `kv-pager` died on 2026-09-08 and took KV eviction and offload with it
 share that ground and are the top of this file for that reason —
 `turboquant-prefill-transient` and `kv-budget-margin`.
 
-**The ordering between them is no longer arbitrary; it resolved on 2026-09-12, when the
-accounting was actually done** ([docs/memory-accounting.md](docs/memory-accounting.md)).
-Both previously-unnamed consumers are now named and measured, and the larger one turns
-out to be TQ's own: a **1.000 GiB** workspace reservation sized by the *declared*
-`max_model_len`, absent from every field of vLLM's budget. So
-`turboquant-prefill-transient` goes first. It removes the single biggest term, and it
-removes it from the side of the problem a budget fix cannot reach — the runtime
-transient is not accountable at any acceptable price, since reserving headroom for it
-means setting aside ~2 GiB against a prefill that may never run. What is left for
-`kv-budget-margin` afterwards is smaller, mechanical, and mostly not ours.
+`turboquant-prefill-transient` closed on 2026-09-12 and took the larger half with it:
+TurboQuant's prefill no longer allocates anything sized by context, which is 1580 MiB
+back at the peak on the 16 GiB card. None of that became declared context, because
+auto-fit cannot see any of these consumers. **`kv-budget-margin` is what converts it**,
+and it is the only item left on this ground.
 
-**Its step 1 landed 2026-09-12** and banked 440 MiB of the 1.000 GiB, which changes the
-two items' relationship rather than the order. What the reserve costs `kv-budget-margin`
-is now 588 MiB, not 1.000 GiB — but the 440 MiB became *headroom*, not context, because
-auto-fit never saw the reservation on either side of the fix. Turning it into declared
-context is still the hook in `kv-budget-margin` step 2.
-
-## `turboquant-prefill-transient` — Stop TQ's prefill cost scaling with context
-
-The outcome wanted is a TurboQuant prefill whose VRAM cost is set by the chunk,
-not by how much context is already cached. Today the path spends VRAM on cached
-context twice: `_continuation_prefill` holds **6144 B/token of cached context**
-live at its peak (the rotation result, `k_full`, `v_full`, 2048 B/token each at
-Hk=4/D=256), and `TurboQuantMetadataBuilder._reserve_workspace` reserves two
-fp16 dequant buffers sized by **`max_model_len`** rather than by anything a
-request does — 4096 B/token of *declarable* context, whether or not a
-continuation ever runs, and invisible to vLLM's budget
-([docs/memory-accounting.md](docs/memory-accounting.md)). Step 1 cut that
-reserve from 1.000 GiB to **588 MiB** by fixing *which* `max_model_len` it
-reads; the 4096 B/token rate is untouched and is what steps 2 and 3 attack.
-
-It unblocks the appliance's binding constraint, and it is now the only thing
-that does: with `kv-pager` dead and KV eviction/offload categorically out,
-declared context on a fixed card is a compression question again, TQ is the only
-4-bit KV path we have, and this transient is what keeps `--kv-cache-memory`
-load-bearing while making a profile-run estimate untransferable — vLLM never
-varies cached length, so it reports the same peak activation for a 4K session and
-a 130K one.
-
-**Candidate approach, cheapest first; each step is independently shippable.**
-
-1. ~~**Stop reserving at `max_model_len`.**~~ **Done 2026-09-12**, vLLM
-   [`881c7345b`](patches.md). The open question resolved to neither of its two
-   candidates: not a stale read, and not a fixed point. The CUDA-graph memory profiler
-   stands up a full set of metadata builders before auto-fit runs and throws them away,
-   and `_ensure_workspace_size` only grows — so the reserve was a *discarded* builder's
-   high-water mark, and the real builder's correct 588 MB request was silently absorbed
-   by it. The fix brackets the profiling phase and shrinks back to the sizes held on
-   entry. Measured A/B: **−440 MiB** at startup, −420 MiB after a 99,923-token prefill,
-   `max_model_len` unchanged, greedy continuation identical token for token, gate green.
-
-   Two things it did not do. It did not buy context — auto-fit never saw the reservation
-   on either side, so the 440 MiB is headroom (see `kv-budget-margin`). And it did not
-   touch the **4096 B/token** rate: the reserve still prices declared context, merely
-   declared-after-fitting, so the "a quarter of TurboQuant's value proposition" figure in
-   [docs/memory-accounting.md](docs/memory-accounting.md) stands. Bounding it by what a
-   chunk needs is still worth the remaining 588 MiB, and still falls out free if step 3
-   lands.
-
-2. **Slab-chunk the rotation.** `k_flat @ Pi_half` materializes the whole
-   inverse-rotated K in fp16 before `k_full[:cached_len].copy_()` reads it once.
-   Rotating in slabs of a few thousand tokens and copying each slab in makes that
-   buffer O(slab) instead of O(context): −2048 B/token, a third of the transient.
-   It is the candidate because it is the only one of the three that argues with
-   nobody — no dtype change, no upstream numerics, no design claim, just a loop
-   bound. (The `out=`-into-a-strided-view version is still dtype-blocked, and the
-   make-dequant-emit-bf16 version is still a change to their numerics for our
-   memory; see the note.) *Verify bit-exactness rather than assuming it* — same
-   dtype and same per-row dot products, but a smaller M may pick a different
-   cuBLAS kernel.
-
-3. **Chunked-KV accumulation — worth re-costing, and cheaper than "rewrite a
-   backend" looked.** This is the only step that changes the *shape* rather than
-   the slope, removing `k_full`/`v_full` and letting the dequant run per chunk.
-   What has changed since it was declined is that both primitives ship in the
-   tree: `flash_attn_varlen_func` takes `return_softmax_lse=` and `out=`, and
-   `vllm/v1/attention/ops/merge_attn_states.py` is written for exactly this split
-   — prefix output/LSE from cache, suffix from the current chunk, with a
-   `prefill_tokens_with_context` argument. Upstream's own FLASH_ATTN backend
-   already merges that way in five places. The real work is the causal
-   bookkeeping across chunks, not the merge.
-
-**0.29 is not a reason to wait, and the risk is not where it was expected**
-(checked 2026-09-08, see [docs/upstream.md](docs/upstream.md) *What a 0.29 bump
-costs the TQ patches*). TQ's own code is frozen upstream: one 39-line refactor in
-`turboquant_attn.py` since v0.28.0, with `_continuation_prefill`, `_tq_Pi_half`
-and every `turboquant*` op and quantization file byte-identical. All the churn is
-in the KV-spec plumbing our *other* two TQ patches sit on, and it is still
-moving. So this work can start on the pin and rebase cleanly; what a bump
-threatens is `turboquant-sliding-window`, not this.
-
-→ [docs/memory-accounting.md](docs/memory-accounting.md) (what the reservation
-actually costs, and why the budget cannot see it),
-[docs/upstream.md](docs/upstream.md) (the costing, and what was declined for
-whom), [docs/kernels.md](docs/kernels.md) (the in-situ captures),
-[docs/turboquant-kv.md](docs/turboquant-kv.md)
+It also got easier. The reason it could not have gone first is in
+[docs/memory-accounting.md](docs/memory-accounting.md): a context-scaled *runtime
+transient* cannot be budgeted for at any acceptable price, since reserving headroom for
+it means setting aside ~2 GiB against a prefill that may never run. That term is now
+gone rather than accounted for, and what TurboQuant leaves behind is a 96 MiB constant
+— the easy case for a declaration hook.
 
 ## `kv-budget-margin` — Make `gpu_memory_utilization` mean what it says
 
@@ -164,9 +80,9 @@ The outcome wanted is a utilization knob that is safe to turn: a declared contex
 the engine can keep, on any attention backend, without the operator discovering the
 ceiling by OOMing at first inference.
 
-It composes with `turboquant-prefill-transient`, which now goes first and takes the
-largest single term with it. What remains here is the general case — the mechanism is
-backend-independent, and FlashInfer carries 0.385 GiB of it with no TurboQuant in sight.
+`turboquant-prefill-transient` went first and took the largest single term with it.
+What remains is the general case — the mechanism is backend-independent, and FlashInfer
+carries 0.385 GiB of it with no TurboQuant in sight.
 
 **The accounting is done** (2026-09-12,
 [docs/memory-accounting.md](docs/memory-accounting.md)): every byte on the card is
@@ -208,9 +124,9 @@ entry still dies at first inference on the 16 GiB card (`blockq-MTP-fp8`; its si
 runs, see `bench-cache-control`); `bench/` should lower its pinned
 `gpu_memory_utilization=0.95` and re-bless, because a gate exists to be runnable. What
 is new is that there is now a principled figure to lower it *to*: subtract the backend's
-static workspace from the budget — **588 MiB** for TurboQuant since
-`turboquant-prefill-transient` step 1, 0.385 GiB for FlashInfer, which on a 15.51 GiB
-card is 3.7 and 2.5 points of utilization respectively.
+static workspace from the budget — **96 MiB** for TurboQuant, 0.385 GiB for
+FlashInfer, which on a 15.51 GiB card is 0.6 and 2.5 points of utilization
+respectively.
 
 → [docs/memory-accounting.md](docs/memory-accounting.md), and
 [docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget" for how the
@@ -287,8 +203,8 @@ Two things make it worth its own line rather than being folded into the finding 
   the numbers agree to every digit. So this is not live retuning; it is a machine state
   that has settled somewhere other than where bless left it, which the gate cannot see.
 
-It was found while verifying `turboquant-prefill-transient` step 1 and is not caused by
-it — that is what the pre-fix arm establishes. Until it is explained, the full tier does
+It was found while verifying `turboquant-prefill-transient` and is not caused by it —
+that is what the pre-fix arm establishes. Until it is explained, the full tier does
 not gate the 27B entries, which is the tier's whole reason for existing.
 
 Also stale in the note below: *two* 27B entries were said to die at first inference.
@@ -310,6 +226,22 @@ are populated: `fast` (~15 min) covers uniform K=3, mixed-in-layer bit widths,
 `mcg`, tied and untied, both execution modes, and the Transformers backend on a
 text-only model; `full` adds MoE, `mul1` with the gemma4-style tie, and the
 multimodal Transformers backend.
+
+**Two holes the gate has on this box, both found 2026-09-12 and both cheap.**
+
+- **No entry chunks its prefill**, so `_continuation_prefill` is unreachable from the
+  gate — `bench/core.py`'s two prompts are ~30 and ~280 characters and nothing pins
+  `max_num_batched_tokens`. `turboquant-prefill-transient` rewrote that path with no
+  gate coverage at all, relying on unit tests and a within-build A/B instead. Closing
+  it needs an `Entry` field for `max_num_batched_tokens`, a per-entry long prompt, and
+  a name filter on `bless` — today `cmd_bless` rewrites every baseline in a tier, so
+  adding one entry would re-bless the nine that are currently green, which is exactly
+  what `bench-cache-control` says not to do.
+- **No entry records a VRAM profile.** `weight_gib` and `kv_cache_gib` are captured;
+  peak and per-prefill growth are not, so a change that costs a gigabyte at 100K
+  context passes every entry. That is the axis the appliance is actually bounded on,
+  and the one `turboquant-prefill-transient` moved by 1580 MiB without the gate
+  noticing either direction.
 
 **This is the next `vast` trip, and everything else TP rides along with it**
 (sequenced 2026-08-26). Nothing TP-shaped outranks the gate tier, because until the
@@ -1635,6 +1567,20 @@ divergence is deliberately all qbench measures),
 
 *One line each, newest first. Prune to ~10 when appending.*
 
+- `turboquant-prefill-transient` — closed 2026-09-12, see
+  [docs/memory-accounting.md](docs/memory-accounting.md). TurboQuant's continuation
+  prefill allocated five buffers sized by `cached_len` or `max_model_len`: 1024 MiB
+  standing plus 774 MiB of growth per 100K prefill, against a 2.65 GiB KV cache. Two
+  fixes. A discarded set of profiling builders was setting the workspace high-water mark
+  before auto-fit ran, which no amount of correct sizing downstream could undo; and the
+  cached prefix does not need to be attended in one piece at all, because every query
+  sees all of it and only the current chunk is causal, so it slabs and merges by
+  log-sum-exp. 1580 MiB back at the peak for ~1% of prefill throughput, agreement with
+  the old path to one bf16 quantum per call, identical greedy output at 100K. The
+  feared part — causal bookkeeping across chunks — did not exist; the split point is
+  exactly where the mask changes character. What it does *not* do is buy context:
+  auto-fit never saw any of it, which is now `kv-budget-margin`'s whole job.
+
 - `exl3-149-quality` — answered 2026-09-10, **no**, see [docs/qbench.md](docs/qbench.md)
   "Did the exllamav3 v1.4.9 bump cost quality?". Dense (Qwen3-8B, 3.0 and 4.0 bpw) is
   **bit-identical to full float precision** across the bump, which is the expected result
@@ -1659,7 +1605,7 @@ divergence is deliberately all qbench measures),
   bpw-for-bandwidth trade at 16 GiB. The one remaining thread, sub-block-64 granularity,
   forfeits prefix caching inherently. `vllm-virtualkv-plugin` is archived and **KV
   eviction/offload is off the table categorically**, which leaves bytes-per-token as the
-  only lever on context per card and is what promotes `turboquant-prefill-transient`.
+  only lever on context per card and is what promoted `turboquant-prefill-transient`.
 
 - `head-bits` — answered 2026-08-25, see [docs/qbench.md](docs/qbench.md) "Head bitrate:
   6 is defensible". Budget-neutral sweep on phi-4-mini, five points within 0.041% of each
