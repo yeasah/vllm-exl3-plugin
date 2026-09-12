@@ -663,6 +663,36 @@ non-torch memory can still grow afterwards — FlashInfer's JIT loading was meas
 exactly that. A backend that grows its context after the snapshot needs that allowance in
 bytes, which is the one place a margin is genuinely unavoidable.
 
+#### An external probe does not reproduce the engine's number (measured 2026-09-12)
+
+The obvious appliance implementation — read free/total before launch — lands short, and
+how short depends on which API it asks:
+
+| what is measuring | free | total | ratio | vs the engine's 0.9852 |
+|---|---|---|---|---|
+| NVML / `nvidia-smi`, no CUDA context | 15.507 | 15.921 | **0.9740** | −1.1 points (~0.18 GiB unused) |
+| `torch.cuda.mem_get_info`, bare torch context | 15.2355 | 15.5082 | **0.9824** | −0.3 points (~0.045 GiB unused) |
+| vLLM's init snapshot | 15.28 | 15.51 | **0.9852** | — |
+
+Two independent reasons, and they are worth separating because one of them is a trap:
+
+- **The totals are different numbers.** NVML reports 15.921 GiB; CUDA reports 15.508. The
+  421 MiB between them is driver/ECC reserve that CUDA never offers. Mixing the two — NVML
+  `free` over CUDA `total` — gives 0.9998 and would over-claim by the whole context. Use
+  one source for both terms or neither.
+- **`free` is a property of the process that will run it.** It is read after that process's
+  own CUDA context exists, and the context's size depends on which libraries have loaded.
+  A bare torch probe's context is *larger* than vLLM's at snapshot time, which is why it
+  reads 45 MiB low.
+
+Both external readings err *downward*, which is the safe direction — an appliance using the
+torch-based probe leaves ~45 MiB unused and never over-claims. It is also perfectly stable:
+three consecutive probes returned 15.2355/15.5082 to four decimals. So the probe is viable
+with a calibration offset, and exact only from inside the engine. Given the whole exercise
+was to recover the last half point of utilization, that argues for `auto` in-process rather
+than a number passed in — but a probe run close to launch, using CUDA's API rather than
+NVML, is a defensible 0.3-point compromise that needs no fork patch.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the
