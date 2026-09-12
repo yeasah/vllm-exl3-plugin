@@ -1112,9 +1112,13 @@ gap this item was opened for — the vision path is not merely loading.
   upstream soft-cap gap, which wrecks sampled output while leaving greedy intact.
 
 **The VRAM link, which is the reason this item is not merely nice-to-have.**
-Multimodal is where headroom runs out first: Qwen3.8 only fits an image budget at
-`--limit-mm-per-prompt '{"image": {"count": 1, "width": 512, "height": 512}}'`,
-and its encoder cache allocation is what OOMs otherwise. The embedding this model
+Multimodal is where headroom runs out first: Qwen3.8 only fits an image budget under
+an explicit cap on image size, and its encoder allocation is what OOMs otherwise.
+**Do not reach for `--limit-mm-per-prompt`'s `width`/`height` to set that cap** — they
+size the profiling dummy and nothing else, so they shrink the budget while the full-size
+image still arrives, which is an OOM rather than a limit. The enforcing knob is
+`--mm-processor-kwargs '{"max_pixels": N}'`; see `encoder-offload` and
+[docs/media-encoders.md](docs/media-encoders.md). The embedding this model
 carries is ~2 GiB — **larger by itself than the entire post-weights headroom that
 test was squeezing into**. So `quantized-embeddings` is not just a size win in the
 abstract; on a 16 GiB card it is the difference between usable and unusable image
@@ -1123,8 +1127,10 @@ competitor for attention.
 
 Note also that vLLM's multimodal knobs churn: `--max-num-encoder-input-tokens` has
 been removed with no obvious replacement, `--mm-processor-cache-gb 0` does *not*
-bound the encoder cache, and `--limit-mm-per-prompt` now carries feature-size as
-well as counts. Check flags against the pinned tree rather than from memory.
+bound the encoder cache, and `--limit-mm-per-prompt` now carries feature-size as well
+as counts — but only as *profiling* hints, which is the trap above. Check flags against
+the pinned tree rather than from memory, and check what reads them, not what they are
+named.
 
 **Candidate approach for the parts still open: the instrument that already worked.**
 exllamav3 implements
@@ -1158,18 +1164,42 @@ remains is the encoder's *resident* cost, not its weights.
 exercise. Today it works only with a correct `--mm-processor-kwargs '{"max_pixels": N}'`,
 and picking N wrong OOMs mid-request rather than at startup.
 
-**Candidate approach, two independent pieces.**
-1. **Derive the cap instead of asking for it.** The encoder's cost is a known function of
-   `max_pixels` and the checkpoint's preprocessor config, and the headroom is known at
-   startup, so N should be autosized against measured headroom the way any knob checked
-   against a hard threshold should default to that threshold. Also the point at which
-   `--limit-mm-per-prompt`'s width/height should stop being offered as if it did this.
-2. **Chunk `Qwen3_VisionMLP.forward` over the token dim.** It is pointwise, so chunking is
-   bit-for-bit identical, and it caps the `[patches, intermediate]` pair that dominates the
-   transient. Same move as TurboQuant's slabbed continuation prefill. Raises the affordable
-   image size; does not remove the need for a cap.
+**Candidate approach, two independent pieces.** The first makes vision usable; the second
+makes the cap generous.
 
-The first is the one that makes vision usable; the second is what makes the cap generous.
+1. **Derive the cap instead of asking for it.** Autosize the image budget against measured
+   headroom rather than making the operator guess, the way any knob checked against a hard
+   threshold should default to that threshold. **Splits into a generic half and a small
+   per-family half**: the *quantity* is already model-agnostic — `max_tokens_per_mm_item`
+   flows through one function, `compute_mm_encoder_budget`, fed by
+   `ProcessingInfo.get_mm_max_tokens_per_item` that every multimodal model implements — so
+   costing an image needs no per-model knowledge. Only the *actuator* fragments, across
+   five families: `max_pixels`/`smart_resize` (13 model files), `max_dynamic_patch`
+   (8, InternVL), `max_num_tiles` (3), `pan_and_scan` (2, gemma3), `max_num_crops`
+   (2, phi). Fixed-resolution towers (CLIP, SigLIP, LLaVA-1.5) need nothing — their patch
+   count per image is constant, so this is a *dynamic-resolution* problem, and only 10
+   files use `smart_resize` at all. So: one sizer, plus a lookup from budget to whichever
+   kwarg the family honours.
+2. **Stop the tower transient scaling with patch count.** Two routes, and the cheap one is
+   untested:
+   - ~~Try `compile_mm_encoder` first.~~ **Tested 2026-09-12 and it is worse, not free.**
+     The flag is live on this tower (28 compile passes, one per block), but it left peak
+     activation at 0.43 GiB against 0.44 — so inductor does *not* avoid materialising the
+     full-width intermediate — while adding **1.13 GiB** of resident consumed memory.
+     Net: KV halved, 2.28 -> 1.14 GiB. Do not revisit without a reason to think the
+     fusion behaviour changed. See [docs/media-encoders.md](docs/media-encoders.md).
+   - **So: chunk the vision MLP over the token dim.** Pointwise, so chunking is
+     bit-for-bit identical; same move as TurboQuant's slabbed continuation prefill. The
+     *property* is universal — every tower MLP checked is `linear -> act -> linear` over
+     three naming conventions (Qwen3 `linear_fc1/fc2`, GLM-4V `gate_up_proj/down_proj`,
+     SigLIP/CLIP `fc1/fc2`) — but vLLM has no shared vision-MLP base, so it is N mechanical
+     edits, and it cannot be lifted to the block level because the block also holds
+     attention, which mixes across tokens. Raises the affordable image size; does not
+     remove the need for a cap.
+
+   **Unverified premise:** that the MLP dominates the transient anywhere but Qwen3.8. On a
+   tower with a different hidden/intermediate ratio the attention projections could lead
+   instead, which changes where to cut. Check before generalising the patch.
 
 → [docs/media-encoders.md](docs/media-encoders.md),
 [docs/memory-accounting.md](docs/memory-accounting.md)

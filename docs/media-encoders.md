@@ -304,6 +304,18 @@ tower cheap enough that you decline to offload at all.
 Upstream made eviction possible; this makes it cheap. Neither helps a unified model,
 which has nothing to evict.
 
+**`compile_mm_encoder` is not the cheap way out (measured 2026-09-12).** The obvious
+one-flag route — let inductor fuse the activation into the GEMM epilogue so the
+full-width intermediate never materialises — does not happen. The flag is genuinely
+active on this tower (28 compile passes, one per vision block, despite a docstring
+naming only `Qwen2_5_vl` and `mLLaMa4`), and it left peak activation at 0.43 GiB against
+0.44 without it: no reduction. What it *did* do is add **1.13 GiB** to consumed
+memory (weights + non-torch), where compiled artifacts and autotune workspaces live,
+halving the KV cache from 2.28 to 1.14 GiB (90,593 -> 44,333 tokens). The image still
+OOMs at `max_pixels` 4194304. Worth noting the figure is larger and more persistent than
+the 0.59 GiB cold-compile term [memory-accounting.md](memory-accounting.md) already has
+open; same suspect, and this is a second sighting.
+
 **A third lever this measurement exposed, not yet built.** The tower transient is
 image-scaled and therefore unbudgetable in the sense
 [memory-accounting.md](memory-accounting.md) sets out — it has to stop existing rather

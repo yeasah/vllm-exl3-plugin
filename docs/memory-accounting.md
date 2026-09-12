@@ -780,6 +780,13 @@ knob to set per configuration, not a default to change.
 - **Why the vision encoder exceeds its own profile** at `max_pixels` 4194304 on
   Qwen3.8-27B, when the served image is smaller than the profiled dummy. Fragmentation is
   the suspect and `tools/memprof.py` is the instrument; neither has been applied.
+- **What exactly the cold-compile 0.59 GiB is** — now with a second, larger sighting:
+  enabling `compile_mm_encoder` on Qwen3.8-27B added **1.13 GiB** to consumed memory
+  (weights + non-torch) with no change to peak activation, halving the KV cache. That
+  one is *persistent* rather than a profiling transient, which makes "reset peak stats
+  after compile" the wrong fix for it and sharpens the question: how much of the compile
+  cost is still live when the measured forward runs. See
+  [media-encoders.md](media-encoders.md).
 - **What exactly the cold-compile 0.59 GiB is.** Inductor's autotuning/combo-kernel
   benchmarking is the suspect on the strength of the config, not of a measurement, and the
   figure is from one model at one chunk size. Worth knowing before offering upstream a
