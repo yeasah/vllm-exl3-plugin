@@ -1093,9 +1093,10 @@ gap this item was opened for — the vision path is not merely loading.
   the package** (Qwen3-VL-8B @3.0bpw), worst on exactly the small, low-bpw
   checkpoints picked for small cards. It should not have to be a capability trade —
   evicting the encoder to host memory costs one PCIe pass per image and nothing at
-  all for text — except that vLLM cannot offload an encoder at all
-  (`upstream-queue`). → [docs/media-encoders.md](docs/media-encoders.md),
-  [docs/upstream.md](docs/upstream.md)
+  all for text. **vLLM 0.29.0 can now do exactly that** (0.86 GiB verified on
+  Qwen3.8-27B), so the capability trade is gone — but the encoder cache and the
+  tower transient stay resident and are the larger cost on a small card. See
+  `encoder-offload`. → [docs/media-encoders.md](docs/media-encoders.md)
 - **Muse-Glimmer is usable in practice now, through the Transformers backend.**
   Reported 2026-08-25: fp8 KV works, and vLLM 0.28 ships a reasoning parser
   (`muse_glimmer_reasoning_parser.py`) plus tool-call parsing, so the serving path
@@ -1145,6 +1146,33 @@ one available — there is no fp16 Muse-Glimmer on hand to fall back to.
 
 → [docs/transformers-backend.md](docs/transformers-backend.md),
 [bench/README.md](bench/README.md)
+
+## `encoder-offload` — Make vision affordable on a small card
+
+**Outcome wanted.** A multimodal EXL3 checkpoint serves on 16 GiB without the operator
+hand-picking an image cap per model. Upstream closed the part that gated everything —
+vLLM 0.29.0 offloads vision towers, verified here at 0.86 GiB on `Qwen3.8-27B` — so what
+remains is the encoder's *resident* cost, not its weights.
+
+**What it unblocks.** Vision as a default capability rather than a per-model tuning
+exercise. Today it works only with a correct `--mm-processor-kwargs '{"max_pixels": N}'`,
+and picking N wrong OOMs mid-request rather than at startup.
+
+**Candidate approach, two independent pieces.**
+1. **Derive the cap instead of asking for it.** The encoder's cost is a known function of
+   `max_pixels` and the checkpoint's preprocessor config, and the headroom is known at
+   startup, so N should be autosized against measured headroom the way any knob checked
+   against a hard threshold should default to that threshold. Also the point at which
+   `--limit-mm-per-prompt`'s width/height should stop being offered as if it did this.
+2. **Chunk `Qwen3_VisionMLP.forward` over the token dim.** It is pointwise, so chunking is
+   bit-for-bit identical, and it caps the `[patches, intermediate]` pair that dominates the
+   transient. Same move as TurboQuant's slabbed continuation prefill. Raises the affordable
+   image size; does not remove the need for a cap.
+
+The first is the one that makes vision usable; the second is what makes the cap generous.
+
+→ [docs/media-encoders.md](docs/media-encoders.md),
+[docs/memory-accounting.md](docs/memory-accounting.md)
 
 ## `gemma4-e2b` — Quantizing gemma-4 E2B/E4B
 
@@ -1442,15 +1470,14 @@ PyTorch, which refuses unpinned H2D during CUDA graph capture. Bits-agnostic,
 checkpoint-vintage-agnostic, no vLLM changes. Accepts a known cost — it depends on a
 vLLM internal that can break on a version bump.
 
-**A third cause, and it is upstream's.** `get_offloader().wrap_modules()` has exactly
-one call site in vLLM, inside `make_layers()` — the helper that builds a *text
-decoder's* `ModuleList`. A vision tower builds its own, so **no encoder is offered to
-either backend on any model in any format**. This is not reachable from here for the
-common case: our `process_weights_after_loading` hook sees only quantized modules, and
-nine of ten surveyed checkpoints ship a bf16 tower. Split out as
-`upstream-queue`, since the fix that matters is a few lines upstream and helps
-every multimodal model in vLLM. Sizes and evidence in
-[docs/media-encoders.md](docs/media-encoders.md).
+**A third cause, which was upstream's and is now fixed.** Vision towers were never
+offered to either backend, because `wrap_modules()` had one call site inside
+`make_layers()`. vLLM 0.29.0 added `supports_tower_offload` and a second call site, so
+`--cpu-offload-gb --cpu-offload-params visual` now works — verified here at 0.86 GiB.
+That leaves our own two causes untouched: they still block *quantized* modules, which
+is the only path that would reach a quantized tower. Evidence in
+[docs/media-encoders.md](docs/media-encoders.md); remaining encoder work under
+`encoder-offload`.
 
 **Scope note: which backend wins depends on access pattern, and MoE inverts the
 obvious answer.** Prefetch overlaps transfer with compute, so it suits dense weights
@@ -1497,7 +1524,9 @@ deliberately does not duplicate the contents.
 
 **What is next**, per that note's ordering: llm-compressor's `strategy: "channel"`
 default (finished evidence, purely their benefit, nothing to negotiate), then
-TurboQuant's `key=int` collision, then the halved softcap patch.
+TurboQuant's `key=int` collision, then the halved softcap patch. The encoder-offload
+report is **closed unsent** — upstream fixed it in 0.29.0, found by checking before
+writing rather than before sending.
 
 **One reproduction is missing and blocks the highest-value item.**
 `vllm-embed-quant-config` cannot be filed until the speculative-decoding breakage it

@@ -1,6 +1,7 @@
-# Media encoders: how big, and why nothing can evict them
+# Media encoders: how big, and what it takes to evict them
 
-*Measured 2026-08-24. Tracked in TODO as `encoder-offload`.*
+*Census measured 2026-08-24; eviction measured 2026-09-12. Tracked in TODO as
+`encoder-offload`.*
 
 A vision or audio encoder is the one weight in a multimodal checkpoint whose offload
 economics are not a compromise. Every other offload target is re-read across PCIe **every
@@ -11,7 +12,8 @@ Evicting it is close to free across a large fraction of real use, and unlike
 
 So the value of doing this is entirely a question of how many bytes an encoder is. HF's
 tensor viewer answers that one tensor at a time, which for a 300-module tower is no answer
-at all. This note is the census, and the structural reason none of it is reachable today.
+at all. This note is the census, the structural reason none of it was reachable until
+vLLM 0.29.0, and what it actually took to serve vision on a 16 GiB card once it was.
 
 ## The census
 
@@ -108,8 +110,8 @@ use.
 depth an encoder is stored at, moving it to host memory costs zero accuracy, one PCIe pass
 per image, and nothing at all for a text-only request. The quantization question is
 contested and model-dependent; the eviction question is not, and the two do not trade
-against each other. That is why the upstream fix below is the half worth pursuing: it
-serves the reader who wants bf16 vision quality and the one who does not.
+against each other. That is why eviction was the half worth pursuing: it serves the
+reader who wants bf16 vision quality and the one who does not.
 
 **3. It is a fixed cost over a shrinking denominator, so it is worst on the smallest
 model.** The Qwen3-VL family ships essentially one encoder at every size — 1.074 GiB at
@@ -196,44 +198,120 @@ Read the trellis carefully when sizing one of these: EXL3 stores it as int16 wit
 width in the last dimension, so element count is `16/K` of the parameters it encodes. A
 naive byte-per-element reading reports 16 bpw for everything.
 
-## Nothing can evict any of it
+## Nothing could evict any of it — until 0.29.0
 
-`--cpu-offload-gb` offloads no encoder on any model, in any format. Not a dtype question,
-not an EXL3 question, not a selector question:
+*The section below described v0.28.0 and was true of it. Upstream closed the gap in
+v0.29.0; the fix is in our fork already, and was found by looking rather than by asking
+(2026-09-12). Kept rather than deleted, because the diagnosis is what made the fix
+recognisable when it arrived.*
+
+**What was true.** `--cpu-offload-gb` offloaded no encoder on any model, in any format —
+not a dtype question, not an EXL3 question, not a selector question:
 
 ```
 get_offloader().wrap_modules(…)      # vllm/model_executor/models/utils.py:824
 ```
 
-That is the **only** call site in vLLM, and it sits inside `make_layers()` — the helper
+That was the **only** call site in vLLM, and it sat inside `make_layers()` — the helper
 that builds a *text decoder's* `ModuleList`. Vision towers build their own
-(`self.blocks = nn.ModuleList([...])`, e.g. `qwen3_vl.py:628`) and are never handed to the
-offloader. Both backends are affected identically, since the omission is upstream of the
-backend choice.
+(`self.blocks = nn.ModuleList([...])`, e.g. `qwen3_vl.py:628`) and were never handed to
+the offloader. Both backends were affected identically, since the omission was upstream
+of the backend choice.
 
-This is a **third** cause, alongside the two traced in TODO `cpu-offload` (eligibility
-decided at construction against empty placeholders; `process_weights_after_loading`
-replacing the parameters afterwards). Unlike those two it is not ours and not
-quantization-specific, so it will never show up as an EXL3 anomaly in a cross-format
-comparison — every format loses the same bytes.
+### What landed
 
-### Two fixes, and they compound rather than overlap
+v0.29.0 adds `BaseOffloader.supports_tower_offload` (default `False`) and a **second**
+call site, in `SupportsMultiModal._mark_tower_model`
+([interfaces.py:380](../deps/vllm/vllm/model_executor/models/interfaces.py#L380)), whose
+comment names this note's diagnosis outright: *"Towers are constructed directly, so
+`make_layers` never routes them through the offloader."* It wraps at construction, so
+offloaded tower weights are never allocated on the device at all. Around 100 model files
+carry the marker — `qwen3_vl`, `qwen3_vl_moe`, `qwen3_5`, `gemma3_mm`, `gemma4_mm`,
+`step3p7` and `muse_glimmer` among them.
 
-**Upstream: offer the tower to the offloader.** Small, general, format-agnostic — every
-multimodal model in vLLM gains 0.8-3.6 GiB of optional headroom regardless of quantization.
-This is the one that matters for the table above, because in nine of ten rows the tower is
-bf16 and therefore invisible to any quantization plugin. Tracked as
-`upstream-queue`; framing and priority in [upstream.md](upstream.md).
+**UVA only.** `PrefetchOffloader` keeps the flag `False` deliberately, because it
+schedules prefetches over a circular layer stack. That is the correct half regardless:
+a tower is read once per image and not at all for a text-only request, which is the
+access pattern UVA wins by 4x (see [format-and-loading.md](format-and-loading.md)).
 
-**Ours: register offload from `process_weights_after_loading`.** The approach already
-proposed under `cpu-offload` reaches only *quantized* modules, so today it covers exactly
-one checkpoint. What it buys there is not capacity but bandwidth: a quantized tower moves
-0.89 GiB per image batch instead of 3.57, so the per-image cost of having evicted it drops
-4x. That is the difference between an eviction you tolerate and one you leave in place —
-or, read the other way, a resident tower cheap enough that you decline to offload at all.
+**Measured 2026-09-12** on `Qwen3.8-27B-exl3@3.00bpw`, a 16 GiB card:
 
-The two are independent and multiply: the first makes eviction possible, the second makes
-it cheap. Neither helps a unified model, which has nothing to evict.
+```
+--cpu-offload-gb 2 --cpu-offload-params visual
+INFO [uva.py:65] Total CPU offloaded parameters: 0.86
+```
+
+0.86 GiB, matching the census. **The selector works and matters**: the counter stops at
+0.86 under a 2 GiB budget, proving nothing but the tower matched. `wrap_modules` is called
+with `prefix=<attr>` and the selector matches dot-delimited segments of
+`f".{prefix}{name}."`, so `visual` names the Qwen tower exactly. Without it the budget is
+first-come, and the tower wins only by construction order — an accident, not a design.
+
+### The bytes freed are not the bytes that gate multimodal
+
+Offloading the tower is necessary and not sufficient, and the follow-on measurement is the
+useful half of this section. Two *other* encoder costs remain resident, and on a 16 GiB
+card they are larger than the weights:
+
+| | bytes | scales with |
+|---|---|---|
+| tower **weights** (offloadable, lossless) | 0.86 G | model |
+| encoder **cache** `[tokens, out_hidden]` | 0.156 G | token budget |
+| tower **transient**, one forward | ~1.6 G | patches |
+
+The budget is derived, not defaulted:
+`encoder_cache_size = max(max_num_batched_tokens, max_tokens_per_mm_item)`, and
+`max_tokens_per_mm_item` comes off `preprocessor_config.json` as
+`size.longest_edge / (patch_size * merge_size)^2`. Stock Qwen3.8 ships
+`longest_edge: 16777216` with patch 16 and merge 2 — **16384 tokens**, 65536 pre-merge
+patches, whose largest single buffer is `[65536, 4304]` bf16 = **564,133,888 bytes**,
+the exact figure the allocator names when it fails. Left at the default, profiling that
+transient starves KV to 0.21 GiB and the engine refuses to start.
+
+**The knob is `mm_processor_kwargs`, not `--limit-mm-per-prompt`.** The latter's `width`
+and `height` are `ImageDummyOptions` — profiling-only, read in
+`multimodal/processing/dummy_inputs.py` and nowhere in the request path — so they shrink
+the budget while the real image sails through at full resolution. `{"max_pixels": N}`
+reaches `smart_resize` inside `_get_vision_info`, the same function that computes the
+profiling token count, so budget and request move together by construction. The accounting
+consequences are in [memory-accounting.md](memory-accounting.md); the trap's general form
+and its tell are in the ecosystem field notes.
+
+**Verified end to end, 2026-09-12** — vision serving with the tower on the host, on one
+16 GiB card:
+
+```
+--gpu-memory-utilization 0.985 --kv-cache-dtype turboquant_4bit_nc
+--cpu-offload-gb 2 --cpu-offload-params visual
+--mm-processor-kwargs '{"max_pixels": 1048576}' --max-model-len 32768
+```
+
+0.86 GiB of tower on the host, 2.3 GiB of KV (90,593 tokens), a 4032x3024 photo described
+correctly. At `max_pixels` 4194304 the same config OOMs inside the tower — twice, once
+with KV pinned to vLLM's own recommendation — so the cap is doing real work and is not
+cosmetic.
+
+### The remaining fix, which still compounds
+
+**Ours: register offload from `process_weights_after_loading`.** Unchanged by the above,
+because it answers a different question. The approach proposed under `cpu-offload` reaches
+only *quantized* modules, so today it covers exactly one checkpoint. What it buys there is
+not capacity but bandwidth: a quantized tower moves 0.89 GiB per image batch instead of
+3.57, so the per-image cost of having evicted it drops 4x. That is the difference between
+an eviction you tolerate and one you leave in place — or, read the other way, a resident
+tower cheap enough that you decline to offload at all.
+
+Upstream made eviction possible; this makes it cheap. Neither helps a unified model,
+which has nothing to evict.
+
+**A third lever this measurement exposed, not yet built.** The tower transient is
+image-scaled and therefore unbudgetable in the sense
+[memory-accounting.md](memory-accounting.md) sets out — it has to stop existing rather
+than be reserved for. `Qwen3_VisionMLP.forward` is
+`linear_fc2(act_fn(linear_fc1(x)))`, purely pointwise over dim 0, so chunking it over
+tokens is bit-for-bit identical and caps the `[patches, 4304]` pair at the chunk. That is
+structurally the same move as TurboQuant's slabbed continuation prefill. It raises the
+affordable image size; it does not remove the need for a cap at 12 MP.
 
 ## Reproducing
 

@@ -75,7 +75,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [capability-suite.md](docs/capability-suite.md) | whether a served configuration still *does the work*: two SWE-bench runs, what a paired comparison has to hold fixed, and why discriminating power peaks near 50% resolved |
 | [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
-| [media-encoders.md](docs/media-encoders.md) | how many bytes a vision/audio tower is — up to 12.7% of a low-bpw exl3 checkpoint — why evicting one is nearly free, and the structural reason nothing can today |
+| [media-encoders.md](docs/media-encoders.md) | how many bytes a vision/audio tower is — up to 12.7% of a low-bpw exl3 checkpoint — why evicting one is nearly free, what vLLM 0.29.0 changed, and why the weights are not the cost that gates vision |
 | [turboquant-kv.md](docs/turboquant-kv.md) | TurboQuant's KV page geometry: the mispriced page that stopped a quantized cache coexisting with sliding-window layers, and what first/last-N boundary protection costs |
 | [memory-accounting.md](docs/memory-accounting.md) | where the VRAM goes: the backend workspaces vLLM's profiler cannot see, why `gpu_memory_utilization` stops being safe above ~0.85, and which consumer has to be engineered away rather than budgeted for |
 | [kvarn.md](docs/kvarn.md) | a low-bit KV cache ported, measured and shelved: +17% context for 3.5x prefill, and why the enum is the real find |

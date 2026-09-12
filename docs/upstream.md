@@ -261,18 +261,35 @@ model keeps serving.
 
 ### Reports, not patches
 
-**Media encoders cannot be offloaded, on any model, in any format.**
-`get_offloader().wrap_modules()` has exactly one call site in vLLM, inside
-`make_layers()` — the helper that builds a *text decoder's* `ModuleList`. Vision towers
-build their own, so no encoder is ever offered to either offload backend.
+**~~Media encoders cannot be offloaded, on any model, in any format.~~ Closed by
+upstream in v0.29.0 — do not send.** Checked 2026-09-12 before writing it up, per the
+standing check below, and it was already fixed: `BaseOffloader.supports_tower_offload`
+plus a second `wrap_modules` call site in `SupportsMultiModal._mark_tower_model`, whose
+comment states this item's diagnosis in the same words we had. UVA opts in;
+`PrefetchOffloader` deliberately does not. Verified working on our fork:
+`--cpu-offload-gb 2 --cpu-offload-params visual` offloads exactly 0.86 GiB on
+`Qwen3.8-27B-exl3@3.00bpw`, and a 4032x3024 photo is described correctly on one 16 GiB
+card. Details in [media-encoders.md](media-encoders.md).
 
-*Why it is worth someone's time*: an encoder is the one offload target whose economics
-are not a compromise — read once per image, never for a text-only request — so this is
-the cheapest headroom in a multimodal deployment and it is unreachable. Sizes are
-0.79–3.64 GiB, up to **21% of the package** on `Qwen3-VL-8B @3.0bpw`. Nine of ten
-surveyed checkpoints ship a bf16 tower, so no quantization plugin can reach it either;
-the fix has to be upstream. Numbers and method in
-[media-encoders.md](media-encoders.md), reproducible with `tools/encoder_census.py`.
+*The lesson is the process one.* This was the largest-payoff item in the queue and the
+one we had most reason to feel ownership of, and it cost nothing because someone
+checked. That is the **fifth** time `check-upstream-before-patching-vllm` has paid; it
+is now cheaper to look first than to decide whether looking is worth it.
+
+**What the fix did not solve, and may yet be worth reporting.** Offloading the tower
+weights is necessary and not sufficient: the encoder *cache* and the tower *transient*
+stay resident, and on a small card they are the larger cost. Two candidates came out of
+that measurement, neither yet filed:
+
+- **`--limit-mm-per-prompt`'s `width`/`height` do not limit anything** — they size the
+  profiling dummy only (`ImageDummyOptions`, read solely in `dummy_inputs.py`), while
+  `count` in the same dict is enforced. A 512x512 "limit" budgets 256 tokens and then
+  serves an 11844-token image, a 46x overrun that OOMs after an otherwise correct
+  profile. Reproducible in one command; the honest report is a documentation/naming
+  defect rather than a sizing bug, which makes it easy to send and easy to dismiss.
+- **FA2's ViT path reports OOM as `RuntimeError: torch_call_dispatcher("aten::empty_like",
+  ...)`** through the torch stable ABI, with no byte counts and no mention of memory. Pure
+  diagnosability, small, and independent of the above.
 
 **TurboQuant and sliding-window models — a cluster, in decreasing confidence.**
 Everything here is measured on `Laguna-XS-2.1-exl3@3.00bpw` at v0.28.0; see TODO
@@ -658,8 +675,11 @@ annoys us:
    Send with (2) and (3) as context, since a maintainer will immediately ask what is
    behind it.
 3. **The softcap half-patch.** Working code, gated by a bench entry, small.
-4. **Encoder offload.** Largest payoff of the set for the widest audience, but it is a
-   report against a design gap and will want a conversation rather than a diff.
+4. ~~**Encoder offload.**~~ **Closed 2026-09-12 — upstream fixed it in v0.29.0 before we
+   filed.** It had been ranked here as the largest payoff for the widest audience. Its
+   replacement in the queue, if anything, is the `--limit-mm-per-prompt` width/height
+   naming defect that the same session turned up; unranked until someone decides a
+   documentation report is worth sending.
 5. **exllamav3 KLD floor.** Small and well-evidenced, but the fork relationship means it
    is the least urgent — we already have the fix where we need it.
 6. **`embed-quant-config`.** Highest value to us, and deliberately last: it needs a
@@ -676,6 +696,10 @@ is verified or replaced.
 - Is the fix defensible without reference to this project?
 - Have we checked whether upstream already fixed it? *We have now paid this cost four
   times* — see `check-upstream-before-patching-vllm`. The turboquant walls were measured
-  against a structure 0.28 had already replaced.
+  against a structure 0.28 had already replaced. **Fifth instance, 2026-09-12, and the
+  first where checking first is what saved the work rather than what recovered it**: the
+  encoder-offload report above was closed by reading the current tree before writing a
+  word of it. Check at the point you decide to write, not at the point you decide to send
+  — the evidence-gathering is most of the cost.
 - If it is a report rather than a patch, is the thing we do not understand stated as
   such rather than smoothed over?

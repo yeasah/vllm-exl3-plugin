@@ -421,6 +421,47 @@ declaration hook handles trivially. The shape of the argument stands for any bac
 that grows one: a context-scaled transient cannot be budgeted for, so it has to stop
 existing.
 
+### A third class: image-scaled, and the profiler is honest about it (2026-09-12)
+
+The two classes above are both *context*-scaled. Multimodal adds one scaled by **pixels**,
+and it behaves differently from either: the profiler does measure it — `profile_run` runs
+the real encoder over a dummy item inside the `memory_profiling` window, and the peak is
+`allocated_bytes.all.peak`, so nothing is hidden. The failure is upstream of the
+measurement.
+
+**The budget is derived from the checkpoint, and one flag lies about it.**
+`encoder_cache_size = max(max_num_batched_tokens, max_tokens_per_mm_item)`, where
+`max_tokens_per_mm_item` is `size.longest_edge / (patch_size * merge_size)^2` from
+`preprocessor_config.json`. Stock Qwen3.8 ships `longest_edge: 16777216`, patch 16,
+merge 2 → **16384 tokens**, 65536 pre-merge patches, largest buffer `[65536, 4304]` bf16
+= 564,133,888 bytes. Left alone, profiling that starves KV to 0.21 GiB and the engine
+will not start.
+
+`--limit-mm-per-prompt`'s `width`/`height` appear to fix this and do not: they are
+`ImageDummyOptions`, read only by the profiling dummy generator, while `count` in the same
+dict is enforced. So they shrink the *budget* and not the *image* — a 512x512 "limit"
+budgets 256 tokens and then serves an 11844-token photo, 46x over, and the OOM lands
+mid-request after a profile that was correct about a request that never arrived. The
+enforcing knob is `--mm-processor-kwargs '{"max_pixels": N}'`, which reaches
+`smart_resize` from inside the same `_get_vision_info` that computes the profiling token
+count, so the two cannot diverge.
+
+**And `peak activation` is the wrong instrument for sizing it.** Cutting `max_pixels` 4x
+moved the reported peak 0.44 → 0.41 GiB, because it is a `max()` over the run and the
+decoder's chunked prefill sets it. The encoder's requirement hides underneath, which is
+how a cap that looks affordable against that number OOMs in the tower anyway — twice, at
+`max_pixels` 4194304, including once with KV pinned to vLLM's own recommendation.
+
+**Unresolved:** why the real encoder exceeded its profile at that cap. The served image
+was *smaller* than the profiled dummy (16060 vs 16384 patches) and it still wanted ≥36 MiB
+more than was left. Fragmentation is the standing suspect — KV is not allocated during
+profiling, so the allocator has 2.2 GiB of slack to satisfy the encoder from, and 134 MiB
+sat "reserved but unallocated" at the failure — but this is a hypothesis, not a
+measurement. `tools/memprof.py` is the instrument and has not been pointed at it.
+
+Sizes, the working configuration and the reproduction are in
+[media-encoders.md](media-encoders.md).
+
 ### The search this needs already exists
 
 The natural objection to a declaration hook is that the backend would have to learn how
@@ -736,6 +777,9 @@ knob to set per configuration, not a default to change.
   `init_attn_backend` one is dead once the trtllm path allocates its own.
 - **Whether the 0.08–0.12 GiB residual is constant across models**, or scales with
   something. It is stable across three backends and three utilizations on one model.
+- **Why the vision encoder exceeds its own profile** at `max_pixels` 4194304 on
+  Qwen3.8-27B, when the served image is smaller than the profiled dummy. Fragmentation is
+  the suspect and `tools/memprof.py` is the instrument; neither has been applied.
 - **What exactly the cold-compile 0.59 GiB is.** Inductor's autotuning/combo-kernel
   benchmarking is the suspect on the strength of the config, not of a measurement, and the
   figure is from one model at one chunk size. Worth knowing before offering upstream a
