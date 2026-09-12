@@ -77,6 +77,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
 | [media-encoders.md](docs/media-encoders.md) | how many bytes a vision/audio tower is — up to 12.7% of a low-bpw exl3 checkpoint — why evicting one is nearly free, and the structural reason nothing can today |
 | [turboquant-kv.md](docs/turboquant-kv.md) | TurboQuant's KV page geometry: the mispriced page that stopped a quantized cache coexisting with sliding-window layers, and what first/last-N boundary protection costs |
+| [memory-accounting.md](docs/memory-accounting.md) | where the VRAM goes: the backend workspaces vLLM's profiler cannot see, why `gpu_memory_utilization` stops being safe above ~0.85, and which consumer has to be engineered away rather than budgeted for |
 | [kvarn.md](docs/kvarn.md) | a low-bit KV cache ported, measured and shelved: +17% context for 3.5x prefill, and why the enum is the real find |
 | [triattention.md](docs/triattention.md) | a KV *eviction* method: four integration defects fixed, compaction corrupting the cache, and the calibration work that outlived it |
 | [kv-pager.md](docs/kv-pager.md) | KV residency as a block-table rewrite: the measurements and the instruments that took them — and **closed 2026-09-08**, three exits that put KV eviction and offload off the table categorically |

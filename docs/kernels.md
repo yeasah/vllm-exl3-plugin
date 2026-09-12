@@ -446,7 +446,12 @@ Same model, two KV paths, both at ~119K context with a 2K chunk:
 The two paths differ in *shape*, not just size, and that is the durable finding: TQ's
 transient is **6144 B/token, linear in cached context**, on an axis the profile run never
 varies. fp8's is chunk-scaled. So a short test prompt validates an fp8 config and tells
-you nothing about a TQ one. ### What the 0.29 bump did to the budget (2026-09-10)
+you nothing about a TQ one. The profiled window is narrower than "never varies" makes
+it sound: `profile_run()` compiles for `max_num_batched_tokens`, so on these runs it
+measures a **512-token** forward pass and reports the result as a constant — see
+[memory-accounting.md](memory-accounting.md).
+
+### What the 0.29 bump did to the budget (2026-09-10)
 
 The re-bless at vLLM 0.29 moved KV headroom on 14 of 14 entries, and the sign splits
 cleanly on execution mode -- same weights, same plugin, same card:
@@ -473,9 +478,21 @@ MiB, fails, and the next kernel OOMs. A config that profiles successfully now fa
 serve, and it fails *because* the transient footprint improved. Tracked as
 `kv-budget-margin` in [../TODO.md](../TODO.md).
 
+**Resolved 2026-09-12**: the budget has no term for either because the profiling window
+closes before the attention backend finishes allocating. FlashInfer's autotuner is not
+the culprit so much as the second victim — FlashInfer itself holds 0.385 GiB of static
+workspace the budget never sees, and TurboQuant 1.000 GiB. See
+[memory-accounting.md](memory-accounting.md).
+
 Removing the rest of TQ's was costed as changing a dequant
 kernel's dtype or rewriting an attention backend we do not own, and both were declined as
 things to *offer*; that decision was reopened on 2026-09-08 as work to carry, with a
 cheaper third option and a `max_model_len`-sized workspace reservation these captures may
 not include -- see [upstream.md](upstream.md) and `turboquant-prefill-transient` in
 [../TODO.md](../TODO.md).
+
+They did not include it. Measured 2026-09-12 at **1.000 GiB** — sized by the declared
+262144 rather than the served context, and present in neither `consumed` nor
+`peak_activation`, so it was never going to show up in a capture that starts from
+vLLM's own figures. It is larger than the ~486 MiB guessed here, because the guess
+assumed it scaled with served context. [memory-accounting.md](memory-accounting.md).

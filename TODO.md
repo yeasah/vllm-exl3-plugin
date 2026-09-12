@@ -59,18 +59,18 @@ That is the biggest win on *format* competitiveness. The most urgent work is byt
 the card: `kv-pager` died on 2026-09-08 and took KV eviction and offload with it, so
 **bytes per token is the only remaining lever on declared context per card**. Two items
 share that ground and are the top of this file for that reason —
-`turboquant-prefill-transient` removes a consumer we can name, and `kv-budget-margin`
-is about the ones we cannot, which is the half with direct evidence against it: a
-budget that overshoots what was asked for, and freed bytes that do not stay where they
-were freed to.
+`turboquant-prefill-transient` and `kv-budget-margin`.
 
-**Which of the two goes first is close to arbitrary, and that is itself the finding**:
-taming TQ's transients does not pay out until the bytes it frees can reliably become KV
-space, so `kv-budget-margin` gates the *return* on
-`turboquant-prefill-transient` rather than merely sitting beside it. Doing the
-accounting first risks optimizing nothing; doing the transient first risks measuring a
-win that never reaches a served context. Whichever is picked, the other is what decides
-whether the number moved.
+**The ordering between them is no longer arbitrary; it resolved on 2026-09-12, when the
+accounting was actually done** ([docs/memory-accounting.md](docs/memory-accounting.md)).
+Both previously-unnamed consumers are now named and measured, and the larger one turns
+out to be TQ's own: a **1.000 GiB** workspace reservation sized by the *declared*
+`max_model_len`, absent from every field of vLLM's budget. So
+`turboquant-prefill-transient` goes first. It removes the single biggest term, and it
+removes it from the side of the problem a budget fix cannot reach — the runtime
+transient is not accountable at any acceptable price, since reserving headroom for it
+means setting aside ~2 GiB against a prefill that may never run. What is left for
+`kv-budget-margin` afterwards is smaller, mechanical, and mostly not ours.
 
 ## `turboquant-prefill-transient` — Stop TQ's prefill cost scaling with context
 
@@ -81,7 +81,8 @@ live at its peak (the rotation result, `k_full`, `v_full`, 2048 B/token each at
 Hk=4/D=256), and `TurboQuantMetadataBuilder._reserve_workspace` reserves two
 fp16 dequant buffers sized by **`max_model_len`** rather than by anything a
 request does — 4096 B/token of *declarable* context, whether or not a
-continuation ever runs.
+continuation ever runs, measured at **1.000 GiB** and invisible to vLLM's budget
+([docs/memory-accounting.md](docs/memory-accounting.md)).
 
 It unblocks the appliance's binding constraint, and it is now the only thing
 that does: with `kv-pager` dead and KV eviction/offload categorically out,
@@ -93,7 +94,21 @@ a 130K one.
 
 **Candidate approach, cheapest first; each step is independently shippable.**
 
-1. **Slab-chunk the rotation.** `k_flat @ Pi_half` materializes the whole
+1. **Stop reserving at `max_model_len`.** Measured 2026-09-12: the reservation is
+   **1.000 GiB**, it is sized by the *declared* 262144 rather than the 150528 the
+   auto-fit settles on, and it appears in **neither** `consumed` nor `peak_activation`
+   — the question this step used to pose is answered, and the answer is "on neither side".
+   It is also more than twice the ~486 MiB previously guessed, because the guess assumed
+   it scaled with served context. This is now the cheapest *and* largest item: correcting
+   it to the served length frees 0.43 GiB outright, and bounding it by what a chunk needs
+   frees the full 1.000 GiB. Reserving at `max_model_len` prices the *declaration*, which
+   is the one axis the appliance sells. Falls out free if step 3 lands. **Read the open
+   question in [docs/memory-accounting.md](docs/memory-accounting.md) first** — whether
+   this is a stale read of `max_model_len` or a builder constructed before the auto-fit
+   decides whether the fix is deferring a call or solving a fixed point, and
+   `VLLM_DEBUG_WORKSPACE=1` settles it with no code change.
+
+2. **Slab-chunk the rotation.** `k_flat @ Pi_half` materializes the whole
    inverse-rotated K in fp16 before `k_full[:cached_len].copy_()` reads it once.
    Rotating in slabs of a few thousand tokens and copying each slab in makes that
    buffer O(slab) instead of O(context): −2048 B/token, a third of the transient.
@@ -104,14 +119,6 @@ a 130K one.
    memory; see the note.) *Verify bit-exactness rather than assuming it* — same
    dtype and same per-row dot products, but a smaller M may pick a different
    cuBLAS kernel.
-
-2. **Bound the workspace reservation by what a chunk needs.** Reserving at
-   `max_model_len` prices the *declaration*, which is the one axis the appliance
-   sells. First find out whether it is even resident in the numbers we have: the
-   0.828 GiB capture in [docs/kernels.md](docs/kernels.md) accounts for three
-   232 MiB transients and does not obviously include a ~486 MiB reservation, so
-   `tools/memprof.py` has to say which side of `consumed`/`peak_activation` this
-   lands on before anything is designed. Falls out free if step 3 lands.
 
 3. **Chunked-KV accumulation — worth re-costing, and cheaper than "rewrite a
    backend" looked.** This is the only step that changes the *shape* rather than
@@ -133,81 +140,67 @@ in the KV-spec plumbing our *other* two TQ patches sit on, and it is still
 moving. So this work can start on the pin and rebase cleanly; what a bump
 threatens is `turboquant-sliding-window`, not this.
 
-→ [docs/upstream.md](docs/upstream.md) (the costing, and what was declined for
+→ [docs/memory-accounting.md](docs/memory-accounting.md) (what the reservation
+actually costs, and why the budget cannot see it),
+[docs/upstream.md](docs/upstream.md) (the costing, and what was declined for
 whom), [docs/kernels.md](docs/kernels.md) (the in-situ captures),
 [docs/turboquant-kv.md](docs/turboquant-kv.md)
 
-## `kv-budget-margin` — Where the bytes went, on a card that has none spare
+## `kv-budget-margin` — Make `gpu_memory_utilization` mean what it says
 
-The outcome wanted is an accounting of GPU memory that holds: every byte on the card
-attributed to something, and a budget whose arithmetic balances, so that a declared
-context length is a promise the engine can keep rather than a guess that OOMs at first
-inference.
+The outcome wanted is a utilization knob that is safe to turn: a declared context that
+the engine can keep, on any attention backend, without the operator discovering the
+ceiling by OOMing at first inference.
 
-This is primary-goal work, not gate maintenance. Declared context per card is the
-appliance's binding constraint, and since `kv-pager` closed, **bytes per token is the
-only lever left on it** — so memory that silently relocates from the KV cache to some
-other consumer is a direct subtraction from the product. It composes with
-`turboquant-prefill-transient`: that item removes a consumer we can name, this one is
-about the ones we cannot. Removing a transient only buys context if the freed bytes
-reach the KV cache and *stay* reachable, and right now there is direct evidence they do
-not.
+It composes with `turboquant-prefill-transient`, which now goes first and takes the
+largest single term with it. What remains here is the general case — the mechanism is
+backend-independent, and FlashInfer carries 0.385 GiB of it with no TurboQuant in sight.
 
-**The gate breakage is the symptom, and its fix is not this item's fix.** Two 27B
-entries die at first inference on the 16 GiB card, and `bench/` should simply lower
-their pinned `gpu_memory_utilization=0.95` and re-bless, because a gate exists to be
-runnable. That workaround is explicitly *not* an answer here — it moves the line rather
-than finding what crossed it.
+**The accounting is done** (2026-09-12,
+[docs/memory-accounting.md](docs/memory-accounting.md)): every byte on the card is
+attributed, the budget's printed arithmetic balances exactly, and the gap is entirely
+static attention-backend workspace allocated *after* the profiling window closes. Do not
+re-open the hypotheses the note records as retired — in particular the
+`--kv-cache-memory=` recommendation line is **not** an instrument for overshoot, it
+reads a deliberate 150 MiB offset, and the "budget overshoots what was asked for"
+premise this item used to rest on was an artifact of double-counting the CUDA-graph
+estimate.
 
-**The mechanism is already written down, in the opposite direction.**
-[docs/kernels.md](docs/kernels.md) records that `gpu_worker.py` budgets KV as
-`requested - consumed - peak_activation` with no CUDA-graph term, and that shrinking
-transients makes `--kv-cache-memory` *more* load-bearing rather than less, because the
-freed memory is handed to the KV cache and the slack that used to absorb unaccounted
-consumers goes with it. These two entries look like that prediction coming true: the
-same entries took **1.05 -> 1.62 GiB** of KV against their blessed baselines, and what
-then runs out is inference-time scratch — FlashInfer's autotuner asks for 544 MiB,
-fails twice with allocator warnings, and saves 0 configs before the kernel that OOMs.
+**Candidate approach, cheapest first.**
 
-Candidate approach, cheapest first: confirm the direction by re-running one entry with
-`--kv-cache-memory` pinned at the blessed figure, which costs one run and either
-implicates the budget or exonerates it. A live hypothesis worth testing in the same
-pass is that the plugin's own transient reduction moved memory into somebody's *static*
-buffer rather than leaving it free — the reconstruct tiling normalized allocation sizes
-deliberately, and a downstream consumer sizing itself against what it observes free
-would convert that into a permanent claim. Bisecting exllamav3 `v1.4.3-21..-32` is the
-fallback if neither holds, since the baselines were blessed at `-21` and the entries
-have not run clean since.
+1. **Lift the 150 MiB `redundancy_buffer_memory` into the utilization path.** It already
+   exists in the recommendation path ([gpu_worker.py:818](deps/vllm/vllm/v1/worker/gpu_worker.py#L818))
+   and covers the measured 0.08–0.12 GiB residual. One constant, one code path, no new
+   concepts. It does not fix the workspaces but it stops the last tenth of a GiB being a
+   surprise.
 
-**Corroborated from serving, independently of `bench/`** (2026-09-10): utilizations
-above the default are no longer reliable at startup on this box, where 0.97 was the
-working figure before. Whether that is a 0.29 change or a standing fact of vLLM is not
-established -- but vLLM prints the arithmetic itself, and it does not balance. At
-`--gpu-memory-utilization 0.88` on a 15.51 GiB card it reports a 13.65 GiB budget
-against 11.34 consumed + 0.55 peak activation + 0.12 CUDA-graph + **1.75 KV in use** =
-13.76 GiB, i.e. 0.11 GiB past what was asked for, and recommends
-`--kv-cache-memory=1.48 GiB` "to fit into requested memory". That recommendation line is
-the instrument: it is the engine's own statement of how far the utilization path
-overshot, printed on every startup, and it costs nothing to read.
+2. **A backend static-workspace declaration, summed into the search that already runs.**
+   `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
+   `_reserve_workspace` (or FlashInfer's `_get_workspace_buffer`) is about to allocate.
+   It is the candidate because the hard parts are already built: the backends already
+   compute the expression, and
+   [`_estimate_max_model_len_from_groups`](deps/vllm/vllm/v1/core/kv_cache_utils.py#L2087)
+   already binary-searches candidate context lengths by *asking for sizes* rather than
+   profiling — twenty iterations of arithmetic, no forward passes, no interpolation, no
+   linearity assumption. It simply never asks the attention backend. Summing the hook
+   into `_max_memory_usage_bytes_from_groups` puts backends inside it, and the
+   `round_up` step comes along for free.
 
-*Also worth trying before hunting a leak*: the two 27B entries pin
-`gpu_memory_utilization=0.95` because that was the tight-fit figure when they were
-written. If high utilization is simply less reliable now, the fix is to lower theirs and
-re-bless rather than to find something that grew.
+3. **Check whether FlashInfer needs both of its workspaces.** It allocates 0.385 GiB
+   twice — once in `init_attn_backend`, once lazily in `forward` — and the budget sees
+   only the second. If the first is dead once the trtllm path allocates its own, that is
+   0.385 GiB for a deletion, and it is upstream's bug to take.
 
-*Not a 0.29 issue*: the tq4 entry fails identically on the 0.28 build, and the fp8 one
-passed there, so the bump at most moved the margin. What the 0.29 re-bless did add is
-the shape of the effect across the whole matrix -- every eager entry gained KV headroom
-and both CUDA-graph entries lost it, measured in
-[docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget". These two
-entries are eager, so they gained, and that is what left them nothing to serve with.
+**The gate breakage is a symptom, and its fix is still not this item's fix.** Two 27B
+entries die at first inference on the 16 GiB card; `bench/` should lower their pinned
+`gpu_memory_utilization=0.95` and re-bless, because a gate exists to be runnable. What
+is new is that there is now a principled figure to lower it *to*: subtract the backend's
+static workspace from the budget — 1.000 GiB for TurboQuant, 0.385 for FlashInfer, which
+on a 15.51 GiB card is 6.4 and 2.5 points of utilization respectively.
 
-Note separately that `--speculative-config` on this architecture forces *dense* Mamba
-checkpointing (see `mtp-turboquant`), which changes how far a given KV allocation goes
-rather than how large it is -- relevant to reading these two entries, but not why they
-OOM.
-
-→ [docs/kernels.md](docs/kernels.md) "Where the remaining peak lives, after tiling"
+→ [docs/memory-accounting.md](docs/memory-accounting.md), and
+[docs/kernels.md](docs/kernels.md) "What the 0.29 bump did to the budget" for how the
+same missing term showed up as a re-bless moving KV headroom on 14 of 14 entries.
 
 ## `bench-cache-control` — The gate cannot see its own inputs
 
