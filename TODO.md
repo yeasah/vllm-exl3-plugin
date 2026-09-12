@@ -89,7 +89,8 @@ What remains is the general case — the mechanism is backend-independent, and F
 carries 0.385 GiB of it with no TurboQuant in sight.
 
 **The milestone that sets the price of not doing this** (2026-09-12): the 27B at 3.00bpw
-serves its full declared 262144 context on the 16 GiB card — but only at 0.975, and only
+serves its full declared 262144 context on the 16 GiB card — a 257,549-token prompt
+completes, so this is service and not just a declaration — but only at 0.975, and only
 with a warm or disabled torch.compile cache. A cold cache costs 0.59 GiB of *profiled peak
 activation*, which is 35K tokens of declared context, because `profile_run()` compiles
 inside the profiling window and the compiler's high-water mark becomes the activation

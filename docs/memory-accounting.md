@@ -44,6 +44,14 @@ Two caveats on the instrument itself:
 - The long-lived summary reports *cumulative* bytes per site, not live bytes. Harmless
   for sites that allocate once (it reads 1.001 GiB where the peak summary reads 1.000),
   but it would overstate any site that resizes repeatedly.
+- **The site-attribution instrument has a context ceiling, and it is well below the one
+  we now serve.** `torch.cuda.memory._record_memory_history` OOMs the *host* at the
+  allocation count a ~256K-token prefill produces, so every per-site number in this note
+  is from a ~100K prompt. Runs at capacity can be observed (they complete, and
+  `profile-completion.py`'s `live` mode reports rate) but not attributed. Anything claimed
+  about where bytes go at full context is therefore an extrapolation from the shape at
+  100K — defensible now that nothing in the prefill path is sized by context, and not
+  before.
 
 ## The two external instruments agree — on headroom, not on "used"
 
@@ -456,6 +464,13 @@ of a reduction, for the first time on this model. That is the transient work's d
 the units the appliance sells, and it needed `gpu_memory_utilization=0.975`: a number the
 operator has to arrive at by hand, which is `kv-budget-margin`'s entire case.
 
+**And it serves, not just declares**: a 257,549-token prompt — 98.2% of the declared
+context — completes on this configuration at 665.65 t/s of prefill, 387 s to first token.
+That is the check this ground exists to fail, since a budget that profiles cleanly and
+then dies at first inference is exactly what `kv-budget-margin` is about; it passes at
+capacity, with the caveat in the method notes that no *profiled peak* can be taken at that
+length.
+
 The full command is in [turboquant-kv.md](turboquant-kv.md) "The configuration that
 superseded it"; it is the run script's verified line with the utilization raised, plus
 `--max-num-batched-tokens 512` and `EXL3_BLOCKQ_ON_LOAD=1`, which loads weights at
@@ -494,6 +509,16 @@ Three findings, largest first:
   every launch after it — and that `VLLM_DISABLE_COMPILE_CACHE=1`, which is set in this
   box's `~/.bashrc` and looks like a debugging leftover, is load-bearing for the
   milestone above.
+
+  **Downstream already pays for this, and the dev box is the reason we did not know.** The
+  appliance project hit it independently and works around it with warmup runs; its managed
+  environment does not set `VLLM_DISABLE_COMPILE_CACHE`, so it meets the cold path the way
+  an operator does, while every measurement taken here has been on the cheap path. So the
+  finding is not "nobody has seen this" — it is that the workaround lives downstream and
+  the accounting lives here, and neither side could see the other's half. Two consequences:
+  a warmup run is the correct mitigation today for anything that must declare context
+  reliably, and the dev environment's exemption should be treated as a blind spot in this
+  note's method, not a convenience.
 - **`VLLM_ENABLE_V1_MULTIPROCESSING` does not affect the budget at all** — C against D is
   byte-identical, in-process against child `EngineCore`.
 - **`--max-num-batched-tokens` barely affects it either**: A against B is +3,075 tokens

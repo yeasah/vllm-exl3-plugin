@@ -341,7 +341,10 @@ it attributable to compilation rather than to the graph.
 
 *Why it is worth someone's time*: every operator's first launch after a version bump or a
 flag change is the cold one, and the penalty sticks for the life of that process while
-looking like a property of the release. It also makes any memory measurement silently
+looking like a property of the release. **A downstream deployment already carries a
+workaround for it** — the appliance project hit this independently and does warmup runs to
+get a warm cache before the run that has to declare context — so this is a report about
+removing a workaround people are already writing, not a hypothetical. It also makes any memory measurement silently
 cache-dependent — the shape of the problem `bench-cache-control` exists for on our side.
 Candidate fix is a reset between compilation and the measured forward, or compiling
 outside the window.

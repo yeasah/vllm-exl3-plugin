@@ -679,11 +679,17 @@ behind it":
 - **`VLLM_DISABLE_COMPILE_CACHE=1` is load-bearing too**, which is not obvious. A *cold*
   compile cache inflates profiled peak activation by 0.59 GiB and costs 35K tokens of
   declared context; disabling the cache, or having it already warm, both avoid it.
-- **`--kv-cache-memory=` appears not to be needed any more.** The pin in the 4.00bpw
-  command above existed to bypass an unreliable profiler; at 0.975 the utilization path
-  reaches the ceiling on its own. Scope of that claim: startup and auto-fit are verified
-  across five runs, and the operator has served from this configuration, but **a
-  full-context prefill at 262144 with the budget this tight has not been run here** — and
-  "profiles successfully, then dies at first inference" is the exact failure this ground
-  keeps producing. Worth doing deliberately, together with the logprobs adversarial test
-  above.
+- **`--kv-cache-memory=` is not needed any more.** The pin in the 4.00bpw command above
+  existed to bypass an unreliable profiler; at 0.975 the utilization path reaches the
+  ceiling on its own, and **it serves rather than merely declaring**: a 257,549-token
+  prompt — 98.2% of the declared context — completes, at **665.65 t/s of prefill**
+  (`profile-completion.py`, `live` mode, so 387 s to first token). That matters because
+  "profiles successfully, then dies at first inference" is the failure this ground keeps
+  producing, and the KV cache being full is when it would happen.
+  **The proof is behavioural, not accounted**: no profiled peak exists at that length,
+  because `torch.cuda.memory._record_memory_history` OOMs the *host* at that many
+  allocations (see [memory-accounting.md](memory-accounting.md), method caveats). What
+  supports it besides the completion is that the ~100K profiles were flat — nothing in
+  them grew with prompt length once the continuation prefill stopped allocating by
+  context. The logprobs adversarial test above is still outstanding and is a different
+  shape of risk: request-sized, not context-sized.
