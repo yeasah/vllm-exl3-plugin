@@ -345,6 +345,20 @@ held live across the multiply** -- and a memory capture of a real prefill step
 put it at 70% of *all* dynamic VRAM, larger than every vLLM allocation in the
 step combined. It is the single biggest thing the plugin does to peak memory.
 
+**And the tile it decodes into is pooled, as of 2026-09-12.** Bounding the scratch was the
+first half; the second is not re-requesting it. A capture during a 30K prefill put the
+tile at 29 MiB and the rotated activations at 27 MiB, allocated on *every* call — 46 MiB
+of a 107 MiB transient peak, and allocated after the memory profiler's window closes,
+which means the KV budget cannot see it and the operator pays for it in utilization
+headroom. Both buffers are fully overwritten before they are read, so one buffer per slot
+(keyed by stream, and declining to pool during CUDA-graph capture) serves every call. They
+then show up as long-lived 0.027 and 0.029 GiB allocations *inside* the profiled peak,
+which is the point: the pool's high-water mark is bounded by `max_num_batched_tokens`, and
+the profile run uses exactly that width, so it cannot grow afterwards. `EXL3_SCRATCH_POOL=0`
+restores per-call allocation. Combined with the attention backend declaring its own reserve
+this is what took `gpu_memory_utilization` to the card's `free/total` on the 27B — see
+[memory-accounting.md](memory-accounting.md).
+
 `reconstruct_slice` (already in the extension, alongside `reconstruct_had_slice`)
 decodes a column range, so the fix is to block the GEMM: decode one tile,
 `torch.mm` it into the matching slice of the output, repeat. `torch.mm` honours

@@ -607,15 +607,34 @@ measured peak — and in that configuration the declaration follows the reserve 
 and auto-fit cuts context to 199,680, which is the hook demonstrating it tracks the
 allocation rather than a constant.
 
-**What the benchmark now waits on is ours, not vLLM's.** At 0.985 the engine starts, sizes
-the full context, and then dies in the *plugin's* reconstruct path —
-`torch.empty((k, tile_n), half)` at [ops.py:533](../vllm_exl3_plugin/ops.py#L533), 30 MiB
-wanted against 39 MiB free. That is a per-call runtime transient in a kernel wrapper, not
-a startup static, so no `get_reserved_workspace_bytes` can declare it; the ways out are
-pooling the buffer (it is the same shape every call for a given layer), reusing the
-workspace manager the attention backends already share, or reconstructing into a
-pre-allocated view. Until then **0.98 is the ceiling for this configuration and the
-remaining 0.5 points of utilization are a plugin question**.
+### The last term was ours, and pooling it reached the benchmark
+
+At 0.985 the declaration alone was not enough: the engine started, sized the full context,
+and died in the *plugin's* reconstruct path. A capture during a 30K prefill priced the
+whole transient peak at **107 MiB** and named the owners — 29 MiB for the decoded weight
+tile, 27 MiB for the rotated activations, both re-requested on every call, plus a 31 MiB
+output that escapes and cannot be pooled.
+
+Pooling the two ([`0184007`](../vllm_exl3_plugin/ops.py), `EXL3_SCRATCH_POOL=0` restores
+per-call allocation) is the same move as declaring a static, done one level down: a
+transient nobody can see becomes a buffer the profiler *does* see. The capture shows the
+conversion rather than asserting it — both sites leave the inference peak and appear as
+long-lived allocations of 0.027 and 0.029 GiB, the inference peak falls to **101 MiB**
+whose largest single site is now `triton_turboquant_decode` at 85 MiB, and the budget's
+`peak_activation` drops **0.18 → 0.16 GiB**.
+
+What makes it safe to hold rather than merely cheaper is an invariant worth stating: the
+pool's high-water mark is set by the widest chunk, which is `max_num_batched_tokens`, and
+that is exactly what the profile run uses — so the pool cannot grow after profiling. A
+transient bounded by something the profile run exercises is a static in disguise.
+
+**Result: `gpu_memory_utilization=0.985` — `free/total` on this card, the most the knob can
+honestly ask for — serves this configuration.** Declared context 262144 with 264,993 tokens
+of cache, an 80,793-token prompt in 80.0 s, and **242,420 tokens (92.5% of capacity) in
+355.1 s**. Prefill throughput is unchanged by the pooling (1161 against 1167 t/s at 30K).
+
+The benchmark is reached for *this* backend and model, not in general: FlashInfer still
+carries 0.385 GiB it does not declare, and nothing but TurboQuant implements the hook.
 
 ## Open
 

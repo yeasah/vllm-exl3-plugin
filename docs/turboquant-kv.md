@@ -680,10 +680,12 @@ behind it":
   compile cache inflates profiled peak activation by 0.59 GiB and costs 35K tokens of
   declared context; disabling the cache, or having it already warm, both avoid it.
 - **`--kv-cache-memory=` is not needed any more.** The pin in the 4.00bpw command above
-  existed to bypass an unreliable profiler; at 0.975 the utilization path reaches the
-  ceiling on its own, and **it serves rather than merely declaring**: a 257,549-token
-  prompt — 98.2% of the declared context — completes, at **665.65 t/s of prefill**
-  (`profile-completion.py`, `live` mode, so 387 s to first token). That matters because
+  existed to bypass an unreliable profiler; the utilization path now reaches the ceiling on
+  its own, and **it serves rather than merely declaring**. At 0.975: a 257,549-token prompt
+  — 98.2% of the declared context — completes at **665.65 t/s of prefill**
+  (`profile-completion.py`, `live` mode, so 387 s to first token). At **0.985**, after the
+  reserve declaration and the scratch pooling: **242,420 tokens in 355.1 s**, 92.5% of
+  capacity. That matters because
   "profiles successfully, then dies at first inference" is the failure this ground keeps
   producing, and the KV cache being full is when it would happen.
   **The proof is behavioural, not accounted**: no profiled peak exists at that length,

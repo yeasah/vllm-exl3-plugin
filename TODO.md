@@ -170,13 +170,19 @@ predictable".
    MiB, under-reserves for FlashInfer by 235, and costs Triton 150 MiB it does not need —
    so it belongs as the default for backends that decline to declare, not as the fix.
 
-**The last 0.5 points are ours.** With the reserve declared, 0.985 starts and sizes the
-full context, then dies in the *plugin's* reconstruct path — `torch.empty((k, tile_n),
-half)` at [vllm_exl3_plugin/ops.py:533](vllm_exl3_plugin/ops.py#L533), 30 MiB wanted
-against 39 MiB free. A per-call runtime transient cannot be declared, so it has to stop
-being one: pool it per layer shape, carve it from the workspace manager the attention
-backends already share, or reconstruct into a pre-allocated view. That is the next item of
-work on this ground and it is in this repo, not the fork.
+**The benchmark is reached on TurboQuant** (2026-09-12). The last 0.5 points were ours:
+with the reserve declared, 0.985 started and then died in the plugin's reconstruct path,
+whose scratch was 46 MiB of a 107 MiB transient peak re-requested every call. Pooling it
+([`0184007`](vllm_exl3_plugin/ops.py)) converts that into two long-lived buffers the
+profiler sees, and `gpu_memory_utilization=0.985` — `free/total` on this card — now serves
+262144 declared context, 264,993 tokens of cache, 242,420 tokens of prompt in 355.1 s. The
+invariant that makes pooling sound rather than merely cheaper: the high-water mark is
+bounded by `max_num_batched_tokens`, which the profile run uses, so the pool cannot grow
+after profiling.
+
+**What is left is other backends.** FlashInfer carries 0.385 GiB it does not declare and
+is the default; nothing but TurboQuant implements the hook. So (2) and (3) below are now
+the whole item, and neither is about this model.
 
 **Out of scope for any workspace hook**, and worth stating because the ideal outcome is
 "no OOM in any configuration": non-torch context growth after the snapshot (JIT kernel
