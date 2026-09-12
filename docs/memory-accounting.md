@@ -693,6 +693,43 @@ was to recover the last half point of utilization, that argues for `auto` in-pro
 than a number passed in — but a probe run close to launch, using CUDA's API rather than
 NVML, is a defensible 0.3-point compromise that needs no fork patch.
 
+## FlashInfer: both workspaces are live, and the default floor is the real cost (2026-09-12)
+
+FlashInfer now declares its workspace too ([`f8f66be1b`](../patches.md)), sharing the
+sizing expression with `_get_workspace_buffer` the same way TurboQuant does. The result is
+worth stating precisely, because it is *not* the same kind of win:
+
+| config | KV | tokens | peak activation |
+|---|---|---|---|
+| 0.96, undeclared (the hand-found ceiling) | 3.86 GiB | ~116K | 0.56 GiB |
+| 0.975, undeclared | — | — | **OOM in `allocate_kv_cache`** |
+| **0.985, declared** | 3.83 GiB | 114,343 | 0.54 GiB |
+| **0.985, declared, 96 MiB workspace floor** | **4.41 GiB** | **134,744** | 0.25 GiB |
+
+**Declaring bought safety, not capacity** — 3.83 GiB against the 3.86 the hand-tuned 0.96
+produced. That is the honest shape of the trade: a declaration surfaces what a backend was
+already taking, so it converts a hidden subtraction into a visible one. Where TurboQuant's
+reserve was 96 MiB against unused headroom, FlashInfer's is 394 MiB, and the utilization
+points recovered (0.96 → 0.985 is 0.39 GiB) almost exactly cancel it.
+
+**The `init_attn_backend` workspace is not dead, so there is no deletion to take.** That
+hypothesis is retired: introspecting a live engine after a real request shows
+`_workspace_buffer` at 394 MiB with `_prefill_wrapper` **set**, `_decode_wrapper` and the
+cudagraph wrappers empty, and the module-global `trtllm_workspace_buffer` also at 394 MiB.
+The two are split by phase — prefill runs through the wrapper, decode through trtllm — and
+both are live in the same process. FlashInfer costs **788 MiB** here, of which the budget
+saw half.
+
+**What is actually recoverable is the floor.** Both buffers sit at
+`VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE`'s 394 MiB default while this fork's own estimate of
+the need — `max_num_batched_tokens x num_qo_heads x head_dim x 16` — is **48 MiB** at a
+512-token chunk (24 heads, head_dim 256). Lowering the floor to 96 MiB gives **+20,401
+tokens, +18%**, and serves a 121,448-token prompt. The estimate is a lower bound the fork
+already computes and raises the floor *to*; lowering the floor is the operator's call,
+because FlashInfer hard-errors rather than growing when a workspace is too small, and the
+estimate scales with chunk and head geometry (768 MiB at an 8192-token chunk). So this is a
+knob to set per configuration, not a default to change.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

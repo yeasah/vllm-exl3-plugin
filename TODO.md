@@ -143,8 +143,12 @@ predictable".
    because sharing the expression was the only way to keep the declaration from drifting
    from the allocation — so (2) is now about *other* backends implementing it.
 
-2. **The general hook: a backend static-workspace declaration, summed into the search that
-   already runs.** `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
+2. **The general hook, for backends beyond the two that implement it.** TurboQuant and
+   FlashInfer declare today; the ones worth checking next are FLASH_ATTN (it uses the
+   workspace manager for DCP context) and HPC_ATTN, since `grep -l workspace` over
+   `v1/attention/backends/` finds only those two plus ROCm's, and the MLA family — most of
+   the 37-entry backend registry is ROCm, XPU, CPU or MLA-sparse and cannot arise here.
+   The shape, for whoever implements it next: `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
    `_reserve_workspace` (or FlashInfer's `_get_workspace_buffer`) is about to allocate —
    TurboQuant 96 MiB, FlashInfer 0.385 GiB, Triton zero. The hard parts are already built:
    the backends compute the expression today, and
@@ -155,13 +159,21 @@ predictable".
    `_max_memory_usage_bytes_from_groups` puts backends inside it, and the `round_up` step
    comes along for free.
 
-3. **Check whether FlashInfer needs both of its workspaces.** It allocates 0.385 GiB
-   twice — once in `init_attn_backend`, once lazily in `forward` — and the budget sees only
-   the second. Measured 2026-09-12: the `init_attn_backend` copy is live and unseen, and it
-   is the entire reason the *default* backend stops 2.8 points short of the benchmark. If
-   it is dead once the trtllm path allocates its own, that is 0.385 GiB for a deletion, and
-   it is upstream's bug to take. **Largest single win, and it is for everyone's default,
-   not ours.**
+3. ~~**Check whether FlashInfer needs both of its workspaces.**~~ **Answered 2026-09-12:
+   yes, both are live**, so there is no deletion to take. A live engine after a real request
+   holds `_workspace_buffer` at 394 MiB with `_prefill_wrapper` set, and the module-global
+   `trtllm_workspace_buffer` at 394 MiB — the two are split by phase, prefill through the
+   wrapper and decode through trtllm. FlashInfer costs 788 MiB, and
+   [`f8f66be1b`](patches.md) now declares the half the budget could not see, which makes
+   0.985 safe but is capacity-neutral against the hand-found 0.96 it replaces.
+
+   **What is recoverable instead is the floor.** Both buffers sit at
+   `VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE`'s 394 MiB default while the estimate this fork
+   computes for the same config is 48 MiB; a 96 MiB floor gives **+20,401 tokens (+18%)**
+   and serves a 121,448-token prompt. It is a per-configuration knob rather than a default
+   to change — FlashInfer hard-errors instead of growing when a workspace is too small, and
+   the estimate scales to 768 MiB at an 8192-token chunk. Worth deciding per appliance
+   profile; see [docs/memory-accounting.md](docs/memory-accounting.md).
 
 4. **Demoted: lifting the 150 MiB `redundancy_buffer_memory` into the utilization path.**
    It exists in the recommendation path
