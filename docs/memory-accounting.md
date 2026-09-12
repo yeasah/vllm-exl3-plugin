@@ -532,6 +532,51 @@ reset peak stats after compilation and before the measured forward, or compile o
 window. It is upstream's to take, and unlike the workspace hooks it is a bug rather than a
 missing feature.
 
+## The ceiling is predictable, which is what makes the item closable (2026-09-12)
+
+The operator's benchmark is `gpu_memory_utilization = free/total` at startup — 15.28/15.51
+= **0.9852** on this card — because vLLM sizes the budget as `total x util`, so that ratio
+is the largest request that does not promise memory the card never had. Every backend's
+ceiling then follows from one term:
+
+    util_max(backend) = (free_at_startup - unseen_post_window) / total
+
+where `unseen_post_window` is what that backend allocates after the profiling window
+closes. Checked against all three backends on this model:
+
+| backend | unseen | predicted | observed |
+|---|---|---|---|
+| Triton fp8 | none | 0.9852 | **starts at 0.985**: KV 4.64 GiB, 141,020 tokens |
+| TurboQuant tq4 | 96 MiB reserve | 0.9791 | 0.975 serves, 0.98 OOMs at startup |
+| FlashInfer fp8 | 0.385 GiB workspace | 0.9568 | 0.96 serves, **0.975 OOMs** |
+
+The FlashInfer failure at 0.975 is the sharpest of the three because it names its own
+mechanism: `allocate_kv_cache` asks for 4.07 GiB with 4.03 free
+([utils.py:411](../deps/vllm/vllm/v1/worker/utils.py#L411)), and the process holds 11.47
+GiB before KV against the 11.03 the budget assumed — a 0.44 GiB under-measurement, its
+0.385 workspace plus slack. **The budget was not wrong about arithmetic; it was wrong
+about the backend.**
+
+**The model's own residual is ≤0.05 GiB, which is the number that decides the item.** That
+is 0.3 utilization points, so the answer is not "leave a few hundred MiB of slack": a
+per-backend declaration plus a margin in the tens of MiB reaches the benchmark on all
+three backends. It also demotes the cheapest candidate in `kv-budget-margin` — the 150 MiB
+`redundancy_buffer_memory` over-reserves for TurboQuant by 54 MiB, under-reserves for
+FlashInfer by 235, and costs Triton 150 MiB it does not need. It is a fallback for
+backends that decline to declare, not the fix.
+
+Two classes stay outside any workspace hook, and they bound how literally "no OOM in any
+configuration" can be read:
+
+- **Non-torch growth after the snapshot.** The gap between `free_at_startup` and what the
+  allocator later reports as capacity is context, not tensors — JIT kernel loading is the
+  suspect, and FlashInfer loads the most. A hook returning tensor bytes cannot see it;
+  pre-warming kernels before the snapshot could, and a small margin covers it meanwhile.
+- **Request-shaped allocations.** The profiled window is 512 tokens wide, so a logprobs
+  request at capacity allocates against headroom nobody reserved. That is admission
+  control, not a budget term, and it is the one part of the ideal outcome the profiler
+  cannot deliver.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

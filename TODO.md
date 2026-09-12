@@ -110,30 +110,55 @@ reads a deliberate 150 MiB offset, and the "budget overshoots what was asked for
 premise this item used to rest on was an artifact of double-counting the CUDA-graph
 estimate.
 
-**Candidate approach, cheapest first.**
+**The benchmark, and the model that says the item is closable** (2026-09-12). The target
+is `gpu_memory_utilization = free/total` at startup — **0.9852** on the 16 GiB card, since
+vLLM sizes the budget as `total x util`. Each backend's ceiling is then
+`(free_at_startup - unseen_post_window) / total`, and that predicts all three observed
+ceilings: Triton 0.9852 (starts at 0.985), TurboQuant 0.9791 (0.975 serves, 0.98 OOMs),
+FlashInfer 0.9568 (0.96 serves, 0.975 OOMs in `allocate_kv_cache`, asking 4.07 GiB with
+4.03 free). **The model's residual is ≤0.05 GiB — 0.3 utilization points** — so the
+outcome is a declaration plus a margin in the tens of MiB, not a few hundred MiB of slack.
+Measurements in [docs/memory-accounting.md](docs/memory-accounting.md) "The ceiling is
+predictable".
 
-1. **Lift the 150 MiB `redundancy_buffer_memory` into the utilization path.** It already
-   exists in the recommendation path ([gpu_worker.py:818](deps/vllm/vllm/v1/worker/gpu_worker.py#L818))
-   and covers the measured 0.08–0.12 GiB residual. One constant, one code path, no new
-   concepts. It does not fix the workspaces but it stops the last tenth of a GiB being a
-   surprise.
+**Candidate approach, in the order the measurements now support.**
 
-2. **A backend static-workspace declaration, summed into the search that already runs.**
-   `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
-   `_reserve_workspace` (or FlashInfer's `_get_workspace_buffer`) is about to allocate.
-   It is the candidate because the hard parts are already built: the backends already
-   compute the expression, and
+1. **Declare TurboQuant's 96 MiB.** One constant, one backend, and it is the difference
+   between the appliance's flagship config running at 0.975 and running at the benchmark.
+   Smallest possible version of (2), and the one whose value is already demonstrated.
+
+2. **The general hook: a backend static-workspace declaration, summed into the search that
+   already runs.** `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
+   `_reserve_workspace` (or FlashInfer's `_get_workspace_buffer`) is about to allocate —
+   TurboQuant 96 MiB, FlashInfer 0.385 GiB, Triton zero. The hard parts are already built:
+   the backends compute the expression today, and
    [`_estimate_max_model_len_from_groups`](deps/vllm/vllm/v1/core/kv_cache_utils.py#L2087)
    already binary-searches candidate context lengths by *asking for sizes* rather than
    profiling — twenty iterations of arithmetic, no forward passes, no interpolation, no
-   linearity assumption. It simply never asks the attention backend. Summing the hook
-   into `_max_memory_usage_bytes_from_groups` puts backends inside it, and the
-   `round_up` step comes along for free.
+   linearity assumption. It simply never asks the attention backend. Summing the hook into
+   `_max_memory_usage_bytes_from_groups` puts backends inside it, and the `round_up` step
+   comes along for free.
 
 3. **Check whether FlashInfer needs both of its workspaces.** It allocates 0.385 GiB
-   twice — once in `init_attn_backend`, once lazily in `forward` — and the budget sees
-   only the second. If the first is dead once the trtllm path allocates its own, that is
-   0.385 GiB for a deletion, and it is upstream's bug to take.
+   twice — once in `init_attn_backend`, once lazily in `forward` — and the budget sees only
+   the second. Measured 2026-09-12: the `init_attn_backend` copy is live and unseen, and it
+   is the entire reason the *default* backend stops 2.8 points short of the benchmark. If
+   it is dead once the trtllm path allocates its own, that is 0.385 GiB for a deletion, and
+   it is upstream's bug to take. **Largest single win, and it is for everyone's default,
+   not ours.**
+
+4. **Demoted: lifting the 150 MiB `redundancy_buffer_memory` into the utilization path.**
+   It exists in the recommendation path
+   ([gpu_worker.py:818](deps/vllm/vllm/v1/worker/gpu_worker.py#L818)) and was the cheapest
+   candidate until the per-backend figures came in. It over-reserves for TurboQuant by 54
+   MiB, under-reserves for FlashInfer by 235, and costs Triton 150 MiB it does not need —
+   so it belongs as the default for backends that decline to declare, not as the fix.
+
+**Out of scope for any workspace hook**, and worth stating because the ideal outcome is
+"no OOM in any configuration": non-torch context growth after the snapshot (JIT kernel
+loading — not a tensor, so nothing can declare it; a margin or a pre-warm covers it) and
+request-shaped allocations (a logprobs request at capacity, against a profiling window 512
+tokens wide — that is admission control, not a budget term).
 
 **The gate breakage is a symptom, and its fix is still not this item's fix.** One 27B
 entry still dies at first inference on the 16 GiB card (`blockq-MTP-fp8`; its sibling
