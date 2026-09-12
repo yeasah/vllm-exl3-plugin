@@ -123,9 +123,14 @@ predictable".
 
 **Candidate approach, in the order the measurements now support.**
 
-1. **Declare TurboQuant's 96 MiB.** One constant, one backend, and it is the difference
-   between the appliance's flagship config running at 0.975 and running at the benchmark.
-   Smallest possible version of (2), and the one whose value is already demonstrated.
+1. ~~**Declare TurboQuant's 96 MiB.**~~ **Done 2026-09-12**,
+   [`6ac849972`](patches.md): `AttentionBackend.get_reserved_workspace_bytes`, default
+   zero, subtracted before auto-fit, with TurboQuant pricing the same reservation sets its
+   builder hands to the workspace manager. Safe ceiling 0.975 → **0.98**, declared context
+   unchanged at 264,993 tokens (the 96 MiB comes out of unused headroom, not context), and
+   an 80,793-token prompt serves. It landed as the general hook rather than a special case
+   because sharing the expression was the only way to keep the declaration from drifting
+   from the allocation — so (2) is now about *other* backends implementing it.
 
 2. **The general hook: a backend static-workspace declaration, summed into the search that
    already runs.** `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
@@ -153,6 +158,14 @@ predictable".
    candidate until the per-backend figures came in. It over-reserves for TurboQuant by 54
    MiB, under-reserves for FlashInfer by 235, and costs Triton 150 MiB it does not need —
    so it belongs as the default for backends that decline to declare, not as the fix.
+
+**The last 0.5 points are ours.** With the reserve declared, 0.985 starts and sizes the
+full context, then dies in the *plugin's* reconstruct path — `torch.empty((k, tile_n),
+half)` at [vllm_exl3_plugin/ops.py:533](vllm_exl3_plugin/ops.py#L533), 30 MiB wanted
+against 39 MiB free. A per-call runtime transient cannot be declared, so it has to stop
+being one: pool it per layer shape, carve it from the workspace manager the attention
+backends already share, or reconstruct into a pre-allocated view. That is the next item of
+work on this ground and it is in this repo, not the fork.
 
 **Out of scope for any workspace hook**, and worth stating because the ideal outcome is
 "no OOM in any configuration": non-torch context growth after the snapshot (JIT kernel

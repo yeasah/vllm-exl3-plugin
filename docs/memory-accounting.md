@@ -577,6 +577,46 @@ configuration" can be read:
   control, not a budget term, and it is the one part of the ideal outcome the profiler
   cannot deliver.
 
+## Declaring the reserve: what it fixed, and the term it uncovered (2026-09-12)
+
+[`6ac849972`](../patches.md) gives `AttentionBackend` a
+`get_reserved_workspace_bytes(vllm_config, kv_cache_spec)`, default zero, and
+subtracts it from the KV budget before auto-fit runs. TurboQuant implements it by
+pricing the *same* reservation sets its builder hands to the workspace manager — one
+expression, two callers — because a declaration that drifts from the allocation is worse
+than none: the budget would be confidently wrong rather than merely blind.
+
+It declares **96.00 MiB**, and `VLLM_DEBUG_WORKSPACE` shows the builder taking exactly
+that (`0 -> 0.76 -> 96.00 MB`, the max over the two sets, not their sum).
+
+| util | before | after |
+|---|---|---|
+| 0.975 | 4.48 GiB KV, 264,993 tok, serves | 4.39 GiB KV, context clamped just under full |
+| **0.98** | **OOM at startup** | **4.46 GiB KV, full 262144, 264,993 tok, 80,793-token prompt served in 79.7 s** |
+| 0.985 | OOM in startup warmup, 23 MiB free | starts, full context, 267,842 tok — **first inference OOMs** |
+
+**The safe ceiling moved 0.975 → 0.98 and the declared context did not change**: 264,993
+tokens either way, so the 96 MiB comes out of headroom nobody was using rather than out of
+context. The knob is now honest one step further up.
+
+**It is not a double count**, which was the first thing to rule out since
+[`881c7345b`](../patches.md) has the profiling builders allocate and then shrink back.
+Control: peak activation is 0.18 GiB whether the reserve is 96 MiB or the monolithic
+path's 1032 MiB (`tq_prefill_workspace_mib=0`), so the builders' mark never reaches the
+measured peak — and in that configuration the declaration follows the reserve to 1032 MiB
+and auto-fit cuts context to 199,680, which is the hook demonstrating it tracks the
+allocation rather than a constant.
+
+**What the benchmark now waits on is ours, not vLLM's.** At 0.985 the engine starts, sizes
+the full context, and then dies in the *plugin's* reconstruct path —
+`torch.empty((k, tile_n), half)` at [ops.py:533](../vllm_exl3_plugin/ops.py#L533), 30 MiB
+wanted against 39 MiB free. That is a per-call runtime transient in a kernel wrapper, not
+a startup static, so no `get_reserved_workspace_bytes` can declare it; the ways out are
+pooling the buffer (it is the same shape every call for a given layer), reusing the
+workspace manager the attention backends already share, or reconstructing into a
+pre-allocated view. Until then **0.98 is the ceiling for this configuration and the
+remaining 0.5 points of utilization are a plugin question**.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the
