@@ -1164,10 +1164,15 @@ remains is the encoder's *resident* cost, not its weights.
 exercise. Today it works only with a correct `--mm-processor-kwargs '{"max_pixels": N}'`,
 and picking N wrong OOMs mid-request rather than at startup.
 
-**Candidate approach, two independent pieces.** The first makes vision usable; the second
-makes the cap generous.
+**Candidate approach, and the sequencing matters.** Do the transient work (2) **first**,
+and treat the autosizer (1) as the fallback it is. A knob that makes it easy to choose how
+much capability to give up is still a knob for giving up capability; if chunking removes
+the need to cap resolution at all, that is strictly the better outcome and (1) should be
+skipped entirely rather than built and then made redundant. Build (1) only once (2) is
+measured and shown insufficient.
 
-1. **Derive the cap instead of asking for it.** Autosize the image budget against measured
+1. **Fallback: derive the cap instead of asking for it.** Autosize the image budget
+   against measured
    headroom rather than making the operator guess, the way any knob checked against a hard
    threshold should default to that threshold. **Splits into a generic half and a small
    per-family half**: the *quantity* is already model-agnostic — `max_tokens_per_mm_item`
@@ -1180,8 +1185,8 @@ makes the cap generous.
    count per image is constant, so this is a *dynamic-resolution* problem, and only 10
    files use `smart_resize` at all. So: one sizer, plus a lookup from budget to whichever
    kwarg the family honours.
-2. **Stop the tower transient scaling with patch count.** Two routes, and the cheap one is
-   untested:
+2. **Do this first: stop the tower transient scaling with patch count.** If it succeeds,
+   full-resolution images become affordable and (1) never needs writing.
    - ~~Try `compile_mm_encoder` first.~~ **Tested 2026-09-12 and it is worse, not free.**
      The flag is live on this tower (28 compile passes, one per block), but it left peak
      activation at 0.43 GiB against 0.44 — so inductor does *not* avoid materialising the
@@ -1197,9 +1202,25 @@ makes the cap generous.
      attention, which mixes across tokens. Raises the affordable image size; does not
      remove the need for a cap.
 
-   **Unverified premise:** that the MLP dominates the transient anywhere but Qwen3.8. On a
-   tower with a different hidden/intermediate ratio the attention projections could lead
-   instead, which changes where to cut. Check before generalising the patch.
+   **Premise settled analytically 2026-09-12, and Qwen3.8 is the worst case.** Whether the
+   MLP or the attention projections lead is decided by `intermediate/hidden` in
+   `vision_config`, so it reads off config.json with no weights. Across eight towers the
+   MLP leads *everywhere*, by 2.49x (Qwen3-VL / gemma-3 / SigLIP, all the so400m shape
+   1152/4304) up to 5.94x (GLM-4.1V, 1536/13696). So chunking cuts in the right place on
+   every architecture checked, and it cuts hardest on the ones we have not measured.
+   Gated MLPs (GLM's `gate_up_proj` -> `SiluAndMul`) are worse still than the ratio
+   suggests, since the fused projection is `2 x I` wide before the activation halves it.
+   Step-3.7's `perception_encoder` states no `intermediate_size`; PE's standard mlp_ratio 4
+   would put it at 2.67x, unconfirmed.
+
+   **Second platform for the end-to-end test: `turboderp/GLM-4.1V-9B-Thinking-exl3`**
+   (revisions 2.00-6.00bpw). 8.01 GiB total at 5.00bpw leaving ~7.5 GiB of headroom, and a
+   **1.662 GiB bf16 encoder — 20.76% of the package**, near the worst share in the census
+   and the largest tower we can actually run locally. It is the right control because it
+   differs in every axis that matters: gated MLP through `Glm4vVisionMLP`, not
+   `Qwen3_VisionMLP`; the highest I/H in the survey; and still dynamic-resolution, so it is
+   the same problem class rather than a fixed-resolution tower with nothing to stress.
+   Untested so far — not yet loaded through the plugin.
 
 → [docs/media-encoders.md](docs/media-encoders.md),
 [docs/memory-accounting.md](docs/memory-accounting.md)
