@@ -484,6 +484,26 @@ the culprit so much as the second victim — FlashInfer itself holds 0.385 GiB o
 workspace the budget never sees, and TurboQuant 1.000 GiB. See
 [memory-accounting.md](memory-accounting.md).
 
+**But the eager/graphs sign split above is not established, and a cheap test settles it**
+(noted 2026-09-12). A cold torch.compile cache was measured that day costing 0.59 GiB of
+*profiled peak activation*, because compilation happens inside the profiling window and
+its high-water mark becomes the activation term
+([memory-accounting.md](memory-accounting.md)). `enforce_eager` sets
+`CompilationMode.NONE` ([vllm.py:1370](../deps/vllm/vllm/config/vllm.py#L1370)), so an
+eager entry cannot pay that term at all — and the two entries that *lost* KV headroom in
+the table are exactly the two graph entries, at 1.01 and 0.28 GiB. These runs predate
+`bench/`'s cache control (built 2026-09-10, which redirects every store and runs a warmup
+per entry precisely so the measured run is warm), so nothing recorded what cache state
+they were in. "0.29 grew something CUDA-graph capture pays for" and "these two runs
+compiled cold" predict the same table.
+
+The test is one entry, two runs, no bump involved: take `qwen3-0.6B 3.0bpw`, run it with
+the warmup and again without, and compare `kv_cache_gib`. If the delta is the 1.01 GiB the
+table attributes to 0.29, the attribution is wrong and the mechanism is cache state. This
+is not a reason to re-open the 0.29 conclusions — the *static workspace* finding stands on
+its own controlled experiment — but it is a reason not to cite this table as evidence
+about what a version bump cost.
+
 Removing the rest of TQ's was costed as changing a dequant
 kernel's dtype or rewriting an attention backend we do not own, and both were declined as
 things to *offer*; that decision was reopened on 2026-09-08 as work to carry, with a
