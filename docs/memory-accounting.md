@@ -207,6 +207,75 @@ Only 2 of the 5 buffers the prefill path uses are covered by the reserve at all.
 three `_continuation_prefill` allocations (0.189, 0.190, 0.190 GiB at ~100K) are fresh
 on top of it.
 
+### The over-sizing was a high-water mark, and it is fixed
+
+Settled 2026-09-12 with `VLLM_DEBUG_WORKSPACE=1`, no code change. The whole startup
+logs exactly **two** resizes, and both land a second before auto-fit:
+
+```
+08:20:34 Resized workspace from 'turboquant_attn.py:243:_reserve_workspace': 0.00 -> 0.76 MB
+08:20:34 Resized workspace from 'turboquant_attn.py:259:_reserve_workspace': 0.76 -> 1024.00 MB
+08:20:35 Auto-fit max_model_len: reduced from 262144 to 150528
+```
+
+Neither hypothesis this note recorded is right on its own, and the fix is neither
+deferring a call nor solving a fixed point. The builder is constructed **twice**:
+
+- **First by the CUDA-graph memory profiler**, which stands up a full set of builders
+  against a minimal KV cache, measures capture, and throws them away. It runs *after*
+  the memory-profiling window closes and *before* auto-fit, so it reserves at 262144.
+- **Then by the real `initialize_kv_cache`**, which reads the fitted 150528 and asks for
+  588 MB. That read is **fresh, not stale** — and it logs no resize at all, because
+  `_ensure_workspace_size` only ever grows.
+
+So the gigabyte is a *discarded* builder's high-water mark. The profiling teardown
+clears `attn_groups` and `kv_caches` and never touches the workspace, and growth is
+one-way by design: reaching the runtime maximum before `lock_workspace` is exactly what
+warmup is for.
+
+**Fixed** in [`881c7345b`](../patches.md): bracket the profiling phase with the
+workspace sizes taken on entry and shrink back to them in its teardown, so only growth
+that phase caused is given back.
+
+The first version simply released the workspace, which measures the same and is wrong.
+`lock_workspace` says in its own comment that the maximum "should have been captured
+during warmup/profiling" — growth is one-way *on purpose*, and `profile_run` runs before
+this phase and inside the memory-profiling window. Dropping to zero discards its mark
+too, and anything that grows the workspace during the profile pass but not during
+capture would then grow it after the lock, which is an assertion at first inference
+rather than a wrong number. No configuration on this card was found that actually does
+that — TurboQuant's mark on entry is zero, and a Qwen3.5-35B-A3B MoE run never touches
+the workspace at all — so the narrowing is defensive, taken because the failure it
+avoids is a crash and the cost of avoiding it is one list of integers.
+
+Measured A/B on this configuration, same session, patch stashed and unstashed:
+
+| | before | after |
+|---|---|---|
+| reserve after auto-fit | 1024.00 MB | 588.00 MB |
+| card occupancy at startup | 14810 MiB | 14370 MiB (**−440**) |
+| card occupancy after a 99,923-token prefill | 15584 MiB | 15164 MiB (**−420**) |
+| `max_model_len` | 150528 | 150528 |
+| greedy continuation (64 ids) | — | identical |
+
+Two things it does **not** do, both load-bearing for what comes next:
+
+- **It does not buy context, only headroom.** `max_model_len` is unchanged, because
+  auto-fit never saw the reservation on either side of the fix. Converting the 440 MiB
+  into declared context is `kv-budget-margin`'s hook, not this.
+- **It does not change the per-token rate.** 588 MB over 150528 tokens is the same
+  4096 B/token as 1.000 GiB over 262144 — the reserve still prices *declared* context,
+  it is now merely declared-after-fitting. The table below is unchanged, and removing
+  the tax itself is steps 2 and 3 of `turboquant-prefill-transient`.
+
+**Navigation trap, since it cost a wrong patch here.** The live model runner is
+`vllm/v1/worker/gpu/model_runner.py` and its helpers under `vllm/v1/worker/gpu/`; the
+older `vllm/v1/worker/gpu_model_runner.py` is a still-selectable fallback
+(`VLLM_USE_V2_MODEL_RUNNER`, ROCm architectures, no Triton) that reads as the obvious
+file and executes in none of our runs. They log as `model_runner.py:` and
+`gpu_model_runner.py:` respectively, which is the cheapest way to tell from a log which
+one ran. Both carry the fix.
+
 ### What it costs, in the units the appliance sells
 
 | config | B/token KV | B/token workspace | effective |
@@ -268,16 +337,6 @@ The closed form is available too, if a search is unwanted: with both terms linea
 
 ## Open
 
-- **Call order for `_reserve_workspace` is not established.** The reserve is sized at
-  262144 and is invisible to the profiler; both facts are solid. Why is not. There is an
-  early `if not is_workspace_manager_initialized(): return` guard, and the metadata
-  builder appears to be constructed both before the profile run and again in
-  `init_kv_cache`, so "reads a stale `max_model_len`" and "is constructed pre-auto-fit"
-  are both consistent with the data. The fix differs between them: a stale read is fixed
-  by deferring the call; pre-auto-fit construction is a fixed point that someone has to
-  solve. `VLLM_DEBUG_WORKSPACE=1` settles it with no code change —
-  [workspace.py:212](../deps/vllm/vllm/v1/worker/workspace.py#L212) logs caller, old size
-  and new size on every resize, timestamped against the auto-fit line.
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the
   `init_attn_backend` one is dead once the trtllm path allocates its own.
 - **Whether the 0.08–0.12 GiB residual is constant across models**, or scales with
