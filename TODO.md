@@ -180,9 +180,16 @@ invariant that makes pooling sound rather than merely cheaper: the high-water ma
 bounded by `max_num_batched_tokens`, which the profile run uses, so the pool cannot grow
 after profiling.
 
-**What is left is other backends.** FlashInfer carries 0.385 GiB it does not declare and
-is the default; nothing but TurboQuant implements the hook. So (2) and (3) below are now
-the whole item, and neither is about this model.
+**What is left is other backends, and applying a number that is already printed.**
+FlashInfer carries 0.385 GiB it does not declare and is the default; nothing but TurboQuant
+implements the hook. So (2) and (3) below are the whole item on the engine side.
+
+Separately, the *ceiling itself* needs no discovery: every startup prints `Free memory on
+device (15.28/15.51 GiB)`, and that ratio is the maximum, identical across 15 runs here
+spanning three backends, two KV dtypes and both engine modes. Nothing computes it, so the
+operator retypes what is already on the screen — either `gpu_memory_utilization=auto` from
+the init snapshot (a fork patch, and the obligation that follows) or the appliance reading
+NVML before launch (free, and the right home for a single-tenant policy).
 
 **Out of scope for any workspace hook**, and worth stating because the ideal outcome is
 "no OOM in any configuration": non-torch context growth after the snapshot (JIT kernel

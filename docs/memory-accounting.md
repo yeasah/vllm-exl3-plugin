@@ -636,6 +636,33 @@ of cache, an 80,793-token prompt in 80.0 s, and **242,420 tokens (92.5% of capac
 The benchmark is reached for *this* backend and model, not in general: FlashInfer still
 carries 0.385 GiB it does not declare, and nothing but TurboQuant implements the hook.
 
+### The ratio does not have to be discovered, only applied
+
+Worth correcting an earlier framing here: the maximum is not hidden. Every startup prints
+`Free memory on device (15.28/15.51 GiB) on startup`, and that ratio — 0.9852 — *is* the
+ceiling, because vLLM sizes the budget as `total x util` while only `free` is actually
+available. Any invocation will do: across 15 runs on this box spanning three attention
+backends, two KV dtypes, utilizations from 0.86 to 0.985, in-process and child engines,
+and cold and warm compile caches, the line reads **15.28/15.51 every time**. The 0.23 GiB
+gap is a fixed per-process cost (CUDA context plus driver reserve), not a property of the
+model or the configuration.
+
+So what is missing is not a measurement but its application — nothing computes
+`free/total` and uses it, so every operator types a number that is already on their screen.
+Two places it could be applied, and they have different costs:
+
+- **`gpu_memory_utilization=auto` in the engine**, from the init snapshot it already takes.
+  This is [[autosize-against-thresholds]] applied to the knob itself: the inputs are in
+  hand before the value is needed. Costs a fork patch and the obligation that comes with it.
+- **The appliance computing it before launch** (NVML free/total), which costs nothing in
+  the fork and is where single-tenant assumptions belong anyway — "claim everything
+  currently free" is a deployment policy, not an engine default.
+
+One caveat either way: `free` is read *after* this process's CUDA context exists, and
+non-torch memory can still grow afterwards — FlashInfer's JIT loading was measured doing
+exactly that. A backend that grows its context after the snapshot needs that allowance in
+bytes, which is the one place a margin is genuinely unavoidable.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the
