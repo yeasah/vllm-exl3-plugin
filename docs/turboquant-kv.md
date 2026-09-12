@@ -609,6 +609,21 @@ prefill latency — 256 makes a full-context prompt ~300 sequential forward pass
 extreme is not the right point. Measured at 512 with the capture list trimmed: **3072 tokens given up (-4%) to take
 full-context prefill from 300 sequential passes to 144**.
 
+**That is stale as of vLLM 0.29 — the logits buffer is no longer sized by the chunk
+(checked 2026-09-12).** The profile run computes logits only at
+`logit_indices = cumsum(num_scheduled_tokens) - 1`, one row per request
+([gpu_model_runner.py:6305](../deps/vllm/vllm/v1/worker/gpu_model_runner.py#L6305)), so
+the tensor it profiles is `max_num_seqs x vocab` — 1 MiB at `--max-num-seqs 1` — not
+`chunk x vocab`. Measured on the 3.00bpw config at `gpu_memory_utilization=0.975`,
+2048 -> 512 moves peak activation 0.80 -> 0.77 GiB and KV capacity 227,094 -> 230,169
+tokens: **+3,075 tokens, where `chunk x vocab x 2` predicts ~40K.** The arithmetic that
+failed is version-independent, so the ~9K -> 46K result above belongs to the version it
+was measured on and does not transfer. Treat the knob as a prefill-latency control and
+nothing else. Most of that 0.77 GiB turned out not to be activation at all — the same
+configuration profiles 0.18 GiB once the torch.compile cache is warm or off — so the
+vocabulary was never the term worth chasing here; see
+[memory-accounting.md](memory-accounting.md).
+
 **CUDA graphs are on, and they are not the memory hazard they are assumed to be.**
 Capture reported **0.04 GiB**, and enabling them *raised* usable context 46K -> 67K:
 `enforce_eager` was the more expensive path on this model, presumably via a more
@@ -633,3 +648,42 @@ rate for capacity work.
 at runtime, so the remaining OOM candidates are all request-shaped. The adversarial test
 is cheap and worth running deliberately: fill the KV to capacity, then issue a long
 request asking for logprobs.
+
+### The configuration that superseded it: full declared context at 3.00bpw (2026-09-12)
+
+The section above is kept because its reasoning about each flag still holds, but it is no
+longer the configuration to copy. At 3.00bpw the same model now serves **its full declared
+262144 context** — 264,993 tokens in the cache, auto-fit reporting no reduction — on the
+same 16 GiB card:
+
+```
+VLLM_DISABLE_COMPILE_CACHE=1 EXL3_BLOCKQ_ON_LOAD=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve \
+  turboderp/Qwen3.8-27B-exl3 --revision 3.00bpw \
+  --max-num-seqs 1 --max-model-len auto --language-model-only \
+  --kv-cache-dtype turboquant_4bit_nc --enable-prefix-caching \
+  --performance-mode interactivity --max-num-batched-tokens 512 \
+  --gpu-memory-utilization 0.975 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+```
+
+What changed is not this note's subject — it is that TurboQuant's prefill stopped
+allocating anything sized by context, which freed 1580 MiB at the peak. Three things about
+the command are worth knowing before editing it, all established in
+[memory-accounting.md](memory-accounting.md) "The payoff, and the term that was hiding
+behind it":
+
+- **`--gpu-memory-utilization 0.975` is load-bearing and hand-found.** Nothing derives it;
+  auto-fit cannot see the consumers that decide whether it is safe. That is TODO
+  `kv-budget-margin`.
+- **`VLLM_DISABLE_COMPILE_CACHE=1` is load-bearing too**, which is not obvious. A *cold*
+  compile cache inflates profiled peak activation by 0.59 GiB and costs 35K tokens of
+  declared context; disabling the cache, or having it already warm, both avoid it.
+- **`--kv-cache-memory=` appears not to be needed any more.** The pin in the 4.00bpw
+  command above existed to bypass an unreliable profiler; at 0.975 the utilization path
+  reaches the ceiling on its own. Scope of that claim: startup and auto-fit are verified
+  across five runs, and the operator has served from this configuration, but **a
+  full-context prefill at 262144 with the budget this tight has not been run here** — and
+  "profiles successfully, then dies at first inference" is the exact failure this ground
+  keeps producing. Worth doing deliberately, together with the logprobs adversarial test
+  above.

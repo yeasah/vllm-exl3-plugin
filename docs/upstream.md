@@ -326,6 +326,32 @@ the native path at all. `DFlashQwen3Model.fc` is the same shape. Gated as
 measured error. *This is the general form of the `embed-quant-config` problem*, and a
 fix worth filing should be judged against both.
 
+**A cold torch.compile costs 35K tokens of declared context, permanently** (measured
+2026-09-12). `profile_run()` executes inside `memory_profiling()`
+([gpu_worker.py:553](../deps/vllm/vllm/v1/worker/gpu_worker.py#L553)), that context resets
+peak stats on entry ([mem_utils.py:291](../deps/vllm/vllm/utils/mem_utils.py#L291)), and
+the activation term the KV budget subtracts is `torch_peak - torch_allocated`. On a cold
+cache the first forward is also the compile, so inductor's compile-time allocations set
+the mark. Measured on `Qwen3.8-27B-exl3@3.00bpw` at `gpu_memory_utilization=0.975`, the
+same config reports **0.77 GiB of peak activation cold and 0.18 GiB warm** — a 0.59 GiB
+difference, 35K tokens of `max_model_len`, and the difference between auto-fit declaring
+the model's full 262144 and clamping it. `consumed` and CUDAGraph memory are identical
+across the pair, and a warm *load* of the same artifact costs nothing, which is what makes
+it attributable to compilation rather than to the graph.
+
+*Why it is worth someone's time*: every operator's first launch after a version bump or a
+flag change is the cold one, and the penalty sticks for the life of that process while
+looking like a property of the release. It also makes any memory measurement silently
+cache-dependent — the shape of the problem `bench-cache-control` exists for on our side.
+Candidate fix is a reset between compilation and the measured forward, or compiling
+outside the window.
+
+**Not fileable yet** by the standing check below: everything above is a stock-vLLM
+mechanism with no plugin involvement, but it was measured on the fork with an EXL3 model,
+and *what* the compiler allocates is still a suspicion (inductor autotuning, on the
+strength of `benchmark_combo_kernel: True` in the config) rather than a measurement. Both
+gaps are cheap to close: one stock build, one stock model, one cold-then-warm pair.
+
 ### Carried, not offered
 
 **`vllm-fused-param-capability-check`** — lets a parameter declare it splits fused

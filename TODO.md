@@ -63,9 +63,13 @@ share that ground and are the top of this file for that reason —
 
 `turboquant-prefill-transient` closed on 2026-09-12 and took the larger half with it:
 TurboQuant's prefill no longer allocates anything sized by context, which is 1580 MiB
-back at the peak on the 16 GiB card. None of that became declared context, because
-auto-fit cannot see any of these consumers. **`kv-budget-margin` is what converts it**,
-and it is the only item left on this ground.
+back at the peak on the 16 GiB card. **It did convert, at a utilization the operator has
+to find by hand**: `Qwen3.8-27B-exl3@3.00bpw` + `turboquant_4bit_nc` now serves the full
+declared 262144 context on the 16 GiB card at `gpu_memory_utilization=0.975`, against
+the 150,528 that the same stack auto-fit to at its 0.86 ceiling before the transient work
+([docs/memory-accounting.md](docs/memory-accounting.md)). So
+**`kv-budget-margin` is what makes it reachable rather than discoverable**, and it is the
+only item left on this ground.
 
 It also got easier. The reason it could not have gone first is in
 [docs/memory-accounting.md](docs/memory-accounting.md): a context-scaled *runtime
@@ -83,6 +87,17 @@ ceiling by OOMing at first inference.
 `turboquant-prefill-transient` went first and took the largest single term with it.
 What remains is the general case — the mechanism is backend-independent, and FlashInfer
 carries 0.385 GiB of it with no TurboQuant in sight.
+
+**The milestone that sets the price of not doing this** (2026-09-12): the 27B at 3.00bpw
+serves its full declared 262144 context on the 16 GiB card — but only at 0.975, and only
+with a warm or disabled torch.compile cache. A cold cache costs 0.59 GiB of *profiled peak
+activation*, which is 35K tokens of declared context, because `profile_run()` compiles
+inside the profiling window and the compiler's high-water mark becomes the activation
+term. That is a fourth consumer, it is a bug rather than a missing declaration, and no
+backend hook can cover it — see [docs/memory-accounting.md](docs/memory-accounting.md)
+"The payoff, and the term that was hiding behind it". Two non-findings from the same
+matrix, so nobody re-tests them: `VLLM_ENABLE_V1_MULTIPROCESSING` does not move the budget
+at all, and `--max-num-batched-tokens` moves it by 3,075 tokens for a 4x change.
 
 **The accounting is done** (2026-09-12,
 [docs/memory-accounting.md](docs/memory-accounting.md)): every byte on the card is
@@ -153,7 +168,7 @@ describes cache state. Five stores on the dev box can steer kernel selection or 
 | cache | why it matters |
 |---|---|
 | `exllamav3/autotune` | **proven** to change greedy output; `COOP_AUTOTUNE_VERSION` is XORed into the key, so upstream bumps invalidate it silently |
-| `vllm/torch_compile_cache` | inductor fusion decisions; already known to be keyed on `vllm.__version__` |
+| `vllm/torch_compile_cache` | inductor fusion decisions; already known to be keyed on `vllm.__version__`; and **measured 2026-09-12 to move KV headroom by 0.59 GiB** — cold compiles inside the profiling window, so a cold entry is handed 35K fewer tokens of context than a warm one ([docs/memory-accounting.md](docs/memory-accounting.md)) |
 | `triton/cache` | JIT'd kernels |
 | `vllm/flashinfer_autotune_cache` | kernel selection, and observed saving 0 configs under memory pressure |
 | `flashinfer` JIT store | JIT'd kernels |
@@ -1578,8 +1593,11 @@ divergence is deliberately all qbench measures),
   log-sum-exp. 1580 MiB back at the peak for ~1% of prefill throughput, agreement with
   the old path to one bf16 quantum per call, identical greedy output at 100K. The
   feared part — causal bookkeeping across chunks — did not exist; the split point is
-  exactly where the mask changes character. What it does *not* do is buy context:
-  auto-fit never saw any of it, which is now `kv-budget-margin`'s whole job.
+  exactly where the mask changes character. It *does* buy context, established
+  2026-09-12: full declared 262144 on the 16 GiB card at `gpu_memory_utilization=0.975`,
+  against 150,528 at the old 0.86 ceiling. What it does not do is buy it *automatically* — auto-fit still
+  cannot see these consumers, so the operator finds 0.975 by hand, which is
+  `kv-budget-margin`'s whole job.
 
 - `exl3-149-quality` — answered 2026-09-10, **no**, see [docs/qbench.md](docs/qbench.md)
   "Did the exllamav3 v1.4.9 bump cost quality?". Dense (Qwen3-8B, 3.0 and 4.0 bpw) is

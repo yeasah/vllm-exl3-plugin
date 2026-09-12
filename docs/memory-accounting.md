@@ -6,6 +6,11 @@ How vLLM's memory budget is computed, which consumers it cannot see, and why
 `turboderp/Qwen3.8-27B-exl3@3.00bpw`, `max_num_batched_tokens=512`,
 `max_num_seqs=1`, `max_model_len=-1` (auto-fit from a declared 262144).
 
+**Updated 2026-09-12.** The ~0.85 ceiling in that sentence *was* TurboQuant's prefill
+transient. With it gone, 0.975 serves the full declared 262144 on the same model and card
+("The payoff" below). What is still not safe is that 0.975 has to be found by hand, and
+that a cold torch.compile cache moves the answer by 35K tokens.
+
 The short version: **the budget's model of "everything that is not KV cache" is
 backend-independent, and the truth is not.** All three attention backends report
 `consumed memory (weights + non-torch) = 10.46 GiB`, byte-identical. What is actually
@@ -442,9 +447,74 @@ exactly what interpolating between profiled points would have got wrong. Lifting
 The closed form is available too, if a search is unwanted: with both terms linear,
 `L = (budget − fixed) / (b_workspace + b_kv)`, which for TQ is `budget / 22,920`.
 
+## The payoff, and the term that was hiding behind it (2026-09-12)
+
+`turboderp/Qwen3.8-27B-exl3@3.00bpw` with `turboquant_4bit_nc` now serves **the model's
+full declared 262144 context on the 16 GiB card** — the cache holds 264,993 tokens and
+auto-fit prints *"full model context length 262144 fits in available GPU memory"* instead
+of a reduction, for the first time on this model. That is the transient work's dividend in
+the units the appliance sells, and it needed `gpu_memory_utilization=0.975`: a number the
+operator has to arrive at by hand, which is `kv-budget-margin`'s entire case.
+
+The full command is in [turboquant-kv.md](turboquant-kv.md) "The configuration that
+superseded it"; it is the run script's verified line with the utilization raised, plus
+`--max-num-batched-tokens 512` and `EXL3_BLOCKQ_ON_LOAD=1`, which loads weights at
+10.24 GiB.
+
+Reproducing it from that script turned up a consumer nobody had priced: **a cold
+torch.compile cache costs 0.59 GiB of budget, which is 35K tokens of declared context.**
+
+| run | compile cache | engine | peak activation | KV | auto-fit | KV tokens |
+|---|---|---|---|---|---|---|
+| A | cold (compile+save) | child | 0.80 GiB | 3.88 GiB | 262144 → 224256 | 227,094 |
+| B | cold (compile+save) | child | 0.77 | 3.91 | 262144 → 227328 | 230,169 |
+| C | disabled | in-process | **0.18** | **4.48** | **full 262144 fits** | **264,993** |
+| D | disabled | child | 0.18 | 4.48 | full fits | 264,993 |
+| E | **warm** (`Directly load`) | child | 0.18 | 4.48 | full fits | 264,993 |
+
+All rows `--gpu-memory-utilization 0.975`; B–E at `--max-num-batched-tokens 512`, A at the
+default 2048. C reproduces the operator's run byte-for-byte. In every row `consumed memory
+(weights + non-torch)` is 10.45–10.46 GiB and CUDAGraph memory is 0.04 GiB, so **nothing
+but the activation term moves.**
+
+Three findings, largest first:
+
+- **A cold-cache launch declares 35K less context than a warm one, and keeps it for the
+  life of the process.** E is the control that makes this attributable: the *loaded*
+  artifact costs nothing, so the 0.59 GiB is a high-water mark left by compiling and
+  saving. It is charged because `profile_run()` runs *inside* the profiling window
+  ([gpu_worker.py:553](../deps/vllm/vllm/v1/worker/gpu_worker.py#L553)), that window
+  resets peak stats on entry
+  ([mem_utils.py:291](../deps/vllm/vllm/utils/mem_utils.py#L291)), and the activation term
+  is `torch_peak - torch_allocated` — so inductor's compile-time benchmarking (this config
+  runs with `benchmark_combo_kernel: True`) sets the mark that sizes the KV cache. **Same
+  failure mode as the TQ reserve's discarded builders**: machinery that is not inference
+  setting the high-water mark that auto-fit then reads. The operator-visible version is
+  that the first launch after any version or flag change silently serves less context than
+  every launch after it — and that `VLLM_DISABLE_COMPILE_CACHE=1`, which is set in this
+  box's `~/.bashrc` and looks like a debugging leftover, is load-bearing for the
+  milestone above.
+- **`VLLM_ENABLE_V1_MULTIPROCESSING` does not affect the budget at all** — C against D is
+  byte-identical, in-process against child `EngineCore`.
+- **`--max-num-batched-tokens` barely affects it either**: A against B is +3,075 tokens
+  for a 4x smaller chunk, because logits are profiled one row per request, not per batched
+  token. The older `chunk x vocab` claim is corrected in
+  [turboquant-kv.md](turboquant-kv.md).
+
+For `kv-budget-margin` this is a term no backend declaration can cover, because no backend
+owns it: the candidate fix is to stop the profiler reading a mark set by the compiler —
+reset peak stats after compilation and before the measured forward, or compile outside the
+window. It is upstream's to take, and unlike the workspace hooks it is a bug rather than a
+missing feature.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the
   `init_attn_backend` one is dead once the trtllm path allocates its own.
 - **Whether the 0.08–0.12 GiB residual is constant across models**, or scales with
   something. It is stable across three backends and three utilizations on one model.
+- **What exactly the cold-compile 0.59 GiB is.** Inductor's autotuning/combo-kernel
+  benchmarking is the suspect on the strength of the config, not of a measurement, and the
+  figure is from one model at one chunk size. Worth knowing before offering upstream a
+  reset, because "reset peak stats after compile" is only correct if nothing the compiler
+  allocates is still live when the measured forward runs.
