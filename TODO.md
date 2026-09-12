@@ -84,6 +84,17 @@ The outcome wanted is a utilization knob that is safe to turn: a declared contex
 the engine can keep, on any attention backend, without the operator discovering the
 ceiling by OOMing at first inference.
 
+**Why eliminating the unseen terms beats padding them.** `gpu_memory_utilization` does two
+jobs: claiming a share of the card, which is legitimately a ratio, and buying insurance
+against the profiler's blind spots, which is the more common use and is not a ratio at all
+— a deployment that wants ~1 GiB of insurance needs a different percentage on every card
+size, so the number does not transfer between machines. Fixing that conflation in vLLM is
+not this item; it is the reason the target is to shrink what the profiler cannot see rather
+than to find the utilization that survives. If a margin turns out to be unavoidable, it
+gets its own knob **in bytes**, defaulted from the measured requirement. Reaching the
+benchmark in every configuration is explicitly not required — the remaining work is priced
+by effort.
+
 `turboquant-prefill-transient` went first and took the largest single term with it.
 What remains is the general case — the mechanism is backend-independent, and FlashInfer
 carries 0.385 GiB of it with no TurboQuant in sight.
