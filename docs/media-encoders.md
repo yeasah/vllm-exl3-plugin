@@ -616,3 +616,52 @@ which restores the single-shot form exactly. Where the tower is resident rather 
 offloaded, chunking is nearly free and there is no reason to turn it off; where it is
 offloaded, the trade is a few seconds of startup against a configuration that may not
 otherwise fit.
+
+## Can the tower cost be reduced to bytes-per-pixel, the way KV reduces to bytes-per-token?
+
+The appliance already does pre-launch KV estimation, and an image budget looks like the
+same shape of problem with pixels where tokens were. Measured 2026-09-12, the answer is
+**the form reduces cleanly and the coefficient does not**, and the difference is what
+decides where the calculation belongs.
+
+**The form reduces.** The tower's peak is linear in patch rows with a negligible
+intercept, and one row is a fixed number of pixels (`patch_size^2`, times
+`temporal_patch_size` for video). Qwen3.8's tower, chunked, sweeping the grid:
+
+| patch rows | peak | B/row | / (H x dtype) |
+|---|---|---|---|
+| 9,216 | 0.260 GiB | 30,295 | 13.15 |
+| 16,384 | 0.346 GiB | 22,673 | 9.84 |
+| 25,600 | 0.445 GiB | 18,682 | 8.11 |
+| 36,864 | 0.644 GiB | 18,747 | 8.14 |
+| 65,536 | 1.134 GiB | 18,576 | 8.06 |
+
+Fitting the two largest: **18,350 B/row + 14.3 MiB**. So above the chunk threshold the
+cost is `c x hidden_size x dtype_size x rows`, with `c ~ 8` — a small integer count of
+`[rows, hidden]`-shaped tensors simultaneously live at the peak instant, which is exactly
+the shape of a KV calculator's `2 x layers x kv_heads x head_dim x dtype`. The curve at
+small row counts is not noise: below `chunk_rows` the MLP runs single-shot and its two
+full-width buffers rejoin the peak, so the law is piecewise with the knee at the chunk
+size.
+
+**The coefficient does not reduce, and that is the whole difference.** `c` is a property
+of the implementation's liveness pattern, not of the checkpoint:
+
+- it differs by architecture — **7.96** on Qwen3.8, **10.27** on GLM-4.1V, same units;
+- it is not readable from any config field, since what sets it is which tensors happen to
+  be alive at one instant;
+- **and it moved 35% today.** Before `e272b1784` and `2f3e2a7db` Qwen's was 12.28; after,
+  8.06. Two commits changed the constant an appliance would have hardcoded.
+
+A KV calculator survives engine upgrades because `2 x layers x kv_heads x head_dim` is a
+property of the model. A tower calculator does not, because `c` is a property of the
+engine. An appliance that pins it is pinning a number its dependency is free to change,
+and the failure mode is the quiet one: a budget that was right last release and now
+under-reserves.
+
+**So: same arithmetic, different owner.** The appliance can own the *policy* — where on
+the fidelity/context curve to sit — and the shape of the estimate. The *coefficient* has
+to come from the engine that determines it, either measured at startup (the profiler
+already runs the tower once; it could report B/row alongside the peak) or published by the
+fork per version. Hardcoding it downstream converts an engine change into a silent
+capacity bug, which is the class this project treats as outranking crashes.
