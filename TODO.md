@@ -1216,7 +1216,7 @@ measured and shown insufficient.
    MLP or the attention projections lead is decided by `intermediate/hidden` in
    `vision_config`, so it reads off config.json with no weights. Across eight towers the
    MLP leads *everywhere*, by 2.49x (Qwen3-VL / gemma-3 / SigLIP, all the so400m shape
-   1152/4304) up to 5.94x (GLM-4.1V, 1536/13696). So chunking cuts in the right place on
+   1152/4304) up to 3.89x (Muse-Glimmer, 1536/8960). So chunking cuts in the right place on
    every architecture checked, and it cuts hardest on the ones we have not measured.
    Gated MLPs (GLM's `gate_up_proj` -> `SiluAndMul`) are worse still than the ratio
    suggests, since the fused projection is `2 x I` wide before the activation halves it.

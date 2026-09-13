@@ -359,10 +359,17 @@ confirmation and was not — the prediction used 24,336 rows while the profiled 
 has 48,672. Two measurements that differ in one variable beat one measurement that agrees
 with a calculation.
 
-**Why GLM is the worst case, in the useful direction.** Its MLP is gated —
-`gate_up_proj` emits `[rows, 2I]` before `SiluAndMul` halves it — and `I/H` is 8.92
-against the so400m shape's 3.74. At full resolution (12288 tokens, 49152 rows) one MLP
-layer would want 3.76 GiB. Everything else in the census sits between these two models.
+**Why GLM is a good control.** Its MLP is gated — `gate_up_proj` emits `[rows, 2I]`
+before `SiluAndMul` halves it — which makes it a different code path from Qwen's plain
+form even though the widths are comparable.
+
+*Corrected 2026-09-12.* An earlier version of this section put GLM's `I/H` at **8.92**,
+reading `vision_config.intermediate_size` (13696). That value feeds a merger elsewhere;
+the vision **block** MLP is built with `mlp_hidden_dim=vision_config.out_hidden_size`,
+so it is 1536 -> 4096 gated, `I/H` **2.67**. The `intermediate_size` field is not the
+block MLP's width on this architecture, and reading a config key by name rather than by
+its use site is how that got through. The runtime was never affected — the chunk sizer is
+handed `hidden_features` by the module itself, not by the config.
 
 ### Two incidental findings, both usable
 
@@ -568,3 +575,44 @@ tools/encoder_census.py <repo>[@rev] --detail   # per-suffix storage breakdown
 is stored in a way the plugin can read — and has its own "never loaded when serving text"
 bucket. That bucket fuses the encoder with MTP and draft heads; this tool separates them,
 because they are evictable on completely different terms.
+
+## What chunking costs in time (2026-09-12)
+
+Memory was measured before throughput was, which is the wrong order; these are the
+numbers that were missing.
+
+**Intrinsically it is ~1%.** In the isolated rig, where the tower is resident, a full
+forward at full resolution takes 8.325s unchunked and 8.342s chunked on Qwen3.8, 3.053 vs
+3.084s on GLM-4.1V. Slicing a pointwise MLP costs a handful of extra kernel launches and
+nothing else.
+
+**On a serve it costs more, because the tower is on the host.** UVA reads an offloaded
+weight on every GEMM that touches it, so chunking into N pieces reads the MLP weights N
+times per image instead of once. Measured on a GLM-4.1V serve, `--cpu-offload-params
+visual`, 5 chunks:
+
+| | startup | first image | second image | KV |
+|---|---|---|---|---|
+| unchunked | 55.2 s | 13.7 s | 2.21 s | 6.17 GiB |
+| chunked | 58.2 s | 12.8 s | 2.47 s | 6.31 GiB |
+
+**+3s at startup, nothing measurable per image.** The first-vs-second gap is warmup —
+cuBLAS heuristics and allocator growth — and belongs to both arms equally.
+
+**On Qwen3.8 uncapped the comparison cannot be made, which is itself the result.** At 7
+chunks the config *starts*; without chunking it does not exist:
+
+| | KV available | outcome |
+|---|---|---|
+| unchunked | 0.55 GiB | **refuses to start** — 0.58 GiB needed for 16384 context |
+| chunked | 1.04 GiB | starts; serves the 4032x3024 image at full resolution, 11,905 prompt tokens |
+
+Startup 82s and a 7s steady-state image on that configuration. Both are the price of a
+65536-patch tower whose weights live on the host, not of chunking — but they are the price
+of the *only* configuration that runs it uncapped, so they should be quoted together.
+
+**So the default stays on and the escape hatch is `VLLM_MM_ENCODER_MLP_CHUNK_MB=0`**,
+which restores the single-shot form exactly. Where the tower is resident rather than
+offloaded, chunking is nearly free and there is no reason to turn it off; where it is
+offloaded, the trade is a few seconds of startup against a configuration that may not
+otherwise fit.
