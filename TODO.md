@@ -1185,22 +1185,18 @@ measured and shown insufficient.
    count per image is constant, so this is a *dynamic-resolution* problem, and only 10
    files use `smart_resize` at all. So: one sizer, plus a lookup from budget to whichever
    kwarg the family honours.
-2. **Do this first: cut the attention preamble's redundant q/k/v copies.** If it succeeds,
-   full-resolution images become affordable and (1) never needs writing.
+2. **Largely done 2026-09-12 — reassess (1) against the new numbers before building it.**
+   Two commits on the fork cut the tower transient by **32.6% on Qwen3.8** (1.728 -> 1.165
+   GiB) and **22.5% on GLM-4.1V** (1.856 -> 1.438), confirmed on a real GLM serve as KV
+   5.89 -> 6.31 GiB and context 154,480 -> 165,456 tokens. Whether that is enough to retire
+   the autosizer is now an open measurement on Qwen3.8, the model where the cap was
+   actually needed, not a question of principle.
 
-   **Not the MLP — measured 2026-09-12 and shelved.** Chunking the MLP is bit-exact and
-   fires, and moves the profiled peak by **zero** on both Qwen3.8 and GLM-4.1V. It shrinks
-   the largest single *allocation* (538 MiB on Qwen, the very bytes its OOM named) while
-   *peak live* is unchanged, because that buffer is never live at the peak instant. Patch
-   kept at `shelf/mm-encoder-mlp-chunk`; it binds again once attention drops below 538 MiB.
-
-   **The peak is the attention preamble on both**, ~1.4 GiB of 1.85 spent holding several
-   copies of the same q/k/v: the `[rows, 3H]` qkv output, three `.contiguous()` copies made
-   while it is still live, a `torch.cat([q, k])`, then the rotary's output. Same shape in
-   `qwen3_vl.py` and `glm4_1v.py`, so one fix covers both — no loop, no knob, no
-   per-architecture tuning. **First question before writing anything:** whether the
-   attention backend requires contiguous q/k/v. If it does, the win is in dropping the
-   `cat`, not the copies.
+   **What remains.** GLM keeps a `torch.cat([q, k])` that re-makes the copy the contiguous
+   drop saved, which is why its attention share is ~2 MiB against Qwen's 75; restructuring
+   its preamble the way `qwen2_5_vl` already does is the next increment. After that, GLM's
+   peak is dominated by `fused_add_rms_norm` temporaries — measured in the isolated rig,
+   not yet confirmed against a serve, where op dispatch may differ.
    - ~~Try `compile_mm_encoder` first.~~ **Tested 2026-09-12 and it is worse, not free.**
      The flag is live on this tower (28 compile passes, one per block), but it left peak
      activation at 0.43 GiB against 0.44 — so inductor does *not* avoid materialising the

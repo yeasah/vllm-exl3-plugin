@@ -393,7 +393,7 @@ is already frame-independent and the MLP is pointwise, so nothing in the tower r
 rows resident simultaneously. The concatenation is an implementation choice, not a
 constraint.
 
-## The MLP is not the peak: largest allocation and peak live are different questions (2026-09-12)
+## Cutting the tower transient: three changes that each hide the others (2026-09-12)
 
 Everything above pointed at the vision MLP. It was the wrong target, and the way it was
 wrong is more useful than the original claim.
@@ -439,17 +439,62 @@ makes three full copies while that output is still live; `torch.cat([q, k])` cop
 them again; the rotary emits another pair. The same data is materialized about four times
 over, ~1.4 GiB of a 1.85 GiB peak.
 
-**So the target is the copy chain, not chunking**, and it is better shaped work: no loop,
-no budget knob, no per-architecture tuning, and the same pattern in both model files.
-Before assuming the copies can go, check why `.contiguous()` is there — the attention
-backend may require contiguous q/k/v, in which case the win is in avoiding the `cat`
-rather than the copies.
+### What the copies turned out to cost, and the ordering that hid it
 
-**The chunking patch is shelved, not discarded**, because it becomes load-bearing the
-moment this succeeds: once the attention peak drops below the MLP's 538 MiB single
-allocation, the MLP binds. `shelf/mm-encoder-mlp-chunk` in the fork, exported to
-[data/shelved/mm-encoder-mlp-chunk.patch](data/shelved/mm-encoder-mlp-chunk.patch); see
-[patches.md](../patches.md).
+Neither copy was required. `einops` yields a strided view when the rearrange moves the q/k
+selector to dim 0, and the code forces it contiguous — but the triton rotary takes
+`x.stride(0/-3/-2/-1)` explicitly and forces only `cos`/`sin` contiguous, a few KB. The
+same kernel supports `inplace`, which `ApplyRotaryEmb.forward_cuda` never passes, so the
+rotary allocates a second full-size output beside an input it could overwrite.
+
+**Each of the three changes is invisible until the others unmask it**, which is the
+reason the MLP work was shelved and then immediately un-shelved:
+
+| Qwen3.8 tower, 65536 rows | peak | vs baseline |
+|---|---|---|
+| baseline | 1.728 GiB | — |
+| drop `.contiguous()` | 1.653 GiB | −75 MiB |
+| + inplace rotary | 1.653 GiB | −0, masked by the MLP |
+| drop `.contiguous()` + chunk MLP | 1.446 GiB | −282 MiB |
+| **all three** | **1.165 GiB** | **−563 MiB (−32.6%)** |
+
+Peak live is a `max` over the forward, so whichever tensor is largest at the peak instant
+hides every change aimed elsewhere. Chunking alone moves Qwen's peak by *zero*; the
+inplace rotary alone moves it by zero; together with the contiguous drop they are worth a
+third of the tower's transient.
+
+**Portability, which was the reason to do GLM up front.** The chunking is fully portable —
+same helper, both models, the larger win on each. The attention changes are *structural*:
+worth 75 MiB on Qwen and ~2 MiB on GLM, because GLM's preamble concatenates q and k
+afterwards and the `torch.cat` immediately re-makes the copy the contiguous drop saved.
+Getting GLM's share would mean restructuring its preamble the way `qwen2_5_vl` already
+does. So: one technique ports as-is, one is shaped by the model file it lands in.
+
+| tower | baseline | after | saving |
+|---|---|---|---|
+| Qwen3.8 | 1.728 GiB | 1.165 GiB | −32.6% |
+| GLM-4.1V | 1.856 GiB | 1.438 GiB | −22.5% |
+
+**End to end on a GLM-4.1V serve**, confirming the isolated rig (1.438 predicted, 1.43
+measured): peak activation 1.85 → 1.43 GiB, KV cache **5.89 → 6.31 GiB**, context
+**154,480 → 165,456 tokens**, same image described identically.
+
+### Two claims that had to be withdrawn
+
+**"Bit-for-bit identical" is true of the attention changes and false of chunking.** The
+attention work moves lifetimes, not GEMM shapes, and is exact. Chunking is *mathematically*
+exact — rows are independent — but cuBLAS picks its kernel from the M dimension, and a
+smaller M can select a split-K variant that reduces over K in a different order. On a
+20000x1536x4304 MLP: exact at 5000 and 10394 rows per chunk, up to 4.9e-4 out at 649 and
+2598, about one bf16 ULP. It is exact at the default budget on both real towers, which is
+precisely why the wrong claim survived several checks before a parametrized test caught it.
+
+**An all-NaN output makes every equality check pass vacuously.** The isolated rig used
+default random init, and ~27 bf16 blocks overflow into an output that is 99.99998% NaN —
+where matching MD5s prove nothing and `torch.equal` returns False for the same reason, so
+the two disagree and neither means anything. Every equivalence figure above is from a
+small-sigma init with a 99.99999%-finite output. The memory figures were never affected;
+they are shape-driven.
 
 **Method note, since this cost two wrong turns.** Both were the same error: reasoning about
 memory from arithmetic and from error messages instead of from a snapshot.

@@ -87,6 +87,8 @@ Newest last; the branch applies them in this order on top of `v0.29.0`.
 | [`740dd8b6a`](https://github.com/yeasah/vllm/commit/740dd8b6a) | **Continuation prefill's VRAM scales with context instead of with the chunk.** Five allocations sized by `cached_len` or `max_model_len`: 588 MiB standing plus 774 MiB of growth per 100K prefill, against a 2.65 GiB KV cache. Slabs the cached prefix and merges by log-sum-exp, so the buffers are the slab and the partials are the chunk. 1580 MiB back at the peak for ~1% of prefill throughput; greedy output identical at 100K. Both paths stay — the monolithic one is all that works without flash-attention, and `tq_prefill_workspace_mib=0` selects it, which is what makes the two comparable inside one build. |
 | [`6ac849972`](https://github.com/yeasah/vllm/commit/6ac849972) | **A backend's workspace reservation is invisible to the KV budget.** The profiling window closes before any metadata builder exists, so what a builder reserves is spent from whatever `gpu_memory_utilization` left unclaimed — which is why the knob could not be set to the card's maximum: at 0.98 TurboQuant sized a KV cache that fit, then OOMed taking 96 MiB behind the budget's back. Adds `AttentionBackend.get_reserved_workspace_bytes`, default zero, subtracted before auto-fit. TurboQuant prices the same reservation sets the builder hands to the workspace manager, so the declaration cannot drift from the allocation. Declares 96.00 MiB where `VLLM_DEBUG_WORKSPACE` shows 96.00 MB taken; 0.98 goes from OOM-at-startup to full 262144 context and an 80,793-token prompt served. |
 | [`f8f66be1b`](https://github.com/yeasah/vllm/commit/f8f66be1b) | **FlashInfer's workspace is allocated after the KV cache is.** `init_attn_backend` takes it from the first builder and shares it with the rest, which runs past the profiling window, so utilization above ~0.96 OOMed inside `allocate_kv_cache`. Declares it through the hook above, sharing the sizing expression with `_get_workspace_buffer`; the trtllm workspace is deliberately *not* declared, being taken inside `forward` where the dummy run already pays for it. Also fixes the aggregation the hook feeds — max within a backend class, sum across classes, with per-slot multiplication moved into the backend that knows it uses the shared manager. 0.985 now starts and serves where 0.975 OOMed. |
+| [`e272b1784`](https://github.com/yeasah/vllm/commit/e272b1784) | **The vision attention preamble copies q/k/v it already has.** A ViT's peak is the attention preamble, not the MLP: `einops` yields a strided view when the rearrange moves the q/k selector to dim 0, and the code forces it contiguous for a triton rotary kernel that takes `x.stride(...)` explicitly and never needed it. That kernel also supports `inplace`, which `ApplyRotaryEmb.forward_cuda` never passes, so the rotary allocates a second full-size output. Both are exactly bit-identical — they move lifetimes, not GEMM shapes. Qwen3.8 1.728 → 1.653 GiB; GLM-4.1V barely moves, because its `torch.cat([q, k])` re-makes the copy, but it unmasks the MLP below. |
+| [`2f3e2a7db`](https://github.com/yeasah/vllm/commit/2f3e2a7db) | **The vision MLP's two full-width buffers become the peak once attention stops hiding them** — 538 MiB each on Qwen3.8 at full resolution. Chunks the pointwise MLP over tokens against a byte budget (`VLLM_MM_ENCODER_MLP_CHUNK_MB`, default 256), so one setting holds across towers whose intermediate widths differ 3x. Qwen3.8 1.653 → 1.165 GiB (−32.6% overall), GLM-4.1V 1.854 → 1.438 (−22.5%); on a real GLM serve, KV 5.89 → 6.31 GiB and context 154,480 → 165,456 tokens. **Not bit-exact in general**: cuBLAS picks its kernel from M, so a smaller chunk can reduce over K in a different order — exact at the default budget on both towers, ~1 bf16 ULP out at small ones. |
 
 ## Offering these upstream
 
@@ -117,21 +119,6 @@ is pinned by the submodule; check one out in a scratch clone to run it.
 - **`reference/kvarn-pr-46812`** — upstream PR 46812's own diff rebased onto
   v0.28.0, original authorship intact. Not our code. Kept because the PR is
   decaying upstream and the rebase was the expensive part.
-- **`shelf/mm-encoder-mlp-chunk`** — chunks a vision tower's MLP over the token
-  dimension, bounding a buffer that otherwise scales with an image's patch
-  count. Correct, bit-exact (`torch.equal`, max abs diff 0.0) and verified to
-  fire in a real serve — and **inert**: it shrinks the largest single
-  *allocation* without moving *peak live*, because the peak is set by the
-  attention preamble, not the MLP. Off the appliance branch rather than
-  diverging four files for nothing.
-
-  **It stops being inert the moment attention is fixed**, which is why it is
-  kept rather than dropped: the MLP's 538 MiB buffer on Qwen3.8 at full
-  resolution becomes the binding constraint as soon as the attention peak falls
-  below it. Scale by `rows x 2 x intermediate_size x 2` for other towers.
-  Exported as [docs/data/shelved/mm-encoder-mlp-chunk.patch](docs/data/shelved/mm-encoder-mlp-chunk.patch)
-  so it survives independently of the fork. Evidence in
-  [docs/media-encoders.md](docs/media-encoders.md).
 
 ## Retired
 
