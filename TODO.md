@@ -1213,14 +1213,14 @@ measured and shown insufficient.
    Step-3.7's `perception_encoder` states no `intermediate_size`; PE's standard mlp_ratio 4
    would put it at 2.67x, unconfirmed.
 
-   **Second platform for the end-to-end test: `turboderp/GLM-4.1V-9B-Thinking-exl3`**
-   (revisions 2.00-6.00bpw). 8.01 GiB total at 5.00bpw leaving ~7.5 GiB of headroom, and a
-   **1.662 GiB bf16 encoder — 20.76% of the package**, near the worst share in the census
-   and the largest tower we can actually run locally. It is the right control because it
-   differs in every axis that matters: gated MLP through `Glm4vVisionMLP`, not
-   `Qwen3_VisionMLP`; the highest I/H in the survey; and still dynamic-resolution, so it is
-   the same problem class rather than a fixed-resolution tower with nothing to stress.
-   Untested so far — not yet loaded through the plugin.
+   **Reference platform: `turboderp/GLM-4.1V-9B-Thinking-exl3@5.00bpw`, verified working
+   2026-09-12.** Tower offloads at 1.66 GiB on the same `--cpu-offload-params visual`, and
+   it serves a full-resolution photo uncapped. It is the right instrument because its
+   profiled peak *is* the tower, where Qwen3.8's is decoder-dominated: measured at
+   **42,357 B per patch row with a zero intercept**, from two runs differing only in
+   profiled modality. So chunking at C rows should land at `C x 42.4 KB` and the win reads
+   straight off the `peak activation` line. Target to beat: peak 0.89 GiB / KV 7.00 GiB
+   image-only, 1.85 / 5.89 with video enabled.
 
 → [docs/media-encoders.md](docs/media-encoders.md),
 [docs/memory-accounting.md](docs/memory-accounting.md)

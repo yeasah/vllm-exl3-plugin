@@ -325,6 +325,129 @@ tokens is bit-for-bit identical and caps the `[patches, 4304]` pair at the chunk
 structurally the same move as TurboQuant's slabbed continuation prefill. It raises the
 affordable image size; it does not remove the need for a cap at 12 MP.
 
+## GLM-4.1V: where the transient is measurable, and the law it obeys (2026-09-12)
+
+`Qwen3.8-27B` is a bad instrument for the tower transient — its profiled peak is
+decoder-dominated, so the encoder's requirement hides underneath a larger number.
+`turboderp/GLM-4.1V-9B-Thinking-exl3@5.00bpw` is the opposite and is now the reference
+platform for this work: 8.01 GiB of weights on a 15.5 GiB card leaves room to move, and
+the profiled peak *is* the tower.
+
+**Tower offload works unchanged on a second architecture.** `--cpu-offload-gb 3
+--cpu-offload-params visual` offloads **1.66 GiB**, matching the census's 1.662 G exactly.
+GLM names its tower `visual` as Qwen does, so the same selector works. Uncapped, it serves
+a 4032x3024 photo correctly at 6045 prompt tokens with no `max_pixels` at all — the
+headroom that Qwen3.8 lacked is what buys that.
+
+**The transient is linear in patch rows, measured.** Two runs differing only in which
+modality the profiler chose:
+
+| profiled modality | patch rows | peak activation | KV available |
+|---|---|---|---|
+| video (default) | 48,672 | 1.85 GiB | 5.89 GiB |
+| image (`--limit-mm-per-prompt '{"video": 0}'`) | 24,336 | 0.89 GiB | **7.00 GiB** |
+
+2.00x the rows gives 2.08x the peak, and fitting the two points yields **42,357 B/row with
+a -72 MiB intercept** — zero floor within the precision of the logged figures. So the peak
+is the tower, it is linear, and chunking at C rows should land at `C x 42.4 KB`: 0.32 GiB
+at 8192, 0.08 GiB at 2048. That linearity is the property the chunking argument needs, and
+it is now measured rather than assumed.
+
+*Recorded because the arithmetic route failed here:* predicting the peak from
+`vision_config` alone gave 1.862 GiB against a measured 1.85, which looked like
+confirmation and was not — the prediction used 24,336 rows while the profiled video item
+has 48,672. Two measurements that differ in one variable beat one measurement that agrees
+with a calculation.
+
+**Why GLM is the worst case, in the useful direction.** Its MLP is gated —
+`gate_up_proj` emits `[rows, 2I]` before `SiluAndMul` halves it — and `I/H` is 8.92
+against the so400m shape's 3.74. At full resolution (12288 tokens, 49152 rows) one MLP
+layer would want 3.76 GiB. Everything else in the census sits between these two models.
+
+### Two incidental findings, both usable
+
+**`--limit-mm-per-prompt '{"video": 0}'` is worth 1.11 GiB of KV** (+19% context) on a
+video-capable model you only ever send images to. Unlike `width`/`height`, `count` **is**
+enforced, so this one does what it says.
+
+**The profiled modality is chosen by `(tokens, name)`, and the name can decide it.**
+GLM's image and video budgets are *tied* at 6084 tokens, so `get_modality_with_max_tokens`
+picked `video` on an alphabetical tiebreak. Equal tokens do not mean equal work: video's
+token divisor includes `temporal_patch_size`, so at the same budget a video item carries
+**twice** the patch rows an image does. Profiling as video is therefore ~2x conservative
+here, by accident of sort order.
+
+### How video actually reaches the tower
+
+Frame count does not multiply the token budget — the pixel budget is a total across the
+clip, so more frames buys lower per-frame resolution at constant tokens. Frames *are*
+independent for attention: `prepare_encoder_metadata` builds `cu_seqlens` as
+`patches_per_frame` repeated `grid_t` times, one sequence per frame, so no frame attends to
+another. But the forward is a single pass over one concatenated `[total_rows, 1176]`
+tensor, so the linear layers see every frame at once and the transient scales with the
+total. `max_frames_per_batch` only pads `cu_seqlens` for CUDA-graph capture; it does not
+split the forward.
+
+**That is what makes chunking obviously safe here rather than merely plausible:** attention
+is already frame-independent and the MLP is pointwise, so nothing in the tower requires all
+rows resident simultaneously. The concatenation is an implementation choice, not a
+constraint.
+
+## Muse-Glimmer: recomposing a bf16 tower, and why that is also the instrument
+
+`turboderp/Muse-Glimmer-30B-exl3` is the one checkpoint in the census with a quantized
+tower (`-vb 4`, 0.904 G for 1.92B parameters). Two separate wants point at the same
+artifact: a **usable** checkpoint, and the **control arm** for a measurement that cannot
+otherwise be made.
+
+**The usability case.** A quantized tower is unreachable by vLLM's offloader — that path
+sees `nn.Parameter`s, and EXL3 stores trellis tensors the offloader never registers — so
+today the tower is resident or nothing. With a bf16 tower it can be evicted like any
+other, and eviction being lossless means the size stops mattering: 3.57 GiB on the host is
+one PCIe pass per image, not a capacity problem. Bigger but offloadable beats smaller but
+pinned. It should also unblock native vLLM for this model, whose current blocker is
+`vision_adapter.c_fc` being a plain `nn.Linear` no quantization plugin can reach — a bf16
+adapter is exactly what that path wants.
+
+**The measurement case, which is the one this note has been missing.** This document has
+argued since 2026-08-24 that the quantized tower's quality is cheaply measurable: a
+self-comparison of bf16 tower against quantized tower on the same per-position logprob
+divergence `bench/` already computes, an instrument indifferent to whether the prompt
+carries an image, with adapter-output cosine divergence as a cheaper first look. It named
+Muse-Glimmer as "the checkpoint that makes the comparison possible", which was only half
+true: a self-comparison needs **both arms**, and only the quantized one exists. The
+recomposed checkpoint is the missing arm, so building it for use also builds the
+instrument.
+
+**And nothing currently characterises that tower.** qbench cannot: its axis is total
+weight bytes and its quality signal is KLD against a *text* corpus, which a vision tower
+does not touch. The conversion log cannot either — under `q_fallback` `proxy_err` is plain
+unweighted MSE where every body tensor's is Hessian-weighted relative error, the same
+column holding two incomparable quantities. So the honest prior is wide: the tower was
+quantized with no calibration data (`quantize_side_model` is called with `state = None`;
+the corpus is six `.utf8` files tokenized to `input_ids` and the tower takes pixels), and
+it sits somewhere between nearly blind and nearly lossless with nothing published either
+way. That is not a criticism of whoever ran the conversion — it is what the pipeline
+structurally produces, and `--vision_bits` offers no third option.
+
+**Feasibility.** The vision tensors are cleanly separable. The `2.00bpw` index holds 3596
+tensors, of which 1718 are vision, under four prefixes — `model.vision_tower.*` (plus
+`ln_pre`, `ln_post`, `patch_embedder`), `model.vision_adapter.*`, `model.vision_projection.*`
+— and every quantized one carries EXL3's `trellis` / `suh` / `svh` / `mul1` suffixes, so
+they are identifiable by name without inspecting shapes. The graft is: drop those, copy the
+corresponding bf16 tensors from the reference repo, rewrite
+`model.safetensors.index.json`, and delete `vision_bits` from `quantization_config` so the
+loader does not expect a quantized tower.
+
+**Two things to verify before trusting the result**, neither yet done: that the reference
+and EXL3 checkpoints agree on tower tensor *names* (EXL3 conversion may rename or fuse),
+and that the adapter and projection are grafted as a set with the tower — they sit on the
+boundary and a mixed-precision seam there is exactly the kind of silent corruption that
+[docs/format-and-loading.md](format-and-loading.md) exists to catch. Emitting a checkpoint
+nobody else emits also needs the precedent check: whether any published EXL3 checkpoint
+mixes a bf16 tower with a quantized body, since "it loads" is a property of one loader,
+not of the format.
+
 ## Reproducing
 
 ```
