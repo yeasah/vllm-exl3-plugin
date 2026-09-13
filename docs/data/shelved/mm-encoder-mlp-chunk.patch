@@ -1,0 +1,228 @@
+From 060ab18a7ff7dc6e8232a4fb3ff3c81cb5f77b7d Mon Sep 17 00:00:00 2001
+From: Yeasah Pell <yeasah@schwide.net>
+Date: Sat, 12 Sep 2026 20:26:03 -0400
+Subject: [PATCH] [Media] Chunk the vision-tower MLP over the token dimension
+
+SHELVED -- correct and bit-exact, but it does not move the profiled peak on
+any model measured. Kept because it becomes load-bearing the moment the
+attention preamble is fixed. See the reactivation condition below.
+
+A vision tower's MLP is pointwise over tokens, so slicing the forward into
+row-chunks is bit-for-bit identical and bounds a buffer that otherwise scales
+with the image's patch count. The chunk is derived from a byte budget
+(VLLM_MM_ENCODER_MLP_CHUNK_MB, default 256) rather than being a row count, so
+one setting holds across towers whose intermediate widths differ 3x: 10394
+rows for so400m's 4304, 3266 for GLM-4.1V's 13696 gated to 27392.
+
+Verified equivalent: 49152 rows in 16 chunks, torch.equal against the
+single-shot path, max abs diff 0.0. Verified to fire in a real serve
+("Chunking vision MLP: 48672 rows in 72 chunks of <=682").
+
+WHY IT IS SHELVED. It shrinks the largest single *allocation* but not the
+*peak*, and those are different quantities. On Qwen3.8's tower at 65536 rows
+the MLP's 538 MiB activation buffer disappears -- it is exactly the
+564,133,888 bytes the original OOM message named -- yet peak live memory is
+1.728 GiB with or without chunking, because that buffer is never live at the
+same instant as the peak. The peak is set by the attention preamble, where
+q/k/v are materialized several times over at once: qkv gemm output, three
+.contiguous() copies, then the rotary's output with the earlier copies still
+live. Same on GLM-4.1V: 1.856 GiB either way. The OOM named the MLP because
+that was the allocation that happened to fail after memory was already gone,
+not because it was the cause.
+
+REACTIVATION CONDITION. The MLP binds once the attention preamble's peak
+drops below its 538 MiB single allocation (Qwen3.8 at full resolution; scale
+by rows * 2 * intermediate_size * 2 for other towers). Until then this is
+inert, so it stays off the appliance branch rather than diverging four files
+for nothing.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ vllm/envs.py                           |  9 ++++
+ vllm/model_executor/models/glm4_1v.py  |  8 ++-
+ vllm/model_executor/models/qwen3_vl.py |  9 +++-
+ vllm/model_executor/models/vision.py   | 74 ++++++++++++++++++++++++++
+ 4 files changed, 97 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/envs.py b/vllm/envs.py
+index 786864b912..1f1ed8f900 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -301,6 +301,7 @@ if TYPE_CHECKING:
+     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
+     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
++    VLLM_MM_ENCODER_MLP_CHUNK_MB: int = 256
+     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
+     VLLM_DISABLE_LOG_LOGO: bool = False
+     VLLM_LORA_DISABLE_PDL: bool = False
+@@ -2053,6 +2054,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
+         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+     ),
++    # Byte budget (MiB) for a vision-tower MLP's live activations. The MLP is
++    # pointwise over the token dimension, so it is sliced into row-chunks sized
++    # to fit this budget, bounding a transient that otherwise scales with the
++    # image's patch count. Bit-for-bit identical to the unchunked forward.
++    # 0 disables chunking and restores the original single-shot behaviour.
++    "VLLM_MM_ENCODER_MLP_CHUNK_MB": lambda: int(
++        os.getenv("VLLM_MM_ENCODER_MLP_CHUNK_MB", "256")
++    ),
+     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
+     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
+     # rocm 7.14/7.15 when batch copy is optimized; CUDA uncapped). Set >0 to override.
+diff --git a/vllm/model_executor/models/glm4_1v.py b/vllm/model_executor/models/glm4_1v.py
+index ec72210a10..df94176705 100644
+--- a/vllm/model_executor/models/glm4_1v.py
++++ b/vllm/model_executor/models/glm4_1v.py
+@@ -121,7 +121,9 @@ from .utils import (
+     maybe_prefix,
+ )
+ from .vision import (
++    chunked_pointwise_mlp,
+     get_vit_attn_backend,
++    mm_encoder_mlp_chunk_rows,
+     is_vit_use_data_parallel,
+     run_dp_sharded_mrope_vision_model,
+ )
+@@ -242,13 +244,17 @@ class Glm4vVisionMLP(nn.Module):
+             disable_tp=use_data_parallel,
+         )
+         self.act_fn = SiluAndMul()
++        self.chunk_rows = mm_encoder_mlp_chunk_rows(hidden_features)
+ 
+-    def forward(self, x: torch.Tensor):
++    def _mlp(self, x: torch.Tensor) -> torch.Tensor:
+         x, _ = self.gate_up_proj(x)
+         x = self.act_fn(x)
+         x, _ = self.down_proj(x)
+         return x
+ 
++    def forward(self, x: torch.Tensor):
++        return chunked_pointwise_mlp(self._mlp, x, self.chunk_rows)
++
+ 
+ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
+     """All-gather the input tensor interleavely across model parallel group."""
+diff --git a/vllm/model_executor/models/qwen3_vl.py b/vllm/model_executor/models/qwen3_vl.py
+index dd08f1cc04..5b2d08725d 100644
+--- a/vllm/model_executor/models/qwen3_vl.py
++++ b/vllm/model_executor/models/qwen3_vl.py
+@@ -154,7 +154,9 @@ from .utils import (
+     maybe_prefix,
+ )
+ from .vision import (
++    chunked_pointwise_mlp,
+     get_fp8_padded_hidden_size,
++    mm_encoder_mlp_chunk_rows,
+     get_vit_attn_backend,
+     is_vit_use_data_parallel,
+     run_dp_sharded_mrope_vision_model,
+@@ -429,10 +431,13 @@ class Qwen3_VisionMLP(nn.Module):
+             disable_tp=use_data_parallel,
+         )
+         self.act_fn = act_fn
++        self.chunk_rows = mm_encoder_mlp_chunk_rows(hidden_features)
++
++    def _mlp(self, x: torch.Tensor) -> torch.Tensor:
++        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+ 
+     def forward(self, x: torch.Tensor):
+-        mlp_output = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+-        return mlp_output
++        return chunked_pointwise_mlp(self._mlp, x, self.chunk_rows)
+ 
+ 
+ @support_torch_compile(
+diff --git a/vllm/model_executor/models/vision.py b/vllm/model_executor/models/vision.py
+index 0ccf410ed5..ce6a2b4f3b 100644
+--- a/vllm/model_executor/models/vision.py
++++ b/vllm/model_executor/models/vision.py
+@@ -11,6 +11,7 @@ import torch
+ import torch.nn as nn
+ from transformers import PretrainedConfig
+ 
++import vllm.envs as envs
+ from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
+ from vllm.distributed import (
+     get_tensor_model_parallel_rank,
+@@ -731,3 +732,76 @@ class FusedInputNorm(nn.Module):
+             1, self.channel, 1
+         )
+         return x.view(patches, size).to(visual_dtype)
++
++
++def mm_encoder_mlp_chunk_rows(
++    hidden_features: int,
++    *,
++    live_widths: int = 3,
++    dtype_size: int = 2,
++) -> int:
++    """Rows per chunk for a pointwise vision-tower MLP, from a byte budget.
++
++    A vision tower's MLP is pointwise over the token dimension, so its live
++    activations are `live_widths * hidden_features` elements per input row and
++    scale with the image's patch count -- 3.76 GiB for one GLM-4.1V layer at
++    full resolution. Slicing the forward into row-chunks bounds that without
++    changing the result.
++
++    The chunk is derived from `VLLM_MM_ENCODER_MLP_CHUNK_MB` rather than being a
++    row count, so one budget holds across architectures whose intermediate sizes
++    differ by 3x (so400m's 4304 against GLM-4.1V's 13696, gated to 27392).
++
++    Args:
++        hidden_features: The MLP's intermediate width.
++        live_widths: Multiples of `hidden_features` live at the peak. 3 covers
++            both the plain form (projection output plus activation output) and
++            the gated form, whose fused projection is already `2 x` wide.
++        dtype_size: Bytes per element of the activation dtype.
++
++    Returns:
++        Rows per chunk, or 0 to leave the forward unchunked.
++    """
++    budget = envs.VLLM_MM_ENCODER_MLP_CHUNK_MB * 1024 * 1024
++    if budget <= 0:
++        return 0
++    return max(1, budget // (live_widths * hidden_features * dtype_size))
++
++
++def chunked_pointwise_mlp(
++    mlp_fn: Callable[[torch.Tensor], torch.Tensor],
++    x: torch.Tensor,
++    chunk_rows: int,
++) -> torch.Tensor:
++    """Apply a shape-preserving pointwise MLP in row-chunks.
++
++    Exactly equivalent to `mlp_fn(x)` -- every row is independent, so slicing the
++    token dimension changes no arithmetic and the result is bit-for-bit identical.
++    Only the peak footprint changes.
++
++    Skipped while tracing: a Python loop here would unroll into the compiled
++    graph, so a compiled encoder keeps the single-shot form it has today.
++
++    Args:
++        mlp_fn: Pointwise over dim 0, returning the same shape it is given.
++        x: `[rows, in_features]` activations.
++        chunk_rows: Rows per chunk; <= 0 or >= rows applies `mlp_fn` in one shot.
++    """
++    rows = x.shape[0]
++    if chunk_rows <= 0 or rows <= chunk_rows or torch.compiler.is_compiling():
++        logger.debug_once(
++            "vision MLP unchunked: %d rows, chunk_rows=%d", rows, chunk_rows
++        )
++        return mlp_fn(x)
++
++    logger.info_once(
++        "Chunking vision MLP: %d rows in %d chunks of <=%d",
++        rows,
++        -(-rows // chunk_rows),
++        chunk_rows,
++    )
++    out = torch.empty_like(x)
++    for start in range(0, rows, chunk_rows):
++        stop = start + chunk_rows
++        out[start:stop] = mlp_fn(x[start:stop])
++    return out
+-- 
+2.52.0
+

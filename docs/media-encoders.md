@@ -393,6 +393,70 @@ is already frame-independent and the MLP is pointwise, so nothing in the tower r
 rows resident simultaneously. The concatenation is an implementation choice, not a
 constraint.
 
+## The MLP is not the peak: largest allocation and peak live are different questions (2026-09-12)
+
+Everything above pointed at the vision MLP. It was the wrong target, and the way it was
+wrong is more useful than the original claim.
+
+**What was built.** The MLP is pointwise over tokens, so slicing its forward into
+row-chunks is bit-for-bit identical and bounds a buffer that otherwise scales with patch
+count. Implemented behind a byte budget so one setting holds across tower widths, verified
+equivalent (`torch.equal`, max abs diff 0.0) and verified to fire in a real serve
+(`Chunking vision MLP: 48672 rows in 72 chunks of <=682`).
+
+**What it did to the number that matters: nothing.**
+
+| Qwen3.8 tower, 65536 rows | peak live | largest single allocation |
+|---|---|---|
+| unchunked | 1.728 GiB | **538.0 MiB** — `activation.py:816` via the MLP |
+| chunked | 1.728 GiB | 432.0 MiB — the qkv gemm |
+
+GLM-4.1V behaves identically: 1.856 GiB either way, unmoved down to a 16 MiB budget.
+
+**The distinction that was being missed.** *Largest single allocation* is what an OOM
+message reports — whichever request happened to fail once memory was already gone.
+*Peak live* is the sum of everything alive at one instant; it is what the profiler
+budgets and what sets the KV cache. Chunking removes the 538 MiB buffer — which is
+exactly the `564,133,888` bytes the original Qwen OOM named — and the peak does not move,
+because that buffer is never live at the same moment as the peak. The OOM named the MLP
+because it was the allocation that failed, not the one that filled the card.
+
+**Where the peak actually is, on both architectures: the attention preamble**, holding
+several copies of q/k/v at once.
+
+| | Qwen3.8 | GLM-4.1V |
+|---|---|---|
+| qkv gemm output | 576 MiB | 428 MiB |
+| `rearrange(...).contiguous()` | 288 MiB | 428 MiB |
+| `apply_rotary` | 288 MiB | 285 MiB |
+| positional-embedding interpolate | 144 MiB | 143 MiB |
+| norm + flash-attn + patch conv | 320 MiB | 317 MiB |
+| **peak live** | **1.728 GiB** | **1.856 GiB** |
+
+The shape is the same in both files. `self.qkv(x)` emits `[rows, 3H]`; the generator
+`q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))` then
+makes three full copies while that output is still live; `torch.cat([q, k])` copies two of
+them again; the rotary emits another pair. The same data is materialized about four times
+over, ~1.4 GiB of a 1.85 GiB peak.
+
+**So the target is the copy chain, not chunking**, and it is better shaped work: no loop,
+no budget knob, no per-architecture tuning, and the same pattern in both model files.
+Before assuming the copies can go, check why `.contiguous()` is there — the attention
+backend may require contiguous q/k/v, in which case the win is in avoiding the `cat`
+rather than the copies.
+
+**The chunking patch is shelved, not discarded**, because it becomes load-bearing the
+moment this succeeds: once the attention peak drops below the MLP's 538 MiB single
+allocation, the MLP binds. `shelf/mm-encoder-mlp-chunk` in the fork, exported to
+[data/shelved/mm-encoder-mlp-chunk.patch](data/shelved/mm-encoder-mlp-chunk.patch); see
+[patches.md](../patches.md).
+
+**Method note, since this cost two wrong turns.** Both were the same error: reasoning about
+memory from arithmetic and from error messages instead of from a snapshot.
+`tools/memprof.py` answered it in one run and existed the whole time. Its distinction
+between "composition of the peak" and "largest single allocation per call site" is exactly
+the one being conflated — the tool had already been built to make this mistake visible.
+
 ## Muse-Glimmer: recomposing a bf16 tower, and why that is also the instrument
 
 `turboderp/Muse-Glimmer-30B-exl3` is the one checkpoint in the census with a quantized

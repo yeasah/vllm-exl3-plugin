@@ -1185,8 +1185,22 @@ measured and shown insufficient.
    count per image is constant, so this is a *dynamic-resolution* problem, and only 10
    files use `smart_resize` at all. So: one sizer, plus a lookup from budget to whichever
    kwarg the family honours.
-2. **Do this first: stop the tower transient scaling with patch count.** If it succeeds,
+2. **Do this first: cut the attention preamble's redundant q/k/v copies.** If it succeeds,
    full-resolution images become affordable and (1) never needs writing.
+
+   **Not the MLP — measured 2026-09-12 and shelved.** Chunking the MLP is bit-exact and
+   fires, and moves the profiled peak by **zero** on both Qwen3.8 and GLM-4.1V. It shrinks
+   the largest single *allocation* (538 MiB on Qwen, the very bytes its OOM named) while
+   *peak live* is unchanged, because that buffer is never live at the peak instant. Patch
+   kept at `shelf/mm-encoder-mlp-chunk`; it binds again once attention drops below 538 MiB.
+
+   **The peak is the attention preamble on both**, ~1.4 GiB of 1.85 spent holding several
+   copies of the same q/k/v: the `[rows, 3H]` qkv output, three `.contiguous()` copies made
+   while it is still live, a `torch.cat([q, k])`, then the rotary's output. Same shape in
+   `qwen3_vl.py` and `glm4_1v.py`, so one fix covers both — no loop, no knob, no
+   per-architecture tuning. **First question before writing anything:** whether the
+   attention backend requires contiguous q/k/v. If it does, the win is in dropping the
+   `cat`, not the copies.
    - ~~Try `compile_mm_encoder` first.~~ **Tested 2026-09-12 and it is worse, not free.**
      The flag is live on this tower (28 compile passes, one per block), but it left peak
      activation at 0.43 GiB against 0.44 — so inductor does *not* avoid materialising the

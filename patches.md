@@ -117,6 +117,21 @@ is pinned by the submodule; check one out in a scratch clone to run it.
 - **`reference/kvarn-pr-46812`** — upstream PR 46812's own diff rebased onto
   v0.28.0, original authorship intact. Not our code. Kept because the PR is
   decaying upstream and the rebase was the expensive part.
+- **`shelf/mm-encoder-mlp-chunk`** — chunks a vision tower's MLP over the token
+  dimension, bounding a buffer that otherwise scales with an image's patch
+  count. Correct, bit-exact (`torch.equal`, max abs diff 0.0) and verified to
+  fire in a real serve — and **inert**: it shrinks the largest single
+  *allocation* without moving *peak live*, because the peak is set by the
+  attention preamble, not the MLP. Off the appliance branch rather than
+  diverging four files for nothing.
+
+  **It stops being inert the moment attention is fixed**, which is why it is
+  kept rather than dropped: the MLP's 538 MiB buffer on Qwen3.8 at full
+  resolution becomes the binding constraint as soon as the attention peak falls
+  below it. Scale by `rows x 2 x intermediate_size x 2` for other towers.
+  Exported as [docs/data/shelved/mm-encoder-mlp-chunk.patch](docs/data/shelved/mm-encoder-mlp-chunk.patch)
+  so it survives independently of the fork. Evidence in
+  [docs/media-encoders.md](docs/media-encoders.md).
 
 ## Retired
 
