@@ -1192,6 +1192,22 @@ measured and shown insufficient.
    the autosizer is now an open measurement on Qwen3.8, the model where the cap was
    actually needed, not a question of principle.
 
+   **Start here tomorrow: auto-context sweep on Qwen3.8 @0.985 (reported 2026-09-12).**
+   Context is *unchanged from text-only* at 256K and 1M pixels (264,993 both), then falls
+   to 248,617 / 233,244 / 190,188 at 4M / 8M / unlimited. **Multimodal is free up to ~1M
+   pixels**, which is the headline this item opened against.
+   The drops track the tower peak: `Δcontext x 19,530 B/token` gives 0.31 / 0.61 / 1.43
+   GiB against a predicted tower peak of 0.28 / 0.57 / 1.13. The flat region is almost
+   certainly `max()` returning the decoder floor, not the profiler going blind -- at 1024
+   and 4096 rows the tower wants 0.03 and 0.12 GiB.
+   **The check that separates the two:** compare the logged `GiB for peak activation`
+   across limits. Identical at 256K/1M and rising from 4M means `max()` is working;
+   identical everywhere including unlimited means it really is blind.
+   *Not evidence of a leak:* an oversized image completing at a low cap is `smart_resize`
+   downscaling it to fit, not an unbudgeted allocation. The cost there is fidelity, not
+   bytes -- which makes **quality vs pixels** the curve still missing, and `bench/`'s
+   image-conditioned logprob divergence the instrument for it.
+
    **What remains.** GLM keeps a `torch.cat([q, k])` that re-makes the copy the contiguous
    drop saved, which is why its attention share is ~2 MiB against Qwen's 75; restructuring
    its preamble the way `qwen2_5_vl` already does is the next increment. After that, GLM's
