@@ -5,4 +5,4 @@
 [submodule "deps/vllm"]
 	path = deps/vllm
 	url = https://github.com/yeasah/vllm.git
-	branch = appliance/v0.28.0
+	branch = appliance/v0.29.0
