@@ -73,7 +73,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [embeddings.md](docs/embeddings.md) | quantized embeddings, block-scaled vs. trellis, storage format, depth selection, serving under torch.compile |
 | [blockq-format.md](docs/blockq-format.md) | the block-scaled embedding format itself: layout, decode/encode reference, invariants, how to produce and consume it |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
-| [capability-suite.md](docs/capability-suite.md) | whether a served configuration still *does the work*: two SWE-bench runs, what a paired comparison has to hold fixed, and why discriminating power peaks near 50% resolved |
+| [capability-suite.md](docs/capability-suite.md) | whether a served configuration still *does the work*: what a paired comparison has to hold fixed, three metrics worth tracking (correctness, cost, indecision), why an agentic harness is actively harmful on a Q&A benchmark, and 4-bit KV measured at no detectable cost on either axis |
 | [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
 | [media-encoders.md](docs/media-encoders.md) | how many bytes a vision/audio tower is — up to 12.7% of a low-bpw exl3 checkpoint — why evicting one is nearly free, what vLLM 0.29.0 changed, and why the weights are not the cost that gates vision |
@@ -86,6 +86,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [pre-ampere.md](docs/pre-ampere.md) | Volta and Pascal below the sm_80 floor: the CUDA 13 toolchain is the wall rather than the kernels, Pascal ruled out for good, Volta parked |
 | [upstream.md](docs/upstream.md) | the outward-facing queue: patches we carry, what is worth offering and in what shape, what to check before filing, and what a 0.29 bump costs the TQ patches |
 | [feasibility-2026-08-03.md](docs/feasibility-2026-08-03.md) | the original research report (frozen) |
+| [capability-suite/README.md](capability-suite/README.md) | post-process analysis for hand-run capability evals |
 | [bench/README.md](bench/README.md) | the dependency-bump gate: what it captures and why |
 
 ## Quick start

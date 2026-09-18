@@ -1759,6 +1759,27 @@ what remains unmeasured is a vocabulary well past 248K.
 quantized weights, quantized embedding, quantized KV — so quality claims stop being
 divergence figures plus personal impressions.
 
+**Established 2026-09-18** (GPQA-Diamond via evalscope and opencode/harbor, written up in
+the doc): **4-bit TurboQuant KV costs nothing detectable on either axis** — 198 paired
+items, 14/10 discordant, p=0.541, CI [-2.5,+7.1] pp, and a median paired cost delta of
++1 token. **The agentic harness is actively harmful on a Q&A benchmark** — same model and
+items, 50.0% via opencode against 81.2% via evalscope, 10/0 one-sided, from protocol
+non-compliance plus model-dependent reasoning suppression (9B suppressed 8.2x, 27B
+*increased* 1.7x). evalscope's simple harness is the instrument for Q&A. And a third
+metric earned its place beside correctness and cost: **indecision**, counted as
+reconsideration restarts, which catches a termination failure the other two cannot see.
+
+**Open, in order.** The body-bit half is unmeasured and is the one that matters — run the
+`gemma-4-12B` bpw ladder (3.00/3.50/4.00, embed+head fixed at 2.874 GB across all three,
+so only body bits move) and read it against ≤7pp for 4-bit KV on the same instrument.
+Start with the extremes: if 3.00 vs 4.00 does not separate at 198 items, the question
+closes for the whole range and `cpu-offload`'s justification closes with it. Before that,
+a cheaper shakedown with a known-large effect: the **reasoning-effort ladder** on the 27B,
+where the knob genuinely works — one set of weights, no requantization, and it answers
+whether `xhigh` is ever worth it once tokens are counted. Also: build the harness
+fingerprint, and re-run `Qwen3.5-9B` with an effort setting so it is comparable to
+anything.
+
 **Why it is the missing instrument.** qbench answers "how far is this distribution from
 the reference", which ranks encodings well and says nothing about whether a 3.0bpw model
 with a 4-bit KV cache still writes working code, follows a long agentic trace, or recalls
@@ -1820,8 +1841,8 @@ against a recorded one. Named instance types stay the answer for *perf*
 comparability. What remains genuinely open is survival: a multi-day run on a spot
 rental needs to resume from where it stopped.
 
-→ [docs/capability-suite.md](docs/capability-suite.md) (the two runs, the statistics
-and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why
+→ [docs/capability-suite.md](docs/capability-suite.md) (the SWE-bench runs, the
+GPQA-Diamond instrument work, the three metrics and the rented-hardware problem), [docs/qbench.md](docs/qbench.md) (scope: why
 divergence is deliberately all qbench measures),
 [docs/embeddings.md](docs/embeddings.md)
 
