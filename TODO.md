@@ -1454,138 +1454,114 @@ parameters, not more GPU time.
 
 ## `cpu-offload` — CPU offload for EXL3 weights
 
-`vllm serve --cpu-offload-gb` silently offloads nothing for EXL3 — 0.01 GiB against
-3.63 GiB for the same model as AWQ. Two independent causes, both traced: the offloader
-decides eligibility at construction time when our parameters are still empty CPU
-placeholders, and `process_weights_after_loading` then replaces those parameters with
-objects the offloader never sees. **Both causes hit both backends** — `PrefetchOffloader`
-fails identically, just louder.
+**Implemented, measured, and unit-tested; not gated, not committed.**
+`vllm_exl3_plugin/cpu_offload.py` registers finished EXL3 tensors with vLLM's UVA
+offloader from `process_weights_after_loading`, with a `re:` extension to vLLM's
+parameter selectors. Background, the cost model, backend choice and the measured
+numbers are in [docs/cpu-offload.md](docs/cpu-offload.md) — this item is open work
+only.
 
-**Why this is worth doing, and it is not capacity.** Offload trades PCIe bandwidth for
-bits per weight, so it is a quality lever rather than a fallback.
+**Done 2026-09-17** (review pass, `tests/test_cpu_offload.py`, 15 tests, GPU-free):
+scale vectors excluded by component policy rather than by selector; null-match
+warning; per-layer log demoted to `debug` with a `report_once()` summary carrying
+tensors as well as bytes; pointer table rebuilt only when something moved and against
+a device captured before offload; matcher extracted to a pure `_matches()`. Every new
+guard was verified by reintroducing the defect and watching it fail.
 
-**The "only at 2.0-2.5bpw" premise this item used to carry is wrong, measured
-2026-09-01.** `Qwen3.8-27B` with a block-quantized embedding is **14.00 GiB at 4.00bpw**
-and 11.17 at 3.00, against 15.92 GiB of card — where the same checkpoint with a dense
-embedding is 15.70 GiB and cannot serve at all. **But "fits" is not "serves":** vLLM's
-budget after weights
-reaches the KV cache as only ~0.4 GiB — about **9K tokens** even at
-`turboquant_4bit_nc`, with sporadic OOMs at startup or in flight. Reported from practice. The
-embedding is worth **1.70 GiB** at this scale, double the 0.83 it saves on an 8B, because
-vocab is 248320 against 151936 and hidden 5120 against 4096. So `quantized-embeddings`
-alone reaches the good part of the curve on a 27B, and the knee argument no longer
-motivates offload by itself. See [docs/qbench.md](docs/qbench.md) for the curve and
-[docs/embeddings.md](docs/embeddings.md) for the format.
+The summary is emitted from a wrapper around the module-level
+`process_weights_after_loading` (`plugin._patch_offload_summary`), **not** from
+`apply()` — that sits inside the `torch.compile` region, where Dynamo refuses
+`logging.Logger` calls and kills the engine at startup (gb0291). Cost one failed
+serve to find; a test now pins `apply()` free of it.
 
-**And it identifies where the leverage actually is at this operating point.** With only
-~0.3 GiB reaching the KV cache, the *base is so small that every further byte freed has
-outsized effect* — 0.30 GiB more would roughly double the context. Three candidates, none
-of which is more body bits:
+**Bench presence needs a new axis, not a new case.** Offload trades VRAM for
+throughput, and the gate cannot see VRAM (`bench-suite`), so bolting it on records the
+throughput loss as a regression and the capacity gain as nothing.
 
-- **Itemised 2026-09-02 from a real 4.00bpw serve, and my "~1.6 GiB of vLLM overhead"
-  guess was wrong.** Under `enforce_eager`, non-torch is only **0.21 GiB**. The budget at
-  `gpu_memory_utilization 0.95` is weights 13.50, non-torch 0.21, peak activation
-  **0.59**, KV **0.43** — plus a 0.41 GiB gap between nvidia-smi's 15.92 and vLLM's 15.51
-  "total", and 0.23 GiB of its own CUDA context. Two recoverable items, neither of them
-  overhead in the assumed sense:
-  - **0.78 GiB is never allocated at all**, left on the floor by util 0.95 — nearly twice
-    the entire KV cache. vLLM prints the fix itself:
-    `--kv-cache-memory=897712128` (0.84 GiB) "to fully utilize gpu memory".
-  - **Peak activation 0.59 GiB exceeds the KV cache.** It follows
-    `max_num_batched_tokens` / chunked prefill rather than anything fundamental; halving
-    it frees ~0.30 GiB.
+**Why is `suh`/`svh` worth 2.6% in one configuration and 12.5% in another?** Same
+model, same host, same ~4.9 MB/token of expert scale vectors: removing them is
+19.1 → 19.6 tok/s when only experts are offloaded, but 8.0 → 9.0 when dense trellis is
+offloaded too. Both exceed what their bytes can pay for, which granularity explains;
+the 10x gap between the two is not explained by anything yet. The policy is right
+either way — they are 1.9% of expert bytes, so excluding them is never worse — but the
+mechanism would say whether transfer granularity is a lever worth pulling elsewhere,
+e.g. whether batching small reads or reordering them against the trellis stream is
+worth anything.
 
-  **But the 0.78 GiB is not waste, it is margin, and treating it as a lever is the wrong
-  read** (corrected 2026-09-02 from operating experience): post-startup OOM already occurs
-  at that margin and worsens as it shrinks, and for a serving appliance **stopping mid
-  session is the worst available outcome** — strictly worse than less context. A config
-  that serves 9K reliably beats one that serves 25K and dies on request 400.
+**Report reachable bytes, not just offloaded ones.** `report_once()` says what moved;
+it does not say what *could* have. Two accounting errors have already been caught by
+hand — `--cpu-offload-gb 10` exceeding the 8.21 GB of eligible experts, and 0.936 GB of
+unquantized `weight` counted as offloadable dense bytes when `register_offload` never
+sees it. Both looked like physics violations until the checkpoint was consulted. A
+by-category reachable-vs-offloaded line would have made each obvious at run time.
 
-  **So the value of `--kv-cache-memory` is determinism, not size.** Today the margin is a
-  *residue*: whatever is left after `util x` a total that vLLM measures at startup and
-  that varies run to run, which is exactly why the same setting sometimes starts and
-  sometimes does not. Pinning KV makes the margin a *chosen quantity* — set it at today's
-  0.43 GiB and nothing gets faster or bigger, but the failure mode changes from
-  nondeterministic to reproducible, which is the precondition for tuning it at all.
+**Test the budget-exhaustion path.** `_offload_one` returns 0 once
+`cpu_offload_bytes >= cpu_offload_max_bytes`, which is the mechanism behind the
+eligibility cap above, and nothing covers it. Needs a fake loader; no GPU.
 
-  **What still allocates after startup**, since weights and KV are both pre-allocated, is
-  the thing to characterise before spending any of the margin:
-  - **Activation peak is profiled, not bounded** — 0.59 GiB from a synthetic worst case at
-    startup, which real traffic shapes can exceed.
-  - **Logprobs**: roughly `positions x vocab`, and this model's vocab is **248320**. That
-    is the same allocation class that OOMed every vllm arm of the Qwen3-8B project at
-    1.16 GiB, and it is not in the startup profile.
-  - **Fragmentation**, which `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` addresses.
-    Untested here. Weak prior that it matters: the OOM traces from 2026-09-01 reported
-    only ~71 MiB "reserved but unallocated", so fragmentation was not the mechanism in
-    those. Cheap to test, but do not expect it to be the answer.
-- **`head_bits` 6 -> 4** on a 1.27B untied head frees **0.30 GiB**. `head-bits` concluded
-  5-6 is optimal, but that was budget-neutral against body bits; when *capacity* is the
-  binding constraint the trade is a different one and the KLD curve now prices it.
-- **The `boundary:N` lever** (`vllm-tq-02-boundary-lever`, drafted and
-  verified): +14.8% KV tokens on the one model measured, for free.
+**Re-measure where the link is not the bottleneck.** Everything measured to date is on
+a Gen3 x8 host at 6.5 GB/s, where the implementation already runs at 87–98% of the link
+and no code change can recover bandwidth. The Gen5 x16 box is ~7.7x. Note
+`cpu_offload_bytes` is per-process, so `--cpu-offload-gb N` under TP>1 offloads N GB
+*per rank*; the 2026-09-17 table is TP=1, so its labels are honest, but a TP tier will
+need the distinction spelled out.
 
-**Which also settles the ordering between the two levers.** Per byte freed, blockq costs
-about a ninth of the harness noise floor in quality and nothing at all in throughput;
-offload costs a PCIe round trip on every token that touches an offloaded weight. Blockq is
-strictly the first thing to spend, and offload is what buys the *next* GiB after it is
-exhausted — on a 30B+ model, or to reach 5-6bpw where the curve says the last of the
-quality lives. Offload trades PCIe bandwidth for bits per weight, which is
-a quality lever rather than a fallback. **Sized on 2026-08-20, and the answer splits.** On the
-one routed MoE measured, vLLM frees only ~1 GiB of a claimed 8 and the reason is not
-yet understood; on dense models it offloads honestly, verified against awq, gptq and
-compressed-tensors. So the ceiling is not a general property — but dense is also where
-every offloaded byte is re-read every token, so the good ceiling and the good
-throughput are on opposite sides. Valuable on the margin either way, not a step up the
-bpw curve on its own.
+**Spread placement is a ~7% lever and should probably be the default.** Confirmed
+2026-09-17: at 1 GiB, naive `experts` (which fills greedily by layer and concentrates
+at 8-of-8 routed) gives 66.4 tok/s, while 34 experts spread across all 40 layers
+(1.07 of 8) gives 70.9 — **+6.8% for the same offloaded bytes**. Apparent bandwidth
+rises from 6.27 to 7.63 GB/s, the latter 17% *above* the pinned-DMA ceiling, so part of
+the transfer is overlapping with compute rather than serialising. Nothing measured is
+sparser than 1.07/layer and the trend has not flattened, so there may be more.
 
-**Candidate approach.** Register the offload ourselves from
-`process_weights_after_loading`, where the finished tensors already exist at final
-shape: reach `get_offloader()` and hand it the real tensor as the backend would have,
-**pinned** — pinning is required both by `PrefetchOffloader`'s own assert and by
-PyTorch, which refuses unpinned H2D during CUDA graph capture. Bits-agnostic,
-checkpoint-vintage-agnostic, no vLLM changes. Accepts a known cost — it depends on a
-vLLM internal that can break on a version bump.
+The expert count that spans every layer is a function of budget and checkpoint
+(`budget / (num_layers * bytes_per_expert)`), so it should be computed rather than
+written by hand as a regex — the same argument as autosizing any knob against the
+threshold it is checked against. Worth checking whether the effect survives
+`--enforce-eager`; an overlap explanation predicts it should not change much.
 
-**A third cause, which was upstream's and is now fixed.** Vision towers were never
-offered to either backend, because `wrap_modules()` had one call site inside
-`make_layers()`. vLLM 0.29.0 added `supports_tower_offload` and a second call site, so
-`--cpu-offload-gb --cpu-offload-params visual` now works — verified here at 0.86 GiB.
-That leaves our own two causes untouched: they still block *quantized* modules, which
-is the only path that would reach a quantized tower. Evidence in
-[docs/media-encoders.md](docs/media-encoders.md); remaining encoder work under
-`encoder-offload`.
+**Routing is NOT uniform, and the placement question is open again.** Two patterns with
+identical geometry — 34 experts, 40 layers, 4080 tensors, 1.00 GiB, same concentration —
+differ by 2.8%: experts 0–33 give 70.9 tok/s against 69.0 for experts 222–255. The
+earlier `experts 0-59` (68.8) vs `experts 200-255` (67.7) pair points the same way,
+despite 0–59 carrying the worse concentration. The cost ratio implies experts 222–255
+are routed ~8.8% more often than 0–33.
 
-**Scope note: which backend wins depends on access pattern, and MoE inverts the
-obvious answer.** Prefetch overlaps transfer with compute, so it suits dense weights
-read every pass. But it is routing-blind — it copies every offloaded parameter each
-forward pass — while UVA's zero-copy reads touch only what the kernel actually reads.
-For routed experts UVA therefore wins decisively; measured on 2026-08-20. *(An earlier
-version of this note extended that to "sparsely-read tensors like a vision tower" at
-0.3-0.6 GiB. Both halves were wrong: a tower cannot be offered to either backend at
-all, and the real sizes are 0.79-3.64 GiB bf16 — 3.64 on Step-3.7-Flash alone — or
-0.90 GiB for Muse-Glimmer's 1.92B parameters at 4 bpw.)* Verified 2026-08-19 that the prefetch path is otherwise fully
-functional with EXL3 tensors, so pinning is the only outstanding requirement.
+Everything in [docs/cpu-offload.md](docs/cpu-offload.md) that rests on uniform routing —
+index invariance, LRU-equals-static — was explicitly conditional on a premise that now
+looks false. The original sweep could not have caught it, because its index ranges were
+confounded with concentration; it took controlling concentration to expose it.
 
-**Honor the parameter selectors in that registration.** Both backends take a set of
-parameter-name segments and offload *only* what matches — `--cpu-offload-params` for
-UVA, `--offload-params` for prefetch, both exact dot-delimited segments
-(`f".{param}." in f".{name}."`). Registering our tensors without that check makes the
-EXL3 path silently non-selective, which nobody notices until someone tries the
-selective form and gets the whole model offloaded. Four lines at the time, an
-irritation to retrofit — and selectivity is what makes the sparse case work at all:
-`--cpu-offload-params experts` is why a routed model pays PCIe for only the experts it
-actually reads.
+**One histogram, to rule out a cause we control — not a calibration programme.** The
+2.8% has two candidate mechanisms: routing skew, or something physical about which
+tensors were offloaded (host allocation order, pinned-page locality, NUMA placement).
+The second would be a defect in this code and fixable here; the first would not. Log
+`topk_ids` once over a normal workload and count per-expert frequency: if 222–255 is
+~8.8% hotter than 0–33, it is routing and the question closes; if the counts are flat,
+the 2.8% belongs to the offload path and is worth chasing.
 
-**What our own registration buys on a quantized tower is bandwidth, not capacity.**
-Muse-Glimmer's tower moves 0.89 GiB per image batch instead of the 3.57 GiB the same
-weights would be at bf16 — a 4x cut in the per-image cost of having evicted it. That is
-the difference between an eviction you tolerate and one you leave in place. It applies
-to one checkpoint today and to anything this project quantizes with `--vision_bits`
-later.
+**Out of scope deliberately:** whether the skew is a workload property or a model
+property, and frequency-ranked placement built on it. Exploiting it needs per-model
+calibration, which is a different project — and one WiSP is already the reference for.
+Note this weakens the LRU-equals-static dismissal in the doc: under skew an LRU cache
+gets the frequency ranking for free, which is exactly when dynamic paging earns its
+keep. 2.8% still does not pay for WiSP's per-layer host syncs and eager-only execution,
+but the argument against it was made on a premise that no longer holds. Note also that
+0–33 and 222–255 are arbitrary windows rather than the extremes of the distribution, so
+2.8% bounds the exploitable spread from *below*.
 
-→ [docs/format-and-loading.md](docs/format-and-loading.md) "CPU offload",
-[docs/media-encoders.md](docs/media-encoders.md)
+**Control for the expert window in every future offload A/B.** This is the part that is
+actionable here regardless of cause: two patterns that differ only in which expert
+indices they select differ by up to ~3%. The original sweep missed the concentration
+lever precisely because index and concentration moved together and partly cancelled.
+Hold the window fixed, or the next comparison will misattribute the difference.
+
+**Unexplained from 2026-08-20:** UVA's reported offload figure was inflated ~9x on a
+routed MoE while honest on dense models across three quantization methods. Mechanism
+never established; the obvious name-matching explanation is wrong. Worth pinning down
+before relying on the claim, since MoE is where offload is most attractive.
+
+→ [docs/cpu-offload.md](docs/cpu-offload.md), [docs/media-encoders.md](docs/media-encoders.md)
 
 ## `upstream-queue` — Findings other projects should hear about
 

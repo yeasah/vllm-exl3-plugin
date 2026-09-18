@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from .. import format, ops, tp
+from .. import cpu_offload
 from ..log import init_logger
 
 logger = init_logger(__name__)
@@ -278,6 +279,12 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
                 getattr(layer, prefix + name).release()
+
+        # Sibling of the stores above: hand the finished expert tensors to the
+        # weight offloader. A routed-expert layer is a distinct method from the
+        # dense linear path, so this is the only moment EXL3's finished tensors
+        # are visible to the offloader here.
+        cpu_offload.register_offload(layer)
 
     # ----------------------------------------------------------------- apply
 

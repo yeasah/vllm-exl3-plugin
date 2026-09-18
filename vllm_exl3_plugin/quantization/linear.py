@@ -32,6 +32,7 @@ from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from .. import format, ops, tp
+from .. import cpu_offload
 from ..log import init_logger
 
 logger = init_logger(__name__)
@@ -293,6 +294,13 @@ class EXL3LinearMethod(LinearMethodBase):
             self._store_dense(layer, shards, has_mcg, has_mul1)
         else:
             self._store_quantized(layer, shards)
+
+        # Sibling of the two stores above: hand the finished trellis/suh/svh
+        # tensors (or exl3_weight) to the active weight offloader now that they
+        # exist at final shape. The offloader saw the construction-time
+        # placeholders only, so this is the only moment it can see the real
+        # weights. See cpu_offload.register_offload.
+        cpu_offload.register_offload(layer)
 
         for param in params.values():
             param.release()
