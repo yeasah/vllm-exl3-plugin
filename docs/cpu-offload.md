@@ -75,6 +75,97 @@ Evidence in [media-encoders.md](media-encoders.md); remaining work under TODO
 
 ---
 
+## What this design cannot do: load a model bigger than VRAM
+
+**Peak VRAM is the full checkpoint, whatever `--cpu-offload-gb` says.** Registering from
+`process_weights_after_loading` is what makes the approach simple — the tensors exist at
+final shape, so nothing has to predict them — but it also runs *after* everything has
+been materialised on the accelerator. `BaseModelLoader.load_model` completes
+`self.load_weights(model, ...)` in full before calling `process_weights_after_loading`,
+so every byte of the checkpoint has already landed before the first tensor is offloaded.
+
+**Confirmed from a real OOM, 2026-09-18.** A 4.0bpw 36B MoE on a 16 GiB card fails
+inside `load_weights`, in `EXL3Parameter.store` (`linear.py:90`,
+`loaded_weight.to(self.exl3_device)`), loading the **lm_head**: 364 MiB wanted, 75 MiB
+free, 15.08 GiB already committed. Not fragmentation — 21.36 MiB reserved-but-unallocated
+— so `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` does not address it.
+`linear.py:90` and `fused_moe.py:125` are the only two sites at which checkpoint tensors
+reach the accelerator.
+
+**vLLM's own path avoids this in three steps, and EXL3 misses all three:**
+
+1. `wrap_modules`, at construction, moves each decoder layer's parameters to pinned host
+   memory. For an ordinary quant method those parameters exist — allocated on device and
+   moved off one layer at a time, so peak stays bounded. EXL3's `EXL3Parameter` is
+   `data=None`, i.e. an empty **CPU** tensor, and `_maybe_offload_to_cpu` returns early
+   on `device == cpu`. Being on the host is what disqualifies it.
+2. Weight loading then writes *into* those host-resident parameters, so the weights never
+   all sit on the accelerator. EXL3's placeholders were never offloaded, so the loader's
+   tensors land on the target device and `EXL3Parameter.store` keeps them there.
+3. `device_loading_context` moves CPU-resident parameters onto the device **one module at
+   a time** for processing and back off in its `finally` — its own comment says the scope
+   exists "for the case where cpu offloading is used". EXL3's real sub-tensors live in
+   `param.shards[index]`, a plain dict attribute that `named_parameters()` never yields,
+   so the context finds nothing to move.
+
+**So what offload delivers today is KV cache headroom — which is the resource you would
+never buy this way.** A checkpoint that does not fit in VRAM cannot be loaded at any
+offload setting, so the one thing offload uniquely provides, *weight* capacity, is
+exactly what the design cannot reach.
+
+That ordering matters because KV is cheap and getting cheaper, while body bits are not.
+Reported from practice: 4-bit TurboQuant KV costs far less capability than degrading
+body weights past the knee of the bpw curve. And on a modern hybrid the memory is barely
+a constraint at all — `Muse-Glimmer-30B` has 39 of 52 layers on a 2048-token sliding
+window, costing **78 MiB in total regardless of context length**, so only the 13
+full-attention layers bill per token: 13 KiB at fp16, 3.2 KiB at 4-bit. Two GiB of 4-bit
+KV is ~639K tokens, **4.9x that model's declared 131072 limit**, or ~80K tokens across
+8 concurrent sequences. The binding constraint there is `max_position_embeddings`, not
+VRAM. See [turboquant-kv.md](turboquant-kv.md).
+
+So the preamble's framing stands and should not be diluted: offload is a lever for
+*bits per weight*, not a way to find KV. Spending it on KV is paying PCIe for something
+a cheaper quantizer already supplies. That is a real gap for the fast-link case, where
+[the measurements above](#what-offload-costs) show a large offload is affordable — 1 GiB
+for 12.8% on Gen5 x16 — and where running a model that exceeds the card is exactly the
+thing worth doing.
+
+**What the limitation actually costs, projected.** Not one marginal checkpoint — the
+whole 16–30 GiB band on a 16 GiB card. Using the fitted decode model (4.55 ms fixed +
+resident/700 GB/s + offloaded/PCIe, both bandwidths measured), assuming ~80% of weights
+in experts and 2 GiB left for KV:
+
+| model | must offload | Gen5 x16 | Gen3 x8 |
+|---|---|---|---|
+| 13 GiB | none | 111 tok/s | 111 tok/s |
+| 16 GiB | 2.9 GiB | **75** | 39 |
+| 20 GiB | 6.9 GiB | **53** | 20 |
+| 24 GiB | 10.9 GiB | **40** | 14 |
+| 30 GiB | 16.9 GiB | 30 | 9 |
+
+Every row below the first fails at load today, including the 16 GiB one that needs only
+2.9 GiB moved and would serve at 75 tok/s. The constants come from a two-point fit and
+assume dense and head are read in full each token; treat the table as scoping, not as a
+measurement. Per-expert packing compounds with this rather than competing — at 37 GB/s
+the 24 GiB row is ~45 tok/s — and the gain grows with offload size, which is a second
+reason to move the offload point first.
+
+**The fix has an obvious shape.** All four `load_*` entry points funnel through a single
+`EXL3Parameter.store`, so that is one choke point at which to pin and accelerator-view
+instead of retaining the device tensor, under the same budget and selectors. Two things
+would improve as a side effect: peak becomes bounded by what is in flight rather than by
+the checkpoint, and the selector would match the checkpoint's **real** tensor name
+instead of the one `_offload_moe` reconstructs, since the name is known at load time.
+
+Complications to expect: `process_weights_after_loading` reads shapes, which is free on a
+host-mapped tensor, but `_interm_divisor` reads `suh` *values* — harmless, since the
+component policy keeps scale vectors resident anyway. The dequantize path
+(`EXL3_DEQUANTIZE=1`) calls `ops.dense_weight(trellis, ...)`, which needs the trellis on
+device, so it would have to pull back or opt out. And budget spend stays greedy in load
+order, as it is today.
+
+---
+
 ## The tensor name grammar is a user-facing interface
 
 `register_offload` matches against a reconstructed name, because the MoE path stores
