@@ -1550,6 +1550,30 @@ by-category reachable-vs-offloaded line would have made each obvious at run time
 `cpu_offload_bytes >= cpu_offload_max_bytes`, which is the mechanism behind the
 eligibility cap above, and nothing covers it. Needs a fake loader; no GPU.
 
+**Offload cannot load a model bigger than VRAM, and this is now the top item** — it is
+the difference between working and not for a primary goal (medium MoE at 4.0bpw in
+16 GiB), where packing is a 1.12-1.27x on something that already works. Registering from
+`process_weights_after_loading` runs after the whole checkpoint has landed on the
+accelerator, so today's offload delivers KV headroom and cannot deliver weight capacity —
+the wrong way round, since 4-bit KV is cheap and body bits are not. Confirmed from a real
+OOM 2026-09-18; mechanism, the three steps vLLM uses to stay bounded, and the projected
+16-30 GiB band it costs are all in [docs/cpu-offload.md](docs/cpu-offload.md).
+
+**Fix shape:** `linear.py:90` and `fused_moe.py:125` are the *only* two sites where
+checkpoint tensors reach the accelerator, and all four `load_*` entry points funnel
+through one `EXL3Parameter.store` — pin-and-view there instead of at finalisation.
+Bounded peak, and the selector would match real checkpoint names rather than
+reconstructed ones. Watch for `_interm_divisor` reading `suh` values (fine, scale vectors
+stay resident) and `EXL3_DEQUANTIZE=1` needing the trellis on device. Unverified: whether
+anything downstream of `store()` assumes the shard is device-resident, and how it
+interacts with TP sharding, which happens in `_take_column`/`_take_row` *before* the
+store.
+
+**Worth trying first:** `EXL3_BLOCKQ_ON_LOAD=1` never materialises the dense embedding,
+so only `bq_*` reaches the GPU — on a 248K-vocab model ~1-2 GB traded for ~0.3-0.5 GB.
+Did not clear the 2026-09-18 case (that run already had it on), but it is the cheap lever
+for a checkpoint whose embedding is still dense.
+
 **Gating test passed 2026-09-17: transfer size is the cap.** Same spread selector
 against `2.00bpw` (256 KiB trellis) and `3.00bpw` (uniform 384 KiB, same 30720 tensors)
 of the same checkpoint, everything else fixed, both baselines measured (136.7 / 129.1):
