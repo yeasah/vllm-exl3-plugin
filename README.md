@@ -195,6 +195,26 @@ a sweep from producing duplicates; `mark` records where it stopped so the next o
 knows where to start (`docs/data/sweeps.json`). Read `user-*.md` first — the human
 turns are about a fifth of the volume and carry most of the signal.
 
+`tools/compose_checkpoint.py` builds one EXL3 checkpoint out of the tensors of
+others: start from a base and replace whole *modules* with another checkpoint's
+copies, selected by category (`head`, `vision`, `mtp`, `experts`,
+`shared-experts`, `body`) or by glob. It exists for the allocation questions
+decided per category rather than per tensor — head bitrate, the vision and MTP
+towers, and whether an MoE model's non-routed tensors want the boost upstream
+can give them (`--take all --keep experts`) — and for repairing one wrong tensor
+family in a checkpoint without redoing the conversion. Modules move whole,
+because a trellis paired with another conversion's `suh` is noise that still
+loads; the shape, module-set, codebook and exllamav3-version checks are the
+point, and it refuses to write on a hard mismatch. Untouched shards are
+hardlinked, so a head swap on a 30B model rewrites one shard.
+
+`--restore` goes the other way: it puts the **dense original** back, which is how
+a bf16 vision tower is grafted into a checkpoint that quantized one
+([docs/media-encoders.md](docs/media-encoders.md)). Because matching names and
+shapes do not prove the dense tensor is the one the trellis was made from,
+`--verify` dequantizes a sample and compares — ~0.17 relative error at K=3 for a
+genuine restore against ~1.41 for a wrong tensor.
+
 The plugin needs a patched vLLM, vendored as the `deps/vllm` submodule: our fork
 on branch `appliance/v0.29.0`, which is the **v0.29.0** pin plus the commits
 below. It reproduces the tree the baselines in `bench/expected/` were captured

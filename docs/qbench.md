@@ -403,6 +403,54 @@ claim that bit allocation is impossible in general. The body result is specific 
 sequential error compensation, which is what makes independently measured deltas cancel —
 a quantizer without it might well compose.
 
+### Head share is the hidden variable, and MoE models sit far outside the tested range (2026-09-18)
+
+The sweep above is budget-neutral, so its verdict is an *exchange rate*: the head
+was 16% of phi-4-mini's quantizable weights, which made each head bit cost 0.19
+body bits, which is why 7 cost +34% and 8 cost +87%. Nothing about "5-6" is
+intrinsic to a head — it is what a 16% head buys. Head share across the models
+in play here:
+
+| model | head params | head / (head + body) | cost of one head bit |
+|---|---|---|---|
+| Phi-4-mini-instruct *(the tested model)* | 0.615B | **16.0%** | 0.19 body bits |
+| Ornith-1.5-9B | 1.017B | 11.8% | 0.13 body bits |
+| Qwen3.6-35B-A3B, Ornith-1.5-35B-A3B | 0.509B | **1.4%** | 0.015 body bits |
+
+A 35B-A3B MoE is **13x cheaper per head bit** than the model the sweep was run
+on, because 35B of experts sit in the denominator. The penalties that closed the
+question at 7 and 8 bits were the *body's* loss, and at 1.4% share the body
+barely loses anything: head 5 -> 8 on these models is ~191 MiB, about 1.1% of a
+4 bpw checkpoint. So the 5-6 verdict should not be carried onto them — if
+anything the optimum is expected to move up, and `-hb 5` is the conservative end
+of an untested range. A dense 9B at 11.8% is close enough to the tested regime
+that 5-6 transfers with much less strain.
+
+This is `category-bits` question 1 stated concretely, and it is the one that
+gates publishing an MoE checkpoint. Composing it needs a donor that already
+carries the head at another bit width, which for a self-converted model means a
+second conversion rather than a free rearrangement.
+
+**A composed head carries its source body's calibration context.** Conversion is
+sequential — `advance_state_parallel` advances the calibration state "through the
+(re-quantized) module", which is the same error compensation the body null above
+attributes its result to — so `lm_head`'s Hessian is captured on activations
+already degraded by that checkpoint's *body*. A head lifted from a 2 bpw arm onto
+a 6 bpw body is therefore not a clean "head at K=3" point: it is a head fitted to
+2 bpw activations and serving 6 bpw ones. The diagonal (each head on its own body)
+is exact and free, since it is the converted checkpoint; the confound lives
+entirely off-diagonal, which is where a head sweep needs to go.
+
+Two things make this tractable rather than disqualifying. The mismatch is
+expected to be *pessimistic* for the higher head bitrates — a head fitted to
+cleaner activations than it ends up serving — so a composed high-bit head that
+still wins is a safe conclusion, and one that loses is ambiguous. And a sweep
+setting `head = min(body + 1, 6)` produces **two or more arms sharing head K=6
+once body >= 5**, whose heads differ only in the body they were fitted to.
+Composing those onto one common body isolates the calibration-context effect with
+K held fixed, and is the control that says whether the rest of the matrix can be
+read at face value. It only exists if the sweep actually reaches body >= 5.
+
 ## Per-tensor bit allocation does not compose (2026-08-23)
 
 *Survives the exllamav3 v1.4.3 bump unrevisited, and provably.* The study ran from
@@ -547,6 +595,41 @@ why the effect first surfaced on the confounded chart.
 If it lands near the last, fractional EXL3 bitrates carry a structural ~25-35% penalty and
 **integer K is the only efficient place on the curve** — which is not how bpw targets are
 currently chosen, here or anywhere.
+
+### What the null is actually about: direction, not granularity (2026-09-18)
+
+Asked directly — is the tax specific to *per-tensor* variation, or does per-layer
+variation pay it too? The finding above answers it and the answer is neither:
+**the tax is on mixed-direction moves.** Its own sentence is the mechanism —
+"superposition holds reasonably when every tensor moves the same direction and
+collapses when they move in opposite directions" — and the table is the evidence:
+promoting all 224 tensors errs -23%, demoting all 224 errs -4%, and the recipe
+that moves 29 down and 42 up errs **+65%** and lands worse than uniform.
+
+Granularity never enters. A per-layer cut at a fixed budget is mixed-direction by
+construction — some layers sit above the mean and some below — so **per-layer
+variation is not exempt**, and nothing here licenses treating it as a safer axis.
+
+The fractional-bitrate section is the direct evidence for that, because
+exllamav3's fractional targets are not realized as a clean depth cut. Surveying
+the local collection: `Qwen3-8B-exl3@2.5bpw` puts **more than one K in all 36 of
+its layers**, split by projection role (`v_proj` K=4, `mlp.gate_proj` K=2,
+`k_proj` spanning 2/3/4 across depth); `@3.5bpw` is the same pattern shifted up a
+bit; `gemma-4-12B@3.50bpw_mul1` mixes in 32 of 48 layers. So the +8% and +7%
+residuals measured there are the penalty on a mixture that varies by role *and*
+by depth simultaneously. The two axes have never been separated, and that
+measurement does not separate them.
+
+**What this does not cover: promotions that are not reallocations.** Everything
+above is budget-neutral — bits taken from one tensor and given to another. Adding
+bits to a small set while demoting nothing is the same-direction regime, where
+superposition held to within -4% to -23% and, notably, *under*-counted the
+benefit. `turboderp/Laguna-XS-2.1-exl3@3.00bpw` is that case: its `shared_expert`
+tensors sit at K=5 against K=3 routed experts, and because they are 39 tensors
+against 9984, the boost costs **0.0286 GiB, or 0.24% of trellis bytes**. That is
+a near-free promotion, not an allocation, and the KLD support it had when
+introduced is consistent with this section rather than in tension with it. See
+[moe.md](moe.md) "How exllamav3 actually spends bits on experts".
 
 ### What this licenses
 

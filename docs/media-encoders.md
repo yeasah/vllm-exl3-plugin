@@ -564,6 +564,141 @@ nobody else emits also needs the precedent check: whether any published EXL3 che
 mixes a bf16 tower with a quantized body, since "it loads" is a property of one loader,
 not of the format.
 
+### The graft now has a tool, and the three open questions are closed (2026-09-18)
+
+`tools/compose_checkpoint.py --restore vision` performs exactly the operation above:
+drop the tower's EXL3 tensors, bring the dense originals across from the reference
+repo, regenerate the index against what is actually written, rewrite the
+`tensor_storage` entries as dense and drop `vision_bits`. The `vision` category
+covers `vision_tower`, `vision_adapter` and `vision_projection` together, so the
+"grafted as a set" requirement is the default rather than a thing to remember.
+
+**Precedent: settled, and it is the majority convention.** The question was whether
+any published EXL3 checkpoint mixes a bf16 tower with a quantized body. Nearly all of
+them do. Of 14 vision-bearing `turboderp` repos on the Hub (122 revisions),
+**111 revisions ship a fully dense bf16 tower** — including `GLM-4.1V-9B-Thinking-exl3`
+(1.662 GiB, 178 dense tensors, no `vision_bits`), the whole `Qwen3-VL` family
+(30B-A3B, 32B, 235B-A22B), `gemma-3-27b-it`, `Step-3.7-Flash`, `Qwen3.5-9B/35B-A3B`,
+`Qwen3.8-27B` and `gemma-4-26B-A4B`. So the artifact a restore produces is not a shape
+anyone would be inventing; it is what almost every vision checkpoint already is.
+
+**Census update: there are two quantized towers now, not one.** Alongside
+`Muse-Glimmer-30B-exl3` (6 revisions, `vision_bits` 4 at 2.00/2.50bpw and 6 above),
+`turboderp/DeepSeek-V4-Flash-Vision-Exp-exl3` quantizes its tower at `vision_bits=5`
+across **all five** of its revisions (2.04 through 3.04bpw). Eleven revisions across
+two model families, and the newer of the two does it at every bitrate — so this is a
+live pipeline choice rather than a one-off.
+
+**Neither family is SC-only, which matters for whether repairing one is worth it.**
+Muse-Glimmer labels its solved-recipe branches explicitly (`SC_1.75bpw_H3` through
+`SC_5.00bpw_H6`, head following `min(body+1, 6)`) and ships seven plain ones beside
+them. The split runs opposite to intuition: **every `SC_` revision has
+`vision_bits: null`** — a dense tower — while the plain revisions are the ones that
+quantize it. DeepSeek-V4-Flash-Vision-Exp carries no `SC_` marker at all, and its odd
+bitrates are better explained by `--hq` overshoot on round targets (2.00-3.00 plus
+~0.04, the same signature as the +0.08 measured on our own 35B-A3B runs) than by a
+solved recipe. So a non-SC checkpoint with a quantized tower is the normal case, and
+repairing one does not mean adopting SC. The model cards say SC is "coming soon", so
+both forms are being published for now; what misleads is that the *evals* on these
+cards are still run on an in-domain corpus, which is the confound
+[qbench.md](qbench.md) measures at a 1.52x swing in relative standing. An in-domain
+eval chart is not evidence the checkpoint is SC.
+
+**What to check before assuming `--drop` is enough**, if a future checkpoint of
+interest splits a fused projection. Dropping the split trellis only works when the
+converter *retained* the fused dense source, as `qwen3_vl` does -- then the
+replacement is already in the file. If some architecture splits and does **not**
+retain it, dropping leaves nothing behind, and restoring cannot help either: the
+fused tensor is a module the base does not have, and adding modules is a thing this
+tool refuses by design. That case needs un-splitting (slicing the original's fused
+weight) or re-conversion, not a drop. One header survey of the candidate checkpoint
+answers which it is.
+
+**Name agreement is enforced rather than assumed.** If the converter renamed, fused or
+split a tower tensor, the selected module simply does not exist in the reference repo
+and the tool refuses by name, saying which modules and why. That is the cheap half.
+
+**The expensive half is a numerical guard, and it is the reason this is publish-grade.**
+Matching names and shapes do not establish that the dense tensor is the one the trellis
+was made from: a different fine-tune of the same architecture, a transposition, or a
+scale convention baked into the stored weights and recorded nowhere (Laguna's
+`interm_div`, [format-and-loading.md](format-and-loading.md)) all pass every structural
+check. So `--verify N` dequantizes a sample of the modules being replaced with
+`ops.dense_weight` and measures relative error against the incoming dense tensor.
+Validated on `gemma-4-12B-it-exl3@3.00bpw_mul1` against `google/gemma-4-12B-it`: a
+genuine restore measures **0.1674** at K=3, inside the 0.1441-0.1790 band
+[qbench.md](qbench.md) records for that bit width, while the same tensor with its rows
+permuted measures **1.4128**. The threshold sits at 0.6, in an 8.4x gap that nothing
+lands in by accident.
+
+### A third quantized tower, from our own pipeline, and what it stores twice (2026-09-18)
+
+exllamav3's default `vision_bits` became architecture-dependent at some point
+before 2026-09-18, and for `qwen3_5`/`qwen3_5_moe` it resolves to **6**. This is
+not a Hub observation: it showed up in our own sweep. `~/ckpt` holds
+`Ornith-1.5-35B-A3B-exl3_3.00bpw` from 2026-09-16 with `vision_bits: null` and a
+fully dense 0.832 GiB tower, and `..._4.00bpw-H5` from 2026-09-18 with
+`vision_bits: 6` and **164 quantized modules at K=6**, tower down to 0.521 GiB.
+Same pipeline, same model, two days apart. So anything published from this sweep
+ships a quantized tower unless something is done about it.
+
+**The tower is split for quantization, and the fused source is kept.** Qwen3-VL
+stores vision attention as one packed `blocks.N.attn.qkv` (3456x1152 here).
+exllamav3 quantizes it as three separate `q_proj`/`k_proj`/`v_proj` — 81 modules
+across 27 blocks — **and leaves the fused bf16 `attn.qkv.weight`/`.bias` in the
+output untouched.** Verified byte-identical to the source repo's, hash and all,
+while every neighbouring norm was cast bf16 -> fp16 on the way through. That is
+**0.2004 GiB per checkpoint** stored twice, in two different factorizations.
+
+Two consequences, one of them convenient:
+
+- **Restoring this tower does not need the original for attention.** The dense
+  weights are already in the file. `--restore vision` against the source repo
+  fails by name on exactly those 81 modules -- which is the fusion case
+  [format-and-loading.md](format-and-loading.md) warns about, caught by the tool
+  rather than silently mismatched -- and the remaining 83 (`attn.proj`,
+  `mlp.linear_fc1`, `mlp.linear_fc2`) do match and restore normally. A fully
+  dense tower is those 83 restored plus the 81 trellis modules simply dropped.
+- **vLLM almost certainly cannot serve the split form**, and it no longer
+  matters enough to test. `Qwen3VisionBlock` builds one packed `attn.qkv`
+  (`qwen3_vl.py`: `"qkv": ["qkv"],  # For vision tower's already-packed QKV`),
+  and its only unpacking rule maps `attn.q.`/`attn.k.`/`attn.v.` onto
+  `attn.qkv.` with a shard id -- a dense weight-loader path, keyed on names the
+  checkpoint does not use (`q_proj`, not `q`). Left here as the reason not to
+  pursue it, not as a finding: it was never run.
+
+## Policy: unquantized vision, always (2026-09-18)
+
+**Decided, and it closes the quantized-tower question rather than answering it.**
+Nothing published from here carries a quantized vision tower, whatever the
+pipeline defaults to.
+
+The reasoning is that the upside stopped existing. Host offload of the tower is
+effective, and the slowness of that path does not show up in real use -- one PCIe
+pass per image is not a capacity problem (see "Nothing could evict any of it"
+above, and the transient sections). So a quantized tower buys back host
+transfers and nothing else, against a **quality cost nobody has characterised
+anywhere**: the tower is quantized as an uncalibrated side model, `proxy_err` is
+not comparable to any body tensor's error column, and qbench's text-KLD axis
+cannot see a vision tower at all. An uncharacterised quality loss for a saving
+that offload already makes irrelevant is not a trade worth taking, and it is not
+worth the measurement either.
+
+**How to get it.** `-vb 16` / `--vision_bits 16` stores the tower unquantized;
+the default is `0` (auto), which resolves to the architecture's
+`default_vision_bits`. Seven architectures now declare that as **6** --
+`qwen3_vl`, `gemma4` (twice), `glm4v`, `muse_glimmer`, `step3_7` and
+`deepseek_v4_vision` -- so this is the default for a growing set, not a quirk of
+one model. `-vb 16` leaves the output directory name unchanged (the `-V` suffix
+is only added for values other than 16), so it does not disturb an existing
+naming scheme.
+
+**It does not affect arm selection.** qbench scores text KLD, which never touches
+the tower, so sweep arms converted with a quantized tower are fine to *choose
+between*. The flag only has to be right for the conversions that get published --
+which means the cheapest correct path is to select first and pass `-vb 16` on the
+final conversion, rather than repairing or re-running a sweep.
+
 ## Reproducing
 
 ```

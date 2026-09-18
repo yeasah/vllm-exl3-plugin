@@ -1397,6 +1397,57 @@ the pipeline this item would build on is the one already measured — see
 
 → [docs/embeddings.md](docs/embeddings.md)
 
+## `category-bits` — Bit allocation for the tensor categories the body null does not cover
+
+Whether the two scalars the allocation question reduced to are actually constants.
+`head-bits` answered the head on **one model at one budget** (phi-4-mini, 3.0 bpw
+body): optimum 5-6, with 7 costing +34% and 8 costing +87%. What it did not
+establish is that 5-6 travels. Published checkpoints disagree with it in both
+directions — `Qwen3-0.6B-exl3` ships a `2.75bpw_H5` arm, and upstream's Qwen3.8
+self-calibrated recipe uses a heuristic of body bits + 1 over a 3-6 range, which at
+a 3.0 bpw body is head 4. Neither is known to be backed by measurement.
+
+Three questions, in the order they are worth asking:
+
+1. **Does the head optimum move with body bitrate, or with the head's share of
+   quantizable weights?** The phi-4-mini result is an exchange rate — each head bit
+   cost 0.19 body bits because the head was 16% of quantizable weights.
+   **This now gates publishing.** A 35B-A3B MoE puts the head at 1.4% of
+   quantizable weights, 13x cheaper per head bit, so the +34%/+87% penalties that
+   closed the question at 7 and 8 bits do not transfer and `-hb 5` is the
+   conservative end of an untested range; a dense 9B at 11.8% is near the tested
+   regime. Budget-neutral sweeps at two very different head shares separate "5-6 is
+   the answer" from "5-6 is what a 16% head gives you". Composed head arms carry
+   their source body's calibration context, so run the K=6 control first. See
+   [docs/qbench.md](docs/qbench.md) "Head share is the hidden variable".
+2. **Non-routed tensors in an MoE model.** Upstream can boost everything that is not
+   a routed expert, and KLD supported it when introduced — measured on older
+   checkpoints, so not confounded with the SC work. `turboderp/Laguna-XS-2.1-exl3`
+   at 3.00bpw ships it (routed experts K=3, `shared_expert` K=5). This is the one
+   live challenge to the per-tensor composability null: that null was measured over
+   body tensors that are all doing the same job, and routed-vs-shared is a
+   categorically different split, so the compensation argument that explains the
+   null may simply not apply across it — and more concretely, it is not the same
+   *operation*: that null is budget-neutral reallocation, where the collapse comes
+   from mixed-direction moves, while the shared-expert boost demotes nothing and
+   costs 0.24% of trellis bytes. Promotions sat in the regime where superposition
+   held. Frame the arm as a promotion, not a reallocation. See
+   [docs/moe.md](docs/moe.md) "How exllamav3 actually spends bits on experts".
+3. **Vision and MTP towers**, which exllamav3 already treats as separate knobs
+   (`vision_bits`, `mtp_bits`) and which no measurement here covers at all.
+
+**Candidate approach: compose, do not convert.** `tools/compose_checkpoint.py`
+builds each arm out of published checkpoints — `--take head` for (1),
+`--take all --keep experts` for (2), `--take vision` for (3) — so an arm costs
+seconds and one rewritten shard instead of hours of GPU time, and the arms share a
+byte-identical body, which converting separately cannot guarantee. The limit is that
+the available bit widths are whatever someone published: it makes the *comparisons*
+cheap, not the grid dense, and filling a gap still needs a conversion. Score with
+qbench as `head-bits` did, and watch the metric blind spots recorded there.
+
+→ [docs/qbench.md](docs/qbench.md) "Head bitrate: 6 is defensible", and
+"Per-tensor bit allocation does not compose" for the null this tests the edge of.
+
 ## `yaqa` — YAQA-quality rounding in the quantizer
 
 Round with a second Hessian on the output channels, minimizing the full-model output KL

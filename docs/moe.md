@@ -461,3 +461,38 @@ disguised twice over: detokenization hides special tokens, and greedy decoding
 returns *something* from a degenerate tensor. Sampling above temperature 0 is
 what exposes it. **Check `token_ids`, not decoded text** — the leading `0` was
 printed in the very first successful-looking run and read past.
+
+## How exllamav3 actually spends bits on experts (2026-09-18)
+
+Surveying the local collection for the `category-bits` question turned up two
+things worth separating, because "the routed experts are at 2 and 3 bits" invites
+the wrong reading.
+
+**The non-routed boost is real and shipped.** `turboderp/Laguna-XS-2.1-exl3` at
+3.00bpw: routed experts K=3 (9984 tensors), `shared_expert` K=5 (39), the dense
+`mlp.*` K=4, attention K=3. `gemma-4-26B-A4B-it-exl3` at 2.54bpw does the same
+shape — routed experts at 2-3, shared `mlp.*` at 3, attention at 4.
+`Qwen3.5-35B-A3B-exl3` at both 2.00 and 3.00bpw is flat K=3 everywhere, so the
+option is per-conversion rather than automatic.
+
+**The 2-vs-3 split inside gemma's routed experts is by layer depth, not by
+tensor.** Layers 0-13 carry K=3 across all 384 of their routed-expert tensors;
+layers 14-29 carry K=2 across all 384 of theirs. There is no scatter within a
+layer and none between the three projections. So this is not the per-tensor
+allocation that "does not compose" (docs/qbench.md) reappearing inside the expert
+category — it is a single depth-wise cut, and the earlier layers are the ones
+that get the bits.
+
+**Why this is not the refuted operation.** The per-tensor allocation null
+(docs/qbench.md) is about *budget-neutral* reallocation, where the collapse comes
+from tensors moving in opposite directions. Laguna's boost demotes nothing: 39
+shared-expert tensors against 9984 routed ones, so K=3 -> K=5 costs **0.0286 GiB,
+0.24% of trellis bytes**. That is a near-free promotion, which is the
+same-direction regime where superposition held — and under-counted the benefit.
+Granularity is not what distinguishes them, and per-layer variation pays the same
+tax as per-tensor variation; see docs/qbench.md "What the null is actually about:
+direction, not granularity".
+
+So for `category-bits` the arm to build is a promotion, not a reallocation:
+`tools/compose_checkpoint.py --take all --keep experts` takes the higher-bitrate
+checkpoint's non-routed tensors while holding the routed experts at the base's.
