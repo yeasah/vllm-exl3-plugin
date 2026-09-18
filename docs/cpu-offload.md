@@ -183,69 +183,70 @@ token's 8 routed experts land in host memory, in the layers the pattern covers.
 including the 10 GB one once the eligibility cap is applied — at **5.67–6.45 GB/s**,
 against a measured 6.54 GB/s pinned-DMA ceiling on this host.
 
-**That constant holds only at fixed concentration**, which every row in the original
-sweep happened to share closely enough to hide the effect. Spread the same bytes more
-thinly and apparent bandwidth rises to 7.63 GB/s — *above* the link — because part of
-the transfer stops being serialised. See "Placement" below. So: no *bandwidth* headroom
-to recover at a given placement, but real headroom in the placement itself, plus a
-latency tax that excluding `suh`/`svh` collects.
+**That constant holds only at fixed layer coverage**, which every row in the original
+sweep happened to share closely enough to hide the effect. Spread the same bytes across
+all 40 layers and apparent bandwidth rises to 7.63 GB/s — *above* the link — because
+part of the transfer stops being serialised. See "Placement" below. So: no *bandwidth*
+headroom to recover at a given placement, but real headroom in the placement itself, in
+transfer granularity, and in the latency tax that excluding `suh`/`svh` collects.
 
-Placement has three separable axes, and they do **not** behave the same way.
+Placement has three separable axes. A full spread sweep on the Gen5 x16 host
+(2026-09-17) separated two of them that the original sweep had confounded, and the
+answer is not the one an earlier draft of this note gave.
 
-**Position — which layers — does not matter.** The cleanest control in the table is the
-first two rows: identical concentration, layers 0–5 against layers 10–15,
-**66.4 vs 66.2 tok/s**. Worth 0.3%.
+**Position — which layers — does not matter.** Identical distribution, layers 0–5
+against layers 10–15: **66.4 vs 66.2 tok/s**. Worth 0.3%.
 
-**But *concentration* does matter, and it is worth ~4%.** This is a different axis, and
-the expected-bytes argument above says nothing about it. What moves the number is how
-many of each token's 8 routed experts land in host memory *in the layers the pattern
-covers* — 8.00 when every expert in a layer is offloaded, 1.75 when only 56 of 256 are.
-Sorting the 1 GiB rows by that column orders them almost perfectly, and the effect
-survives re-running.
+**Layer *coverage* — how much of the forward pass the transfers are spread over — is
+the variable that matters, and it is worth up to 3x.** Two configurations on the fast
+host, both offloading *every* expert in the layers they touch:
 
-**The sparse rows beat the link, which is the tell.** `experts 200-255` and
-`experts 0-59` imply **6.63–6.74 and 6.92–6.95 GB/s**, against a measured pinned-DMA
-ceiling of **6.54 GB/s** — in *both* runs. Serialised transfer cannot exceed the link,
-so part of it is not serialised. The mechanism is intra-layer overlap: when only ~2 of
-a layer's 8 routed experts are offloaded, the other ~6 are resident and their GEMMs
-issue while the offloaded reads are in flight. At 8-of-8 there is nothing left to hide
-behind, and those rows sit at 6.11–6.27, just under the ceiling, like fully serialised
-transfer.
-
-**So there is one placement lever, and it is not the one the sweep was looking for:**
-spread a fixed offload budget as thinly as possible across as many layers as possible.
-Plain `--cpu-offload-params experts` does the opposite — it fills greedily in layer
-order and concentrates at 8-of-8. Expressing the spread form requires the `re:`
-extension, which is the instrument for the only placement choice that pays.
-
-**Index — which experts — does matter, by 2.8%, and that was not expected.** Two
-patterns with *identical* geometry — 34 experts, all 40 layers, 4080 tensors, 1.00 GiB,
-1.07 offloaded of 8 routed per layer — differ by more than noise:
-
-| pattern | experts | tok/s | apparent GB/s |
+| config | layers touched | tok/s | apparent GB/s |
 |---|---|---|---|
-| `re:experts\.(22[2-9]\|2[3-5][0-9])\.` | 222–255 | 69.0 | 7.01 |
-| `re:experts\.([0-9]\|[1-2][0-9]\|3[0-3])\.` | 0–33 | **70.9** | **7.63** |
+| 1 GiB, plain `experts` (greedy fill) | 5.3 | 93.8 | 10.03 |
+| 7.50 GiB, plain `experts` (full) | 40 | 63.0 | **29.41** |
 
-Nothing differs but the index range. The earlier pair points the same way:
-`experts 200-255` (67.7) against `experts 0-59` (68.8), low index faster *despite*
-0–59 carrying the worse concentration. Two independent pairs, same direction.
+Same experts-per-layer, 3x apart in rate. Concentrating transfers into a few layers
+stalls them with nothing to overlap; spreading them across the pass gives each one a
+layer's worth of surrounding compute to hide behind.
+
+**Experts-per-layer does *not* matter, and an earlier draft of this note said it did.**
+The spread sweep varies it 7.5x at constant layer coverage and nothing happens:
+
+| offloaded | % of experts | of 8 routed/layer | tok/s | apparent GB/s |
+|---|---|---|---|---|
+| 1.00 GiB | 13% | 1.04 | 119.3 | 31.45 |
+| 1.96 GiB | 26% | 2.08 | 104.7 | 29.42 |
+| 2.93 GiB | 39% | 3.12 | 92.1 | 27.75 |
+| 3.90 GiB | 52% | 4.16 | 84.7 | 29.14 |
+| 4.86 GiB | 65% | 5.20 | 77.4 | 29.10 |
+| 5.83 GiB | 78% | 6.24 | 71.7 | 29.50 |
+| 6.80 GiB | 91% | 7.28 | 66.1 | 29.20 |
+| 7.50 GiB | 100% | 8.00 | 63.0 | 29.41 |
+| 7.83 GiB | 100% + dense | 8.00 | 36.1 | 29.56 |
+
+**Flat at 29.4 ± 1.7 GB/s across the whole range**, including the `everything` row once
+dense trellis is priced at full duty. So **cost is linear in bytes touched per token**,
+and the earlier claim that it is superlinear — that the lever "decays to zero at full
+offload" — was wrong. It was inferred from the 1 GiB greedy row, which is slow because
+of *layer coverage*, not because of experts-per-layer.
+
+**Index — which experts — does matter, by 2.8%.** Two patterns with identical geometry —
+34 experts, all 40 layers, 4080 tensors, 1.00 GiB — differ by more than noise:
+`experts 0-33` gives 70.9 tok/s against 69.0 for `experts 222-255` (Gen3 host). The
+earlier `experts 0-59` (68.8) vs `experts 200-255` (67.7) pair points the same way.
 
 **The straightforward reading is that routing is not uniform.** The cost ratio implies
-experts 222–255 are routed **~8.8% more often** than experts 0–33 — roughly 13.9% vs
-12.7% of routings against a uniform 13.28% share for 34 of 256. That is a mild skew,
-well within what aux-loss-free (bias-based) balancing produces, and it is enough to
-move throughput by 2.8%.
+experts 222–255 are routed **~8.8% more often** than 0–33 — roughly 13.9% vs 12.7%
+against a uniform 13.28% share. Mild, consistent with aux-loss-free balancing.
 
-**Which means the uniformity premise above is false, and the conclusions that rested on
-it are only as good as it was.** Expected-bytes invariance was always conditional —
-"*if* routing is uniform, index is measure-preserving" — and the original sweep could
-not have detected the failure, because its index ranges were confounded with
-concentration. It took *controlling* concentration to expose the index effect.
-Throughput is an indirect instrument for routing frequency, though; the direct
-measurement is cheap and has not been done. See "Open questions".
+**Which means the uniformity premise is false, and what rested on it is only as good as
+it was.** Expected-bytes invariance was always conditional. The original sweep could not
+have caught the failure, because its index ranges were confounded with layer coverage;
+it took controlling coverage to expose it. Throughput is an indirect instrument for
+routing frequency, and the direct measurement has not been done — see "Open questions".
 
-**This also qualifies the LRU comparison.** An LRU cache with C slots *per layer* is
+**This also qualifies the LRU comparison.**
 inherently spread — every layer keeps C of N resident, so offloaded-routed-per-layer is
 uniform at `top_k x (1 - C/N)`. It is equivalent to a static placement *at the same
 per-layer density*, which the greedy `experts` fill is not. Dynamic paging still buys
@@ -325,11 +326,95 @@ pcie.link.gen.max` reads 3. Measured throughput is the only honest instrument; t
 check the real link, read `LnkCap` of the *upstream bridge* on the hypervisor (the
 GPU's own `LnkCap` reports the card's capability, not the negotiated minimum).
 
-**This makes every number above host-specific.** A Gen5 x16 host is ~7.7x this link,
-which changes what offload *is*: offloading all 8.21 GB of experts costs ~80% of
-throughput here and a projected ~34% there, and combines with batching to near-free. Any decision
-about whether offload is worth shipping should be taken on the fast host. The code is
-already saturating the slow one.
+### Measured on both hosts, and a faster link makes *placement* matter more
+
+*5070 Ti, Gen5 x16, single card, same model and budget. 2026-09-17.*
+
+| host | baseline | 1 GiB greedy (5.3 layers) | 1 GiB spread (40 layers) | spread is worth |
+|---|---|---|---|---|
+| 5060 Ti, Gen3 x8 | 103.0 | 66.4 (−35.5%) | 69.0 (−33.0%) | 1.12x |
+| 5070 Ti, Gen5 x16 | 136.7 | 93.8 (−31.4%) | **119.2 (−12.8%)** | **3.12x** |
+
+Apparent bandwidth goes 6.27 → 7.01 GB/s on the slow host but **10.03 → 31.45 GB/s** on
+the fast one. **The naive intuition — that a fast link makes placement matter less — is
+backwards.** On Gen3 x8 the link saturates either way, so spreading recovers only a
+sliver. On Gen5 x16 the link is nowhere near saturated, so what is left is stall time,
+and spreading is what removes it.
+
+**Offload cost cannot be projected by scaling link bandwidth.** An earlier draft
+projected full expert offload at ~34% on a Gen5 host by scaling 6.5 GB/s to ~50, then
+revised it to ~77% from the greedy 1 GiB row. Both were wrong. Measured: **63.0 tok/s
+against a 136.7 baseline, a 54% cost**, because full offload covers all 40 layers and
+therefore gets the spread rate, not the greedy one.
+
+### The real ceiling is transfer size, and the format sets it
+
+*Measured on the 5070 Ti, 2026-09-17.*
+
+29.4 GB/s is not an arbitrary number. One EXL3 expert-projection trellis is
+`(2048/16, 512/16, 16*2)` int16 = **exactly 256 KiB**, and that is the granularity every
+offloaded read happens at. On that host:
+
+| transfer size | pinned DMA | UVA kernel read |
+|---|---|---|
+| 256 KiB — one trellis | 26.4 GB/s | 22.9 GB/s |
+| 512 KiB | 46.0 | 32.0 |
+| **768 KiB — one expert, gate+up+down** | **47.2** | **35.3** |
+| 1 MiB | 47.9 | 39.5 |
+| 16 MiB | 51.1 | 49.9 |
+
+The measured offload rate of 29.4 GB/s sits right where a 256–512 KiB granularity
+predicts. **So a correctly spread offload is already saturated — not against the link,
+which does 52 GB/s, but against what 256 KiB transfers achieve.** The link has ~1.8x
+more to give and the format cannot ask for it.
+
+**Confirmed by varying the format's own granularity.** Running the same spread selector
+against `2.00bpw` and `3.00bpw` of the same checkpoint changes trellis size — 256 KiB
+against a uniform 384 KiB, 30720 tensors either way — with architecture, layers, routing
+and selector all fixed. Both baselines measured, no offload:
+
+| revision | trellis | baseline | offloaded | tok/s | apparent GB/s |
+|---|---|---|---|---|---|
+| 2.00bpw | 256 KiB | 136.7 | 7.50 GiB (100%) | 63.0 | 29.41 |
+| 3.00bpw | 384 KiB | 129.1 | 5.84 GiB (52%) | 73.0 | **32.92** |
+
+**Transfer size is the cap, but the scaling is weaker than the microbenchmark suggests:**
+a 1.5x larger tensor buys 1.12x more bandwidth, where the `sum()` curve implied ~1.20x.
+Fitting `t = L + S/B` to the two real points gives a **per-transfer latency of 2.85 µs**
+and an asymptote of **43.2 GB/s** — against 52 GB/s for large pinned DMA on the same
+host.
+
+**So packing is worth 1.12–1.27x, not the 1.55x an earlier draft of this note claimed.**
+That figure came from extrapolating the microbenchmark and from an *estimated* 3bpw
+baseline of ~118 tok/s; the measured 129.1 roughly halves the projected payoff. Using
+the fit:
+
+| packed unit | size | GB/s | vs today | full expert offload @2bpw |
+|---|---|---|---|---|
+| one trellis (today) | 256 KiB | 29.4 | 1.00x | 63.0 tok/s |
+| gate+up only | 512 KiB | 35.0 | 1.19x | 66.8 tok/s |
+| whole expert | 768 KiB | 37.4 | 1.27x | 71.2 tok/s |
+
+If `down` does not join the bundle — it is read after the activation, not with gate/up —
+the effective figure is **1.12x**, the same as simply moving to 3bpw tensors. The fit is
+two points extrapolated 2x beyond their range; treat it as indicative.
+
+**Mechanically it is still cheap.** Unlike stacking all experts into one
+`[num_experts, ...]` tensor, which `_pointers` rejects for doubling peak load memory,
+per-expert packing needs one buffer at a time, and the pointer table can address views
+into it since the kernel dereferences per-tensor addresses and does not care that they
+are adjacent. Bit widths differ per projection (`exl3_gate_bits` vs `exl3_down_bits`),
+so the buffer is not three equal thirds. Untested.
+
+**A side finding from the two baselines.** 3.00bpw is only 1.059x slower than 2.00bpw
+despite reading ~16% more weight bytes per token. Solving `t = F + W/B` across the pair
+puts effective VRAM bandwidth near 700 GB/s and **fixed cost at ~4.6 ms of the 7.3 ms
+token**, i.e. most of decode at batch 1 is not weight reading at all. That does not
+affect the offload model, which prices a marginal cost — but it does mean offload's
+*percentage* cost is measured against a baseline dominated by something else.
+
+**Every number here remains host-specific.** Any decision about whether offload is worth
+shipping should be taken on the fast host; the code is already saturating the slow one.
 
 ---
 
@@ -440,16 +525,23 @@ model KV is cheap — `full_attention_interval=4` and `num_key_value_heads=2` gi
 
 ## Open questions
 
-Tracked under TODO `cpu-offload`. The substantive ones: whether routing on real
-workloads is actually uniform (everything above assumes it is, and the whole placement
-question reopens if not — and **the 2.8% index effect above says it is not**. The
-bounded next step is one `topk_ids` histogram, not to characterise the skew but to
-discriminate it from a physical cause in the offload path itself: allocation order,
-pinned-page locality, NUMA placement. The first is out of scope to exploit — it needs
-per-model calibration, which is WiSP's territory — while the second would be a defect
-here. Either way the index window is a **confound to control in every future offload
-A/B**, worth up to ~3%); how far the concentration effect goes, since 1.07 offloaded of
-8 routed per layer is the sparsest measured and still improving; **why removing
-`suh`/`svh` is worth 2.6% in one configuration and 12.5% in another**, for the same
-bytes; what the 2026-08-20 MoE reporting shortfall
-was; and what any of this looks like on a link that is not the bottleneck.
+Tracked under TODO `cpu-offload`.
+
+**Is routing skewed, or is the offload path?** The 2.8% index effect says routing is not
+uniform, but throughput is an indirect instrument. One `topk_ids` histogram discriminates
+routing skew from a physical cause in the offload path — allocation order, pinned-page
+locality, NUMA placement — and only the second would be a defect here. Exploiting real
+skew needs per-model calibration, which is out of scope and is WiSP's territory. Either
+way the index window is a **confound to control in every future offload A/B**, worth up
+to ~3%.
+
+**Does per-expert trellis packing deliver the ~1.55x?** The microbenchmark says a 768 KiB
+read beats three 256 KiB ones by that much on the UVA path, and offload is measurably
+saturated at the 256 KiB rate. Untested in the real kernel, where parallelism and
+overlap differ from a `sum()`.
+
+**Why is removing `suh`/`svh` worth 2.6% in one configuration and 12.5% in another**, for
+the same bytes.
+
+**What the 2026-08-20 MoE reporting shortfall was** — UVA's claim inflated ~9x on a
+routed MoE while honest on dense models.

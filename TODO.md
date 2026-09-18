@@ -1499,6 +1499,45 @@ by-category reachable-vs-offloaded line would have made each obvious at run time
 `cpu_offload_bytes >= cpu_offload_max_bytes`, which is the mechanism behind the
 eligibility cap above, and nothing covers it. Needs a fake loader; no GPU.
 
+**Gating test passed 2026-09-17: transfer size is the cap.** Same spread selector
+against `2.00bpw` (256 KiB trellis) and `3.00bpw` (uniform 384 KiB, same 30720 tensors)
+of the same checkpoint, everything else fixed, both baselines measured (136.7 / 129.1):
+**29.41 GB/s against 32.92**. So the cap is per-request overhead, not memory-level
+parallelism in the decode kernel, and packing is worth building — but a 1.5x larger
+tensor buys only 1.12x, where the microbenchmark implied ~1.20x. Fitting `t = L + S/B`
+gives 2.85 µs per transfer and a 43.2 GB/s asymptote.
+
+**Then: pack each expert's three trellis tensors contiguously — worth ~1.55x, untested.**
+A correctly spread offload is already saturated, but not against the link: one
+expert-projection trellis is exactly 256 KiB, and on the Gen5 host 256 KiB transfers get
+22.9 GB/s on the UVA path against 49.9 for 16 MiB. Measured offload runs at 29.4 GB/s,
+right where that granularity predicts, on a link that does 52. Gate/up/down are always
+read together, so packing them into one 768 KiB buffer is projected at 37.4 GB/s —
+**63 → ~71 tok/s** on full expert offload, or ~67 if `down` stays separate. An earlier
+version of this item said ~79 on a 1.55x; that used an estimated 3bpw baseline of ~118
+tok/s, and the measured 129.1 roughly halves the payoff to **1.12–1.27x**. Unlike
+stacking all experts into one `[num_experts, ...]` tensor, which `_pointers` rejects for
+doubling peak load memory, this needs one 768 KiB buffer at a time and the pointer table
+can hold three views into it — the kernel dereferences per-tensor addresses and does not
+care that they are adjacent. Biggest remaining lever in this item, **conditional on the
+bpw test above**. Note also that `down` is read after the activation, not with gate/up,
+so a 768 KiB buffer may behave as 512 + 256; on the measured curve that is ~1.23x rather
+than ~1.55x. And bit widths differ per projection (`exl3_gate_bits` vs
+`exl3_down_bits`), so the buffer size is per-group, not three equal thirds.
+
+**Spread across all layers, and correct two claims that were wrong.** The Gen5 sweep
+(2026-09-17) settled it: layer *coverage* is the placement variable, not experts per
+layer. Varying experts-per-layer 7.5x at constant coverage does nothing — 29.4 ± 1.7
+GB/s flat from 13% to 100% of experts, including the `everything` row. So cost is
+**linear** in bytes touched, and two earlier claims in this item were wrong: that the
+lever decays to zero at full offload, and that cost is superlinear. Both were inferred
+from the 1 GiB greedy row, which is slow because it touches 5.3 layers, not because it
+offloads every expert in them. Full expert offload on Gen5 x16 is 63.0 tok/s against a
+136.7 baseline — a 54% cost, not the ~77% projected. Plain `experts` is only wrong for
+*partial* offload, where greedy fill concentrates; at full offload it covers every layer
+anyway. The spread expert count is `budget / (num_layers * bytes_per_expert)` and should
+be computed rather than hand-written as a regex.
+
 **Re-measure where the link is not the bottleneck.** Everything measured to date is on
 a Gen3 x8 host at 6.5 GB/s, where the implementation already runs at 87–98% of the link
 and no code change can recover bandwidth. The Gen5 x16 box is ~7.7x. Note
