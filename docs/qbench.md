@@ -888,9 +888,11 @@ Raw results and arms: `quantization/work/Qwen3-0.6B-exl3/main/qb_results.json`.
 ## What identifies a promotable tensor: not an imatrix, and not a fixed role (2026-09-20)
 
 Promotion works (above) and the bar is arithmetic, so the remaining question is how
-to find the tensors worth promoting without measuring every one. Two shortcuts were
-tested against the seven ground-truth sensitivities on Qwen3-0.6B. **Both failed**,
-and the failures are worth keeping because both will be proposed again.
+to find the tensors worth promoting without measuring every one. **Three shortcuts
+were tested and all three failed**, and the failures are worth keeping because each
+will be proposed again: a GGUF imatrix, a fixed tensor role, and a published
+per-tensor sensitivity table. They fail for one shared reason — sensitivity has to be
+measured in the model as it will be served, and none of the three is.
 
 ### A GGUF imatrix does not contain the ranking
 
@@ -935,6 +937,87 @@ compose arms, minutes on a small model, and exact rather than correlated. A prox
 would only earn its keep at per-tensor granularity, which the budget-neutral null
 says is not worth chasing anyway. The MoE case is unaffected — `-hq`'s boundary is
 categorical and needs no ranking at all.
+
+### A published per-tensor sensitivity table does not pick a paying set
+
+`turboderp/Qwen3.8-27B-exl3` ships a
+[kld_table.json](https://huggingface.co/turboderp/Qwen3.8-27B-exl3/blob/main/kld_table.json):
+per-tensor measured `S` for all 400 budgeted tensors plus a geometric KLD model over
+K=1..8 (`alpha` 1.7403, `bit_ratio` 1.96, so a flat 3.2257x per bit). This is the
+output-side signal the imatrix lacks, and the K-model is not a guess — phi-4-mini
+measured a K=2/K=3 error ratio of **1.985** against the assumed 1.96.
+
+**The role ordering cross-validates.** Ranking by KLD/size reproduces, on a different
+model and from an entirely separate pipeline, the shape measured above:
+
+| role | Qwen3.8-27B (table) | Qwen3-0.6B (measured here) |
+|---|---|---|
+| v_proj | 5.85x | 1.95x |
+| k_proj | 2.68x | 3.96x |
+| q_proj | **0.51x** | **0.44x** |
+| mlp.* | 0.85-1.15x | 0.59-0.91x |
+
+k and v high, q lowest, MLP near average. So per-role sensitivity is a real and
+reproducible property — which is what made the table worth testing.
+
+**It still does not work.** Promoting the top 60 by KLD/size from K=4 to K=6 costs
++0.1890 bpw (the table predicted +0.1892) and is predicted to cut total KLD by
+**26.5%**:
+
+| | KLD reduction |
+|---|---|
+| `kld_table.json` predicts | **26.5%** |
+| measured, bf16 reference | **4.4%** |
+| measured, FP8 reference | 1.5% |
+
+A **6x** over-prediction. The arm is faithful — 60 modules verified at K=6, 348 still
+at K=4, lm_head untouched — so the sensitivities are what failed, not the
+composition.
+
+**And no reading of the curve rescues it.** The comparison above is base-relative, so
+no slope enters. Separately, the arm cut excess 4.4% for +0.189 bpw, which breaks
+even only if the body curve is flatter than **0.24/bpw**; the flattest segment
+measured anywhere on this model is 0.790, **3.3x steeper**. Across the full observed
+slope range the arm lands **+11% to +29% against trend**.
+
+**Why this does not contradict "promotion composes".** Additivity held to under 1%
+on Qwen3-0.6B — but those sensitivities were backed out of composed arms measured on
+the same instrument, so they were in-context by construction. `sc_measure` measures
+tensors in isolation, which is exactly the regime "deltas do not compose" describes.
+The framework is sound; **its inputs have to be measured in the model as it will be
+served.** Published per-tensor sensitivities are not that, and this is the third
+shortcut to die on the same point.
+
+### Published bitrate ladders are not a controlled series (2026-09-20)
+
+A byproduct of the above, and a caution that reaches further. Qwen3.8-27B's uniform
+arms do not lie on a log-linear curve, and the deviation is not one bad point: a
+5.00bpw arm was added specifically to break the tie, with both hypotheses registered
+in the project file first, and **it missed both low** (0.004501 against predictions
+of 0.005268 and 0.006175). Adjacent slopes alternate rather than drift.
+
+The control is the two models converted here in a single batch with one settings set:
+
+| model | converted by | adjacent slopes | spread |
+|---|---|---|---|
+| Qwen3-0.6B | one batch, here | 1.794 -> 1.402 -> 1.321 -> 1.196 | **1.50x**, monotone |
+| Ornith-1.5-35B-A3B | one batch, here | 1.221 -> 1.180 -> 1.170 -> 1.082 | **1.13x**, monotone |
+| Qwen3.8-27B | turboderp, published | 0.790 -> **1.581** -> 0.951 | **2.00x**, alternating |
+
+Both of ours decline smoothly and monotonically; the published ladder does not, at
+comparable signal-to-floor. The likely reason is that **each published revision is an
+independent conversion run**, so anything unrecorded that differs between them
+(calibration draw, seed, host, patch level within a version) makes each arm a sample
+rather than a point on one curve.
+
+**What to take from it**: a `vs trend` figure computed against a chord through
+independently-published arms is unsound, and may be why both registered predictions
+missed. Every such figure elsewhere in this file is computed against arms converted
+here in one batch, which this comparison suggests is the reason they behave. Note
+also the reference matters: an FP8 reference put the 6.00bpw arm at 1.99x the noise
+floor with non-monotone perplexity and mutually inconsistent slopes (0.958 from 4->6
+against 0.674 from 3->4). Projects: `~/qbench/q38-kldtable{,-bf16}.yaml`, kept as a
+pair for that contrast.
 
 ### k_proj is not the `-hq` of dense models
 

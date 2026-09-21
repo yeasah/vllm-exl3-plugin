@@ -1483,11 +1483,19 @@ Three questions, in the order they are worth asking:
    statistic and allocation sensitivity is an output-side property. And k_proj is
    not a portable rule either: 3.96x on Qwen3-0.6B but **1.30x** on Llama-3.2-3B and
    2.5x on Qwen3-8B, neither clearing its bar, with no monotonicity in GQA or scale.
-   So the only thing that identifies a promotable dense tensor is measuring it —
-   seven compose arms per model, cheap small and not cheap large. **The live path is
-   MoE**, where the boundary is categorical and needs no ranking. See
-   [docs/qbench.md](docs/qbench.md) "Extra-budget promotion does compose" and "What
-   identifies a promotable tensor".
+   A *third* shortcut died the same way: turboderp's published `kld_table.json`
+   (measured per-tensor S for Qwen3.8-27B) predicts a 26.5% KLD cut for its top-60
+   promotion and delivers **4.4%** — 6x over, and losing to uniform spending under
+   every reading of the curve. So the only thing that identifies a promotable dense
+   tensor is measuring it *in context* — seven compose arms per model, cheap small and
+   not cheap large. **The live path is MoE**, where the boundary is categorical and
+   needs no ranking. See [docs/qbench.md](docs/qbench.md) "Extra-budget promotion does
+   compose" and "What identifies a promotable tensor".
+
+   Related caution from the same work: **a published bitrate ladder is not a
+   controlled series** — turboderp's Qwen3.8-27B arms give alternating slopes
+   (0.790/1.581/0.951) where two models converted here in one batch give smooth
+   monotone ones, so `vs trend` against published arms is unsound.
 
 **Candidate approach: compose, do not convert.** `tools/compose_checkpoint.py`
 builds each arm out of published checkpoints — `--take head` for (1),
