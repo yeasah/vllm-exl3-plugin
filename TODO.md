@@ -1483,19 +1483,17 @@ Three questions, in the order they are worth asking:
    statistic and allocation sensitivity is an output-side property. And k_proj is
    not a portable rule either: 3.96x on Qwen3-0.6B but **1.30x** on Llama-3.2-3B and
    2.5x on Qwen3-8B, neither clearing its bar, with no monotonicity in GQA or scale.
-   A *third* shortcut died the same way: turboderp's published `kld_table.json`
-   (measured per-tensor S for Qwen3.8-27B) predicts a 26.5% KLD cut for its top-60
-   promotion and delivers **4.4%** — 6x over, and losing to uniform spending under
-   every reading of the curve. So the only thing that identifies a promotable dense
-   tensor is measuring it *in context* — seven compose arms per model, cheap small and
-   not cheap large. **The live path is MoE**, where the boundary is categorical and
-   needs no ranking. See [docs/qbench.md](docs/qbench.md) "Extra-budget promotion does
-   compose" and "What identifies a promotable tensor".
-
-   Related caution from the same work: **a published bitrate ladder is not a
-   controlled series** — turboderp's Qwen3.8-27B arms give alternating slopes
-   (0.790/1.581/0.951) where two models converted here in one batch give smooth
-   monotone ones, so `vs trend` against published arms is unsound.
+   The third shortcut, turboderp's published `kld_table.json` (measured per-tensor S for
+   Qwen3.8-27B), turned out to be roughly right once scored on-template (2026-09-21).
+   Its top-60 promotion measures a 22.5% cut against a predicted 26.5%, not the 4.4%
+   measured off-template. But it is break-even against uniform spending (P = 0.40), and
+   the +1 variants do no better. So dense promotion does not pay on that model either
+   way, and +1 vs +2 (K+1) is closed for dense as moot. The "published ladders are not
+   a controlled series" caution is withdrawn: under render the published Qwen3.8 arms
+   are smooth and monotone (slopes 1.48/1.41/1.09), and the old alternation was
+   off-template scoring. **The live path is still MoE**, where `-hq`'s boundary is
+   categorical and needs no ranking. See [docs/qbench.md](docs/qbench.md) "A published
+   per-tensor sensitivity table" and "Published bitrate ladders behave".
 
 **Candidate approach: compose, do not convert.** `tools/compose_checkpoint.py`
 builds each arm out of published checkpoints — `--take head` for (1),
