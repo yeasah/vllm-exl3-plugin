@@ -126,6 +126,21 @@ def tensor_survey_remote(repo, revision):
                 yield name, b - a
     return tensor_survey(tensors())
     
+def has_chat_template(repo):
+    """Does the base repo ship a chat template (standalone file or inline)?
+
+    Base models often do not (meta-llama/Llama-3.2-3B), and qbench's `render` mode
+    raises on them. Raw text is the right instrument for those anyway: it is the
+    distribution they were trained on.
+    """
+    files = HfApi().list_repo_files(repo)
+    if any(f in files for f in ("chat_template.jinja", "chat_template.json")):
+        return True
+    if "tokenizer_config.json" in files:
+        with open(hf_hub_download(repo, "tokenizer_config.json")) as f:
+            return bool(json.load(f).get("chat_template"))
+    return False
+
 def parse_qbench(qbench, label):
     for res in qbench:
         if res['label'] == label:
@@ -173,8 +188,17 @@ def do_card(job, args):
 def do_qbench(job, args):
     os.makedirs(job.main, exist_ok=True)
 
+    # The mode is part of qbench's cache key and changes the numbers (2026-09-21:
+    # off-template rows inflated KLD up to ~2x on Qwen3.6), so say which one is in use.
+    mode = args.chat_template
+    if mode == 'auto':
+        mode = 'render' if has_chat_template(job.base_repo) else 'none'
+        print(f"=== chat template: {mode} (auto: {job.base_repo} "
+              f"{'ships' if mode == 'render' else 'has no'} chat template) ===")
+
     params = { "this_model": job.name,
                "base_model": job.base_repo,
+               "template_mode": "render" if mode == 'render' else "false",
                "out_dir": job.main,
                "logit_cache_dir": args.logit_cache,
                "logit_cache_size": args.logit_cache_size,
@@ -256,6 +280,10 @@ def main():
 
     cmd_qbench = subparsers.add_parser('qbench')
     cmd_qbench.add_argument('--template', default='templates/qbench.jinja')
+    # auto: render through the base model's chat template when it has one, raw text
+    # when it does not (base models); none forces raw text either way.
+    cmd_qbench.add_argument('--chat-template', default='auto',
+                            choices=['auto', 'render', 'none'])
     cmd_qbench.add_argument('--logit_cache', default='../../_logit_cache')
     cmd_qbench.add_argument('--logit_cache_size', default=25)
     cmd_qbench.add_argument('-d', '--device', default=0)

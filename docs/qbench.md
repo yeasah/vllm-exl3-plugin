@@ -523,6 +523,90 @@ cells can be trusted.
 Raw results: `~/qbench/results/ornith-1.5-35b-a3b/`, project
 `~/qbench/ornith-1.5-35b-a3b.yaml`.
 
+**Re-checked on the chat template, 2026-09-21: the verdicts hold.** H6 at body >= 4
+on both Ornith and Qwen3.6. Body 3 moves from a clear H5 to a tie, which H5 still wins
+on bytes. See the next section.
+
+## Scoring through the chat template: what off-template rows did (2026-09-21)
+
+Before `template: render`, the pipeline benched with `template: true`, which put every
+row off-template: inside an open `<think>` block for Qwen3.6 and Ornith. The two modes
+score **identical tokens**; only the prefix differs (18 vs 20 tokens). So every
+comparison below is paired row-for-row, over qbench's cached per-token KLD vectors,
+with 20k bootstrap resamples over rows and 90% intervals.
+
+**The size of the effect depends on the model.**
+
+| model | noise floor, off-template → render | quant arms |
+|---|---|---|
+| Qwen3.6-35B-A3B | 0.0077 → 0.0042 (0.55x) | 0.61-0.85x |
+| Ornith-1.5-35B-A3B | 0.0141 → 0.0123 (0.87x) | excess KLD within ±3% at 2-4 bpw |
+| Ornith 9B (dense) | — | under 1%, run elsewhere by the user |
+
+**It is not confidence.** On Qwen3.6 the reference's confidence distribution barely
+moves: bucket shares agree within ~1 point, and PPL goes 10.60 → 10.10. Yet KLD drops
+~40% *within every confidence bucket*. The model is more **stable** on-template, meaning
+the same perturbation moves its output less, and that holds from the noise floor to
+2 bpw.
+
+**Off-template instability grows with depth into the block, on Qwen3.6 only.** Noise
+floor KLD by token position:
+
+| | 0-32 | 32-256 | 256-1024 | 1024-2048 |
+|---|---|---|---|---|
+| Qwen3.6 off-template | 0.0117 | 0.0048 | 0.0055 | **0.0098** |
+| Qwen3.6 render | 0.0112 | 0.0043 | 0.0039 | 0.0043 |
+| Ornith off-template | 0.0295 | 0.0175 | 0.0150 | 0.0123 |
+| Ornith render | 0.0361 | 0.0172 | 0.0124 | 0.0103 |
+
+Ornith is a post-trained Qwen MoE, and it has the same shape in both modes. The
+plausible reading is that its training corpus exercised long off-template text. Its
+floor is also 2-3x Qwen3.6's in absolute terms, so it gave up some on-template
+stability too. The explanation is a hypothesis; the position profiles are measured.
+
+**The curve changed shape; the ordering did not.** Qwen3.6, paired, render step factor
+divided by off-template step factor:
+
+- 2->3 bpw: 1.32 [1.06, 1.67]
+- 3->4: 0.83 [0.60, 1.11]
+- 4->5: 1.26 [1.08, 1.51]
+- 5->6: 1.00
+
+Off-template, the curve had a bump at 3 bpw. PPL was non-monotone (+0.03% at 4 bpw,
++0.25% at 5) and went *below* the base at 6 bpw (-0.09%). Under render, KLD is smooth
+and ΔPPL is monotone: 7.61 / 1.07 / 0.25 / 0.07 / 0.00%. Those off-template features
+were amplified noise, not properties of the quantization.
+
+**Render is the quieter instrument.** Within-mode step-factor intervals are ~±4% under
+render, against ~±25% off-template, at the same 10 rows. That is why rows stay at 10.
+
+**Head bitrate re-checked under render.** Composed arms (`tools/compose_checkpoint.py
+--take head`) give 3.00bpw-H6 and 4.00bpw-H5 against the native 3.00bpw-H5 and
+4.00bpw. The bar is the byte-matched rule from the grid above: a head bit is 0.0592 GB,
+priced at the local log-slope of excess KLD to the next body arm.
+
+| | body 3, H5->H6 | bar | P(H6 wins) | body 4, H5->H6 | bar | P(H6 wins) |
+|---|---|---|---|---|---|---|
+| Qwen3.6 | 2.06% [1.13, 2.93] | 1.87% | 0.64 | 8.27% [6.81, 9.98] | 1.91% | 1.00 |
+| Ornith | 2.00% [1.23, 2.92] | 1.67% | 0.75 | 3.16% [1.57, 4.74] | 1.70% | 0.93 |
+| Ornith grid, off-template | 0.22% | 1.62% | — | 3.97% | 1.89% | — |
+
+On Ornith the body-3 head gain rose ~10x. That comparison also flips which arm is
+composed: the grid's native arm at body 3 was H6, here it is H5. Native arms have tended
+to score better, so the flip biases *against* the larger H6 gain, not toward it.
+Policy unchanged: H5 below body 4, H6 at and above.
+
+**What to distrust.** Any off-template qbench conclusion that rests on differences of a
+few percent between arms at >= 4 bpw, on a model that behaves like Qwen3.6. That is the
+regime where the amplified noise exceeded the arm-to-arm differences. The same-day
+Qwen3.6 numbers above are the check to repeat before relying on one. The category-bits
+and promotion sections were measured before render and have not been re-checked.
+
+**Knob.** `quant.py qbench --chat-template {auto,render,none}`. `auto` renders when the
+base repo ships a template (a standalone file or inline in `tokenizer_config.json`), and
+uses raw text when it does not, as for base models like `meta-llama/Llama-3.2-3B`, where
+`render` raises. Raw text is the right instrument there.
+
 ## Per-tensor bit allocation does not compose (2026-08-23)
 
 *Survives the exllamav3 v1.4.3 bump unrevisited, and provably.* The study ran from
