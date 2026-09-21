@@ -166,7 +166,8 @@ def do_card(job, args):
         base_metadata['tags'] = []
     base_metadata['tags'].append('exl3')
     card_data = ModelCardData(**base_metadata)
-    card = ModelCard.from_template(card_data, template_path=args.template, **meta)
+    card = ModelCard.from_template(card_data, template_path=args.template,
+                                   show_ppl=args.ppl, **meta)
     card.save(os.path.join(job.main, "README.md"))
 
 def do_qbench(job, args):
@@ -262,6 +263,10 @@ def main():
 
     cmd_card = subparsers.add_parser('card')
     cmd_card.add_argument('--template', default='templates/model_card.jinja')
+    # Raw-text perplexity is meaningless for some models (gpt-oss: ~3600 even for
+    # the unquantized reference, on every engine); KLD stays valid, so drop only PPL.
+    cmd_card.add_argument('--ppl', default=True,
+                          action=argparse.BooleanOptionalAction)
     cmd_card.set_defaults(func=do_card)
 
     cmd_upload = subparsers.add_parser('upload')

@@ -21,19 +21,22 @@ The vision encoder is left unquantized. This preserves full vision fidelity as c
 
 Each bitrate is available as a separate revision of this repository. When planning available VRAM for kv space, refer to the appropriate VRAM column.
 
-| BPW | Size on disk | VRAM (exllamav3) | VRAM (vLLM) | KLD | PPL |
-|---|---|---|---|---|---|
-{% for rev in revisions %}|[{{ '{0:0.2f}'.format(rev.bits) }}](https://huggingface.co/{{ this_model }}/tree/{{ rev.name }})|{{ '{0:0.2f}'.format(rev.disk_bytes / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes) / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.encoder_bytes+rev.blockq_bytes) / 1024**3) }} GiB|{{ '{0:0.4f}'.format(rev.kld) }}|{{ '{0:0.4f}'.format(rev.ppl) }}|
-{% endfor %}|(base)|{{ '{0:0.2f}'.format(base_disk_bytes / 1024**3) }} GiB|||{{ '{0:0.4f}'.format(base_kld) }}|{{ '{0:0.4f}'.format(base_ppl) }}|
+| BPW | Size on disk | VRAM (exllamav3) | VRAM (vLLM) | KLD |{% if show_ppl %} PPL |{% endif %}
+|---|---|---|---|---|{% if show_ppl %}---|{% endif %}
+{% for rev in revisions %}|[{{ '{0:0.2f}'.format(rev.bits) }}](https://huggingface.co/{{ this_model }}/tree/{{ rev.name }})|{{ '{0:0.2f}'.format(rev.disk_bytes / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes) / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.encoder_bytes+rev.blockq_bytes) / 1024**3) }} GiB|{{ '{0:0.4f}'.format(rev.kld) }}|{% if show_ppl %}{{ '{0:0.4f}'.format(rev.ppl) }}|{% endif %}
+{% endfor %}|(base)|{{ '{0:0.2f}'.format(base_disk_bytes / 1024**3) }} GiB|||{{ '{0:0.4f}'.format(base_kld) }}|{% if show_ppl %}{{ '{0:0.4f}'.format(base_ppl) }}|{% endif %}
 
 - BPW: Average bits per weight across tensors (not including input embeddings, encoders, or output head)
 - Size on disk: Total aggregate size of tensors in checkpoint, in GiB
 - VRAM (exllamav3): Total VRAM consumption as typically used in exllamav3, in GiB (minus embeddings)
 - VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB (blockq embeddings, offloaded/omitted encoders)
 - KLD: Mean KL divergence from unquantized base model at this bitrate (lower is better)
-- PPL: Perplexity at this bitrate (lower is better)
+{% if show_ppl %}- PPL: Perplexity at this bitrate (lower is better)
 
-KLD and PPL are quality metrics that represent fidelity to the base model. The values for the base model row are the noise floor: it is not possible for a quantization to meaningfully score better than this value using these metrics.
+KLD and PPL are quality metrics that represent fidelity to the base model. The values for the base model row are the noise floor: it is not possible for a quantization to meaningfully score better than this value using these metrics.{% else %}
+KLD is a quality metric that represents fidelity to the base model. The value for the base model row is the noise floor: it is not possible for a quantization to meaningfully score better than this value.
+
+Perplexity is omitted: for this model, perplexity on the raw-text test set is not meaningful even for the unquantized base model, while KLD compares against the base model directly and remains valid.{% endif %}
 
 ---
 
@@ -43,6 +46,6 @@ KLD and PPL are quality metrics that represent fidelity to the base model. The v
 
 ![qb_kld_vram](./qb_kld_vram.png)
 
-## Plot of resident VRAM versus perplexity
+{% if show_ppl %}## Plot of resident VRAM versus perplexity
 
-![qb_kld_ppl](./qb_ppl_vram.png)
+![qb_kld_ppl](./qb_ppl_vram.png){% endif %}
