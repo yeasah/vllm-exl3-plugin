@@ -1409,6 +1409,19 @@ a 3.0 bpw body is head 4. Neither is known to be backed by measurement.
 
 Three questions, in the order they are worth asking:
 
+0. ~~**Is the budget-neutral framing even the right one for `-hb`?**~~
+   **Settled 2026-09-20**: head, MTP and vision are `aux_targets` in
+   `allocation.py` and sit *outside* `max_bits`, so `-hb` is a free promotion, not
+   an exchange against the body. Both questions are legitimate — budget-neutral
+   when size-constrained, free promotion when choosing a `-hb` — and the 5x4 grid
+   on Ornith-1.5-35B-A3B answers the second: byte-matched, **head 5 below body 4
+   and head 6 at and above**, with the crossover robust to the native/composed
+   bias. Two things stay open there: the grid stops at H6 while the gradient is
+   still steep (38.5% at body 6), so the optimum for a 1.4%-head MoE may be higher;
+   and the calibration-context control is unrun. See
+   [docs/qbench.md](docs/qbench.md) "Head bitrate against body bitrate: the 5x4
+   grid".
+
 1. **Does the head optimum move with body bitrate, or with the head's share of
    quantizable weights?** The phi-4-mini result is an exchange rate — each head bit
    cost 0.19 body bits because the head was 16% of quantizable weights.
@@ -1420,21 +1433,61 @@ Three questions, in the order they are worth asking:
    the answer" from "5-6 is what a 16% head gives you". Composed head arms carry
    their source body's calibration context, so run the K=6 control first. See
    [docs/qbench.md](docs/qbench.md) "Head share is the hidden variable".
-2. **Non-routed tensors in an MoE model.** Upstream can boost everything that is not
+2. ~~**Non-routed tensors in an MoE model.**~~ **Answered 2026-09-20, in `-hq`'s
+   favour.** A matched pair on Ornith-1.5-35B-A3B (same pipeline, commit and
+   calibration, differing only in `-hq`) cuts excess KLD **44.4%** for +0.0835 bpw,
+   which is **-38.7% against the budget-matched control** — the comparison that had
+   never been run. The promoted 4.18% of weights carries 49.1% of the KLD, **11.8x**
+   average sensitivity against a 2.47x bar, and Ornith's top-8-of-256 routing gives
+   a 32x duty-cycle gap that accounts for it. `select_hq_bits = 2` is right here even
+   though the dense result argues against it. See [docs/qbench.md](docs/qbench.md)
+   "`-hq` beats its budget-matched control". Original framing kept below for the
+   reasoning that got there:
+
+   **Non-routed tensors in an MoE model.** Upstream can boost everything that is not
    a routed expert, and KLD supported it when introduced — measured on older
    checkpoints, so not confounded with the SC work. `turboderp/Laguna-XS-2.1-exl3`
    at 3.00bpw ships it (routed experts K=3, `shared_expert` K=5). This is the one
    live challenge to the per-tensor composability null: that null was measured over
    body tensors that are all doing the same job, and routed-vs-shared is a
    categorically different split, so the compensation argument that explains the
-   null may simply not apply across it — and more concretely, it is not the same
-   *operation*: that null is budget-neutral reallocation, where the collapse comes
-   from mixed-direction moves, while the shared-expert boost demotes nothing and
-   costs 0.24% of trellis bytes. Promotions sat in the regime where superposition
-   held. Frame the arm as a promotion, not a reallocation. See
-   [docs/moe.md](docs/moe.md) "How exllamav3 actually spends bits on experts".
+   null may simply not apply across it. The operation also differs: `-hq` clamps
+   *after* the budget loop and is never checked against it, so the boost overshoots
+   the target rather than paying for itself (Laguna ships as `3.00bpw` recording
+   `bits: 3.01`). Its KLD win was therefore against a smaller model. **The
+   budget-matched comparison is the open one**: the same 0.24% of bytes spent on
+   the routed experts instead. Do not frame this as "promotion is exempt" — exl3's
+   ordinary fractional allocation is promotion-only from `floor(bpw)` and is taxed
+   anyway. See [docs/moe.md](docs/moe.md) "How exllamav3 actually spends bits on
+   experts" and [docs/qbench.md](docs/qbench.md) "What the null is about, and what
+   the pipeline actually does".
 3. **Vision and MTP towers**, which exllamav3 already treats as separate knobs
    (`vision_bits`, `mtp_bits`) and which no measurement here covers at all.
+
+4. **A promotion-only body recipe — now the most promising item here.** Answered in
+   part 2026-09-20: extra-budget promotion *does* compose (max 0.9% prediction error
+   across five arms, against +65% for the budget-neutral recipe), the dense body has
+   an **8.9x** sensitivity spread, and `k_proj +1, v_proj +1` on Qwen3-0.6B is worth
+   **-16.5%** against spending the same bytes uniformly. The rule that falls out is
+   **spread bits at +1 rather than concentrate at +2** — the bar is 1.76x average
+   sensitivity for the first bit and 2.74x for the second — which makes
+   `select_hq_bits = 2` the wrong default. Next: validate an imatrix-derived ranking
+   against the seven ground-truth per-role sensitivities before building anything
+   then source `select_hq_bits` from a map rather than architecture literals — the
+   mechanism is already extra-budget and already per-module.
+
+   **Both shortcuts for *finding* the tensor are now closed** (2026-09-20). A GGUF
+   imatrix does not contain the ranking — Spearman **0.04** on the planned proxy,
+   0.36 on the best of four reductions, and q_proj ranks first under every one when
+   it is last in truth. The reason is structural: an imatrix is an input-side
+   statistic and allocation sensitivity is an output-side property. And k_proj is
+   not a portable rule either: 3.96x on Qwen3-0.6B but **1.30x** on Llama-3.2-3B and
+   2.5x on Qwen3-8B, neither clearing its bar, with no monotonicity in GQA or scale.
+   So the only thing that identifies a promotable dense tensor is measuring it —
+   seven compose arms per model, cheap small and not cheap large. **The live path is
+   MoE**, where the boundary is categorical and needs no ranking. See
+   [docs/qbench.md](docs/qbench.md) "Extra-budget promotion does compose" and "What
+   identifies a promotable tensor".
 
 **Candidate approach: compose, do not convert.** `tools/compose_checkpoint.py`
 builds each arm out of published checkpoints — `--take head` for (1),

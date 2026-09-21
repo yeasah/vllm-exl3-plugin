@@ -483,16 +483,40 @@ allocation that "does not compose" (docs/qbench.md) reappearing inside the exper
 category — it is a single depth-wise cut, and the earlier layers are the ones
 that get the bits.
 
-**Why this is not the refuted operation.** The per-tensor allocation null
-(docs/qbench.md) is about *budget-neutral* reallocation, where the collapse comes
-from tensors moving in opposite directions. Laguna's boost demotes nothing: 39
-shared-expert tensors against 9984 routed ones, so K=3 -> K=5 costs **0.0286 GiB,
-0.24% of trellis bytes**. That is a near-free promotion, which is the
-same-direction regime where superposition held — and under-counted the benefit.
-Granularity is not what distinguishes them, and per-layer variation pays the same
-tax as per-tensor variation; see docs/qbench.md "What the null is actually about:
-direction, not granularity".
+**Where the boost comes from: outside the budget.** `-hq` sets
+`select_hq_bits` (2 bits on attention and shared experts for MoE architectures) as
+a `min_bpw`, and the clamp is applied *after* the budget loop in
+`exllamav3/conversion/allocation.py`, never checked against `max_bits`. So it
+overshoots the requested bitrate rather than paying for itself. Laguna is
+published as `3.00bpw` and records `bits: 3.01`; Qwen3.5-35B-A3B, which has no
+boost, records exactly `3.0`. The 0.01 is the 0.0286 GiB — 0.24% of trellis bytes
+— that 39 shared-expert tensors at K=5 cost against 9984 routed ones at K=3.
 
-So for `category-bits` the arm to build is a promotion, not a reallocation:
-`tools/compose_checkpoint.py --take all --keep experts` takes the higher-bitrate
-checkpoint's non-routed tensors while holding the routed experts at the base's.
+**Now finished, and `-hq` wins.** The matched pair landed 2026-09-20: 44.4% less
+excess KLD for +0.0835 bpw, **-38.7% against the budget-matched control**, with the
+promoted set at 11.8x average sensitivity against a 2.47x bar. Ornith's
+top-8-of-256 routing is a 32x duty-cycle gap, which accounts for the concentration.
+See docs/qbench.md, "`-hq` beats its budget-matched control". The reasoning that
+framed the experiment is kept below.
+
+**The KLD win had been against a smaller model, and that is what made it
+unfinished.** It needs no superposition argument: more bytes, better model. The
+comparison that has never been run is the budget-matched one — spend the same
+0.24% on the routed experts instead and see which buys more. Note that "promotion"
+is not itself an exemption: exl3's ordinary fractional allocation is also
+promotion-only from `floor(bpw)` and is taxed anyway, because a mixture of K
+levels pays a Jensen penalty no allocation can avoid. See docs/qbench.md "What the
+null is about, and what the pipeline actually does".
+
+**And the boundary is no longer the only candidate.** As of 2026-09-20 a
+promotion-only body recipe beats the uniform alternative by 16.5% on a dense model
+(docs/qbench.md, "Extra-budget promotion does compose"), with the bar at 1.76x
+average sensitivity for a first bit and 2.74x for a second. That makes
+`select_hq_bits = 2` suspect as a default here too: the same bytes spread at +1 over
+more tensors may beat +2 on attention and shared experts. The duty-cycle gap in an
+MoE is large enough that both bits could still clear, which is exactly what the
+budget-matched arm below would show.
+
+For `category-bits`, then, the arm worth building is budget-matched:
+`tools/compose_checkpoint.py --take all --keep experts` gives the non-routed
+boost, and the control it needs is the same bytes spent uniformly instead.

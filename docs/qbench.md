@@ -451,6 +451,78 @@ Composing those onto one common body isolates the calibration-context effect wit
 K held fixed, and is the control that says whether the rest of the matrix can be
 read at face value. It only exists if the sweep actually reaches body >= 5.
 
+## Head bitrate against body bitrate: the 5x4 grid (2026-09-20)
+
+`ornith-ai/Ornith-1.5-35B-A3B`, body 2/3/4/5/6 bpw against head 3/4/5/6, with a
+genuine noise floor at KLD **0.014147**. This is the free-promotion framing — `-hb`
+is an `aux_target` outside `max_bits`, so a head bit buys size rather than trading
+against the body — which is the question you answer when choosing a `-hb`, where
+the phi-4-mini sweep answered the size-constrained one.
+
+**Six of the twenty arms are conversions; the rest are composed.** The natives
+trace `head = min(body + 1, 6)` — (2,H3), (3,H4), (4,H5), (5,H6), (6,H6) — plus
+(3,H6) at the default. Everything else was built with
+`tools/compose_checkpoint.py`, so the calibration-context caveat in the section
+above applies off-diagonal: a composed head was fitted to its *source* body's
+activations. That is handled below rather than waved at.
+
+Excess KLD over the floor, and what each extra head bit buys:
+
+| body | H3 | H4 | H5 | H6 | H4->5 | H5->6 |
+|---|---|---|---|---|---|---|
+| 2 | 0.180878 | 0.171750 | 0.169600 | 0.168661 | 1.25% | 0.55% |
+| 3 | 0.064397 | 0.052585 | 0.049836 | 0.049727 | 5.23% | 0.22% |
+| 4 | 0.033386 | 0.020768 | 0.017533 | 0.016837 | 15.58% | **3.97%** |
+| 5 | 0.021285 | 0.008640 | 0.005550 | 0.004775 | 35.76% | **13.97%** |
+| 6 | 0.017515 | 0.004679 | 0.002095 | 0.001288 | 55.22% | **38.51%** |
+
+**The head's importance scales with body quality, and steeply.** At body 2 the
+entire H3-H6 range is 7%; at body 6 it is **13.6x**. At low bitrate the body error
+dominates and the head is not the bottleneck; at high bitrate the head is most of
+what is left. "6 is defensible" was not wrong, it was a single point on this
+surface.
+
+**Byte-matched, since a head bit costs 0.0592 GB here.** Priced against what the
+same VRAM buys on the body (local log-slope of excess KLD from the neighbouring
+body arm):
+
+| body | bar to clear | H5->H6 buys | verdict | native arm | bias favours |
+|---|---|---|---|---|---|
+| 2 | 1.83% | 0.55% | H5 | neither | — |
+| 3 | 1.62% | 0.22% | H5 | H6 | **against the winner** |
+| 4 | 1.89% | 3.97% | **H6** | H5 | **against the winner** |
+| 5 | 1.96% | 13.97% | **H6** | H6 | with the winner |
+| 6 | 1.96% | 38.51% | **H6** | H6 | with the winner |
+
+**Head 5 below body 4, head 6 at and above** — and the crossover is where the
+composition confound is least able to have caused it. In both rows that decide it,
+the native arm is the one that *lost*: at body 3 the native H6 still failed to
+justify itself against a composed H5, and at body 4 a composed H6 beat the native
+H5 anyway. Whatever advantage a native conversion carries is pushing against each
+verdict, and neither flips. Rows 5 and 6 have the bias pointing the same way as
+the result, but at 7x and 20x the bar.
+
+**H4 at body 2 is the one open cell.** H4->H5 buys 1.25% against a 1.83% bar, so
+strict byte-matching prefers H4 — but 1.25% sits at this harness's ~1% run-to-run
+variation and both arms are composed, so they are not separable here. Head 5
+across both low rows is the simpler rule and costs nothing measurable. H3 is never
+defensible: at body 6 it is 13.6x the H6 arm to save 0.18 GB.
+
+**The grid is truncated at H6, and it should not be read as finding an optimum
+there.** At body 6 the last measured step still buys 38.51% against a 1.96% bar —
+nowhere near flat. For a model whose head is 1.4% of quantizable weights the
+section above predicts exactly this, and nothing here tests H7 or H8. The rule is
+"6 is enough to capture most of it at body >= 4", not "6 is the optimum".
+
+**The control that would settle the composition question has not been run.** Three
+native H6 arms exist, at body 3, 5 and 6, whose heads differ only in the body they
+were fitted to. Composing those onto one common body isolates calibration context
+with K held fixed, which is the measurement that says how far the off-diagonal
+cells can be trusted.
+
+Raw results: `~/qbench/results/ornith-1.5-35b-a3b/`, project
+`~/qbench/ornith-1.5-35b-a3b.yaml`.
+
 ## Per-tensor bit allocation does not compose (2026-08-23)
 
 *Survives the exllamav3 v1.4.3 bump unrevisited, and provably.* The study ran from
@@ -596,42 +668,85 @@ If it lands near the last, fractional EXL3 bitrates carry a structural ~25-35% p
 **integer K is the only efficient place on the curve** — which is not how bpw targets are
 currently chosen, here or anywhere.
 
-### What the null is actually about: direction, not granularity (2026-09-18)
+### What the null is about, and what the pipeline actually does (2026-09-20)
 
-Asked directly — is the tax specific to *per-tensor* variation, or does per-layer
-variation pay it too? The finding above answers it and the answer is neither:
-**the tax is on mixed-direction moves.** Its own sentence is the mechanism —
-"superposition holds reasonably when every tensor moves the same direction and
-collapses when they move in opposite directions" — and the table is the evidence:
-promoting all 224 tensors errs -23%, demoting all 224 errs -4%, and the recipe
-that moves 29 down and 42 up errs **+65%** and lands worse than uniform.
+Asked directly: is the tax specific to *per-tensor* variation, or does per-layer
+variation pay it too? And what stops us targeting a lower bitrate and selectively
+promoting the important tensors? Reading
+`exllamav3/conversion/allocation.py` answers both, and corrects a framing this
+file carried for two days.
 
-Granularity never enters. A per-layer cut at a fixed budget is mixed-direction by
-construction — some layers sit above the mean and some below — so **per-layer
-variation is not exempt**, and nothing here licenses treating it as a safer axis.
+**exl3 has a budget independent of any recipe.** `-b/--bits` sets
+`max_bits = int(bpw * sum_numel)`; `-rcp/--recipe` replaces the budgeted path
+entirely ("used in place of the budgeted allocation"). They are alternatives.
 
-The fractional-bitrate section is the direct evidence for that, because
-exllamav3's fractional targets are not realized as a clean depth cut. Surveying
-the local collection: `Qwen3-8B-exl3@2.5bpw` puts **more than one K in all 36 of
-its layers**, split by projection role (`v_proj` K=4, `mlp.gate_proj` K=2,
-`k_proj` spanning 2/3/4 across depth); `@3.5bpw` is the same pattern shifted up a
-bit; `gemma-4-12B@3.50bpw_mul1` mixes in 32 of 48 layers. So the +8% and +7%
-residuals measured there are the penalty on a mixture that varies by role *and*
-by depth simultaneously. The two axes have never been separated, and that
-measurement does not separate them.
+**The budgeted allocator never demotes.** `base_bpw = floor(bpw)`, every budgeted
+Linear starts there, and the loop only ever calls `increase_1()`, spending the
+fractional remainder on whole qgroups in priority order (then by distance to the
+nearer end of the forward pass). So **"target lower and selectively promote" is
+not an alternative to what exl3 does — it is exactly what exl3 does.** Every
+fractional EXL3 checkpoint is that scheme: 2.54 bpw means everything at K=2 with
+some groups promoted to K=3 until the budget runs out.
 
-**What this does not cover: promotions that are not reallocations.** Everything
-above is budget-neutral — bits taken from one tensor and given to another. Adding
-bits to a small set while demoting nothing is the same-direction regime, where
-superposition held to within -4% to -23% and, notably, *under*-counted the
-benefit. `turboderp/Laguna-XS-2.1-exl3@3.00bpw` is that case: its `shared_expert`
-tensors sit at K=5 against K=3 routed experts, and because they are 39 tensors
-against 9984, the boost costs **0.0286 GiB, or 0.24% of trellis bytes**. That is
-a near-free promotion, not an allocation, and the KLD support it had when
-introduced is consistent with this section rather than in tension with it. See
-[moe.md](moe.md) "How exllamav3 actually spends bits on experts".
+**Which is why it is already measured, and already taxed.** The fractional points
+in the section above *are* selective-promotion checkpoints, and they land +37% and
++31% above the trend through their integer neighbours. So the answer to "what is
+stopping us" is: nothing mechanical. It is the default, it has always shipped, and
+the measurement says it costs.
+
+**The dominant term is Jensen, not an allocation failure.** A mixture of two K
+levels gives the *arithmetic* mean of their KLDs where the interpolated trend gives
+the *geometric* mean, and arithmetic >= geometric. That is +27% and +22% on the two
+points, it depends only on the local steepness of the curve, and **no choice of
+which tensors to promote can avoid it** — it is a property of mixing K levels at
+all. Only the +8% and +7% residual is superposition, and that is the part a clever
+recipe could in principle recover. The recipe experiment is what says it does not:
+42 tensors up, 29 down, scored 0.103185 against uniform's 0.098907.
+
+**So granularity is not the axis.** Per-layer variation is not exempt — it is a
+mixture, so it pays Jensen like any other. Nor is "promotion-only" the exempting
+property, which is where this file was wrong on 2026-09-18: the budgeted allocator
+*is* promotion-only from the floor and is taxed anyway. The property that actually
+exempts something is **not being budget-matched**.
+
+**`-hq` is the case that is not budget-matched.** The MoE boost
+(`select_hq_bits`, 2 bits on attention and shared experts for MoE architectures)
+is applied *after* the budget loop and is never checked against `max_bits`:
+
+```python
+while sum_bits < max_bits:   # budget loop -- promotions only
+    ...
+if hq:                        # after, and unchecked
+    t.clamp_min()
+```
+
+`final_bits` is then recomputed post-clamp and returned as the model's actual bpw,
+so `-hq` overshoots the requested target by design. Visible in the artifacts:
+`Laguna-XS-2.1-exl3` is published as **`3.00bpw` and records `bits: 3.01`**, which
+is the 0.24% of trellis bytes its `shared_expert` boost costs;
+`Qwen3.5-35B-A3B-exl3`, which has no boost, records exactly `3.0`.
+
+So `-hq`'s KLD win was measured against a *smaller* model — the same target
+without the boost — and needs no superposition argument to explain. **The
+budget-matched comparison has never been run**: give the same 0.24% to the routed
+experts instead and see which buys more. That is the experiment `category-bits`
+should be framed around, not "promotion vs reallocation".
+
+**One more consequence, for the head.** `sum_numel` and `sum_bits` accumulate only
+for `qbits_key == "bits"`; head, MTP and vision are `aux_targets` and sit outside
+`max_bits`. **`-hb` does not come out of the body budget.** The head sweep above
+imposed budget-neutrality *manually* (holding `615·H + 3221·B` constant), so
+"head 6 is defensible" answers "if the head must be paid for from the body" — the
+right question when size-constrained, but not the question "what should I pass to
+`-hb`". At fixed `-b`, a higher `-hb` is a pure promotion that simply makes the
+file bigger.
 
 ### What this licenses
+
+**Superseded in scope as of 2026-09-20** — see "Extra-budget promotion does
+compose" below. Everything here is budget-neutral reallocation, and that turns out
+to be the load-bearing condition rather than an incidental one. The null holds
+exactly as stated for reallocation; it does not extend to promotion.
 
 On this model at this bitrate, per-tensor allocation is worth ~1.7% at best, and the
 apparent 13-22% available to a first-order solver is an artifact of assuming
@@ -656,6 +771,257 @@ solver, where re-converting from a recorded recipe is merely slow.
 `microsoft/Phi-4-mini-instruct` is the source model. The two unquantized
 variants (`deq-3.0`, `mixed-marginal`) were dequantized rather than converted
 and carry no allocation, which is itself the thing to know about them.
+
+## Extra-budget promotion does compose, and the null was about opposed moves (2026-09-20)
+
+The allocation null above was measured only where bits taken from one tensor were
+given to another. Every escalation within it pushed toward *better predictions*,
+which is pressure toward *more* reallocation — `recipe-3.0` moved 88 of 225 modules
+(59 up, 29 down, **1711 opposed pairs**, three modules driven to K=1) and
+`marginal-3.0` moved 71 (42 up, 29 down, 1218 opposed pairs). Nobody ever pushed
+the other way: fewer moves, gentler moves, or no demotions at all. Three axes, and
+every tested point sat at the extreme of all three.
+
+Doing that on Qwen3-0.6B, with `tools/compose_checkpoint.py` building each arm in
+seconds from the native 2/3/4/5/6 bpw conversions, gives a different answer.
+
+**Method.** A 4.00 bpw base, with one tensor role at a time lifted from the 5.00 or
+6.00 bpw arm — a pure promotion, nothing demoted. Scored against the log-trend
+through the uniform arms, which is what the same bytes would have bought spent on
+the whole body. Noise floor 0.001334; body slope 1.2587/bpw. Composed arms carry
+the calibration-context bias of [the head grid](#head-bitrate-against-body-bitrate-the-5x4-grid-2026-09-20):
+a tensor converted at 6 bpw was fitted to 6 bpw activations and serves 4 bpw ones,
+which is **pessimistic**, so a win here is safe and a narrow loss is ambiguous.
+
+### The bar a promotion has to clear
+
+Promoting a fraction `f` of body weights by `Δ` bits beats spending the same bytes
+uniformly only if the promoted set's per-parameter sensitivity exceeds
+
+    slope·Δ / (1 - e^(-slope·Δ))
+
+as `f -> 0`. Two things fall out that are worth stating before the data. The bar is
+**independent of how small the promoted set is** — cost and benefit shrink together,
+so being selective does not make the economics easier; it is a sensitivity
+threshold, not a count threshold. And it rises steeply with `Δ`: **1.76x at +1 bit,
+2.74x at +2, 3.86x at +3** on this model.
+
+### The dense body is not flat
+
+Each role promoted +2 bits, alone, from the 6.00 bpw arm:
+
+| tensor | % of body | sens / avg | bar | vs trend | ppl | |
+|---|---|---|---|---|---|---|
+| **k_proj** | 6.67 | **3.96x** | 2.52x | **-10.4%** | -21.4% | **beats** |
+| v_proj | 6.67 | 1.95x | 2.52x | +4.1% | +3.8% | loses |
+| down_proj | 20.00 | 0.91x | 2.15x | +37.8% | +35.6% | loses |
+| up_proj | 20.00 | 0.83x | 2.15x | +40.2% | +40.4% | loses |
+| o_proj | 13.33 | 0.75x | 2.33x | +27.1% | +23.6% | loses |
+| gate_proj | 20.00 | 0.59x | 2.15x | +47.6% | +42.2% | loses |
+| q_proj | 13.33 | 0.44x | 2.33x | +32.3% | +26.2% | loses |
+
+**`sum(sens x fraction) = 1.018`.** The seven roles are the whole body and their
+shares sum to unity, which the additivity model requires and does not get for free
+— the strongest available check that the per-tensor sensitivities mean what they
+are being read to mean.
+
+The spread is **8.9x**, which contradicts the reading of "the sensitivity gradient
+is flat" taken from the 21.8% ceiling earlier in this file. That number is the
+geometric-vs-arithmetic gap of the *size-weighted mean*, dominated by the bulk, and
+it barely moves when one 6.67% tensor is 4x. The tail is what a promotion spends
+against, and the tail is fat.
+
+**k against q is the striking pair**: symmetric in the dot product, 9x apart per
+parameter. GQA accounts for 2x of it (8 KV heads serving 16 query heads, so each k
+parameter feeds twice the attention scores); the rest is unexplained here, and
+q_proj having twice the width and more redundancy to spend is a candidate rather
+than an answer. **The mechanism is not needed to use the result** — this is exactly
+what an imatrix measures directly.
+
+### Promotions superpose, to under 1%
+
+Predicting multi-tensor arms from the single-tensor sensitivities above:
+
+| arm | bpw | predicted | measured | error | vs trend |
+|---|---|---|---|---|---|
+| k +1 | 4.0896 | 0.033420 | 0.033111 | **-0.9%** | -13.1% |
+| k +2 | 4.1563 | 0.031382 | 0.031381 | -0.0% | -10.4% |
+| **k +1, v +1** | 4.1563 | 0.029470 | 0.029261 | **-0.7%** | **-16.5%** |
+| k +2, v +1 | 4.2229 | 0.027432 | 0.027476 | **+0.2%** | -14.7% |
+| k +2, v +2 | 4.2896 | 0.026429 | 0.026604 | **+0.7%** | -10.2% |
+
+Maximum error 0.9%. Against **+65%** for the budget-neutral marginal recipe, the
+conclusion is not subtle: **the collapse was never about granularity, count, or
+measurement quality. It was about opposed moves.** Remove the demotions and the
+deltas superpose almost exactly.
+
+### Spread the bits, do not concentrate them
+
+At identical cost (bpw 4.1563), `k+1, v+1` scores 0.029261 against `k+2` at
+0.031381 — **6.8% better for the same bytes**. The bar explains it: the +1 bar is
+1.76x where the +2 bar is 2.74x, so a second bit on an already-promoted tensor is a
+much harder sell than a first bit on the next one. v_proj shows both sides, since
+1.95x sits between the two bars: adding v **+1** to `k+2` gains 4.3 points
+(-10.4% -> -14.7%), while adding v **+2** instead loses 4.5 points (-> -10.2%).
+
+**Consequence for `-hq`**: `select_hq_bits = 2` is the wrong default on this
+evidence. A tensor has to be 2.74x to justify the second bit and only 1.76x to
+justify the first, so the same bytes spread over more tensors at +1 should win.
+Untested on an MoE, and the shared-expert case may differ — the duty-cycle gap
+there is large enough that both bits could clear.
+
+### What this licenses, and what it does not
+
+Per-tensor allocation is **not** dead; budget-neutral per-tensor allocation is.
+A conservative, promotion-only recipe is worth **-16.5% against the uniform
+alternative** on a dense model at 4 bpw, from two tensor roles guessed at without
+any importance data, with the composition bias running pessimistic throughout.
+
+What is not established: one model, one bitrate pair, dense, and the arms are
+composed rather than converted, so the numbers are a floor rather than the real
+thing. Whether the ranking transfers across models or bitrates is untested — and
+the ranking is the part an imatrix would supply, which now has **seven ground-truth
+points to be validated against before any of it is built**.
+
+Raw results and arms: `quantization/work/Qwen3-0.6B-exl3/main/qb_results.json`.
+
+## What identifies a promotable tensor: not an imatrix, and not a fixed role (2026-09-20)
+
+Promotion works (above) and the bar is arithmetic, so the remaining question is how
+to find the tensors worth promoting without measuring every one. Two shortcuts were
+tested against the seven ground-truth sensitivities on Qwen3-0.6B. **Both failed**,
+and the failures are worth keeping because both will be proposed again.
+
+### A GGUF imatrix does not contain the ranking
+
+Sources, both legacy (pre-GGUF) imatrix format — `int32 n_entries`, then per entry
+`int32 name_len / name / int32 ncall / int32 nval / float32[nval]`, with a trailing
+`int32 ncall_total / int32 len / dataset`:
+
+- [unsloth/Qwen3-0.6B-GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/imatrix_unsloth.dat)
+  — 196 entries, ncall 688, dataset `unsloth_calibration_Qwen3-0.6B.txt` (note:
+  *model-specific* calibration, which given the 1.52x in-domain/neutral swing above
+  is not a neutral instrument)
+- [bartowski/Qwen_Qwen3-0.6B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B.imatrix)
+  — 196 entries, ncall 137, dataset `/training_dir/calibration_datav3.txt`
+
+Both parse clean (196 = 28 layers x 7 roles, `nval` matching each role's input dim)
+and agree closely with each other. Neither correlates with measured sensitivity:
+
+| reduction | Spearman rho | ordering, most to least important |
+|---|---|---|
+| `sum_j d_j ||W[:,j]||^2` (the planned proxy) | **+0.036** | q, k, v, gate, down, up, o |
+| relative (normalized by `||W||^2`) | +0.250 | k, q, v, gate, down, up, o |
+| activation energy alone | +0.357 | k, q, v, down, gate, up, o |
+| `||W||^2` alone, no imatrix | **-0.571** | gate, q, up, v, down, k, o |
+| **measured** | +1.000 | **k, v, down, up, o, gate, q** |
+
+**The tell is consistent: q_proj ranks 1st or 2nd under every imatrix reduction and
+is last in truth (0.44x)** — an 8x error in the worst direction. o_proj is last
+under every proxy and mid-pack in truth.
+
+**Why, and it is structural rather than a bad reduction.** An imatrix records mean
+squared activation per *input* channel. That is exactly right for what llama.cpp
+uses it for — weighting the quantizer's local reconstruction objective — but
+allocation sensitivity is an *output*-side property: how far the model's output
+moves per unit perturbation of this tensor's output. q_proj produces ample output
+energy and then feeds a softmax, shift-invariant and behind a per-head QK-norm that
+removes scale, so those errors are damped. No input-side statistic can see that.
+It is also why `sc_realsens` ranked correctly at Spearman 0.959: it measured output
+deltas. The expensive measurement is expensive because it measures the right thing.
+
+**What survives**: at *role* granularity a proxy is not needed. Seven roles is seven
+compose arms, minutes on a small model, and exact rather than correlated. A proxy
+would only earn its keep at per-tensor granularity, which the budget-neutral null
+says is not worth chasing anyway. The MoE case is unaffected — `-hq`'s boundary is
+categorical and needs no ranking at all.
+
+### k_proj is not the `-hq` of dense models
+
+The obvious follow-up to k_proj measuring 3.96x on Qwen3-0.6B: is it a portable
+rule? Three points, each the same construction (4 bpw base, k_proj lifted +2 bits,
+priced against the uniform trend):
+
+| model | family | GQA | k share | sensitivity | bar (+2) | vs trend |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B | Qwen3 | 2 | 6.67% | **3.96x** | 2.52x | **-10.4%** |
+| Llama-3.2-3B | Llama | 3 | 3.12% | **1.30x** | 2.86x | +5.0% |
+| Qwen3-8B | Qwen3 | 4 | 2.17% | 2.44-2.52x | 2.94-3.52x | +0.9 to +2.5% |
+
+**Not monotone in GQA and not monotone in scale.** Only Qwen3-0.6B clears its bar.
+The GQA-fanout story that seemed to explain k's advantage is refuted outright: GQA
+rose 2 -> 4 and concentration *fell*. Llama corroborates on both metrics (ppl +2.5%
+vs trend) and its 6 bpw arm is not saturated, unlike both Qwen runs.
+
+**One pattern, held loosely.** Both elevated models carry QK-norm; the flat one does
+not. Per-head RMSNorm on q and k changes how weight error reaches attention scores,
+so it is mechanically plausible — but family and QK-norm are perfectly confounded
+across three points and scale moves too. A Llama-family model with QK-norm, or
+gemma-4 at GQA=2, would separate them. Treat as a hypothesis, not a finding.
+
+**Caveat on the Llama point**: its gap to trend is 0.98x the noise floor, so the
+direction is safe and the magnitude is not — 1.3x +/- 0.3. Under 2.86x either way.
+
+**So there is no portable dense rule.** The promotion framework stands: extra-budget
+promotion composes to under 1%, the bar is `slope*delta / (1 - e^(-slope*delta))`,
+and `-hq` clears it by 4.8x on an MoE. What does not transfer is *which* tensor to
+promote. With the imatrix shortcut dead too, the only thing that identifies a
+promotable dense tensor is measuring it. MoE has a categorical boundary worth
+exploiting; dense does not.
+
+Raw results: `~/qbench/results/{qwen8b,llama3b}-kproj/`, `~/qbench/qwen8b-kproj.yaml`,
+`~/qbench/llama3b-kproj.yaml`.
+
+## `-hq` beats its budget-matched control, and duty cycle is why (2026-09-20)
+
+The companion to the section above, in the opposite regime: where the dense body
+had to be searched for a tensor worth promoting, an MoE has a *categorical*
+boundary that upstream already exploits. Whether it earned its keep was open,
+because every published comparison was against a checkpoint at the same nominal
+target *without* the boost — a smaller model, so the win needed no explanation
+beyond more bytes.
+
+`ornith-ai/Ornith-1.5-35B-A3B`, converted twice at `-b 4 -hb 6` with the same
+pipeline, commit and calibration, differing only in `-hq`. Noise floor 0.014147;
+body slope 1.1697/bpw from the 4->5 arms.
+
+| arm | bpw | excess KLD | x floor |
+|---|---|---|---|
+| 4.00 non-`-hq` | 4.0469 | 0.028253 | 2.00 |
+| 4.00 **`-hq`** | 4.1304 | **0.015719** | 1.11 |
+
+**For +0.0835 bpw (+0.327 GiB) it cuts excess KLD by 44.4%.** Priced against the
+uniform alternative — the same bytes spread over the whole body, 0.025623 — `-hq`
+comes in at **-38.7%**. So it is not merely a bigger model: it beats the
+budget-matched control decisively, which is the comparison that had never been run.
+
+**The concentration is enormous.** The promoted set is 4.18% of body weights and
+carries **49.1% of the KLD**, which is **11.8x** average per-parameter sensitivity
+against a bar of 2.47x — clearing by 4.8x. Nothing in the dense body of
+Qwen3-0.6B came within a factor of three of this; the best role there was k_proj at
+3.96x.
+
+**Duty cycle accounts for it, as predicted before the arm landed.** Ornith routes
+**top-8 of 256 experts**, so a routed expert sees 3.1% of tokens while attention and
+the shared expert see all of them — a **32x** gap. Measured concentration is 11.8x,
+the same order and comfortably inside the ceiling that gap allows. The prediction
+was made with the falsifier attached (near break-even would have killed the duty-cycle
+story) and it survived.
+
+**Consequence for `select_hq_bits = 2`.** The dense result argues for spreading bits
+at +1 rather than concentrating at +2, because the +1 bar is 1.76x where the +2 bar
+is 2.74x. That argument **does not transfer here**: at 11.8x both bits clear with
+room to spare, and concentration is correct precisely because the sensitivity is
+concentrated. The default is right for MoE and suspect for dense.
+
+**Two caveats.** The `-hq` arm sits at 1.11x the noise floor against non-`-hq`'s
+2.00x, so the ratio is well resolved but the derived 11.8x is the softest number
+here — +/-5% on the hq excess moves it ~6%. And **perplexity cannot corroborate
+this one**: the `-hq` arm reads 11.6300 against a floor of 11.6350, i.e. below it,
+so ppl is saturated at 4 bpw on this model and KLD carries the result alone. Every
+other finding in this sequence had two metrics agreeing; this one does not.
+
+Raw results: `quantization/work/Ornith-1.5-35B-A3B-exl3/main/qb_results.json`.
 
 ## Known limitations, and what closing them would unlock
 
