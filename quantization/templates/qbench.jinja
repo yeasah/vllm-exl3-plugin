@@ -1,0 +1,39 @@
+title: {{ this_model }}
+
+test_data:
+  source: openwebtext10k
+  rows: 10
+  length: 2048
+  stride: 2048
+
+tokenizer:
+  repo: {{ base_model }}
+  template: true
+
+logit_cache:
+  dir: {{ logit_cache_dir }}
+  max_size_gb: {{ logit_cache_size }}
+
+models:
+  - label: HF BF16
+    group: reference
+    engine: transformers
+    repo: {{ base_model }}
+    options:
+      streaming: true
+
+{% for rev_name,rev in revisions.items() %}
+  - label: {{ rev_name }}
+    group: EXL3
+    engine: exllamav3
+    source: {{ rev }}
+{% endfor %}
+
+output:
+  results: qb_results.json
+  plot_ppl_vram: qb_ppl_vram.png
+  plot_kld_vram:
+    file: qb_kld_vram.png
+    y_log: true
+  plot_kld_spread_vram: qb_kld_spread_vram.png
+  plot_kld_hist: qb_kld_hist.png

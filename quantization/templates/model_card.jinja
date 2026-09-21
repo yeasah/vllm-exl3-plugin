@@ -1,0 +1,48 @@
+---
+{{ card_data }}
+---
+
+# EXL3 quantizations of [{{ base_model }}](https://huggingface.co/{{ base_model }})
+
+These quantizations can be used with [exllamav3](https://github.com/turboderp-org/exllamav3) or vLLM via [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin)
+
+Actual consumed VRAM will be lower than the total checkpoint size because of the handling of the input embeddings (and potentially the vision tower). The embeddings are not quantized, because EXL3 is not an efficient format for this purpose. The strategy for this is different for the two platforms:
+- For exllamav3, input embeddings are typically offloaded to CPU, which has a performance cost but removes that tensor from VRAM entirely.
+- For vllm-exl3-plugin, input embeddings are typically quantized at load time to a format called `blockq`, which is a computationally inexpensive and embedding-compatible quantization format. The embeddings are resident in VRAM, but much smaller.
+
+{% if multimodal %}
+The vision encoder is left unquantized. This preserves full vision fidelity as compared to the base model, which is otherwise harder to characterize. This may represent a significant additional component to VRAM utilization. There are two strategies to eliminate this:
+- CPU offload for the encoders. Especially for text-heavy use cases, this represents a minimal performance impact.
+- Omitting the encoders entirely, for text-only use cases.
+{% endif %}
+---
+
+# Available bitrates
+
+Each bitrate is available as a separate revision of this repository. When planning available VRAM for kv space, refer to the appropriate VRAM column.
+
+| BPW | Size on disk | VRAM (exllamav3) | VRAM (vLLM) | KLD | PPL |
+|---|---|---|---|---|---|
+{% for rev in revisions %}|[{{ '{0:0.2f}'.format(rev.bits) }}](https://huggingface.co/{{ this_model }}/tree/{{ rev.name }})|{{ '{0:0.2f}'.format(rev.disk_bytes / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes) / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.encoder_bytes+rev.blockq_bytes) / 1024**3) }} GiB|{{ '{0:0.4f}'.format(rev.kld) }}|{{ '{0:0.4f}'.format(rev.ppl) }}|
+{% endfor %}|(base)|{{ '{0:0.2f}'.format(base_disk_bytes / 1024**3) }} GiB|||{{ '{0:0.4f}'.format(base_kld) }}|{{ '{0:0.4f}'.format(base_ppl) }}|
+
+- BPW: Average bits per weight across tensors (not including input embeddings, encoders, or output head)
+- Size on disk: Total aggregate size of tensors in checkpoint, in GiB
+- VRAM (exllamav3): Total VRAM consumption as typically used in exllamav3, in GiB (minus embeddings)
+- VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB (blockq embeddings, offloaded/omitted encoders)
+- KLD: Mean KL divergence from unquantized base model at this bitrate (lower is better)
+- PPL: Perplexity at this bitrate (lower is better)
+
+KLD and PPL are quality metrics that represent fidelity to the base model. The values for the base model row are the noise floor: it is not possible for a quantization to meaningfully score better than this value using these metrics.
+
+---
+
+# Quality vs. bitrate plots
+
+## Plot of resident VRAM versus KLD divergence from unquantized base model
+
+![qb_kld_vram](./qb_kld_vram.png)
+
+## Plot of resident VRAM versus perplexity
+
+![qb_kld_ppl](./qb_ppl_vram.png)

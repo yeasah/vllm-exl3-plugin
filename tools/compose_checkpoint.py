@@ -449,6 +449,76 @@ def base_t_path(base_mods, mod, name) -> str:
 # Writing
 # --------------------------------------------------------------------------
 
+def raw_header(path):
+    """Tensor records straight from a safetensors header: no torch, no data read.
+
+    Returns {name: (dtype, shape, path, abs_start, abs_end)} plus the file's
+    `__metadata__`. Offsets are absolute in the file, so a tensor can be copied
+    without knowing anything else about it.
+    """
+    with open(path, "rb") as f:
+        n = int.from_bytes(f.read(8), "little")
+        header = json.loads(f.read(n))
+    base = 8 + n
+    out = {}
+    for name, rec in header.items():
+        if name == "__metadata__":
+            continue
+        a, b = rec["data_offsets"]
+        out[name] = (rec["dtype"], rec["shape"], path, base + a, base + b)
+    return out, header.get("__metadata__")
+
+
+#: Copy buffer. Large enough that the syscall overhead is irrelevant on a
+#: multi-GiB shard, small enough to be invisible next to anything else here.
+_COPY_CHUNK = 8 << 20
+
+
+def write_shard(out_path, entries, metadata) -> None:
+    """Write a safetensors file by copying tensor bytes, one buffer at a time.
+
+    `entries` is an ordered list of (name, dtype, shape, source, start, end).
+
+    **Never materializes a tensor.** The obvious implementation -- read the
+    shard into a dict and hand it to `save_file` -- costs about twice the
+    shard's size in RAM, which is fine for a 0.6B model and fatal for a 35B MoE
+    whose shards are already most of the machine. Composition is a byte-level
+    operation: nothing here needs to know what a trellis *means*, only where it
+    starts and stops. So this builds the header from the source headers, assigns
+    new offsets, and streams the payload across. Memory is one 8 MiB buffer
+    whatever the model size, and it is faster too, since no dtype ever gets
+    decoded.
+    """
+    header, off = {}, 0
+    for name, dtype, shape, _src, a, b in entries:
+        n = b - a
+        header[name] = {"dtype": dtype, "shape": shape,
+                        "data_offsets": [off, off + n]}
+        off += n
+    if metadata:
+        header["__metadata__"] = metadata
+    blob = json.dumps(header, separators=(",", ":")).encode()
+    blob += b" " * (-len(blob) % 8)   # keep the data blob 8-byte aligned
+    handles: dict = {}
+    try:
+        with open(out_path, "wb") as w:
+            w.write(len(blob).to_bytes(8, "little"))
+            w.write(blob)
+            for name, _dtype, _shape, src, a, b in entries:
+                r = handles.get(src) or handles.setdefault(src, open(src, "rb"))
+                r.seek(a)
+                left = b - a
+                while left:
+                    chunk = r.read(min(left, _COPY_CHUNK))
+                    if not chunk:
+                        raise SystemExit(f"{src}: short read on {name}")
+                    w.write(chunk)
+                    left -= len(chunk)
+    finally:
+        for r in handles.values():
+            r.close()
+
+
 def link_or_copy(src: str, dst: str) -> bool:
     """Hardlink, resolving symlinks first. True if linked, False if copied.
 
@@ -751,9 +821,7 @@ def write(args, base_t, base_mods, donors, assign, restore, versions) -> None:
     cheapest thing and the only attested one -- the layout is a shape some
     publisher already emits, because it is the shape the base arrived in.
     """
-    import torch  # noqa: F401  (safetensors' torch backend)
-    from safetensors import safe_open
-    from safetensors.torch import save_file
+    from safetensors import safe_open   # only to enumerate a hardlinked shard
 
     src, dst = args.base, args.output
     if os.path.exists(dst) and os.listdir(dst):
@@ -800,17 +868,18 @@ def write(args, base_t, base_mods, donors, assign, restore, versions) -> None:
             continue
         rewritten += 1
         drop = replaced[shard]
-        with safe_open(shard, framework="pt") as h:
-            meta = h.metadata()
-            keep = {k: h.get_tensor(k) for k in h.keys() if k not in drop}
+        src_hdr, meta = raw_header(shard)
+        entries = [(k, *rec) for k, rec in src_hdr.items() if k not in drop]
+        seen: dict = {}
         for name, donor_shard in incoming[shard]:
-            with safe_open(donor_shard, framework="pt") as h:
-                keep[name] = h.get_tensor(name)
+            if donor_shard not in seen:
+                seen[donor_shard] = raw_header(donor_shard)[0]
+            entries.append((name, *seen[donor_shard][name]))
         print(f" -- rewriting {os.path.basename(shard)} "
               f"(-{len(drop)} +{len(incoming[shard])} tensors)")
-        save_file(keep, out, metadata=meta or {"format": "pt"})
-        for k in keep:
-            weight_map[k] = os.path.basename(shard)
+        write_shard(out, entries, meta or {"format": "pt"})
+        for e in entries:
+            weight_map[e[0]] = os.path.basename(shard)
 
     # Everything that is not weights travels from the base unchanged.
     for name in os.listdir(src):
