@@ -247,6 +247,34 @@ class EXL3Config(QuantizationConfig):
             # selection rather than at load.
             text = getattr(hf_config, "text_config", None) or hf_config
             self._hidden_size = getattr(text, "hidden_size", None)
+            self._stamp_compile_factors(hf_config)
+
+    def _stamp_compile_factors(self, hf_config: Any) -> None:
+        """Put the flags that change the embedding's parameters in vLLM's key.
+
+        `EXL3_BLOCKQ_ON_LOAD` and `EXL3_DENSE_EMBED` each decide whether the
+        embedding owns a dense `weight` or `bq_q`/`bq_s`/`bq_r`, and an AOT
+        graph traced against one set is called with the other on the next
+        start: `KeyError: 'weight'`, from inside torch's AOT wrapper. vLLM's
+        cache key cannot see either flag -- it hashes `VLLM_*` variables and
+        its own configs, and defers quantization to `model_config.quantization`,
+        which is just `"exl3"`.
+
+        It does hash `hf_config`, through `to_json_string()`, and this hook is
+        handed that same object before any key is computed. An attribute set
+        here reaches the key in every worker, because the config is pickled to
+        them with it attached. The raw flags go in rather than the resolved
+        method: resolving it logs, and a flag that turns out to be a no-op for
+        this model costs one recompile, not a wrong graph.
+
+        `EXL3_DEQUANTIZE` disables the cache outright instead, which is fine for
+        a debug oracle and not for these two, which are serving switches. See
+        `_disable_stale_compile_cache` for the hazard in general.
+        """
+        hf_config.exl3_compile_factors = {
+            "blockq_on_load": self._blockq_on_load,
+            "dense_embed": self._dense_embed,
+        }
 
     def _skip_hub_lookup(self, model_name: str, revision: str | None) -> bool:
         """Whether a metadata lookup would have to invent a revision to proceed.

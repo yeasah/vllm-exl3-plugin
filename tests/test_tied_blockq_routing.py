@@ -264,3 +264,37 @@ class BlockQOnLoadTest(unittest.TestCase):
         cfg = self._cfg(on_load=True, stored=True)
         mapper = cfg.get_cache_scale_mapper()
         self.assertIsNone(mapper._map_name("model.embed_tokens.weight"))
+
+
+class CompileKeyTest(unittest.TestCase):
+    """The embedding flags have to reach vLLM's compile-cache key.
+
+    Each one decides whether the embedding owns a dense `weight` or `bq_*`, and
+    vLLM's key hashes neither -- only `hf_config`, through `to_json_string()`.
+    Without the stamp, a graph cached with the flag off is loaded with it on and
+    dies with `KeyError: 'weight'` inside torch's AOT wrapper (reproduced
+    2026-09-21 on Qwen3-8B-exl3). This pins both halves: that the stamp changes
+    what vLLM hashes, and that it survives the pickle to the engine process.
+    """
+
+    def _hashed(self, *, on_load, dense):
+        import pickle
+
+        from transformers import Qwen3Config
+        from vllm.config.utils import normalize_value
+
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg._blockq_on_load = on_load
+        cfg._dense_embed = dense
+        hf = Qwen3Config()
+        cfg._stamp_compile_factors(hf)
+        return normalize_value(pickle.loads(pickle.dumps(hf)))
+
+    def test_each_flag_changes_the_key(self):
+        base = self._hashed(on_load=False, dense=False)
+        self.assertNotEqual(base, self._hashed(on_load=True, dense=False))
+        self.assertNotEqual(base, self._hashed(on_load=False, dense=True))
+
+    def test_same_flags_same_key(self):
+        self.assertEqual(self._hashed(on_load=True, dense=False),
+                         self._hashed(on_load=True, dense=False))
