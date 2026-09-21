@@ -67,6 +67,8 @@ Selectors, applied in the order given, later rules winning:
     --take SEL     take these modules from the current --from donor
     --restore SEL  replace these quantized base modules with the donor's dense
                    originals (donor = the unquantized model, not an EXL3 one)
+    --map FILE     a {module key: bits} recipe; each module comes from whichever
+                   donor carries it at that width (for large selections)
     --keep SEL     revert these modules to BASE
 
 `SEL` is a category name (`head`, `embed`, `vision`, `mtp`, `experts`,
@@ -217,6 +219,43 @@ def select(sel: str, modules, quantized: set[str]) -> set[str]:
         f"({', '.join(sorted(set(_CATEGORY) | {'body', 'quantized'}))}). "
         "Use a glob or 're:<regex>' for an exact set of modules."
     )
+
+
+def load_map(path) -> dict[str, int]:
+    """A {module key: target bit width} recipe, JSON or YAML.
+
+    The shape `sc_optimize.py` emits, and the shape a `kld_table.json` analysis
+    produces: a flat map from module key to the K that module should end up at.
+    A nested `{"tensors": {...}}` is unwrapped, so a recipe can carry its own
+    provenance alongside the map without needing to be stripped first.
+
+    This exists because the selector language is the wrong tool past a certain
+    size. Promoting the top 150 tensors of a 400-tensor model by measured
+    sensitivity is a reasonable thing to want and an unreadable command line;
+    worse, one that cannot be reviewed, diffed, or kept beside the checkpoint it
+    produced.
+    """
+    with open(path) as f:
+        text = f.read()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import yaml
+        except ImportError:
+            raise SystemExit(f"{path} is not JSON and PyYAML is not installed")
+        data = yaml.safe_load(text)
+    if isinstance(data, dict) and isinstance(data.get("tensors"), dict):
+        data = data["tensors"]
+    if not isinstance(data, dict) or not data:
+        raise SystemExit(f"{path}: expected a non-empty map of module key -> bits")
+    out = {}
+    for k, v in data.items():
+        if not isinstance(v, int) or not format.MIN_BITS <= v <= format.MAX_BITS:
+            raise SystemExit(f"{path}: {k!r} -> {v!r} is not an integer bit width "
+                             f"in {format.MIN_BITS}..{format.MAX_BITS}")
+        out[str(k)] = v
+    return out
 
 
 class _Rule(argparse.Action):
@@ -545,6 +584,11 @@ def main() -> None:
                     help="checkpoint that subsequent --take rules draw from")
     ap.add_argument("--take", dest="rules", metavar="SEL", action=_Rule,
                     help="take these modules from the current donor")
+    ap.add_argument("--map", dest="rules", metavar="FILE", action=_Rule,
+                    help="a {module key: bits} recipe (JSON or YAML). Each "
+                         "module is taken from whichever --from donor carries "
+                         "it at that width, so one recipe can draw from several "
+                         "arms. For selections too large to write out.")
     ap.add_argument("--keep", dest="rules", metavar="SEL", action=_Rule,
                     help="revert these modules to the base")
     ap.add_argument("--restore", dest="rules", metavar="SEL", action=_Rule,
@@ -583,6 +627,7 @@ def main() -> None:
             if current not in donors:
                 t = read_headers(current)
                 donors[current] = {
+                    "dir": current,
                     "tensors": t,
                     "modules": modules_of(t),
                     "quantized": format.quantized_module_keys(t),
@@ -620,6 +665,41 @@ def main() -> None:
             for m in chosen:
                 restore[m] = current
                 assign.pop(m, None)
+            continue
+        if kind == "map":
+            # The donor is chosen per module by the bit width the recipe asks
+            # for, so one --map can draw from several arms at once. Two donors
+            # carrying a module at the same K are interchangeable here, so the
+            # first --from wins and ambiguity cannot arise.
+            wanted = load_map(value)
+            unknown = sorted(m for m in wanted if m not in base_mods)
+            if unknown:
+                raise SystemExit(
+                    f"--map {value!r}: {len(unknown)} module(s) are not in the "
+                    f"base, e.g. {unknown[:3]}. Composition replaces modules; "
+                    "it cannot add them.")
+            noop, unmet, placed = [], [], 0
+            for mod, bits in wanted.items():
+                if trellis_bits(mod, base_mods[mod], base_t) == bits:
+                    noop.append(mod)
+                    continue
+                for dd in donors.values():
+                    g = dd["modules"].get(mod)
+                    if g and trellis_bits(mod, g, dd["tensors"]) == bits:
+                        assign[mod] = dd["dir"]
+                        restore.pop(mod, None)
+                        placed += 1
+                        break
+                else:
+                    unmet.append((mod, bits))
+            if unmet:
+                raise SystemExit(
+                    f"--map {value!r}: no --from donor carries {len(unmet)} "
+                    f"module(s) at the requested bit width, e.g. "
+                    f"{[(m, f'K={b}') for m, b in unmet[:3]]}. Add the arm that "
+                    "has them, or change the recipe.")
+            print(f" -- map {os.path.basename(value)}: {placed} module(s) placed"
+                  + (f", {len(noop)} already at the requested width" if noop else ""))
             continue
         d = donors[current]
         chosen = select(value, d["modules"], d["quantized"])
@@ -854,6 +934,7 @@ def write(args, base_t, base_mods, donors, assign, restore, versions) -> None:
                     (name, donors[donor_dir]["tensors"][name][0]))
 
     weight_map: dict[str, str] = {}
+    problems_late: list[str] = []
     linked = copied = rewritten = 0
     for shard in sorted({v[0] for v in base_t.values()}):
         out = os.path.join(dst, os.path.basename(shard))
@@ -880,6 +961,29 @@ def write(args, base_t, base_mods, donors, assign, restore, versions) -> None:
         write_shard(out, entries, meta or {"format": "pt"})
         for e in entries:
             weight_map[e[0]] = os.path.basename(shard)
+
+    # A passthrough file that names a shard this run rewrote is describing the
+    # base's bytes, not the output's. `crc32.txt` in turboderp's checkpoints
+    # happens to list only the small files that do travel unchanged, so it stays
+    # correct -- but that is luck, and a manifest that did cover the shards would
+    # be copied out silently wrong. Cheap to notice, expensive to discover later.
+    rewritten_names = {os.path.basename(p) for p in replaced}
+    for name in os.listdir(src):
+        f = os.path.join(src, name)
+        if (not os.path.isfile(f) or name.endswith(".safetensors")
+                or name == INDEX_NAME or os.path.getsize(f) > 1 << 20):
+            continue
+        try:
+            with open(f, encoding="utf-8", errors="strict") as fh:
+                stale = sorted(n for n in rewritten_names if n in fh.read())
+        except (UnicodeDecodeError, OSError):
+            continue
+        if stale:
+            problems_late.append(
+                f"{name} references {len(stale)} shard(s) this run rewrote "
+                f"({stale[0]}...), so whatever it records about them -- a "
+                f"checksum, a size -- is the base's and is now wrong in the "
+                f"output. Check it before publishing.")
 
     # Everything that is not weights travels from the base unchanged.
     for name in os.listdir(src):
@@ -911,6 +1015,8 @@ def write(args, base_t, base_mods, donors, assign, restore, versions) -> None:
     write_quantization_config(args, dst, donors, assign, restore, versions,
                               quant_after)
 
+    for m in problems_late:
+        print(f" .. {m}", file=sys.stderr)
     if copied:
         print(f" !! {copied} shard(s) were COPIED, not hardlinked -- output and "
               f"source are on different filesystems. Write the output beside "
