@@ -66,7 +66,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | note | subject |
 |---|---|
 | [format-and-loading.md](docs/format-and-loading.md) | on-disk format, driving vLLM's loader, quantized `lm_head` |
-| [cpu-offload.md](docs/cpu-offload.md) | why vLLM's offloaders skip EXL3, what a PCIe round trip per token actually costs, why *which* experts you offload cannot matter, and why llama.cpp's `-ot` recipes mean something else |
+| [cpu-offload.md](docs/cpu-offload.md) | why vLLM's offloaders skip EXL3, what a PCIe round trip per token actually costs, why prefill pays it per token too, why *which* experts you offload cannot matter, and why llama.cpp's `-ot` recipes mean something else |
 | [kernels.md](docs/kernels.md) | fused kernels, reconstruct threshold, CUDA graphs, bf16, benchmarks |
 | [tensor-parallel.md](docs/tensor-parallel.md) | Hadamard-block-128 sharding, what each TP degree admits, hardware results |
 | [moe.md](docs/moe.md) | `exl3_mgemm` behind `FusedMoE`, the Laguna scale factor, the sm_90+ barrier hang |

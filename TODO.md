@@ -1573,6 +1573,21 @@ parameter selectors. Background, the cost model, backend choice and the measured
 numbers are in [docs/cpu-offload.md](docs/cpu-offload.md) — this item is open work
 only.
 
+**Design these together, not one at a time.** There are now five open levers, and
+each one changes the premises of the others:
+
+- load-time pin-at-store changes where tensors live;
+- prefill staging needs VRAM carved out of what offload frees, and a pointer-table
+  swap;
+- expert packing wants a host layout, and the same pointer-table trick;
+- spread placement decides which layers every prefill step must copy;
+- the backend question is now "UVA for decode, bulk copy for prefill", which neither
+  vLLM backend offers.
+
+One host layout could serve both packing and prefill staging, for example per-layer
+contiguous with experts packed inside it. A pass that settles the layout, the staging
+buffer and the load path at once is likely cheaper than three sequential reworks.
+
 **Done 2026-09-17** (review pass, `tests/test_cpu_offload.py`, 15 tests, GPU-free):
 scale vectors excluded by component policy rather than by selector; null-match
 warning; per-layer log demoted to `debug` with a `report_once()` summary carrying
@@ -1611,8 +1626,31 @@ by-category reachable-vs-offloaded line would have made each obvious at run time
 `cpu_offload_bytes >= cpu_offload_max_bytes`, which is the mechanism behind the
 eligibility cap above, and nothing covers it. Needs a fake loader; no GPU.
 
-**Offload cannot load a model bigger than VRAM, and this is now the top item** — it is
-the difference between working and not for a primary goal (medium MoE at 4.0bpw in
+**Top item: prefill pays offload per token, not per step.**
+Found 2026-09-21. `exl3_mgemm` runs one single-row product per (token, expert) slot, so
+a P-token prefill reads offloaded experts over PCIe P times. On the Gen3 host a 15K
+prefill goes 32.5 → 348 s with 3.75 GiB of experts off, which is +21 ms per prompt
+token and exactly the link. On Gen5 a 15K request goes 23.4 → 76 s. That is worse than
+the decode tax, and vLLM's logged prompt throughput hides it completely. **Offload is
+not usable in practice for long prompts until this is fixed.** That is why it ranks
+above bigger-than-VRAM loading: making offload work in more cases buys little while
+every long prompt pays this. Measurements and mechanism are in [docs/cpu-offload.md](docs/cpu-offload.md).
+
+**Candidate:** when a step's slot reads exceed one bulk copy of the layer (about 32
+tokens at top-8/256), copy the layer's offloaded experts into a VRAM staging buffer and
+point the kernel's pointer tables at it. Decode stays on UVA. The projection is ~5 s
+instead of 315 s here, and ~0.75 s instead of ~50 s on Gen5.
+
+Open questions:
+- the staging buffer's size, and double-buffering, against the freed bytes;
+- the side-stream copy under the compiled region and CUDA graphs, especially mixed
+  prefill+decode batches;
+- whether to copy only the active experts, which needs a `topk_ids` host sync.
+
+**Acceptance:** TTFT measured as `first_token_ts - scheduled_ts`, never the logged
+throughput line. Prefill overhead should scale with number of steps, not tokens.
+
+**Second: offload cannot load a model bigger than VRAM.** It is the difference between working and not for a primary goal (medium MoE at 4.0bpw in
 16 GiB), where packing is a 1.12-1.27x on something that already works. Registering from
 `process_weights_after_loading` runs after the whole checkpoint has landed on the
 accelerator, so today's offload delivers KV headroom and cannot deliver weight capacity —
@@ -1663,7 +1701,7 @@ tok/s, and the measured 129.1 roughly halves the payoff to **1.12–1.27x**. Unl
 stacking all experts into one `[num_experts, ...]` tensor, which `_pointers` rejects for
 doubling peak load memory, this needs one 768 KiB buffer at a time and the pointer table
 can hold three views into it — the kernel dereferences per-tensor addresses and does not
-care that they are adjacent. Biggest remaining lever in this item, **conditional on the
+care that they are adjacent. A distant third behind prefill and loading, **conditional on the
 bpw test above**. Note also that `down` is read after the activation, not with gate/up,
 so a 768 KiB buffer may behave as 512 + 256; on the measured curve that is ~1.23x rather
 than ~1.55x. And bit widths differ per projection (`exl3_gate_bits` vs

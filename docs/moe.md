@@ -358,6 +358,15 @@ for a 35B at 2bpw is the whole reason the checkpoint fits at all. A partial form
 (reconstruct only the top-k experts of a chunk, bounded like
 `_EMBED_BLOCK_CHUNK`) is the shape that might work.
 
+**Why the ratio is so low: slots are not grouped by expert.** `_exl3_moe_mm` feeds
+`exl3_mgemm` one single-row product per (token, expert) slot (`size_m = 1`), so each
+slot reads its expert's full trellis and a bigger batch amortises nothing. Measured
+2026-09-21 on the 5060 Ti: a 15K prefill takes 32.5 / 32.6 / 32.7 s at
+`max_num_batched_tokens` 2048 / 4096 / 8192, flat across 4x. With experts in VRAM the
+re-reads are cheap-ish. With experts CPU-offloaded they cross PCIe per token, which is
+where it became visible. See [cpu-offload.md](cpu-offload.md). Grouping tokens by expert
+is the kernel-side fix for both.
+
 Recorded here rather than in TODO because it is an observation with an open
 feasibility question, not yet a task. The numbers are now gated
 (`bench/run.py perf-check --tier full`), so if anything changes them it will say

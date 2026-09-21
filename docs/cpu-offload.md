@@ -575,6 +575,95 @@ Registering from `process_weights_after_loading` should avoid the shortfall by
 construction: it runs after all replacement, with the final tensors in hand, and
 nothing repacks them afterwards. Unverified against EXL3 at the time of writing.
 
+**That verdict was reached on decode alone, and prefill reverses it.** See the next
+section: a prefill step reads nearly every expert, which makes it the densely-read case
+this section says belongs to prefetch.
+
+---
+
+## Prefill pays the offload cost once per token, not once per step
+
+*Surfaced 2026-09-21 from serving, on the Gen5 x16 host: a 15K-token prompt went from
+23.4 s to 1 m 16 s of request time with 3.75 GiB of experts offloaded, while decode only
+went 51 → 40 tok/s and vLLM's log showed "prefill" of ~1450 t/s both times. That logged
+figure is not a prefill rate, which is why the loss looked unaccounted for. It is
+prompt tokens credited at first-token time divided by the 10 s log interval, so a long
+prompt always reads as roughly `prompt_len / 10`. (The mechanism is in the field notes.
+Measure prefill as `first_token_ts - scheduled_ts`, or with `max_tokens=1`.)*
+
+**Mechanism: every (token, expert) slot is its own single-row product.**
+`_exl3_moe_mm` ([ops.py](../vllm_exl3_plugin/ops.py)) repeats each token's row `top_k`
+times into `gathered = [tokens * top_k, 1, hidden]`, and `exl3_mgemm` takes
+`size_m = A.size(1) = 1`. Tokens routed to the same expert are never grouped, so each
+slot reads its expert's whole trellis. In weight traffic a P-token prefill is P decode
+steps. With experts resident, those re-reads come from VRAM and L2. With UVA, every one
+of them crosses PCIe, because zero-copy has no device-side copy to reuse. Nothing
+amortises over the step, and chunk size cannot change it.
+
+*Measured on the Gen3 x8 host (RTX 5060 Ti, TP=1), `Qwen3.5-35B-A3B-exl3@2.00bpw`,
+`max_tokens=1` on random 15000-token prompts, prefix caching off, one warmup then two
+timed repeats. Offload is `--cpu-offload-gb 3.75 --cpu-offload-params experts`, which
+lands as 3.75 GiB in 15360 tensors across layers 0–19.*
+
+| offload | max-num-batched-tokens | 15K prefill | |
+|---|---|---|---|
+| none | 2048 | 32.5 s | 462 t/s |
+| none | 4096 | 32.6 s | 461 t/s |
+| none | 8192 | 32.7 s | 459 t/s |
+| 3.75 GiB | 2048 | 346.6 / 350.4 s | 43 t/s |
+
+- **The prediction came before the number.** 3.75 GiB over 20 layers × 256 experts is
+  ~786 KB per expert, so 8 routed × 20 layers is ~126 MB per token over the link.
+  15K × 126 MB at the 6.1 GB/s zero-copy ceiling predicts ~310 s extra. **Measured:
+  +315 s, which is 21.0 ms per prompt token, or 6.0 GB/s.** So prefill is purely
+  link-bound on per-token expert reads.
+- **Same per-token cost as decode, on this host.** Decode pays about +22.5 ms per token.
+  That comes from 128 tokens after a 64-token prompt, less that prompt's own ~1.3 s of
+  per-token reads. On the Gen5 host prefill paid about 0.6× decode per token: ~50 s
+  extra over 15K tokens against 5.4 ms per decode token. The likely reason is that decode
+  on a fast link is latency-bound per transfer (2.85 µs each, fitted above), while
+  prefill's many concurrent slots keep more transfers in flight. That is inferred, not
+  measured.
+- **Chunk size is flat even with no offload** (32.5–32.7 s across 4x). That is the
+  same per-slot structure: a bigger step amortises nothing. It is probably also why
+  [moe.md](moe.md) measures MoE prefill at only 1.8x decode throughput. Grouping tokens by
+  expert would help resident prefill too, but that is a kernel change, separate from and
+  larger than the one below.
+
+**Scale:** on a slow link this turns offload from a decode tax into a prefill wall.
+10.7x on prefill here (32.5 → 348 s), and about 3x on the whole request on the Gen5 host. The chunk-size
+sweep was stopped after the 2048 point with offload, because the mechanism already
+predicts the other points (flat).
+
+### Design direction: stage a layer's offloaded experts for prefill
+
+A prefill step already touches almost every expert in a layer. So one bulk copy of the
+layer's offloaded bytes into a VRAM staging buffer beats per-slot zero-copy reads once
+`tokens × top_k × bytes_per_expert` exceeds the layer's offloaded bytes. That is about
+**32 tokens** at 256 experts, top-8. Here that means ~4.0 GB per step (0.62 s at 6.5 GB/s,
+~0.1 s at Gen5 rates). A 15K prompt at 2048-token steps would pay ~5 s instead of 315 s,
+or ~0.75 s instead of ~50 s on Gen5. Decode stays on UVA, where laziness is what wins.
+
+- **Wiring is already the right shape.** The kernel takes per-expert *pointer tables*
+  (`exl3_*_trellis_ptrs`), so a prefill step can swap in a table aimed at the staging
+  buffer and nothing else about the call changes. This is the same property the packing
+  item relies on.
+- **Neither vLLM backend does this.** UVA is lazy and never copies. `PrefetchOffloader`
+  copies every forward, decode included, which is the 4x loss above, and only one backend
+  is active per process. What is wanted is a per-step switch on token count, inside our
+  MoE `apply`.
+- **Costs to size:** one layer of offloaded experts is ~190 MB here. Double-buffering, so
+  the next layer's copy overlaps this layer's compute, doubles that. The buffer can only
+  be carved out of what offload freed, so it eats into the saving.
+- **Refinement:** copy only the experts active in the step, from `topk_ids`. At 2048
+  tokens that is nearly all of them, so it matters mostly for short prefills and mixed
+  batches. It would also need a device-to-host sync to build the copy list, which the
+  unconditional copy avoids.
+- **Unverified:** how an H2D copy on a side stream behaves inside the piecewise-compiled
+  region and under CUDA graph capture. Large prefill steps typically run above the
+  capture sizes, but mixed prefill+decode batches do not. It also interacts with every
+  other open offload item, which is why the TODO treats them together.
+
 ---
 
 ## Why llama.cpp's offload knobs look different
@@ -661,6 +750,10 @@ overlap differ from a `sum()`.
 
 **Why is removing `suh`/`svh` worth 2.6% in one configuration and 12.5% in another**, for
 the same bytes.
+
+**Does prefill staging hold up under compile and CUDA graphs, and what does its buffer
+cost in KV?** The mechanism and the ~60x projection are in the prefill section; the
+integration questions are not answered.
 
 **What the 2026-08-20 MoE reporting shortfall was** — UVA's claim inflated ~9x on a
 routed MoE while honest on dense models.
