@@ -150,6 +150,34 @@ measurement. Per-expert packing compounds with this rather than competing — at
 the 24 GiB row is ~45 tok/s — and the gain grows with offload size, which is a second
 reason to move the offload point first.
 
+**Even the KV headroom is only partly delivered, and under expandable segments it can
+be none at all.** Offloading after load frees the offloaded trellises from the middle of
+allocator segments that still hold resident tensors. An expert trellis is 256–384 KiB,
+which puts it in the caching allocator's small pool, interleaved with the `suh`/`svh`
+vectors the component policy keeps on device. A segment (classic) or a 2 MiB page
+(expandable) that still holds one live tensor cannot go back to the driver. vLLM's
+"Model loading took" figure is live allocations, so it reports the full saving. The KV
+budget is computed from `cudaMemGetInfo`, which counts the stranded pages as consumed.
+Measured 2026-09-21 on this host, `Qwen3.6-35B-A3B-exl3@2.00bpw-H5`, `--cpu-offload-gb 4
+--cpu-offload-params experts`, allocator stats after `empty_cache` at the end of load:
+
+| allocator | offload | allocated | reserved | stranded | device used |
+|---|---|---|---|---|---|
+| classic | 4 GiB | 5.06 | 5.77 | 0.71 | 6.00 |
+| classic | none | 9.06 | 9.09 | 0.03 | 9.32 |
+| expandable | 4 GiB | 5.05 | **9.07** | **4.02** | 9.31 |
+| expandable | none | 9.05 | 9.07 | 0.02 | 9.30 |
+
+With `expandable_segments:True` the 4 GiB offload returned nothing to the card: it paid
+the PCIe cost and bought zero KV. The classic allocator returned 3.3 of the 4 GiB. A user
+report the same day, on `3.00bpw-H5` (384 KiB trellis) on another host, lost 1.82 GiB of
+the 4 to the same switch. It is unexplained why that was a partial loss rather than the
+full 4 GiB seen here, but either way the size of the loss depends on the allocator
+setting. [turboquant-kv.md](turboquant-kv.md)'s serve recipes set expandable segments, so
+following them with offload hits this. The rework below removes the cause, since an
+offloaded tensor then never occupies device memory. That is why this is recorded rather
+than patched separately.
+
 **The fix has an obvious shape.** All four `load_*` entry points funnel through a single
 `EXL3Parameter.store`, so that is one choke point at which to pin and accelerator-view
 instead of retaining the device tensor, under the same budget and selectors. Two things

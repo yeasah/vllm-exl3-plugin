@@ -1630,6 +1630,14 @@ anything downstream of `store()` assumes the shard is device-resident, and how i
 interacts with TP sharding, which happens in `_take_column`/`_take_row` *before* the
 store.
 
+**Acceptance check: the saving has to reach the KV budget under both allocators.** Today's
+offload-after-load strands the freed trellis pages. The loss is 0.71 of 4 GiB with the
+classic allocator and all 4 GiB with `expandable_segments:True` (2026-09-21, table in
+[docs/cpu-offload.md](docs/cpu-offload.md)). "Model loading took" hides this, because it
+counts live allocations. Check `reserved - allocated` after load, or the "weights +
+non-torch" line, with expandable segments on and off. The rework should bring both to
+the no-offload residual (~0.03 GiB).
+
 **Worth trying first:** `EXL3_BLOCKQ_ON_LOAD=1` never materialises the dense embedding,
 so only `bq_*` reaches the GPU — on a 248K-vocab model ~1-2 GB traded for ~0.3-0.5 GB.
 Did not clear the 2026-09-18 case (that run already had it on), but it is the cheap lever
