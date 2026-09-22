@@ -237,7 +237,15 @@ def do_quantize(job, args):
         donefile=os.path.join(revdir, "quantization_config.json")
         script=os.path.join(args.exllamav3dir, "convert.py")
 
-        if not os.path.isfile(donefile):
+        # A failed attempt resumes from its checkpoint rather than ending the sweep. The
+        # usual failure is a host OOM at the head, the job's memory peak, and resuming is
+        # safe: a conversion OOM-killed there and resumed came out byte-identical to an
+        # uninterrupted one (single GPU, 2026-09-21).
+        attempt = 0
+        while not os.path.isfile(donefile) and attempt <= args.retries:
+            if attempt:
+                print(f"=== ATTEMPT {attempt + 1} of {args.retries + 1} FOR {revdir} ===")
+            attempt += 1
             if os.path.isfile(os.path.join(workdir, "args.json")):
                 print(f"=== RESUMING QUANTIZTION OF {revdir} ===")
                 subprocess.call([ "python3", script,
@@ -257,7 +265,7 @@ def do_quantize(job, args):
                                   "-d", str(args.device) ])
 
         if not os.path.isfile(donefile):
-            print(f"=== QUANTIZATION OF {revdir} FAILED ===")
+            print(f"=== QUANTIZATION OF {revdir} FAILED after {attempt} attempt(s) ===")
             return False
         else:
             print(f"=== QUANTIZATION OF {revdir} COMPLETE ===")
@@ -276,6 +284,8 @@ def main():
     cmd_quantize = subparsers.add_parser('quantize')
     cmd_quantize.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
     cmd_quantize.add_argument('-d', '--device', default=0)
+    cmd_quantize.add_argument('--retries', type=int, default=2,
+                              help='resume a failed revision this many times before stopping')
     cmd_quantize.set_defaults(func=do_quantize)
 
     cmd_qbench = subparsers.add_parser('qbench')
