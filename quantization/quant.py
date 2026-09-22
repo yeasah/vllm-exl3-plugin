@@ -32,7 +32,7 @@ class Job:
         if not os.path.isdir(self.dir):
             return []
         return sorted(r for r in os.listdir(self.dir)
-                      if r != 'main' and os.path.isdir(self.revdir(r)))
+                      if r not in ('main', 'logs') and os.path.isdir(self.revdir(r)))
 
     def is_complete(self, rev):
         # A revision is finished when convert.py wrote its config; main is finished
@@ -220,9 +220,30 @@ def do_qbench(job, args):
     else:
         print("=== no revisions found ===")
 
+def run_logged(cmd, log_path):
+    """Run cmd, echoing its output to the terminal and appending it to log_path.
+
+    convert.py's `!!` warnings (non-finite rows, Cholesky retries, fallbacks) and its
+    per-layer error lines are the only record of how a conversion went; the checkpoint
+    keeps none of it. Raw bytes are copied, so the converter's progress bars still render.
+    """
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    sys.stdout.flush()  # our own === lines must reach the terminal before the child's output
+    with open(log_path, "ab") as log:
+        log.write(f"\n=== {' '.join(cmd)}\n".encode())
+        log.flush()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        while chunk := os.read(proc.stdout.fileno(), 65536):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            log.write(chunk)
+            log.flush()
+        return proc.wait()
+
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
-    
+
+
     for b in args.bits.split(','):
         tb = b.split(':')
         bits = tb[0]
@@ -236,6 +257,8 @@ def do_quantize(job, args):
         workdir=os.path.join(revdir, "_work")
         donefile=os.path.join(revdir, "quantization_config.json")
         script=os.path.join(args.exllamav3dir, "convert.py")
+        # Outside revdir on purpose: `upload` publishes each revision directory whole.
+        log_path=os.path.join(job.dir, "logs", f"{rev}.log")
 
         # A failed attempt resumes from its checkpoint rather than ending the sweep. The
         # usual failure is a host OOM at the head, the job's memory peak, and resuming is
@@ -248,21 +271,21 @@ def do_quantize(job, args):
             attempt += 1
             if os.path.isfile(os.path.join(workdir, "args.json")):
                 print(f"=== RESUMING QUANTIZTION OF {revdir} ===")
-                subprocess.call([ "python3", script,
-                                  "-w", workdir,
-                                  "-r",
-                                  "-d", str(args.device) ])
+                run_logged([ "python3", script,
+                             "-w", workdir,
+                             "-r",
+                             "-d", str(args.device) ], log_path)
             else:
                 print(f"=== QUANTIZING {revdir} ===")
-                subprocess.call([ "python3", script,
-                                  "-hq",
-                                  "-b", bits,
-                                  "-hb", headbits,
-                                  "-vb", "16",
-                                  "-i", path,
-                                  "-w", workdir,
-                                  "-o", revdir,
-                                  "-d", str(args.device) ])
+                run_logged([ "python3", script,
+                             "-hq",
+                             "-b", bits,
+                             "-hb", headbits,
+                             "-vb", "16",
+                             "-i", path,
+                             "-w", workdir,
+                             "-o", revdir,
+                             "-d", str(args.device) ], log_path)
 
         if not os.path.isfile(donefile):
             print(f"=== QUANTIZATION OF {revdir} FAILED after {attempt} attempt(s) ===")
