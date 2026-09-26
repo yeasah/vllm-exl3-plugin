@@ -630,6 +630,24 @@ not going away; they are the replacement. `sc_optimize.py` still fits
 `kld(t, K) = S_t · rfn_t(K)^alpha` per tensor, so both halves of the finding — the floor
 and the alpha it biases — apply unchanged.
 
+**Conversion sign vectors alias within a module, and parallel mode races the RNG**
+(2026-09-23). `convert_model.py` seeds every tensor of module *idx* with `idx`, and
+`quantize_exl3` calls `torch.manual_seed` per tensor, so any two same-length draws at the
+same position get **identical** sign vectors. On Qwen3.8 that gives `gate.sv == down.su`
+in all 64 layers, `z.sv == out_proj.su` in all 48 linear-attention layers, and
+`out_proj.sv == down.sv` — producer/consumer pairs the incoherence argument treats as
+independent. `quantize_exl3_batch` reproduces the reuse deliberately, to match the serial
+path. In parallel mode (`-d 0,1`) worker threads share torch's global generator, so the
+per-tensor seed and the `randn` draw are not atomic: sign vectors differ run to run
+(33-35 of 418 on Ornith-9B) and published checkpoints show mixed draw indices.
+
+*Why it matters to them*: reproducibility of parallel conversions, and a correlation the
+method's own assumptions exclude. *What it does not claim*: any quality effect — on
+Qwen3.8 4bpw, aliased and alias-free draws overlapped completely (n = 5 and 4). Fix for
+both: seed each tensor from a stable hash of its key, drawn from a per-thread
+`torch.Generator`; resume stays exact because the seed still does not depend on order.
+Detail in [calibration.md](calibration.md).
+
 ---
 
 ### qbench: two defects found using it, 2026-09-10
@@ -685,6 +703,9 @@ annoys us:
 6. **`embed-quant-config`.** Highest value to us, and deliberately last: it needs a
    design decision, a reproduction we have not built, and a fix judged against two
    other manifestations. Filing it early would waste the good will the others earn.
+
+7. **exllamav3 conversion RNG.** A clean report with a small fix, but no measured quality
+   effect, so it rides along with (5) rather than going on its own.
 
 **Not yet fileable**: the turboquant `kv_cache_dtype` mystery (4), until the hypothesis
 is verified or replaced.

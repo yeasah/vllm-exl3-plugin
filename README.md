@@ -73,6 +73,7 @@ was ruled out, and why each design went the way it did. Open tasks live in
 | [embeddings.md](docs/embeddings.md) | quantized embeddings, block-scaled vs. trellis, storage format, depth selection, serving under torch.compile |
 | [blockq-format.md](docs/blockq-format.md) | the block-scaled embedding format itself: layout, decode/encode reference, invariants, how to produce and consume it |
 | [qbench.md](docs/qbench.md) | quality measurement across formats on the served path |
+| [calibration.md](docs/calibration.md) | what a conversion's calibration protects and what it leaves uncovered: why Qwen3.8's quants looked like a lottery, and a conversational calibration mix that cuts excess KLD 15-32% on chat inputs at no cost on raw text |
 | [capability-suite.md](docs/capability-suite.md) | whether a served configuration still *does the work*: what a paired comparison has to hold fixed, three metrics worth tracking (correctness, cost, indecision), why an agentic harness is actively harmful on a Q&A benchmark, and 4-bit KV measured at no detectable cost on either axis |
 | [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |

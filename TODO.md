@@ -1491,7 +1491,10 @@ Three questions, in the order they are worth asking:
    way, and +1 vs +2 (K+1) is closed for dense as moot. The "published ladders are not
    a controlled series" caution is withdrawn: under render the published Qwen3.8 arms
    are smooth and monotone (slopes 1.48/1.41/1.09), and the old alternation was
-   off-template scoring. **The live path is still MoE**, where `-hq`'s boundary is
+   off-template scoring. (Both render-mode readings on Qwen3.8 are worth re-checking on
+   the conversational slices before relying on a few-percent gap — render turned out to
+   be a regime of its own, [docs/qbench.md](docs/qbench.md) "Conversational trace
+   slices".) **The live path is still MoE**, where `-hq`'s boundary is
    categorical and needs no ranking. See [docs/qbench.md](docs/qbench.md) "A published
    per-tensor sensitivity table" and "Published bitrate ladders behave".
 
@@ -1545,6 +1548,36 @@ so the −19% is measured against a baseline up to 66% worse than what the conve
 is untested and is now the cheapest thing to check first.
 
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
+
+## `calibration-mix` — Make the conversational calibration the pipeline default
+
+**Outcome wanted:** `quant.py` converts with a conversational calibration mix by default,
+with shares tuned and the gain confirmed beyond one model and one bitrate.
+
+**What it unblocks:** a 15-32% cut in excess KLD on conversational inputs over the
+published Qwen3.8 4bpw, at no cost on raw text — the largest quality lever measured on
+this project that costs no bytes — and draws that stop varying where the default corpus
+left inputs uncovered.
+
+**Candidate approach, in order:**
+1. *Split the scaffolding.* Calibration and eval traces share `ctx_trace.py`'s anchor
+   phrasings, tool definitions and loop wording; give each its own pool and regenerate
+   the eval traces. It prices how much of the tool-result gain is fit to the scaffolding,
+   cheaply — generation only, no conversions.
+2. *Breadth:* the same mix at 2 and 3 bpw, where the default draws were least smooth, and
+   on gemma-4-12B, the other draw-sensitive model measured (three default draws spread
+   3.2x in median KLD under render).
+3. *Shares:* the 25/35/25/10/5 split is a guess; European-language coverage did not
+   improve and is the first thing to look at.
+4. *More agentic sessions.* The agentic column is two captured sessions; it cannot rank
+   draws yet.
+5. *Wire it into `quant.py`,* with the trace generated once per model from a 6bpw
+   conversion, as `sc_trace.py` is used.
+
+The reason this is the candidate: it is the one change that fixed the variance *and*
+moved quality everywhere, and it needs no kernel, format or loader work.
+
+→ [docs/calibration.md](docs/calibration.md)
 
 ## `moe-tp` — Finish the job on MoE + TP
 
@@ -1784,8 +1817,8 @@ before relying on the claim, since MoE is where offload is most attractive.
 
 ## `upstream-queue` — Findings other projects should hear about
 
-Ten items across vLLM, llm-compressor and exllamav3: two patches ready to offer, one
-blocked on a design decision that is not ours, six reports, and one question we cannot
+Eleven items across vLLM, llm-compressor and exllamav3: two patches ready to offer, one
+blocked on a design decision that is not ours, seven reports, and one question we cannot
 yet phrase honestly. They were scattered across TODO items, patch headers and subject
 notes, which made the queue invisible *as* a queue -- what is ready, what is blocked,
 what is worth doing first.

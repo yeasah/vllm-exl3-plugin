@@ -359,6 +359,12 @@ asymmetry the non-EXL3 arms do not get.
 
 Projects and raw results: `~/qbench/qwen38-27b-sc-{neutral,indomain}.yaml`.
 
+**Revisited 2026-09-25, and it holds.** Re-scored at 4 bpw against a bf16 reference: SC
+is 25-36% better than plain on the model's own chat (turboderp's trace and our own-voice
+slice), equal or worse on documents in context, and **5x worse** under `template: render`.
+A conversational calibration built from the bundled corpus beats plain everywhere but
+SC's home ground, at no cost on raw text — [calibration.md](calibration.md).
+
 ## Head bitrate: 6 is defensible, and the lever does not want pulling (2026-08-25)
 
 *Tracked as `head-bits`, which this closes.* The one allocation question the composability
@@ -528,6 +534,12 @@ on both Ornith and Qwen3.6. Body 3 moves from a clear H5 to a tie, which H5 stil
 on bytes. See the next section.
 
 ## Scoring through the chat template: what off-template rows did (2026-09-21)
+
+> **Revisited 2026-09-25.** `render` is on-template in framing but not in content: it
+> places web text as the assistant's reply, a regime of its own that produced a spurious
+> quantization lottery on Qwen3.8. It stays in the card as a stress test; the headline
+> instrument is now the conversational slices plus raw text. See "Conversational trace
+> slices" at the end of this note.
 
 Before `template: render`, the pipeline benched with `template: true`, which put every
 row off-template: inside an open `<think>` block for Qwen3.6 and Ornith. The two modes
@@ -1882,3 +1894,82 @@ targets, one embedding treatment, one engine, one model.
 inferential. 0.831 GiB is larger than the gap between adjacent EXL3 rungs on this model,
 it costs a ninth of the noise floor, and it takes six seconds per checkpoint. On a tied
 model the same saving needs no tooling at all.
+
+## Conversational trace slices, and what render mode was measuring (2026-09-25)
+
+`template: render` (2026-09-21, above) was an improvement over off-template rows, and it
+was also a trap. It wraps each openwebtext row as **the assistant's reply** after the
+model's default system prompt and an empty think block: chat framing around content no
+model writes in that position. On Qwen3.8-27B that one framing produced a quantization
+"lottery" — 4bpw conversions ranging 0.0098-0.0370 excess KLD, with the same seeds
+landing differently on two hosts — that neither raw text nor the model's own chat shows
+at all. The full account is in [calibration.md](calibration.md); this section is about
+the instrument.
+
+**Render is a stress test, not the headline number.** It measures the model reading
+external text in the assistant's position, which is a real but narrow regime. Qwen3.8
+4bpw draws, excess KLD:
+
+| framing | spread across draws | turboderp's plain 4bpw |
+|---|---|---|
+| raw text (`template: false`) | 0.0076-0.0080 | 0.0078 |
+| render | 0.0098-0.0370 | 0.0105 |
+| turboderp's own eval trace (`test_trace`) | 0.0076-0.0078 | 0.0077 |
+
+turboderp's trace (`qbench_prompts_gen.json` on the repo's `main` branch: 24
+self-generated conversations, thinking on) reproduced his published plain ladder here to
+within 1e-4 — 0.0333 / 0.0083 / 0.0024 / 0.0009 at 3/4/5/6 bpw — which also validates
+`test_trace` mode against an outside result.
+
+**The replacement: conversational slices, scored on responses only.** `ctx_trace.py` in
+the fork generates qbench traces that put documents where real use puts them, and the
+model's own answer after them. qbench's `test_trace` mode scores only the response
+positions: in use the model reads a document, it never predicts one.
+
+| slice | construction |
+|---|---|
+| `ctx_user` | a held-out document pasted into a user turn under an anchoring request |
+| `ctx_tool` | the same, returned as the result of a scripted tool call |
+| `ctx_ml` | multilingual documents (Wikipedia, 13 languages), both placements, native or English anchors |
+| `loop` | a 2-3 round tool loop over documents of mixed kinds |
+| `self` | the model's own voice on short prompts |
+| `agentic` | assistant turns of real captured agent sessions (`eval/prompts/agentic_*`) |
+
+Eval documents are held out from everything else by construction: the end of
+openwebtext-10k, wikitext-2 *validation*, source files given by `--code_glob`, and
+Wikipedia row group 1 (calibration uses row group 0). 30 conversations per slice resolve
+differences of about 5% on a row bootstrap; they separate draws where render's variance
+was an artifact, and agree with render's ordering where it was not — the draws that were
+worst in render are worst on tool results and loops too, by 8-17% rather than 2.5x.
+
+**Keep render in the card, labelled.** A card that shows raw, render and the
+conversational slices side by side makes an uncovered regime visible as its own column
+rather than averaging it away.
+
+**Harness changes that came with it.**
+
+- **The head runs on the score range only.** Engines used to apply the output head to
+  every position and let the callbacks slice the scored span afterwards; an agentic row
+  with 15-20k tokens of context and a few hundred scored tokens needed 7-10 GB of logits
+  and ran a 16 GB card out of memory. `backend.run()` now takes the per-row ranges, the
+  exllamav3 and streaming-transformers engines run the head on `[a, b)` only, and
+  `DiffStats` / `save_reference_row` take the offset. Guarded: bit-identical on a CPU
+  test, an off-by-one slice detected, and an end-to-end rescore on a fresh cache
+  matching to 0.02-0.09% (the exl3 head switches kernels below 144 rows).
+- **wikitext2 loads again** (`Salesforce/wikitext`; current `huggingface_hub` rejects the
+  bare id).
+
+**Limitations to know about.**
+
+- **The logit cache is not safe for concurrent writers.** Two qbench processes sharing a
+  `logit_cache.dir` race on `manifest.json.tmp` and one dies. Give each process its own.
+- **Long contexts still need care.** exllamav3's attention ran out of memory at 40k tokens
+  of context on one 16 GB card; the agentic slice is capped at 20k.
+- **The agentic slice is two sessions.** Its turns are strongly correlated, so its
+  bootstrap intervals are too narrow and its ordering is not trustworthy yet.
+- **Mean KLD on low-entropy traces is carried by a few tokens.** Medians on these slices
+  sit at 1e-5 to 1e-3; always bootstrap over rows before reading a gap.
+
+Scratch tooling used here, not in the repo: `agentic_trace.py` (captured session ->
+trace), `bootstrap.py` (row bootstrap from the cache's per-position KL), both under
+`/home/bulk/ypell/quant_work/_ctxtrace/`.
