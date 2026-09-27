@@ -1934,13 +1934,29 @@ positions: in use the model reads a document, it never predicts one.
 | `loop` | a 2-3 round tool loop over documents of mixed kinds |
 | `self` | the model's own voice on short prompts |
 | `agentic` | assistant turns of real captured agent sessions (`eval/prompts/agentic_*`) |
+| `wild` | real first user turns from WildChat-1M, half carrying pasted material, stratified by language; eval-only |
 
 Eval documents are held out from everything else by construction: the end of
 openwebtext-10k, wikitext-2 *validation*, source files given by `--code_glob`, and
-Wikipedia row group 1 (calibration uses row group 0). 30 conversations per slice resolve
+Wikipedia row group 1 (calibration uses row group 0). So is the scaffolding: eval traces
+draw anchor phrasings, tool names and schemas, and task wording from a pool disjoint from
+calibration's, and give each conversation one of four thinking settings (reasoning effort
+low/medium/xhigh, or off) where calibration uses one. The first round of traces shared
+calibration's scaffolding; splitting it cost the calibration mix about 8 points of its
+advantage on user-turn and multilingual documents and almost nothing elsewhere
+([calibration.md](calibration.md)). `wild` is the least constructed slice: real users'
+requests, regenerated answers, no scaffolding of ours at all — WildChat-1M from the end of
+the dataset, non-toxic and unredacted, deduplicated on a normalized prefix (it repeats
+templated prompts thousands of times), 45% English / 15% Chinese / 7% Russian and the rest
+over 11 languages, only the user text kept. 30 conversations per slice resolve
 differences of about 5% on a row bootstrap; they separate draws where render's variance
 was an artifact, and agree with render's ordering where it was not — the draws that were
 worst in render are worst on tool results and loops too, by 8-17% rather than 2.5x.
+
+**Two tiers.** `wild`, turboderp's trace and `agentic` are the independent tier:
+prompts and scaffolding nobody here wrote, the one to quote. The constructed slices locate
+an effect — which placement of external text a change helps or hurts — and should not
+carry a headline on their own, since whoever builds calibration also builds them.
 
 **Keep render in the card, labelled.** A card that shows raw, render and the
 conversational slices side by side makes an uncovered regime visible as its own column
@@ -1956,6 +1972,11 @@ rather than averaging it away.
   `DiffStats` / `save_reference_row` take the offset. Guarded: bit-identical on a CPU
   test, an off-by-one slice detected, and an end-to-end rescore on a fresh cache
   matching to 0.02-0.09% (the exl3 head switches kernels below 144 rows).
+- **A trace row's length no longer comes from its last nonzero id.** The streaming
+  transformers engine treated token 0 as padding, and in Qwen's vocabulary id 0 is `!`,
+  so a response genuinely ending in `!` lost its last position and tripped an assertion
+  in `compute_target_log_probs` (3 rows of 210). Where score ranges exist, the range end
+  now sets the length; that changed exactly those three rows across every trace scored.
 - **wikitext2 loads again** (`Salesforce/wikitext`; current `huggingface_hub` rejects the
   bare id).
 

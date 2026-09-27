@@ -1554,30 +1554,45 @@ is untested and is now the cheapest thing to check first.
 **Outcome wanted:** `quant.py` converts with a conversational calibration mix by default,
 with shares tuned and the gain confirmed beyond one model and one bitrate.
 
-**What it unblocks:** a 15-32% cut in excess KLD on conversational inputs over the
-published Qwen3.8 4bpw, at no cost on raw text — the largest quality lever measured on
+**What it unblocks:** a 12-18% cut in excess KLD on independent chat-shaped evals (real
+user prompts, turboderp's own trace) over the published Qwen3.8 4bpw, up to 29% on tool
+results, at no cost on raw text — the largest quality lever measured on
 this project that costs no bytes — and draws that stop varying where the default corpus
 left inputs uncovered.
 
 **Candidate approach, in order:**
-1. *Split the scaffolding.* Calibration and eval traces share `ctx_trace.py`'s anchor
-   phrasings, tool definitions and loop wording; give each its own pool and regenerate
-   the eval traces. It prices how much of the tool-result gain is fit to the scaffolding,
-   cheaply — generation only, no conversions.
-2. *Breadth:* the same mix at 2 and 3 bpw, where the default draws were least smooth, and
+1. *Breadth:* the same mix at 2 and 3 bpw, where the default draws were least smooth, and
    on gemma-4-12B, the other draw-sensitive model measured (three default draws spread
    3.2x in median KLD under render).
-3. *Shares:* the 25/35/25/10/5 split is a guess; European-language coverage did not
+2. *Shares:* the 25/35/25/10/5 split is a guess; European-language coverage did not
    improve and is the first thing to look at.
-4. *More agentic sessions.* The agentic column is two captured sessions; it cannot rank
+3. *More agentic sessions.* The agentic column is two captured sessions; it cannot rank
    draws yet.
-5. *Wire it into `quant.py`,* with the trace generated once per model from a 6bpw
+4. *Wire it into `quant.py`,* with the trace generated once per model from a 6bpw
    conversion, as `sc_trace.py` is used.
 
 The reason this is the candidate: it is the one change that fixed the variance *and*
 moved quality everywhere, and it needs no kernel, format or loader work.
 
 → [docs/calibration.md](docs/calibration.md)
+
+## `card-composite` — One headline fidelity number per card, and a table that shows nothing regressed
+
+**Outcome wanted:** model cards plot KLD vs size on a single declared composite from the
+independent eval tier, and carry a per-quant table (composite, raw text, worst-slice
+ratio), with the per-slice detail kept for internal use.
+
+**What it unblocks:** cards that can show a calibration or recipe change honestly. Per-slice
+curves run nearly parallel on a log scale, so N plots repeat themselves, and slices named
+by content read as task benchmarks when they measure fidelity to the base model.
+
+**Candidate approach:** composite = declared weights over WildChat, turboderp-style
+self-generated trace and captured agent sessions; worst-slice ratio = max over all slices
+of the arm's slice excess relative to a reference arm, divided by the same ratio on the
+composite. Mock it up on the Qwen3.8 arms already scored before touching `quant.py`'s card
+code. The reason: it keeps one number for readers and a regression gate for us.
+
+→ [docs/qbench.md](docs/qbench.md) "Conversational trace slices"
 
 ## `moe-tp` — Finish the job on MoE + TP
 
