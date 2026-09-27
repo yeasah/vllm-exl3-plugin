@@ -1576,21 +1576,35 @@ moved quality everywhere, and it needs no kernel, format or loader work.
 
 → [docs/calibration.md](docs/calibration.md)
 
-## `card-composite` — One headline fidelity number per card, and a table that shows nothing regressed
+## `card-composite` — Cards that answer "which size?", and justify a duplicate only when there is one
 
-**Outcome wanted:** model cards plot KLD vs size on a single declared composite from the
-independent eval tier, and carry a per-quant table (composite, raw text, worst-slice
-ratio), with the per-slice detail kept for internal use.
+**Outcome wanted:** `quant.py`'s card generation emits two sections. **Always:** the card's
+own checkpoints on a single composite fidelity metric — one plot of excess KLD vs size,
+and a table of size, composite KLD, Δ perplexity and raw-text KLD — answering which
+quality/size tradeoff suits the reader, with no comparison. **Only when a reference ladder
+exists** (a published set we chose to duplicate): excess KLD relative to the reference at
+equal size, and a worst-slice table showing no eval slice got worse.
 
-**What it unblocks:** cards that can show a calibration or recipe change honestly. Per-slice
-curves run nearly parallel on a log scale, so N plots repeat themselves, and slices named
-by content read as task benchmarks when they measure fidelity to the base model.
+**What it unblocks:** publishing cards whose headline does not depend on a reference that
+often does not exist (the Ornith pair, the Qwen3.6 MoE), while a duplicated model still
+carries its case. One set of quants per model — our best effort — not parallel calibration
+variants, unless some calibration is shown to be strongly better in a domain.
 
-**Candidate approach:** composite = declared weights over WildChat, turboderp-style
-self-generated trace and captured agent sessions; worst-slice ratio = max over all slices
-of the arm's slice excess relative to a reference arm, divided by the same ratio on the
-composite. Mock it up on the Qwen3.8 arms already scored before touching `quant.py`'s card
-code. The reason: it keeps one number for readers and a regression gate for us.
+**Decided (2026-09-27):**
+- Composite = the independent eval tier only: WildChat prompts 0.80, captured agent
+  sessions 0.20. turboderp's self-generated trace is left out by the same razor as our own
+  calibration/eval separation (it shares SC's generator); the content it embodies is
+  already represented by the constructed own-voice slice.
+- Render is off the card entirely; it is a pipeline diagnostic.
+- Perplexity goes in the table, not on a second y-axis: on these traces it moves ~0.5% at
+  4 bpw, and a dual axis makes crossings look meaningful.
+- Worst slice = the largest ratio of the arm's excess to the reference arm's at the same
+  bitrate, over every non-render slice (normalizing by the headline gain instead flags
+  slices that merely improved less).
+
+**Candidate approach:** port `/home/bulk/ypell/quant_work/_ctxtrace/card_mockup2.py` into
+the card code; the traces become per-model pipeline artifacts. Open: more agent sessions
+before the 0.20 weight means much (two today).
 
 → [docs/qbench.md](docs/qbench.md) "Conversational trace slices"
 
