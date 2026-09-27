@@ -1935,6 +1935,7 @@ positions: in use the model reads a document, it never predicts one.
 | `self` | the model's own voice on short prompts |
 | `agentic` | assistant turns of real captured agent sessions (`eval/prompts/agentic_*`) |
 | `wild` | real first user turns from WildChat-1M, half carrying pasted material, stratified by language; eval-only |
+| `swe` | real coding-agent sessions (Open-SWE-Traces: openhands and sweagent, MiniMax-M2.5, swe-rebench-v2), cut at an assistant turn the model regenerates; the recorded agent's history and real tool output stay in context; eval-only |
 
 Eval documents are held out from everything else by construction: the end of
 openwebtext-10k, wikitext-2 *validation*, source files given by `--code_glob`, and
@@ -1953,7 +1954,7 @@ differences of about 5% on a row bootstrap; they separate draws where render's v
 was an artifact, and agree with render's ordering where it was not — the draws that were
 worst in render are worst on tool results and loops too, by 8-17% rather than 2.5x.
 
-**Two tiers.** `wild`, turboderp's trace and `agentic` are the independent tier:
+**Two tiers.** `wild`, `swe`, turboderp's trace and `agentic` are the independent tier:
 prompts and scaffolding nobody here wrote, the one to quote. The constructed slices locate
 an effect — which placement of external text a change helps or hurts — and should not
 carry a headline on their own, since whoever builds calibration also builds them.
@@ -1972,6 +1973,12 @@ rather than averaging it away.
   `DiffStats` / `save_reference_row` take the offset. Guarded: bit-identical on a CPU
   test, an off-by-one slice detected, and an end-to-end rescore on a fresh cache
   matching to 0.02-0.09% (the exl3 head switches kernels below 144 rows).
+- **The exllamav3 engine runs each row at its true length, and offloads states past a
+  budget.** It kept every row's state on the device at the padded width; 40 agent rows padded
+  to 17.5k tokens were ~7 GB and ran a 16 GB card out of memory. Rows now end at their score
+  range (trailing padding is causally inert), and states above `QBENCH_STATE_BUDGET_GB`
+  (default 3) stay in host memory between modules. Guarded: a rescore with offload forced on
+  matched to 0.1%.
 - **A trace row's length no longer comes from its last nonzero id.** The streaming
   transformers engine treated token 0 as padding, and in Qwen's vocabulary id 0 is `!`,
   so a response genuinely ending in `!` lost its last position and tripped an assertion
@@ -1986,8 +1993,8 @@ rather than averaging it away.
   `logit_cache.dir` race on `manifest.json.tmp` and one dies. Give each process its own.
 - **Long contexts still need care.** exllamav3's attention ran out of memory at 40k tokens
   of context on one 16 GB card; the agentic slice is capped at 20k.
-- **The agentic slice is two sessions.** Its turns are strongly correlated, so its
-  bootstrap intervals are too narrow and its ordering is not trustworthy yet.
+- **The captured `agentic` slice is two sessions** with correlated turns; `swe` (40
+  independent sessions) supersedes it as the agentic measure.
 - **Mean KLD on low-entropy traces is carried by a few tokens.** Medians on these slices
   sit at 1e-5 to 1e-3; always bootstrap over rows before reading a gap.
 

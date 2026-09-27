@@ -1566,8 +1566,10 @@ left inputs uncovered.
    3.2x in median KLD under render).
 2. *Shares:* the 25/35/25/10/5 split is a guess; European-language coverage did not
    improve and is the first thing to look at.
-3. *More agentic sessions.* The agentic column is two captured sessions; it cannot rank
-   draws yet.
+3. *An agentic calibration slice.* Real coding-agent sessions are where draws still spread
+   (0.73-0.89 for the mix, 0.94-1.23 for default); the mix's scripted loops do not cover
+   them. Source: Open-SWE-Traces' minisweagent sessions from the Qwen family on scale-swe
+   tasks — disjoint in harness, generator and task pool from the `swe` eval slice.
 4. *Wire it into `quant.py`,* with the trace generated once per model from a 6bpw
    conversion, as `sc_trace.py` is used.
 
@@ -1591,8 +1593,8 @@ carries its case. One set of quants per model — our best effort — not parall
 variants, unless some calibration is shown to be strongly better in a domain.
 
 **Decided (2026-09-27):**
-- Composite = the independent eval tier only: WildChat prompts 0.80, captured agent
-  sessions 0.20. turboderp's self-generated trace is left out by the same razor as our own
+- Composite = the independent eval tier only: WildChat prompts 0.80, real coding-agent
+  sessions (`swe`, 40 from Open-SWE-Traces) 0.20. turboderp's self-generated trace is left out by the same razor as our own
   calibration/eval separation (it shares SC's generator); the content it embodies is
   already represented by the constructed own-voice slice.
 - Render is off the card entirely; it is a pipeline diagnostic.
@@ -1603,8 +1605,7 @@ variants, unless some calibration is shown to be strongly better in a domain.
   slices that merely improved less).
 
 **Candidate approach:** port `/home/bulk/ypell/quant_work/_ctxtrace/card_mockup2.py` into
-the card code; the traces become per-model pipeline artifacts. Open: more agent sessions
-before the 0.20 weight means much (two today).
+the card code; the traces become per-model pipeline artifacts.
 
 → [docs/qbench.md](docs/qbench.md) "Conversational trace slices"
 
