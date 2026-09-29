@@ -648,6 +648,18 @@ both: seed each tensor from a stable hash of its key, drawn from a per-thread
 `torch.Generator`; resume stays exact because the seed still does not depend on order.
 Detail in [calibration.md](calibration.md).
 
+**`fallback_quant` aborts on any tensor `quantize_exl3` has moved to the CPU**
+(2026-09-29). `quantize_exl3` moves weights over 5e8 elements to the CPU before
+quantizing, and `fallback_quant`'s body already supports a work buffer off the compute
+device — but it takes the compute device from the weight and asserts it is `devices[0]`.
+So the uncalibrated path cannot quantize a large-vocab head: found converting
+Ornith-1.5-9B (248k x 4096) uncalibrated, where it aborts at `lm_head` after every layer
+has finished. Upstream master has the same lines. *Why it matters to them*: the same
+fallback serves a calibrated conversion whose head Hessian comes out empty or
+non-finite, which would then crash rather than degrade. Fix (fork `53c651f`): compute on
+`devices[0]` and keep the buffers where the weight is; CPU- and GPU-buffered results are
+bit-identical on the same weight, and the old code fails that test.
+
 ---
 
 ### qbench: two defects found using it, 2026-09-10
