@@ -92,6 +92,57 @@ whose default-calibration draws spread widely under render (three draws, 2.0x in
 3.2x in median KLD), where Qwen3-4B (1.16x) and Qwen3-0.6B (1.06x at 4 bpw, 1.21x even at
 2 bpw) behave ordinarily.
 
+## A small proxy: Ornith-1.5-9B (2026-09-28)
+
+Iterating on the mix at 27B costs most of a day per variant, so the same pipeline was
+repeated on Ornith-1.5-9B, the one small model on hand with Qwen3.8's architecture
+(`Qwen3_5ForConditionalGeneration`, 3:1 gated-delta-net/attention, 16 key heads). The
+recipe was identical: the same shares, seeds, document pools and own-voice exclusions,
+with the calibration and all seven eval traces regenerated from an Ornith 6bpw (the
+calibration's input side matched the 27B's token for token, 286,390 tokens). Three
+default draws and three mix draws were converted at 4 bpw with `EXL3_SEED_IDX_OFFSET` 0,
+100000 and 200000.
+
+Ornith has no published 4bpw, so both models are scored here against **the mean of their
+own default draws** (the 27B's five), with 90% row-bootstrap intervals on the mix mean:
+
+| eval | 9B default draws | 9B mix | 27B default draws | 27B mix |
+|---|---|---|---|---|
+| **real user prompts (WildChat, 60)** | 0.99-1.01 | **0.89-0.91** [0.87, 0.92] | 0.98-1.01 | 0.88-0.89 [0.87, 0.90] |
+| **real agent sessions (swe, 40)** | 0.97-1.03 | 0.88-0.91 [0.86, 0.93] | **0.86-1.14** | 0.67-0.81 [0.69, 0.78] |
+| document in user turn | 1.00 | 0.84 | 0.98-1.03 | 0.79-0.82 |
+| document as tool result | 0.98-1.02 | 0.80-0.82 | 0.97-1.03 | 0.74-0.77 |
+| multilingual documents | 0.99-1.01 | 0.89-0.90 | 0.96-1.05 | 0.84-0.87 |
+| tool loop | 0.98-1.02 | 0.77-0.82 | 0.98-1.04 | 0.75-0.76 |
+| own voice | 0.99-1.02 | 0.86-0.90 | 0.99-1.03 | 0.86-0.87 |
+| **raw text (openwebtext, 50 x 2048)** | 0.98-1.01 | **1.03-1.07** [1.03, 1.06] | — | ~1.00 (0.0077-0.0079 vs 0.0076-0.0080) |
+
+- **What carries over:** the chat-tier gain almost exactly (WildChat, own voice), and
+  the ordering of the constructed slices — tool results and loops gain most,
+  multilingual least — at 3-6 points less gain throughout.
+- **What does not:** the draw lottery. Ornith's default draws agree within 3% on real
+  agent sessions, where the 27B's spread 0.86-1.14, and the mix's swe gain is a third of
+  the 27B's. As with Qwen3-4B and Qwen3-0.6B under render, the small model does not show
+  the variance, so the proxy cannot stand in for the agentic-slice question.
+- **What is new: a 3-7% cost on raw text.** At 27B the mix left raw text unchanged. Two
+  readings, not yet separated: the smaller model needs raw coverage the mix dilutes (65 raw
+  rows, against the default corpus's ~238), or the 27B carries a cost of this size that
+  its 10-row raw control could not resolve. Ornith's own thinking is also more verbose:
+  99 of 242 calibration responses hit the 1024-token cap (56 before `</think>`), against
+  73 for the 27B, so its calibration holds less answer text. Either way the cost is
+  accepted: raw web text framed as nothing matches any real use, so raw text is a guard
+  with a tolerance, not something to buy back at the expense of a real slice.
+
+Cost per full pass on the local 2x5060 Ti host: 49 minutes for the 6bpw generator,
+58 for the calibration trace, 75 for the eval traces, about 47 minutes per 4 bpw draw
+(one at a time: two concurrent conversions leave the 31 GiB host 3 GB free before the
+head), and 2 hours of scoring for six arms over eight slices. A shares variant needs
+no new eval traces, only a calibration re-pack (plus generation, if a generated slice
+grows), then roughly two draws and an hour of scoring.
+
+Project files: `/home/bulk/ypell/quant_work/_orn9_mix/` (`ratios.py` computes both
+tables).
+
 ## Each calibration protects the regime it contains
 
 The same comparison across the three calibrations measured, by the kind of input:

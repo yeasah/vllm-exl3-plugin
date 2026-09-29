@@ -1565,7 +1565,12 @@ left inputs uncovered.
    on gemma-4-12B, the other draw-sensitive model measured (three default draws spread
    3.2x in median KLD under render).
 2. *Shares:* the 25/35/25/10/5 split is a guess; European-language coverage did not
-   improve and is the first thing to look at.
+   improve and is the first thing to look at. Iterate on Ornith-1.5-9B, which reproduces
+   the chat-tier gain and the slice ordering (docs/calibration.md "A small proxy"), then
+   confirm the winning split at 27B, which also tests whether the proxy ranks variants the
+   way the 27B does. Not a proxy for the agentic draw variance, which it does not show.
+   Its 3-7% raw-text cost is accepted: raw text matches no real use, so it is a guard
+   with a tolerance, not a target to buy back with any real slice.
 3. *An agentic calibration slice.* Real coding-agent sessions are where draws still spread
    (0.73-0.89 for the mix, 0.94-1.23 for default); the mix's scripted loops do not cover
    them. Source: Open-SWE-Traces' minisweagent sessions from the Qwen family on scale-swe
