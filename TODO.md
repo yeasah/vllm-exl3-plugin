@@ -1575,8 +1575,11 @@ left inputs uncovered.
    (0.73-0.89 for the mix, 0.94-1.23 for default); the mix's scripted loops do not cover
    them. Source: Open-SWE-Traces' minisweagent sessions from the Qwen family on scale-swe
    tasks — disjoint in harness, generator and task pool from the `swe` eval slice.
-4. *Wire it into `quant.py`,* with the trace generated once per model from a 6bpw
-   conversion, as `sc_trace.py` is used.
+4. *Wire it into `quant.py`,* with the trace generated once per model, as `sc_trace.py`
+   is used. The generator is an uncalibrated 8bpw (`convert.py
+   --uncalibrated`), as good as a calibrated one on Ornith-9B; eval traces come from a
+   different generator than the calibration trace (docs/calibration.md "An uncalibrated
+   reference").
 
 The reason this is the candidate: it is the one change that fixed the variance *and*
 moved quality everywhere, and it needs no kernel, format or loader work.
@@ -1608,6 +1611,11 @@ variants, unless some calibration is shown to be strongly better in a domain.
 - Worst slice = the largest ratio of the arm's excess to the reference arm's at the same
   bitrate, over every non-render slice (normalizing by the headline gain instead flags
   slices that merely improved less).
+
+**Open option (2026-09-29):** an uncalibrated quant (`convert.py --uncalibrated`) as a
+reference that always exists — it sits a steady 1.7x above the default calibration at 2-4
+bpw on Ornith-9B and preserves calibration differences under normalization (log axis).
+Not decided; docs/calibration.md "An uncalibrated reference".
 
 **Candidate approach:** port `/home/bulk/ypell/quant_work/_ctxtrace/card_mockup2.py` into
 the card code; the traces become per-model pipeline artifacts.
