@@ -150,10 +150,14 @@ Cost per full pass on the local 2x5060 Ti host: 49 minutes for a calibrated 6bpw
 generator (about 30 for an uncalibrated 8bpw), 58 for the calibration trace, 75 for the
 eval traces, 47-50 minutes per 4 bpw draw alone or 51-57 for two run concurrently (swap
 absorbs the heads' memory peak), and 2 hours of scoring for six arms over eight slices.
-A shares variant needs no new eval traces, but it does regenerate the calibration trace:
-`ctx_trace.py` sizes the generated conversations from the shares and packs them in the
-same run, with no mode that repacks an existing trace. So a variant is about an hour of
-generation, an hour for a concurrent pair of draws, and an hour of scoring.
+A shares variant needs no new eval traces, and since `ctx_trace.py --repack` (2026-10-01)
+no new calibration trace either when it only shrinks generated slices: generation
+over-provisions each slice by 1.25x, and a repack at the original shares reproduces the
+generated pack byte for byte. So a variant is a minute of packing, an hour for a
+concurrent pair of draws, and an hour of scoring. Two things still need generation:
+growing a slice past its spare material (own voice has none — its 23 rows already
+exhaust the prompt pool left after the eval's exclusions), and anything about the
+documents themselves, such as `ml_frac` or which languages they come from.
 
 Project files: `/home/bulk/ypell/quant_work/_orn9_mix/` (`ratios.py` computes both
 tables).

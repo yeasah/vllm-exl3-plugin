@@ -1572,11 +1572,14 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
 
 **Candidate approach, in order:**
 1. *Shares, on the proxy.* The 25/35/25/10/5 split is a guess; European-language
-   coverage did not improve and is the first thing to look at. Every variant regenerates
-   the calibration trace, because `ctx_trace.py` sizes generation from the shares and has
-   no repack mode; adding one (reuse an existing trace when slices only shrink) cuts a
-   variant from ~3 hours to ~2. Confirm the winner at 27B, which also tests whether the
-   proxy ranks variants as the 27B does.
+   coverage did not improve and is the first thing to look at — a document question,
+   so it needs a regenerated trace; variants that only shrink slices are a
+   `ctx_trace.py --repack` away. Baseline first: Ornith's eval traces regenerated from
+   bf16 and the default and uncalibrated-generator mix draws re-scored on them. Confirm
+   the winner at 27B, which also tests whether the proxy ranks variants as the 27B does.
+2a. *27B eval traces need a generator:* exllamav3 reads FP8 only by dequantizing at load
+   (54 GB for Qwen3.8-27B), so it is bf16 on the vast box, or a vLLM-backed generator for
+   FP8 locally.
 2. *An agentic calibration slice, at 27B.* Real coding-agent sessions are where draws
    still spread (0.73-0.89 for the mix, 0.94-1.23 for default); the mix's scripted loops
    do not cover them, and the proxy cannot test it. Source: Open-SWE-Traces'
