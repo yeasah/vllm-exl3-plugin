@@ -2,7 +2,9 @@
 
 *What a conversion's calibration data does and does not protect, measured on
 Qwen3.8-27B at 4 bpw between 2026-09-22 and 2026-09-27, and the conversational
-calibration mix that came out of it. The instrument side — the conversational qbench
+calibration mix that came out of it; then a small proxy (Ornith-1.5-9B) and an
+uncalibrated reference, 2026-09-28 to 2026-10-01, which settled how the traces behind
+calibration and eval should be generated. The instrument side — the conversational qbench
 slices, and what `template: render` was actually measuring — is in
 [qbench.md](qbench.md) "Conversational trace slices".*
 
@@ -16,6 +18,13 @@ tool results, short tool loops, a little of the model's own voice — cuts exces
 12-13% on real user prompts (WildChat), 17-18% on turboderp's own independent eval trace,
 14-29% on constructed conversational slices whose scaffolding calibration never saw, and
 costs nothing on raw text.
+
+Ornith-1.5-9B, which shares Qwen3.8's architecture, reproduces the chat-tier gain and
+serves as a proxy for tuning the mix, though not for the agentic draw variance. An
+uncalibrated quant (`convert.py --uncalibrated`) is a steady reference at 1.7x the
+default calibration's error, and as the generator of a calibration trace it is as good as
+a calibrated quant. The policy that came out of it: calibration traces from an
+uncalibrated 8bpw, eval traces from bf16 (FP8 where bf16 does not fit).
 
 ## The result: a conversational calibration mix (2026-09-25)
 
@@ -86,11 +95,12 @@ suspected of being scaffolding fit, is the most robust. SC's small first-round e
 user-turn documents (0.89) vanished (1.00) the same way.
 
 **What this licenses.** One model, one bitrate, three draws. It does not yet say anything
-about 2-3 bpw, where the default calibration's draws were furthest from smooth, or about
-other models. gemma-4-12B is the obvious second case: it is the only other model found
-whose default-calibration draws spread widely under render (three draws, 2.0x in mean and
-3.2x in median KLD), where Qwen3-4B (1.16x) and Qwen3-0.6B (1.06x at 4 bpw, 1.21x even at
-2 bpw) behave ordinarily.
+about 2-3 bpw at 27B, where the default calibration's draws were furthest from smooth, or
+about other models; on the Ornith-9B proxy the gain holds at 2 and 3 bpw (0.92 and 0.89 on
+WildChat, single draws — "An uncalibrated reference" below). gemma-4-12B is the obvious
+second case: it is the only other model found whose default-calibration draws spread
+widely under render (three draws, 2.0x in mean and 3.2x in median KLD), where Qwen3-4B
+(1.16x) and Qwen3-0.6B (1.06x at 4 bpw, 1.21x even at 2 bpw) behave ordinarily.
 
 ## A small proxy: Ornith-1.5-9B (2026-09-28)
 
@@ -98,10 +108,13 @@ Iterating on the mix at 27B costs most of a day per variant, so the same pipelin
 repeated on Ornith-1.5-9B, the one small model on hand with Qwen3.8's architecture
 (`Qwen3_5ForConditionalGeneration`, 3:1 gated-delta-net/attention, 16 key heads). The
 recipe was identical: the same shares, seeds, document pools and own-voice exclusions,
-with the calibration and all seven eval traces regenerated from an Ornith 6bpw (the
-calibration's input side matched the 27B's token for token, 286,390 tokens). Three
-default draws and three mix draws were converted at 4 bpw with `EXL3_SEED_IDX_OFFSET` 0,
-100000 and 200000.
+with the calibration and all seven eval traces regenerated from a default-calibration
+Ornith 6bpw (the calibration's input side matched the 27B's token for token, 286,390
+tokens). Three default draws and three mix draws were converted at 4 bpw with
+`EXL3_SEED_IDX_OFFSET` 0, 100000 and 200000; the table below is from those, and a fourth
+mix draw (300000), added for the generator test, widened the mix ranges on swe to
+0.83-0.91, multilingual to 0.89-0.92 and user-turn documents to 0.84-0.85, and left the
+rest unchanged.
 
 Ornith has no published 4bpw, so both models are scored here against **the mean of their
 own default draws** (the 27B's five), with 90% row-bootstrap intervals on the mix mean:
@@ -133,12 +146,14 @@ own default draws** (the 27B's five), with 90% row-bootstrap intervals on the mi
   accepted: raw web text framed as nothing matches any real use, so raw text is a guard
   with a tolerance, not something to buy back at the expense of a real slice.
 
-Cost per full pass on the local 2x5060 Ti host: 49 minutes for the 6bpw generator,
-58 for the calibration trace, 75 for the eval traces, about 47 minutes per 4 bpw draw
-(one at a time: two concurrent conversions leave the 31 GiB host 3 GB free before the
-head), and 2 hours of scoring for six arms over eight slices. A shares variant needs
-no new eval traces, only a calibration re-pack (plus generation, if a generated slice
-grows), then roughly two draws and an hour of scoring.
+Cost per full pass on the local 2x5060 Ti host: 49 minutes for a calibrated 6bpw
+generator (about 30 for an uncalibrated 8bpw), 58 for the calibration trace, 75 for the
+eval traces, 47-50 minutes per 4 bpw draw alone or 51-57 for two run concurrently (swap
+absorbs the heads' memory peak), and 2 hours of scoring for six arms over eight slices.
+A shares variant needs no new eval traces, but it does regenerate the calibration trace:
+`ctx_trace.py` sizes the generated conversations from the shares and packs them in the
+same run, with no mode that repacks an existing trace. So a variant is about an hour of
+generation, an hour for a concurrent pair of draws, and an hour of scoring.
 
 Project files: `/home/bulk/ypell/quant_work/_orn9_mix/` (`ratios.py` computes both
 tables).
@@ -150,8 +165,8 @@ path that MTP heads already take. Two uses were in view: a reference that exists
 every model at every bitrate, for scaling card results and measuring what calibration is
 worth at all; and a calibration-neutral generator for the traces a conversion's own
 calibration is built from, in place of an existing quant or a quant made with some
-arbitrary calibration. On Ornith-1.5-9B, excess KLD (two uncalibrated draws per bitrate,
-one calibrated draw at 2 and 3 bpw, three at 4):
+arbitrary calibration. On Ornith-1.5-9B, excess KLD (two uncalibrated draws per bitrate
+except one at 5 bpw; one calibrated draw at 2 and 3 bpw, three at 4):
 
 | bpw | WildChat: default | mix | uncalibrated | unc / default | raw text: unc / default | mix / default |
 |---|---|---|---|---|---|---|
@@ -239,7 +254,7 @@ The same comparison across the three calibrations measured, by the kind of input
 |---|---|---|---|---|
 | default (raw web text) | all draws equal | all draws equal, match td | draws within ~±5%, up to 17% apart at a single thinking setting | a wide lottery, 0.0098-0.0370 |
 | SC (own chat only) | — | best, -25 to -31% | about equal to plain (0.95-1.00) | **5x worse** than plain |
-| conversational mix | unchanged | better, -13 to -18% | better, -14 to -29% | narrow, 0.0095-0.0133 |
+| conversational mix | unchanged at 27B (3-7% worse at 9B) | better, -13 to -18% | better, -14 to -29% | narrow, 0.0095-0.0133 |
 
 The reading that fits all of it: the Hessians only see the activations the calibration
 produces, and the quantizer only controls error in the directions they cover. Outside
@@ -317,9 +332,15 @@ latent in the state and amplified by the model's own later layers.
 
 **Determinism.** A single-GPU conversion is byte-exact across runs, across two GPUs of
 one model, and across a resume onto a different GPU. Two GPU models give different
-rounding and therefore a different draw — not a worse one.
+rounding and therefore a different draw — not a worse one. Scoring is as stable: driver
+610.57.04 -> 615.71.09, and CUDA toolkit 13.4.1 -> 13.4.2 with the extension rebuilt,
+left every qbench KL vector bit-identical, the bf16 reference included (2026-10-01).
 
 ## What is open
 
-The shares, the scaffolding split, other bitrates and models, and more agentic sessions:
-`calibration-mix` in TODO.md.
+In `calibration-mix` (TODO.md): tuning the shares on the Ornith proxy, then confirming the
+winner at 27B; an agentic calibration slice, which only the 27B can test because the proxy
+does not show the variance; 2-3 bpw at 27B, and gemma-4-12B; and wiring the mix into
+`quant.py` under the generator policy above. Whether the 27B's raw text carries the 9B's
+3-7% cost is unmeasured at a resolution that could see it, and accepted either way. Whether
+an uncalibrated quant becomes the card's reference is open in `card-composite`.
