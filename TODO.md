@@ -1577,8 +1577,8 @@ left inputs uncovered.
    tasks — disjoint in harness, generator and task pool from the `swe` eval slice.
 4. *Wire it into `quant.py`,* with the trace generated once per model, as `sc_trace.py`
    is used. The generator is an uncalibrated 8bpw (`convert.py
-   --uncalibrated`), as good as a calibrated one on Ornith-9B; eval traces come from a
-   different generator than the calibration trace (docs/calibration.md "An uncalibrated
+   --uncalibrated`), as good as a calibrated one on Ornith-9B; eval traces come from
+   bf16 (FP8 where it does not fit), never from a pipeline quant (docs/calibration.md "An uncalibrated
    reference").
 
 The reason this is the candidate: it is the one change that fixed the variance *and*
