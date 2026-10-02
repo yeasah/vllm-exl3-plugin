@@ -693,6 +693,40 @@ self-noise rather than fp16's -- so this only bites projects that use a non-tran
 reference, which is a small set but includes any comparison that cannot afford the bf16
 weights.
 
+## PyTorch
+
+*Nothing to offer: the one defect found is fixed upstream. Recorded so the workaround it
+forced gets removed on time.*
+
+**`empty_cache()` with expandable segments unmaps another device's pages under running
+kernels** ([#196258](https://github.com/pytorch/pytorch/issues/196258), fixed by
+[`3fda599`](https://github.com/pytorch/pytorch/commit/3fda5993c2572eca77dd53033f057dc0290f287f),
+not in a release as of 2026-10-02; we run 2.13). `ExpandableSegment::unmapHandles` calls
+`cudaStreamSynchronize(nullptr)`, which resolves against the caller's current device, so
+releasing a segment owned by another device does not wait for that device's queued work.
+exllamav3 enables expandable segments by default, and `free_mem()` runs at the end of a
+layer-split load while autosplit's reference forward is still executing on the last
+device: those kernels wrote into unmapped pages, an intermittent Xid 31 on the second GPU
+at the first generation step (2026-09-30 to 10-02, Ornith-1.5-9B bf16 on two 5060 Tis).
+
+*Carried:* `free_mem()` synchronizes every device before `empty_cache()` (fork
+`3a310c6`). Verified on a deterministic reproducer (the split load under compute-sanitizer
+memcheck, which slows kernels enough to always lose the race): 4 of 4 faults before, 0 of
+3 after; and standalone, without exllamav3. *Not covered:* PyTorch's own release-and-retry
+on a failed allocation goes through the same `unmapHandles`, so a split load that runs a
+non-current device out of memory can still hit it. *Remove when:* the minimum torch
+release contains `3fda599`.
+
+*How it was found, for next time:* rates and correlations (idle time, page cache, card
+order, GPC) misled for a day, twice through comparisons that were not interleaved.
+Three instruments settled it: `torch.cuda.memory._record_memory_history()` dumped on
+failure, which put the fault address in a freed and unmapped load-time temporary; memcheck
+as a reproducer rather than a detector (it never flagged the access, since it treats the
+reserved expandable-segment range as valid, but it made the race deterministic); and a
+standalone repro once the mechanism was suspected.
+
+---
+
 ## Priority, and the reasoning
 
 Ordered by *value to the recipient per unit of our effort*, not by how much each one
