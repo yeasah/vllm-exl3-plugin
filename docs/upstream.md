@@ -709,13 +709,27 @@ layer-split load while autosplit's reference forward is still executing on the l
 device: those kernels wrote into unmapped pages, an intermittent Xid 31 on the second GPU
 at the first generation step (2026-09-30 to 10-02, Ornith-1.5-9B bf16 on two 5060 Tis).
 
-*Carried:* `free_mem()` synchronizes every device before `empty_cache()` (fork
-`3a310c6`). Verified on a deterministic reproducer (the split load under compute-sanitizer
+*Carried, two layers.* **The fix itself, locally:** `tools/torch-c10cuda-fix.sh` rebuilds
+only `libc10_cuda.so` (the one library holding the caching allocator) from the wheel's own
+commit with `3fda599`'s hunk, with the wheel's flags and CUDA 13.0 headers, refuses to
+install unless every exported function matches the original, and keeps the original
+beside it; `--check` says whether the installed one is patched. A torch reinstall silently
+restores the stock library, so run `--check` after any venv change. Verified 2026-10-02:
+the upstream regression test fails on the stock library and passes on the patched one;
+the split-load memcheck reproducer is clean with the exllamav3 workaround below removed
+(0 of 3); qbench KL vectors are bit-identical, bf16 reference included; a from-scratch
+rebuild is byte-identical. This covers every caller, including the allocation-retry path.
+**Defence in depth for everyone else:** `free_mem()` synchronizes every device before
+`empty_cache()` (fork `3a310c6`), which protects exllamav3 users on stock torch. Verified on a deterministic reproducer (the split load under compute-sanitizer
 memcheck, which slows kernels enough to always lose the race): 4 of 4 faults before, 0 of
-3 after; and standalone, without exllamav3. *Not covered:* PyTorch's own release-and-retry
-on a failed allocation goes through the same `unmapHandles`, so a split load that runs a
-non-current device out of memory can still hit it. *Remove when:* the minimum torch
-release contains `3fda599`.
+3 after; and standalone, without exllamav3. On stock torch, PyTorch's own release-and-retry
+on a failed allocation still goes through the same `unmapHandles`. *Remove both when:* the
+minimum torch release contains `3fda599` (not 2.14.1).
+
+*Worth offering turboderp:* upstream exllamav3 made expandable segments the default on
+2026-09-06 and its `free_mem()` is unpatched, so every layer-split user on torch <= 2.14.1
+is exposed. The `free_mem()` sync is the right-for-everyone part; the standalone repro
+shows the mechanism without exllamav3.
 
 *How it was found, for next time:* rates and correlations (idle time, page cache, card
 order, GPC) misled for a day, twice through comparisons that were not interleaved.
