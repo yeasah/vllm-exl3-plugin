@@ -247,6 +247,27 @@ except one at 5 bpw; one calibrated draw at 2 and 3 bpw, three at 4):
   where this matters least — WildChat showed no generator effect at all — which is one
   more reason the card composite is built from it alone.
 
+**It has a draw lottery of its own (2026-10-03).** Two draws per bitrate had suggested the
+uncalibrated ladder was steadier than calibrated ones (0.9-1.4% apart at 4 bpw), which fit a
+mechanism: with no Hessian, error is spread evenly, so no draw can be unlucky in an uncovered
+direction. Eight draws per bitrate say otherwise. Relative standard deviation across draws,
+on the bf16-generated evals:
+
+| | draws | WildChat | swe | composite |
+|---|---|---|---|---|
+| uncalibrated 2 bpw | 8 | 2.1% | 2.4% | 1.8% |
+| default 2 bpw | 3 | 0.7% | 5.7% | 1.4% |
+| uncalibrated 4 bpw | 8 | 1.9% | 3.8% | 1.5% |
+| default 4 bpw | 3 | 1.0% | 2.1% | 0.8% |
+| mix 4 bpw | 4 | 1.4% | 7.0% | 1.7% |
+
+Evenly spread error still lands on a fixed set of inputs differently each draw, about as much
+as a calibrated set's does. So a single uncalibrated rung is no steadier a reference than a
+single calibrated one; its case is neutrality and availability, and that its draws are cheap
+(a third of a calibrated conversion's time and host memory), so averaging four per rung
+brings it under 1% for less than one more calibrated draw. The mix's wide swe spread stands
+out (7.0%): the agentic regime again.
+
 Cost: an uncalibrated conversion runs at half the per-layer time of a calibrated one
 (31 vs 64 s) in 1.6 GB of host memory rather than 11.5. Two calibrated conversions run
 concurrently through swap at 51-57 minutes each against 47-50 alone — 1.8x throughput,
