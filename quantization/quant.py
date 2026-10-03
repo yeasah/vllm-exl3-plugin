@@ -8,6 +8,7 @@ import re
 import glob as globmod
 import subprocess
 import shutil
+import datetime
 import yaml
 from jinja2 import Environment, FileSystemLoader
 from huggingface_hub import ModelCard, ModelCardData, HfApi, hf_hub_download, snapshot_download
@@ -459,11 +460,15 @@ def do_card(job, args):
                                    show_ppl=args.ppl, eval_slices=EVAL_SLICES, **meta)
     card.save(os.path.join(job.main, "README.md"))
 
+def logit_cache_dir(job, args):
+    """Each model owns its logit cache by default (<model>-exl3/_logit_cache, never uploaded), so
+    pruning what one model's bench series did not use cannot touch another model's entries."""
+    return os.path.abspath(args.logit_cache or os.path.join(job.dir, "_logit_cache"))
+
 def qbench_project(job, args, slice_, arms):
     """One qbench project per slice: a bf16-generated eval trace, or raw web text. arms: [(label, path)]"""
     project = { "title": f"{job.name}: {slice_}",
-                # relative to main/, as when the project file was rendered there
-                "logit_cache": { "dir": os.path.abspath(os.path.join(job.main, args.logit_cache)),
+                "logit_cache": { "dir": logit_cache_dir(job, args),
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
                               "repo": job.base_repo, "options": { "streaming": True } } ] +
@@ -500,6 +505,7 @@ def do_qbench(job, args):
             json.dump({"repo": args.reference, "revisions": ref_paths}, f, indent=1)
     print(f"=== running bench on {' '.join(label for label, _ in arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
+    series_start = datetime.datetime.now().replace(microsecond=0)
     for sl in slices:
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
         with open(qbench_file, "w") as f:
@@ -508,6 +514,12 @@ def do_qbench(job, args):
         if rc:
             print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
             return False
+    # The series succeeded: reference logits it did not use (a superseded eval trace, a dropped
+    # reference) can only be dead weight. Results and KL vectors are never pruned.
+    if args.prune:
+        print(f"=== pruning reference logits unused since {series_start.isoformat()} ===")
+        run_logged([ "python3", os.path.join(args.exllamav3dir, "eval", "qbench_prune.py"),
+                     logit_cache_dir(job, args), "--unused-since", series_start.isoformat() ], job.log("qbench-prune"))
     return True
 
 def run_logged(cmd, log_path, env=None):
@@ -723,8 +735,14 @@ def main():
     cmd_quantize.set_defaults(func=do_quantize)
 
     cmd_qbench = subparsers.add_parser('qbench')
-    cmd_qbench.add_argument('--logit_cache', default='../../_logit_cache')
-    cmd_qbench.add_argument('--logit_cache_size', default=25)
+    cmd_qbench.add_argument('--logit_cache', default=None,
+                            help='logit cache dir (default: <model>-exl3/_logit_cache, owned by this model)')
+    # Reference logits are full-vocabulary: ~35 GB for a 60-conversation WildChat trace on a
+    # 248k vocabulary, ~150 GB for a full set of slices. Pruning after each series keeps only
+    # what the current series used, so the cap can be generous.
+    cmd_qbench.add_argument('--logit_cache_size', default=200, type=int, help='cap in GB')
+    cmd_qbench.add_argument('--prune', default=True, action=argparse.BooleanOptionalAction,
+                            help='after a successful series, evict reference logits it did not use')
     cmd_qbench.add_argument('-d', '--device', default=0)
     cmd_qbench.add_argument('--reference', default=None,
                             help='HF repo of an existing set of this model\'s quants to compare against (card section 2)')
