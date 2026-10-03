@@ -149,24 +149,27 @@ def reference_section(job, qbench, floor, data):
     with open(ref_file) as f:
         ref_info = json.load(f)
     ref_repo = ref_info["repo"]
-    # Sizes as on the rest of the card: the checkpoint's tensors minus the input embeddings
+    # Sizes as on the rest of the card (the checkpoint's tensors minus the input embeddings), the
+    # total for the size column, and the body (minus the output head too) for interpolation: a
+    # ladder whose head bits change between rungs (turboderp's 2.75bpw_H5 -> 3.0bpw) spends bytes
+    # there that buy little, which bends the curve under anything interpolated across them
     def survey_size(path):
         sz = tensor_survey_local(path)
-        return (sz['total'] - sz['embed']) / 1024**3, sz['total'] / 1024**3
+        return { 'size': (sz['total'] - sz['embed']) / 1024**3, 'total': sz['total'] / 1024**3,
+                 'body': (sz['total'] - sz['embed'] - sz['head']) / 1024**3 }
     slices = [sl for sl in qbench if sl != "raw"]
     def arm(label, path):
         rows = {sl: parse_qbench(qbench[sl], label) for sl in qbench}
         if any(r is None for r in rows.values()):
             return None
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
-        size, total = survey_size(path)
-        return { 'size': size, 'total': total, 'excess': ex,
+        return { **survey_size(path), 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, (_, w) in EVAL_SLICES.items()) }
     refs = {b: arm(REF_PREFIX + b, path) for b, path in ref_info["revisions"].items()}
     refs = {k: v for k, v in refs.items() if v}
     if len(refs) < 2:
         return None
-    ladder = sorted((v['size'], v['composite']) for v in refs.values())
+    ladder = sorted((v['body'], v['composite']) for v in refs.values())
     import numpy as np
     def ref_at(x):
         return float(np.exp(np.interp(x, [p[0] for p in ladder], np.log([p[1] for p in ladder]))))
@@ -175,11 +178,15 @@ def reference_section(job, qbench, floor, data):
         ours = arm(r['name'], job.revdir(r['name']))
         if not ours:
             continue
-        row = { 'name': r['name'], 'bits': r['bits'], 'size': ours['size'],
-                'vs_ladder': ours['composite'] / ref_at(ours['size']),
-                # within the reference ladder, allowing for a hair of size difference at its ends
-                'in_range': ladder[0][0] * 0.98 <= ours['size'] <= ladder[-1][0] * 1.02 }
+        row = { 'name': r['name'], 'bits': r['bits'], 'size': ours['size'], 'vs': None, 'interpolated': False }
         same = same_bitrate(r, ref_info["revisions"], refs)
+        if same:
+            # A revision at the same nominal bit rate is the comparison a reader would make
+            row['vs'] = ours['composite'] / same['composite']
+        elif ladder[0][0] * 0.98 <= ours['body'] <= ladder[-1][0] * 1.02:
+            # Otherwise along the reference's ladder at equal body size, allowing a hair at its ends
+            row['vs'] = ours['composite'] / ref_at(ours['body'])
+            row['interpolated'] = True
         if same:
             rel = {sl: ours['excess'][sl] / same['excess'][sl] for sl in slices}
             worst = max(rel, key=rel.get)
@@ -208,6 +215,8 @@ def tensor_category(name):
         return "encoder"
     if re.search(r"\.embed_tokens\.", m):
         return "embed"
+    if re.search(r"\.lm_head\.", m) and not name.startswith("mtp."):
+        return "head"
     return None
 
 def quant_config(job, revision):
@@ -221,7 +230,8 @@ def quant_config(job, revision):
 def tensor_survey(tensors):
     out = { 'total': 0,
             'embed': 0,
-            'encoder': 0 }
+            'encoder': 0,
+            'head': 0 }
     for name, size in tensors:
         out['total'] += size
         cat = tensor_category(name)
@@ -343,8 +353,8 @@ def plot_vs_reference(job, ref, path):
     import matplotlib.pyplot as plt
     SURF, INK, INK2 = "#1f1f1f", "#ffffff", "#aaaaaa"
     AXES, GRID, REF, OURS = "#555555", "#555555", "#2a78d6", "#eb6834"
-    rows = [r for r in ref['rows'] if r['in_range']]
-    xs = [r['size'] for r in rows]; ys = [r['vs_ladder'] for r in rows]
+    rows = [r for r in ref['rows'] if r['vs'] is not None]
+    xs = [r['size'] for r in rows]; ys = [r['vs'] for r in rows]
     fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
@@ -355,16 +365,24 @@ def plot_vs_reference(job, ref, path):
     ax.tick_params(colors=INK2)
     ax.axhline(1.0, color=REF, lw=2, zorder=1, label=f"{ref['repo']} (reference)")
     ax.plot(xs, ys, color=OURS, lw=2, ls=(0, (4, 2)), zorder=2)
-    ax.scatter(xs, ys, s=70, marker="D", color=OURS, edgecolor=SURF, linewidth=1.5, zorder=3, label="this card")
+    paired = [(x, y) for r, x, y in zip(rows, xs, ys) if not r['interpolated']]
+    interp = [(x, y) for r, x, y in zip(rows, xs, ys) if r['interpolated']]
+    if paired:
+        ax.scatter(*zip(*paired), s=70, marker="D", color=OURS, edgecolor=SURF, linewidth=1.5, zorder=3,
+                   label="this card, vs the reference at the same bit rate")
+    if interp:
+        # hollow: against the reference's ladder interpolated at equal size, not a revision of it
+        ax.scatter(*zip(*interp), s=70, marker="D", facecolor=SURF, edgecolor=OURS, linewidth=1.5, zorder=3,
+                   label="this card, vs the reference interpolated at equal size")
     for r, x, y in zip(rows, xs, ys):
-        ax.annotate(f"{r['bits']:.2f} bpw: {y:.2f}", (x, y), xytext=(0, 9), textcoords="offset points",
-                    fontsize=8, color=INK, ha="center")
+        ax.annotate(f"{r['bits']:.2f} bpw: {y:.2f}{'*' if r['interpolated'] else ''}", (x, y), xytext=(0, 9),
+                    textcoords="offset points", fontsize=8, color=INK, ha="center")
     ax.margins(x=0.08)
     lo, hi = min(ys + [1.0]), max(ys + [1.0])
     pad = max(0.05, (hi - lo) * 0.25)
     ax.set_ylim(lo - pad, hi + pad)
     ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
-    ax.set_ylabel("excess KLD relative to\nthe reference at equal size", color=INK2)
+    ax.set_ylabel("excess KLD relative\nto the reference", color=INK2)
     leg = ax.legend(frameon=False, fontsize=8, loc="upper right")
     for t in leg.get_texts():
         t.set_color(INK2)
