@@ -1635,9 +1635,10 @@ uncalibrated-reference option above.
 - *Ladders, not a repo:* turboderp/Qwen3.8-27B-exl3 has a plain ladder (2.00-6.00) and an
   SC ladder (1.40-6.00, head bits H3 -> H6 along it), plus `_V*` twins of each SC rung that
   differ only in the quantized vision tower. Group branches into named ladders by pattern
-  (explicit `NAME=regex` when the default guesses wrong), drop twins whose text tensors match
-  another branch (check by hash, do not assume), and keep only rungs in our size range
-  (~2 bpw and up) unless asked.
+  (explicit `NAME=regex` when the default guesses wrong), drop the `_V*` twins by name (the
+  publisher's naming implies identical text weights), and keep only rungs in our size range
+  (~2 bpw and up) unless asked. Built 2026-10-03 (`quant.py baseline`, repeatable
+  `qbench --reference`); checked on Ornith-1.5-9B and Qwen3-0.6B.
 - *Plot:* every ladder, ours included, as a trace of excess KLD relative to the uncalibrated
   ladder at equal body size -- each rung at its own size, each set's draw noise visible, none
   drawn as a perfect line. One uncalibrated draw per rung: it is no steadier than a

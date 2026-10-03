@@ -141,8 +141,8 @@ def baseline_label(rev):
 def ladders_of(branches):
     """Group a reference repo's branches into ladders by name: the part before the bit rate
     ('SC_4.00bpw_H5' -> 'SC'; '4.0bpw', '2.75bpw_H5' -> ''). Branches ending in _V<n> are
-    vision-quantized twins of another rung (turboderp's SC_4.00bpw_H5_V6): skipped by name.
-    TODO before relying on it at 27B: confirm the text tensors match by hash."""
+    vision-quantized twins of another rung (turboderp's SC_4.00bpw_H5_V6), skipped by name: the
+    publisher's naming implies the text weights are the same as the twin's."""
     out = {}
     for b in sorted(branches):
         if b == "main" or re.search(r"_V\d+$", b):
