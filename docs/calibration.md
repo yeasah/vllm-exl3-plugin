@@ -263,9 +263,10 @@ on the bf16-generated evals:
 
 Evenly spread error still lands on a fixed set of inputs differently each draw, about as much
 as a calibrated set's does. So a single uncalibrated rung is no steadier a reference than a
-single calibrated one; its case is neutrality and availability, and that its draws are cheap
-(a third of a calibrated conversion's time and host memory), so averaging four per rung
-brings it under 1% for less than one more calibrated draw. The mix's wide swe spread stands
+single calibrated one; its case is neutrality and availability. As the denominator of a
+comparison between ladders its noise is common-mode -- every trace at a given size divides by
+the same value, so their order and gaps survive and only each curve's shape across bitrates
+picks up ~1.5-2% -- so one draw per rung is enough there. The mix's wide swe spread stands
 out (7.0%): the agentic regime again.
 
 Cost: an uncalibrated conversion runs at half the per-layer time of a calibrated one

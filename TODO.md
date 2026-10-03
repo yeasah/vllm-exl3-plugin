@@ -1640,9 +1640,11 @@ uncalibrated-reference option above.
   (~2 bpw and up) unless asked.
 - *Plot:* every ladder, ours included, as a trace of excess KLD relative to the uncalibrated
   ladder at equal body size -- each rung at its own size, each set's draw noise visible, none
-  drawn as a perfect line. The uncalibrated ladder is no steadier per draw than a calibrated
-  one (lottery test, 2026-10-03: ~1.5-2% composite sd either way), but its draws are cheap:
-  average ~4 per rung to bring the baseline under 1%.
+  drawn as a perfect line. One uncalibrated draw per rung: it is no steadier than a
+  calibrated draw (lottery test, 2026-10-03: ~1.5-2% composite sd either way), but its noise
+  is common-mode -- every trace at a given size shares the same denominator, so ladders keep
+  their order and gaps and only each curve's shape across bitrates wobbles. Section 1, with
+  no baseline, is the one for choosing a size; section 2 is for comparing ladders.
 - *Table:* per revision of ours, the most competitive same-bitrate rung across all ladders
   (lowest composite), named; interpolation (asterisked) only where no ladder has that rate.
 - *Cost:* ~29 arms of a 27B across 8 slices, ~270 GB of reference downloads. Score reference
