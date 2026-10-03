@@ -106,6 +106,7 @@ def collect_metadata(job, qbench):
         excess = {sl: qb[sl]['kld'] - floor[sl] for sl in qb}
         r = { 'name': rev,
               'bits': quant['bits'],
+              'head_bits': quant.get('head_bits'),
               'calibration': calibration_of(job, rev),
               'disk_bytes': sizes['total'],
               'embed_bytes': sizes['embed'],
@@ -122,6 +123,20 @@ def collect_metadata(job, qbench):
     data['revisions'] = sorted(revs, key=lambda x: x['bits'])
     data['reference'] = reference_section(job, qbench, floor, data) if data['composite'] else None
     return data
+
+def same_bitrate(rev, ref_paths, refs):
+    """The reference revision at this revision's bit rate, read from each one's
+    quantization_config.json: branch names differ between publishers (4.00bpw, 4.0bpw).
+    Among several at one rate, prefer the same head bits."""
+    def qcfg(path):
+        with open(os.path.join(path, "quantization_config.json")) as f:
+            return json.load(f)
+    matches = []
+    for b, path in ref_paths.items():
+        q = qcfg(path)
+        if refs.get(b) and abs(q.get("bits", -1) - rev['bits']) < 0.01:
+            matches.append((q.get("head_bits") != rev.get('head_bits'), b))
+    return refs[min(matches)[1]] if matches else None
 
 def reference_section(job, qbench, floor, data):
     """Section 2 of the card, when qbench scored an existing set of this model's quants: each of
@@ -163,7 +178,7 @@ def reference_section(job, qbench, floor, data):
                 'vs_ladder': ours['composite'] / ref_at(ours['size']),
                 # within the reference ladder, allowing for a hair of size difference at its ends
                 'in_range': ladder[0][0] * 0.98 <= ours['size'] <= ladder[-1][0] * 1.02 }
-        same = refs.get(r['name'])
+        same = same_bitrate(r, ref_info["revisions"], refs)
         if same:
             rel = {sl: ours['excess'][sl] / same['excess'][sl] for sl in slices}
             worst = max(rel, key=rel.get)
