@@ -133,10 +133,13 @@ own default draws** (the 27B's five), with 90% row-bootstrap intervals on the mi
 - **What carries over:** the chat-tier gain almost exactly (WildChat, own voice), and
   the ordering of the constructed slices — tool results and loops gain most,
   multilingual least — at 3-6 points less gain throughout.
-- **What does not:** the draw lottery. Ornith's default draws agree within 3% on real
-  agent sessions, where the 27B's spread 0.86-1.14, and the mix's swe gain is a third of
-  the 27B's. As with Qwen3-4B and Qwen3-0.6B under render, the small model does not show
-  the variance, so the proxy cannot stand in for the agentic-slice question.
+- **What does not:** the default calibration's draw lottery. Ornith's default draws agree
+  within 3% on real agent sessions, where the 27B's spread 0.86-1.14, and the mix's swe gain
+  is a third of the 27B's. As with Qwen3-4B and Qwen3-0.6B under render, the small model's
+  default draws do not show the variance, so the proxy cannot stand in for the
+  agentic-slice question. Its *mix* draws do spread, though: four of them read 0.79-0.93
+  on swe and 0.79-0.89 on tool results against bf16-generated evals (2026-10-01), so
+  comparing calibrations on the proxy needs several draws per arm.
 - **What is new: a 3-7% cost on raw text.** At 27B the mix left raw text unchanged. Two
   readings, not yet separated: the smaller model needs raw coverage the mix dilutes (65 raw
   rows, against the default corpus's ~238), or the 27B carries a cost of this size that
@@ -249,6 +252,26 @@ Cost: an uncalibrated conversion runs at half the per-layer time of a calibrated
 concurrently through swap at 51-57 minutes each against 47-50 alone — 1.8x throughput,
 with the heads' memory peak absorbed. The flag's first large-vocab head exposed a
 `fallback_quant` defect that upstream shares ([upstream.md](upstream.md)).
+
+## The pipeline set against the published one (2026-10-03)
+
+The first full `quant.py` run (traces, mix calibration, bf16 eval traces; one draw per
+bitrate) scored against the published default-calibrated `yeasah/Ornith-1.5-9B-exl3` on
+the same traces, as excess KLD relative to it:
+
+| bpw | composite, at equal size | worst of seven eval slices, same bitrate |
+|---|---|---|
+| 2.00 | 0.92 | 0.93 (own voice) |
+| 3.00 | 0.89 | 0.92 (agent sessions) |
+| 4.00 | 0.89 | 0.92 (own voice) |
+| 5.00 | 0.86 | 0.91 (own voice) |
+| 6.00 | 0.87 | 0.96 (agent sessions) |
+
+The gain holds at every bitrate, and no slice is worse anywhere. Single draws on both
+sides, so each row carries the swe spread above; the consistency across five bitrates is
+the stronger evidence. Own voice was scored on 25 of the 30 held-out prompts: the
+pipeline's first calibration trace did not exclude the held-out set, and the 5 it used
+are dropped from the eval (the pipeline now excludes them from calibration).
 
 ## Each calibration protects the regime it contains
 

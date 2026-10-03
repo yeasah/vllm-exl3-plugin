@@ -66,6 +66,15 @@ CAL_MAX_NEW_TOKENS = 1024
 # quant's sampled text, and no pipeline quant may write the text it is judged on.
 EVAL_SLICES = {"wild": (60, 0.80), "swe": (40, 0.20)}
 EVAL_SEED = 1
+# Diagnostic slices, constructed by ctx_trace.py with scaffolding disjoint from calibration's:
+# never in the composite, only in the card's worst-slice check against a reference ladder
+DIAG_SLICES = {"ctx_user": "documents in a user turn", "ctx_tool": "documents as tool results",
+               "ctx_ml": "multilingual documents", "loop": "tool-use loops", "self": "the model's own voice"}
+DIAG_N = 30
+HERE = os.path.dirname(os.path.abspath(__file__))
+EVAL_SELF_PROMPTS = os.path.join(HERE, "eval_self_prompts.json")       # held out of calibration
+CODE_DOCS = os.path.join(HERE, "..", "deps", "vllm", "vllm", "**", "*.py")   # code documents for ctx slices
+REF_PREFIX = "ref/"                                                      # qbench label of a reference arm
 
 
 def collect_metadata(job, qbench):
@@ -111,7 +120,58 @@ def collect_metadata(job, qbench):
                                   for sl in composite)
         revs.append(r)
     data['revisions'] = sorted(revs, key=lambda x: x['bits'])
+    data['reference'] = reference_section(job, qbench, floor, data) if data['composite'] else None
     return data
+
+def reference_section(job, qbench, floor, data):
+    """Section 2 of the card, when qbench scored an existing set of this model's quants: each of
+    ours against the reference ladder at equal size (log-interpolated between its sizes), and
+    against the same-named reference revision on every eval slice. Raw text is left out, as on
+    the rest of the card: it is the trade a conversational calibration accepts."""
+    ref_file = os.path.join(job.main, "reference.json")
+    if not os.path.isfile(ref_file):
+        return None
+    with open(ref_file) as f:
+        ref_info = json.load(f)
+    ref_repo = ref_info["repo"]
+    # Sizes as on the rest of the card: the checkpoint's tensors minus the input embeddings
+    def survey_size(path):
+        sz = tensor_survey_local(path)
+        return (sz['total'] - sz['embed']) / 1024**3
+    slices = [sl for sl in qbench if sl != "raw"]
+    def arm(label, path):
+        rows = {sl: parse_qbench(qbench[sl], label) for sl in qbench}
+        if any(r is None for r in rows.values()):
+            return None
+        ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
+        return { 'size': survey_size(path), 'excess': ex,
+                 'composite': sum(w * ex[sl] for sl, (_, w) in EVAL_SLICES.items()) }
+    refs = {b: arm(REF_PREFIX + b, path) for b, path in ref_info["revisions"].items()}
+    refs = {k: v for k, v in refs.items() if v}
+    if len(refs) < 2:
+        return None
+    ladder = sorted((v['size'], v['composite']) for v in refs.values())
+    import numpy as np
+    def ref_at(x):
+        return float(np.exp(np.interp(x, [p[0] for p in ladder], np.log([p[1] for p in ladder]))))
+    rows = []
+    for r in data['revisions']:
+        ours = arm(r['name'], job.revdir(r['name']))
+        if not ours:
+            continue
+        row = { 'name': r['name'], 'bits': r['bits'], 'size': ours['size'],
+                'vs_ladder': ours['composite'] / ref_at(ours['size']),
+                # within the reference ladder, allowing for a hair of size difference at its ends
+                'in_range': ladder[0][0] * 0.98 <= ours['size'] <= ladder[-1][0] * 1.02 }
+        same = refs.get(r['name'])
+        if same:
+            rel = {sl: ours['excess'][sl] / same['excess'][sl] for sl in slices}
+            worst = max(rel, key=rel.get)
+            row.update({ 'worst_slice': worst, 'worst': rel[worst],
+                         'worst_desc': DESCRIBE.get(worst) or DIAG_SLICES.get(worst, worst) })
+        rows.append(row)
+    return { 'repo': ref_repo, 'rows': rows, 'slices': slices,
+             'slice_descs': [DESCRIBE.get(sl) or DIAG_SLICES.get(sl, sl) for sl in slices] }
 
 def calibration_of(job, rev):
     path = os.path.join(job.revdir(rev), "calibration.json")
@@ -255,6 +315,43 @@ def plot_quality_vs_size(job, meta, path):
 
 DESCRIBE = {"wild": "real user prompts (WildChat)", "swe": "real agent sessions (Open-SWE-Traces)"}
 
+def plot_vs_reference(job, ref, path):
+    """Section 2 of the card: each of ours as a ratio to the reference ladder at equal size."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    SURF, INK, INK2 = "#1f1f1f", "#ffffff", "#aaaaaa"
+    AXES, GRID, REF, OURS = "#555555", "#555555", "#2a78d6", "#eb6834"
+    rows = [r for r in ref['rows'] if r['in_range']]
+    xs = [r['size'] for r in rows]; ys = [r['vs_ladder'] for r in rows]
+    fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=150)
+    fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
+    ax.grid(True, which="major", color=GRID, lw=0.8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(AXES)
+    ax.tick_params(colors=INK2)
+    ax.axhline(1.0, color=REF, lw=2, zorder=1, label=f"{ref['repo']} (reference)")
+    ax.plot(xs, ys, color=OURS, lw=2, ls=(0, (4, 2)), zorder=2)
+    ax.scatter(xs, ys, s=70, marker="D", color=OURS, edgecolor=SURF, linewidth=1.5, zorder=3, label="this card")
+    for r, x, y in zip(rows, xs, ys):
+        ax.annotate(f"{r['bits']:.2f} bpw: {y:.2f}", (x, y), xytext=(0, 9), textcoords="offset points",
+                    fontsize=8, color=INK, ha="center")
+    ax.margins(x=0.08)
+    lo, hi = min(ys + [1.0]), max(ys + [1.0])
+    pad = max(0.05, (hi - lo) * 0.25)
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
+    ax.set_ylabel("excess KLD relative to\nthe reference at equal size", color=INK2)
+    leg = ax.legend(frameon=False, fontsize=8, loc="upper right")
+    for t in leg.get_texts():
+        t.set_color(INK2)
+    fig.text(0.13, 0.97, "Against the existing quants of this model", fontsize=11, color=INK, va="top")
+    fig.subplots_adjust(top=0.88, left=0.15, right=0.97, bottom=0.16)
+    fig.savefig(path, facecolor=SURF)
+    plt.close(fig)
+
 # Published in main/traces, so a set can be reproduced: (file in _traces, published name)
 PUBLISHED_TRACES = [("cal.safetensors", "calibration.safetensors"),
                     ("cal.manifest.json", "calibration.manifest.json"),
@@ -296,7 +393,7 @@ def do_card(job, args):
     os.makedirs(job.main, exist_ok=True)
 
     qbench = {}
-    for sl in list(EVAL_SLICES) + ["raw"]:
+    for sl in list(EVAL_SLICES) + list(DIAG_SLICES) + ["raw"]:
         path = os.path.join(job.main, f"qb_{sl}.json")
         if os.path.isfile(path):
             with open(path) as f:
@@ -307,6 +404,8 @@ def do_card(job, args):
     meta = collect_metadata(job, qbench)
     plot_quality_vs_size(job, meta, os.path.join(job.main, "quality_vs_size.png"))
     meta['traces_published'] = publish_traces(job)
+    if meta['reference']:
+        plot_vs_reference(job, meta['reference'], os.path.join(job.main, "vs_reference.png"))
 
     # get base metadata and add content
     base_card = ModelCard.load(job.base_repo)
@@ -321,16 +420,16 @@ def do_card(job, args):
                                    show_ppl=args.ppl, eval_slices=EVAL_SLICES, **meta)
     card.save(os.path.join(job.main, "README.md"))
 
-def qbench_project(job, args, slice_, revisions):
-    """One qbench project per slice: a bf16-generated eval trace, or raw web text."""
+def qbench_project(job, args, slice_, arms):
+    """One qbench project per slice: a bf16-generated eval trace, or raw web text. arms: [(label, path)]"""
     project = { "title": f"{job.name}: {slice_}",
                 # relative to main/, as when the project file was rendered there
                 "logit_cache": { "dir": os.path.abspath(os.path.join(job.main, args.logit_cache)),
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
                               "repo": job.base_repo, "options": { "streaming": True } } ] +
-                          [ { "label": rev, "group": "EXL3", "engine": "exllamav3",
-                              "source": os.path.abspath(job.revdir(rev)) } for rev in revisions ],
+                          [ { "label": label, "group": "EXL3", "engine": "exllamav3",
+                              "source": os.path.abspath(path) } for label, path in arms ],
                 "output": { "results": os.path.abspath(os.path.join(job.main, f"qb_{slice_}.json")) } }
     if slice_ == "raw":
         # A guard, not a target: raw web text framed as nothing matches no real use
@@ -346,17 +445,26 @@ def do_qbench(job, args):
     if not revisions:
         print("=== no revisions found ===")
         return False
-    slices = [sl for sl in EVAL_SLICES if os.path.isfile(job.eval_trace(sl))] + ["raw"]
+    slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if os.path.isfile(job.eval_trace(sl))] + ["raw"]
     missing = [sl for sl in EVAL_SLICES if sl not in slices]
     if missing:
         print(f"=== no eval traces for {', '.join(missing)}: the card falls back to raw text "
               f"(run `traces` first for the composite) ===")
-    print(f"=== running bench on revisions: {' '.join(revisions)}; slices: {' '.join(slices)} ===")
+    arms = [(rev, job.revdir(rev)) for rev in revisions]
+    if args.reference:
+        # An existing set of this model's quants (the case for publishing another set): every
+        # revision branch, scored on the same slices
+        refs = [b.name for b in HfApi().list_repo_refs(args.reference).branches if b.name != "main"]
+        ref_paths = {b: snapshot_download(args.reference, revision=b) for b in sorted(refs)}
+        arms += [(REF_PREFIX + b, path) for b, path in ref_paths.items()]
+        with open(os.path.join(job.main, "reference.json"), "w") as f:
+            json.dump({"repo": args.reference, "revisions": ref_paths}, f, indent=1)
+    print(f"=== running bench on {' '.join(label for label, _ in arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
     for sl in slices:
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
         with open(qbench_file, "w") as f:
-            yaml.safe_dump(qbench_project(job, args, sl, revisions), f, sort_keys=False)
+            yaml.safe_dump(qbench_project(job, args, sl, arms), f, sort_keys=False)
         rc = run_logged([ "python3", script, qbench_file, "-d", str(args.device) ], job.log(f"qbench-{sl}"))
         if rc:
             print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
@@ -426,7 +534,8 @@ def do_traces(job, args):
     if not run_until(job.cal_data,
                      [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
                        "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
-                       "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS) ],
+                       "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
+                       "--exclude_self", EVAL_SELF_PROMPTS ],
                      job.log("traces-cal"), tries, env=one_gpu):
         print("=== calibration trace FAILED ==="); return False
 
@@ -444,7 +553,38 @@ def do_traces(job, args):
                          job.log(f"traces-eval-{sl}"), tries,
                          env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
             print(f"=== eval trace {sl} FAILED ==="); return False
+
+    print(f"=== diagnostic eval traces ({', '.join(DIAG_SLICES)}, {DIAG_N} each, bf16) ===")
+    if not run_until(job.eval_trace(list(DIAG_SLICES)[-1]),
+                     [ "python3", "-u", ctx_trace, "-m", path, "-cs", "65536",
+                       "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
+                       "--slices", ",".join(DIAG_SLICES), "-n", str(DIAG_N), "--seed", str(EVAL_SEED),
+                       "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ],
+                     job.log("traces-eval-diag"), tries,
+                     env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
+        print("=== diagnostic eval traces FAILED ==="); return False
+    decontaminate_self(job)
     return True
+
+def decontaminate_self(job):
+    """Drop own-voice eval rows whose prompt the calibration trace also used. Calibration excludes
+    the held-out prompts now, but a trace built before that (Ornith-1.5-9B, 2026-10-02) did not."""
+    cal_trace = os.path.join(job.traces, "cal_cal.json")
+    if not (os.path.isfile(cal_trace) and os.path.isfile(job.eval_trace("self"))):
+        return
+    with open(cal_trace) as f:
+        used = {r.get("conversation") for r in json.load(f)["rows"] if r.get("slice") == "self"}
+    with open(job.eval_trace("self")) as f:
+        trace = json.load(f)
+    overlap = sorted({r["conversation"] for r in trace["rows"]} & used)
+    if not overlap:
+        return
+    trace["rows"] = [r for r in trace["rows"] if r["conversation"] not in used]
+    trace["meta"]["dropped_calibration_overlap"] = overlap
+    trace["meta"]["rows"] = len(trace["rows"])
+    with open(job.eval_trace("self"), "w") as f:
+        json.dump(trace, f)
+    print(f"!! own-voice eval: dropped prompts {overlap}, which the calibration trace also used")
 
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
@@ -547,6 +687,8 @@ def main():
     cmd_qbench.add_argument('--logit_cache', default='../../_logit_cache')
     cmd_qbench.add_argument('--logit_cache_size', default=25)
     cmd_qbench.add_argument('-d', '--device', default=0)
+    cmd_qbench.add_argument('--reference', default=None,
+                            help='HF repo of an existing set of this model\'s quants to compare against (card section 2)')
     cmd_qbench.set_defaults(func=do_qbench)
 
     cmd_card = subparsers.add_parser('card')

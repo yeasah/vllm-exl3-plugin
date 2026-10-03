@@ -1,0 +1,95 @@
+{
+ "note": "Own-voice prompts (indices into exllamav3 sc_trace.CONVERSATIONS) held out for evaluation: calibration excludes them (ctx_trace --exclude_self), the own-voice eval uses only them (--self_from). The same split as docs/calibration.md.",
+ "rows": [
+  {
+   "conversation": 8
+  },
+  {
+   "conversation": 9
+  },
+  {
+   "conversation": 10
+  },
+  {
+   "conversation": 15
+  },
+  {
+   "conversation": 17
+  },
+  {
+   "conversation": 27
+  },
+  {
+   "conversation": 29
+  },
+  {
+   "conversation": 40
+  },
+  {
+   "conversation": 52
+  },
+  {
+   "conversation": 56
+  },
+  {
+   "conversation": 68
+  },
+  {
+   "conversation": 72
+  },
+  {
+   "conversation": 75
+  },
+  {
+   "conversation": 77
+  },
+  {
+   "conversation": 78
+  },
+  {
+   "conversation": 79
+  },
+  {
+   "conversation": 84
+  },
+  {
+   "conversation": 96
+  },
+  {
+   "conversation": 100
+  },
+  {
+   "conversation": 108
+  },
+  {
+   "conversation": 112
+  },
+  {
+   "conversation": 116
+  },
+  {
+   "conversation": 118
+  },
+  {
+   "conversation": 121
+  },
+  {
+   "conversation": 122
+  },
+  {
+   "conversation": 128
+  },
+  {
+   "conversation": 136
+  },
+  {
+   "conversation": 138
+  },
+  {
+   "conversation": 152
+  },
+  {
+   "conversation": 155
+  }
+ ]
+}
