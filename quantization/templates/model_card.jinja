@@ -41,3 +41,9 @@ Each bitrate is available as a separate revision of this repository. When planni
 {% if composite %}
 These quantizations are calibrated on a conversational mix rather than the bundled raw-text corpus: documents pasted into user turns and returned as tool results, short tool-use loops, a little of the model's own voice, and the default corpus. Its answers come from an uncalibrated 8-bit quant of the same model. Against the default calibration at equal size, it cut excess KLD on real user prompts by 12-13% on Qwen3.8-27B and 8-11% on Ornith-1.5-9B (4 bpw), at no cost in bytes ([details](https://github.com/yeasah/vllm-exl3-plugin/blob/main/docs/calibration.md)).
 {% endif %}
+{% if traces_published %}
+
+# Reproducing these quants
+
+Each revision's `quantization_config.json` records its calibration (source, and the SHA-256 of the calibration file) and any non-default seed offset; `calibration.json` beside it records the calibration mix's shares and composition. The data itself is in [`traces/`](./traces) on this branch: the packed calibration rows passed to `convert.py --cal_data`, the trace they were packed from, and the two eval traces behind the table above, with their sources and licenses in [`traces/DATA_NOTICE.md`](./traces/DATA_NOTICE.md). The pipeline that produced them is `quantization/quant.py` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
+{% endif %}
