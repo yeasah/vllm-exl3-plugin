@@ -30,6 +30,8 @@ class Job:
         # Not a revision: a leading underscore keeps it out of revisions(), so never uploaded.
         self.traces = os.path.join(self.dir, "_traces")
         self.cal_data = os.path.join(self.traces, "cal.safetensors")
+        # Uncalibrated sweep: card section 2's common baseline. Kept, not uploaded.
+        self.baseline = os.path.join(self.dir, "_baseline")
 
     def revdir(self, rev):
         return os.path.join(self.dir, rev)
@@ -40,6 +42,12 @@ class Job:
         return sorted(r for r in os.listdir(self.dir)
                       if r not in ('main', 'logs') and not r.startswith('_')
                       and os.path.isdir(self.revdir(r)))
+
+    def baseline_revisions(self):
+        if not os.path.isdir(self.baseline):
+            return []
+        return sorted(r for r in os.listdir(self.baseline)
+                      if os.path.isfile(os.path.join(self.baseline, r, "quantization_config.json")))
 
     def eval_trace(self, slice_):
         return os.path.join(self.traces, f"eval_{slice_}.json")
@@ -75,7 +83,6 @@ DIAG_N = 30
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVAL_SELF_PROMPTS = os.path.join(HERE, "eval_self_prompts.json")       # held out of calibration
 CODE_DOCS = os.path.join(HERE, "..", "deps", "vllm", "vllm", "**", "*.py")   # code documents for ctx slices
-REF_PREFIX = "ref/"                                                      # qbench label of a reference arm
 
 
 def collect_metadata(job, qbench):
@@ -125,82 +132,135 @@ def collect_metadata(job, qbench):
     data['reference'] = reference_section(job, qbench, floor, data) if data['composite'] else None
     return data
 
-def same_bitrate(rev, ref_paths, refs):
-    """The reference revision at this revision's bit rate, read from each one's
-    quantization_config.json: branch names differ between publishers (4.00bpw, 4.0bpw).
-    Among several at one rate, prefer the same head bits."""
-    def qcfg(path):
-        with open(os.path.join(path, "quantization_config.json")) as f:
-            return json.load(f)
-    matches = []
-    for b, path in ref_paths.items():
-        q = qcfg(path)
-        if refs.get(b) and abs(q.get("bits", -1) - rev['bits']) < 0.01:
-            matches.append((q.get("head_bits") != rev.get('head_bits'), b))
-    return refs[min(matches)[1]] if matches else None
+def ref_label(repo, branch):
+    return f"ref:{repo}@{branch}"
+
+def baseline_label(rev):
+    return f"baseline:{rev}"
+
+def ladders_of(branches):
+    """Group a reference repo's branches into ladders by name: the part before the bit rate
+    ('SC_4.00bpw_H5' -> 'SC'; '4.0bpw', '2.75bpw_H5' -> ''). Branches ending in _V<n> are
+    vision-quantized twins of another rung (turboderp's SC_4.00bpw_H5_V6): skipped by name.
+    TODO before relying on it at 27B: confirm the text tensors match by hash."""
+    out = {}
+    for b in sorted(branches):
+        if b == "main" or re.search(r"_V\d+$", b):
+            continue
+        out.setdefault(re.sub(r"_?\d+(\.\d+)?bpw.*$", "", b), []).append(b)
+    return out
+
+def load_reference_info(job):
+    """main/reference.json: the reference repos qbench scored, by ladder, and the uncalibrated
+    baseline sweep. Accepts the earlier single-repo format."""
+    path = os.path.join(job.main, "reference.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        info = json.load(f)
+    if "repo" in info:   # 2026-10-03 format: one repo, labels ref/<branch>
+        info = {"references": [{"repo": info["repo"], "ladders": {"": info["revisions"]}}], "baseline": {}}
+    return info
 
 def reference_section(job, qbench, floor, data):
-    """Section 2 of the card, when qbench scored an existing set of this model's quants: each of
-    ours against the reference ladder at equal size (log-interpolated between its sizes), and
-    against the same-named reference revision on every eval slice. Raw text is left out, as on
-    the rest of the card: it is the trade a conversational calibration accepts."""
-    ref_file = os.path.join(job.main, "reference.json")
-    if not os.path.isfile(ref_file):
+    """Section 2 of the card. Plot: every ladder -- this card's and each reference's -- as excess
+    KLD relative to the uncalibrated baseline at equal body size, so no ladder is drawn as a
+    perfect line and all share one denominator (its draw noise is common-mode: order and gaps
+    between ladders survive). Table: for each revision of ours, the most competitive rung at the
+    same bit rate across all reference ladders, or, where none has that rate, the most
+    competitive ladder interpolated at equal body size (asterisked). Raw text stays out, as on
+    the rest of the card."""
+    info = load_reference_info(job)
+    if not info:
         return None
-    with open(ref_file) as f:
-        ref_info = json.load(f)
-    ref_repo = ref_info["repo"]
-    # Sizes as on the rest of the card (the checkpoint's tensors minus the input embeddings), the
-    # total for the size column, and the body (minus the output head too) for interpolation: a
-    # ladder whose head bits change between rungs (turboderp's 2.75bpw_H5 -> 3.0bpw) spends bytes
-    # there that buy little, which bends the curve under anything interpolated across them
-    def survey_size(path):
-        sz = tensor_survey_local(path)
-        return { 'size': (sz['total'] - sz['embed']) / 1024**3, 'total': sz['total'] / 1024**3,
-                 'body': (sz['total'] - sz['embed'] - sz['head']) / 1024**3 }
+    import numpy as np
     slices = [sl for sl in qbench if sl != "raw"]
-    def arm(label, path):
-        rows = {sl: parse_qbench(qbench[sl], label) for sl in qbench}
+    # Sizes as on the rest of the card (minus input embeddings), the total for the size column,
+    # and the body (minus the output head too) for anything interpolated: head bits can change
+    # between rungs (turboderp's 2.75bpw_H5 -> 3.0bpw), and those bytes buy little
+    def survey(path):
+        sz = tensor_survey_local(path)
+        with open(os.path.join(path, "quantization_config.json")) as f:
+            q = json.load(f)
+        return { 'size': (sz['total'] - sz['embed']) / 1024**3, 'total': sz['total'] / 1024**3,
+                 'body': (sz['total'] - sz['embed'] - sz['head']) / 1024**3,
+                 'bits': q.get('bits'), 'head_bits': q.get('head_bits') }
+    def arm(label, path, need):
+        rows = {sl: parse_qbench(qbench[sl], label) for sl in need}
         if any(r is None for r in rows.values()):
             return None
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
-        return { **survey_size(path), 'excess': ex,
+        return { **survey(path), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, (_, w) in EVAL_SLICES.items()) }
-    refs = {b: arm(REF_PREFIX + b, path) for b, path in ref_info["revisions"].items()}
-    refs = {k: v for k, v in refs.items() if v}
-    if len(refs) < 2:
+    def interp(ladder, x):
+        pts = sorted((r['body'], r['composite']) for r in ladder)
+        if len(pts) < 2 or not pts[0][0] * 0.98 <= x <= pts[-1][0] * 1.02:
+            return None
+        return float(np.exp(np.interp(x, [p[0] for p in pts], np.log([p[1] for p in pts]))))
+
+    ours = {r['name']: arm(r['name'], job.revdir(r['name']), slices) for r in data['revisions']}
+    ours = {k: v for k, v in ours.items() if v}
+    if not ours:
         return None
-    ladder = sorted((v['body'], v['composite']) for v in refs.values())
-    import numpy as np
-    def ref_at(x):
-        return float(np.exp(np.interp(x, [p[0] for p in ladder], np.log([p[1] for p in ladder]))))
+    lo = min(v['body'] for v in ours.values()) * 0.9; hi = max(v['body'] for v in ours.values()) * 1.1
+    ladders = []   # (display name, [rungs])
+    for ref in info["references"]:
+        named = [n for n in ref["ladders"]]
+        for name, branches in ref["ladders"].items():
+            rungs = [arm(ref_label(ref["repo"], b), p, slices) for b, p in branches.items()]
+            for r, b in zip(rungs, branches):
+                if r:
+                    r['branch'] = b
+            # rungs far outside this card's size range (SC's 1.4-1.8 bpw against a 2-6 bpw set) add nothing
+            rungs = [r for r in rungs if r and lo <= r['body'] <= hi]
+            if rungs:
+                disp = ref["repo"] if len(named) == 1 else f"{ref['repo']} ({name or 'plain'})"
+                ladders.append((disp, rungs))
+    if not ladders:
+        return None
+    base = [a for a in (arm(baseline_label(rev), p, list(EVAL_SLICES)) for rev, p in info.get("baseline", {}).items()) if a]
+
+    def describe_slice(sl):
+        return DESCRIBE.get(sl) or DIAG_SLICES.get(sl, sl)
     rows = []
     for r in data['revisions']:
-        ours = arm(r['name'], job.revdir(r['name']))
-        if not ours:
+        o = ours.get(r['name'])
+        if not o:
             continue
-        row = { 'name': r['name'], 'bits': r['bits'], 'size': ours['size'], 'vs': None, 'interpolated': False }
-        same = same_bitrate(r, ref_info["revisions"], refs)
+        row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False }
+        # same nominal bit rate, preferring the same head bits within a ladder; best across ladders
+        same = []
+        for disp, rungs in ladders:
+            m = [x for x in rungs if x['bits'] is not None and abs(x['bits'] - r['bits']) < 0.01]
+            if m:
+                pick = min(m, key=lambda x: (x['head_bits'] != o['head_bits'], x['composite']))
+                same.append((pick['composite'], disp, pick))
         if same:
-            # A revision at the same nominal bit rate is the comparison a reader would make
-            row['vs'] = ours['composite'] / same['composite']
-        elif ladder[0][0] * 0.98 <= ours['body'] <= ladder[-1][0] * 1.02:
-            # Otherwise along the reference's ladder at equal body size, allowing a hair at its ends
-            row['vs'] = ours['composite'] / ref_at(ours['body'])
-            row['interpolated'] = True
-        if same:
-            rel = {sl: ours['excess'][sl] / same['excess'][sl] for sl in slices}
+            _, disp, best = min(same, key=lambda t: t[0])
+            row['vs'] = o['composite'] / best['composite']
+            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices}
             worst = max(rel, key=rel.get)
-            # Any size advantage either set enjoys at the same nominal bit rate (head bits, layer
-            # allocation, ...): total checkpoint size, ours minus the reference's
-            d = ours['total'] - same['total']
-            row.update({ 'size_delta': f"{d:+.2f} GiB" if abs(d) >= 0.1 else f"{d * 1024:+.0f} MiB",
-                         'size_delta_pct': 100 * (ours['total'] / same['total'] - 1),
-                         'worst_slice': worst, 'worst': rel[worst],
-                         'worst_desc': DESCRIBE.get(worst) or DIAG_SLICES.get(worst, worst) })
+            d = o['total'] - best['total']
+            row.update({ 'against': f"{disp}: {best['branch']}",
+                         'size_delta': f"{d:+.2f} GiB" if abs(d) >= 0.1 else f"{d * 1024:+.0f} MiB",
+                         'size_delta_pct': 100 * (o['total'] / best['total'] - 1),
+                         'worst': rel[worst], 'worst_desc': describe_slice(worst) })
+        else:
+            cands = [(v, disp) for disp, rungs in ladders if (v := interp(rungs, o['body'])) is not None]
+            if cands:
+                v, disp = min(cands)
+                row.update({ 'vs': o['composite'] / v, 'interpolated': True, 'against': disp })
         rows.append(row)
-    return { 'repo': ref_repo, 'rows': rows, 'slices': slices,
-             'slice_descs': [DESCRIBE.get(sl) or DIAG_SLICES.get(sl, sl) for sl in slices] }
+
+    traces = []
+    if len(base) >= 2:
+        for disp, rungs in [("this card", list(ours.values()))] + ladders:
+            pts = [(x['size'], x['composite'] / b) for x in sorted(rungs, key=lambda x: x['body'])
+                   if (b := interp(base, x['body'])) is not None]
+            if pts:
+                traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
+    return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
+             'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices] }
 
 def calibration_of(job, rev):
     path = os.path.join(job.revdir(rev), "calibration.json")
@@ -348,15 +408,14 @@ def plot_quality_vs_size(job, meta, path):
 DESCRIBE = {"wild": "real user prompts (WildChat)", "swe": "real agent sessions (Open-SWE-Traces)"}
 
 def plot_vs_reference(job, ref, path):
-    """Section 2 of the card: each of ours as a ratio to the reference ladder at equal size."""
+    """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal size."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    SURF, INK, INK2 = "#1f1f1f", "#ffffff", "#aaaaaa"
-    AXES, GRID, REF, OURS = "#555555", "#555555", "#2a78d6", "#eb6834"
-    rows = [r for r in ref['rows'] if r['vs'] is not None]
-    xs = [r['size'] for r in rows]; ys = [r['vs'] for r in rows]
-    fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=150)
+    SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
+    OURS, BASE = "#eb6834", "#888888"
+    OTHERS = ["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"]
+    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
     for sp in ("top", "right"):
@@ -364,31 +423,29 @@ def plot_vs_reference(job, ref, path):
     for sp in ("left", "bottom"):
         ax.spines[sp].set_color(AXES)
     ax.tick_params(colors=INK2)
-    ax.axhline(1.0, color=REF, lw=2, zorder=1, label=f"{ref['repo']} (reference)")
-    ax.plot(xs, ys, color=OURS, lw=2, ls=(0, (4, 2)), zorder=2)
-    paired = [(x, y) for r, x, y in zip(rows, xs, ys) if not r['interpolated']]
-    interp = [(x, y) for r, x, y in zip(rows, xs, ys) if r['interpolated']]
-    if paired:
-        ax.scatter(*zip(*paired), s=70, marker="D", color=OURS, edgecolor=SURF, linewidth=1.5, zorder=3,
-                   label="this card, vs the reference at the same bit rate")
-    if interp:
-        # hollow: against the reference's ladder interpolated at equal size, not a revision of it
-        ax.scatter(*zip(*interp), s=70, marker="D", facecolor=SURF, edgecolor=OURS, linewidth=1.5, zorder=3,
-                   label="this card, vs the reference interpolated at equal size")
-    for r, x, y in zip(rows, xs, ys):
-        ax.annotate(f"{r['bits']:.2f} bpw: {y:.2f}{'*' if r['interpolated'] else ''}", (x, y), xytext=(0, 9),
-                    textcoords="offset points", fontsize=8, color=INK, ha="center")
-    ax.margins(x=0.08)
-    lo, hi = min(ys + [1.0]), max(ys + [1.0])
-    pad = max(0.05, (hi - lo) * 0.25)
+    ax.axhline(1.0, color=BASE, lw=1.5, ls=(0, (2, 2)), zorder=1, label="uncalibrated (baseline)")
+    ys_all = [1.0]
+    others = iter(OTHERS)
+    for t in ref['traces']:
+        xs, ys = zip(*t['points']); ys_all += ys
+        color = OURS if t['ours'] else next(others)
+        ax.plot(xs, ys, color=color, lw=2, zorder=3 if t['ours'] else 2,
+                marker="D" if t['ours'] else "o", markersize=6, markeredgecolor=SURF, label=t['name'])
+        if t['ours']:
+            for x, y in zip(xs, ys):
+                ax.annotate(f"{y:.2f}", (x, y), xytext=(0, -13), textcoords="offset points",
+                            fontsize=7, color=INK, ha="center")
+    lo, hi = min(ys_all), max(ys_all)
+    pad = max(0.03, (hi - lo) * 0.12)
     ax.set_ylim(lo - pad, hi + pad)
+    ax.margins(x=0.06)
     ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
-    ax.set_ylabel("excess KLD relative\nto the reference", color=INK2)
-    leg = ax.legend(frameon=False, fontsize=8, loc="upper right")
+    ax.set_ylabel("excess KLD relative to\nuncalibrated at equal size", color=INK2)
+    leg = ax.legend(frameon=False, fontsize=7.5, loc="best")
     for t in leg.get_texts():
         t.set_color(INK2)
-    fig.text(0.13, 0.97, "Against the existing quants of this model", fontsize=11, color=INK, va="top")
-    fig.subplots_adjust(top=0.88, left=0.15, right=0.97, bottom=0.16)
+    fig.text(0.13, 0.97, "Against other quants of this model", fontsize=11, color=INK, va="top")
+    fig.subplots_adjust(top=0.89, left=0.15, right=0.97, bottom=0.14)
     fig.savefig(path, facecolor=SURF)
     plt.close(fig)
 
@@ -444,7 +501,7 @@ def do_card(job, args):
     meta = collect_metadata(job, qbench)
     plot_quality_vs_size(job, meta, os.path.join(job.main, "quality_vs_size.png"))
     meta['traces_published'] = publish_traces(job)
-    if meta['reference']:
+    if meta['reference'] and meta['reference']['traces']:
         plot_vs_reference(job, meta['reference'], os.path.join(job.main, "vs_reference.png"))
 
     # get base metadata and add content
@@ -495,21 +552,29 @@ def do_qbench(job, args):
         print(f"=== no eval traces for {', '.join(missing)}: the card falls back to raw text "
               f"(run `traces` first for the composite) ===")
     arms = [(rev, job.revdir(rev)) for rev in revisions]
-    if args.reference:
-        # An existing set of this model's quants (the case for publishing another set): every
-        # revision branch, scored on the same slices
-        refs = [b.name for b in HfApi().list_repo_refs(args.reference).branches if b.name != "main"]
-        ref_paths = {b: snapshot_download(args.reference, revision=b) for b in sorted(refs)}
-        arms += [(REF_PREFIX + b, path) for b, path in ref_paths.items()]
+    # Existing sets of this model's quants (each grouped into ladders by branch name), and the
+    # uncalibrated baseline sweep from `baseline`: section 2 of the card
+    references = []
+    for repo in args.reference or []:
+        branches = [b.name for b in HfApi().list_repo_refs(repo).branches]
+        ladders = {name: {b: snapshot_download(repo, revision=b) for b in bs}
+                   for name, bs in ladders_of(branches).items()}
+        references.append({"repo": repo, "ladders": ladders})
+        arms += [(ref_label(repo, b), p) for bs in ladders.values() for b, p in bs.items()]
+    baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
+    if references or baseline:
         with open(os.path.join(job.main, "reference.json"), "w") as f:
-            json.dump({"repo": args.reference, "revisions": ref_paths}, f, indent=1)
-    print(f"=== running bench on {' '.join(label for label, _ in arms)}; slices: {' '.join(slices)} ===")
+            json.dump({"references": references, "baseline": baseline}, f, indent=1)
+    base_arms = [(baseline_label(rev), p) for rev, p in baseline.items()]
+    print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
     series_start = datetime.datetime.now().replace(microsecond=0)
     for sl in slices:
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
         with open(qbench_file, "w") as f:
-            yaml.safe_dump(qbench_project(job, args, sl, arms), f, sort_keys=False)
+            # the baseline only enters through the composite
+            yaml.safe_dump(qbench_project(job, args, sl, arms + (base_arms if sl in EVAL_SLICES else [])),
+                           f, sort_keys=False)
         rc = run_logged([ "python3", script, qbench_file, "-d", str(args.device) ], job.log(f"qbench-{sl}"))
         if rc:
             print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
@@ -637,6 +702,27 @@ def decontaminate_self(job):
         json.dump(trace, f)
     print(f"!! own-voice eval: dropped prompts {overlap}, which the calibration trace also used")
 
+def do_baseline(job, args):
+    """The uncalibrated sweep that card section 2 measures every ladder against: the same bit
+    rates as `quantize`, converted with --uncalibrated (no calibration of any kind, so it favors
+    no ladder), into <model>-exl3/_baseline. Uncalibrated jobs cannot resume; a failed one restarts."""
+    path = snapshot_download(repo_id=job.base_repo)
+    for b in args.bits.split(','):
+        tb = b.split(':')
+        bits, headbits = tb[0], (tb[1] if len(tb) > 1 else "6")
+        rev = f"{float(bits):0.2f}bpw" + (f"-H{int(headbits)}" if len(tb) > 1 else "")
+        out = os.path.join(job.baseline, rev); work = os.path.join(job.baseline, f"_work-{rev}")
+        print(f"=== BASELINE {rev} (uncalibrated) ===")
+        if not run_until(os.path.join(out, "quantization_config.json"),
+                         [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
+                           "-hq", "-b", bits, "-hb", headbits, "-vb", "16",
+                           "-i", path, "-w", work, "-o", out, "-d", str(args.device) ],
+                         job.log(f"baseline-{rev}"), args.retries + 1,
+                         cleanup=lambda: shutil.rmtree(work, ignore_errors=True)):
+            print(f"=== BASELINE {rev} FAILED ==="); return False
+        shutil.rmtree(work, ignore_errors=True)
+    return True
+
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
     if args.calibration == "mix" and not os.path.isfile(job.cal_data):
@@ -734,6 +820,12 @@ def main():
                               help='resume a failed revision this many times before stopping')
     cmd_quantize.set_defaults(func=do_quantize)
 
+    cmd_baseline = subparsers.add_parser('baseline')
+    cmd_baseline.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
+    cmd_baseline.add_argument('-d', '--device', default=0)
+    cmd_baseline.add_argument('--retries', type=int, default=2)
+    cmd_baseline.set_defaults(func=do_baseline)
+
     cmd_qbench = subparsers.add_parser('qbench')
     cmd_qbench.add_argument('--logit_cache', default=None,
                             help='logit cache dir (default: <model>-exl3/_logit_cache, owned by this model)')
@@ -744,8 +836,9 @@ def main():
     cmd_qbench.add_argument('--prune', default=True, action=argparse.BooleanOptionalAction,
                             help='after a successful series, evict reference logits it did not use')
     cmd_qbench.add_argument('-d', '--device', default=0)
-    cmd_qbench.add_argument('--reference', default=None,
-                            help='HF repo of an existing set of this model\'s quants to compare against (card section 2)')
+    cmd_qbench.add_argument('--reference', action='append',
+                            help='HF repo of an existing set of this model\'s quants to compare against '
+                                 '(card section 2); repeatable')
     cmd_qbench.set_defaults(func=do_qbench)
 
     cmd_card = subparsers.add_parser('card')

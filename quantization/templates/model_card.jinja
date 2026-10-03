@@ -42,20 +42,24 @@ These quantizations are calibrated on a conversational mix rather than the bundl
 {% endif %}
 {% if reference %}
 
-# Against the existing quants of this model
+# Against other quants of this model
 
-*This section appears because [{{ reference.repo }}](https://huggingface.co/{{ reference.repo }}) already exists; it is the case for publishing another set.*
+*This section appears because other quantizations of this model exist ({% for r in reference.repos %}[{{ r }}](https://huggingface.co/{{ r }}){% if not loop.last %}, {% endif %}{% endfor %}); it is the case for publishing another set.*
+{% if reference.traces %}
 
-![relative to reference](./vs_reference.png)
+![relative to other quants](./vs_reference.png)
 
-| BPW | Composite vs reference | Size vs same-bitrate reference | Worst eval slice vs same-bitrate reference | Slice |
-|---|---|---|---|---|
-{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.vs is not none %}{{ '{0:0.2f}'.format(r.vs) }}{% if r.interpolated %}\*{% endif %}{% else %}-{% endif %}|{% if r.worst is defined %}{{ r.size_delta }} ({{ '{0:+0.1f}'.format(r.size_delta_pct) }}%)|{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-|-{% endif %}|
+Every set is plotted relative to the same baseline: an uncalibrated quantization of this model at each bit rate, which favors no calibration. Each set keeps its own draw-to-draw noise (about 1-2% here) rather than one being drawn as a perfect line, and the baseline's own noise moves all of them together, so their order at any size is unaffected.
+{% endif %}
+
+| BPW | Composite vs best other quant | Compared against | Size difference | Worst eval slice | Slice |
+|---|---|---|---|---|---|
+{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.vs is not none %}{{ '{0:0.2f}'.format(r.vs) }}{% if r.interpolated %}\*{% endif %}{% else %}-{% endif %}|{{ r.against | default('-') }}|{% if r.worst is defined %}{{ r.size_delta }} ({{ '{0:+0.1f}'.format(r.size_delta_pct) }}%)|{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-|-{% endif %}|
 {% endfor %}
 
-Ratios of excess KLD, below 1.00 better than the reference. Revisions are paired by nominal bit rate; the size column shows how much larger (+) or smaller (-) this card's checkpoint is than the one it is paired with. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse than the reference. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.{% if reference.rows | selectattr('interpolated') | list %}
+Ratios of excess KLD, below 1.00 better. Each revision is compared with the most competitive quant at the same nominal bit rate among the sets above; the size column shows how much larger (+) or smaller (-) this card's checkpoint is than that one. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.{% if reference.rows | selectattr('interpolated') | list %}
 
-\* No reference revision at this bit rate: compared against the reference's ladder interpolated (log scale) at equal size, counting the transformer body only, since output-head bits can differ between rungs.{% endif %}
+\* No other quant at this bit rate: compared against the most competitive set's ladder, interpolated (log scale) at equal size, counting the transformer body only, since output-head bits can differ between rungs.{% endif %}
 {% endif %}
 {% if traces_published %}
 
