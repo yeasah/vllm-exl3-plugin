@@ -152,14 +152,15 @@ def reference_section(job, qbench, floor, data):
     # Sizes as on the rest of the card: the checkpoint's tensors minus the input embeddings
     def survey_size(path):
         sz = tensor_survey_local(path)
-        return (sz['total'] - sz['embed']) / 1024**3
+        return (sz['total'] - sz['embed']) / 1024**3, sz['total'] / 1024**3
     slices = [sl for sl in qbench if sl != "raw"]
     def arm(label, path):
         rows = {sl: parse_qbench(qbench[sl], label) for sl in qbench}
         if any(r is None for r in rows.values()):
             return None
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
-        return { 'size': survey_size(path), 'excess': ex,
+        size, total = survey_size(path)
+        return { 'size': size, 'total': total, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, (_, w) in EVAL_SLICES.items()) }
     refs = {b: arm(REF_PREFIX + b, path) for b, path in ref_info["revisions"].items()}
     refs = {k: v for k, v in refs.items() if v}
@@ -182,7 +183,12 @@ def reference_section(job, qbench, floor, data):
         if same:
             rel = {sl: ours['excess'][sl] / same['excess'][sl] for sl in slices}
             worst = max(rel, key=rel.get)
-            row.update({ 'worst_slice': worst, 'worst': rel[worst],
+            # Any size advantage either set enjoys at the same nominal bit rate (head bits, layer
+            # allocation, ...): total checkpoint size, ours minus the reference's
+            d = ours['total'] - same['total']
+            row.update({ 'size_delta': f"{d:+.2f} GiB" if abs(d) >= 0.1 else f"{d * 1024:+.0f} MiB",
+                         'size_delta_pct': 100 * (ours['total'] / same['total'] - 1),
+                         'worst_slice': worst, 'worst': rel[worst],
                          'worst_desc': DESCRIBE.get(worst) or DIAG_SLICES.get(worst, worst) })
         rows.append(row)
     return { 'repo': ref_repo, 'rows': rows, 'slices': slices,

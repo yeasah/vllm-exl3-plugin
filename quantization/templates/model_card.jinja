@@ -48,12 +48,12 @@ These quantizations are calibrated on a conversational mix rather than the bundl
 
 ![relative to reference](./vs_reference.png)
 
-| BPW | Composite, vs reference at equal size | Worst eval slice vs same-bitrate reference | Slice |
-|---|---|---|---|
-{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.in_range %}{{ '{0:0.2f}'.format(r.vs_ladder) }}{% else %}-{% endif %}|{% if r.worst is defined %}{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-{% endif %}|
+| BPW | Composite, vs reference at equal size | Size vs same-bitrate reference | Worst eval slice vs same-bitrate reference | Slice |
+|---|---|---|---|---|
+{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.in_range %}{{ '{0:0.2f}'.format(r.vs_ladder) }}{% else %}-{% endif %}|{% if r.worst is defined %}{{ r.size_delta }} ({{ '{0:+0.1f}'.format(r.size_delta_pct) }}%)|{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-|-{% endif %}|
 {% endfor %}
 
-Ratios of excess KLD, below 1.00 better than the reference. Equal size interpolates along the reference's own ladder (log scale), so it holds even where the two sets' sizes differ. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse than the reference. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.
+Ratios of excess KLD, below 1.00 better than the reference. Equal size interpolates along the reference's own ladder (log scale), so it holds even where the two sets' sizes differ. The same-bitrate comparisons pair revisions by nominal bit rate; the size column shows how much larger (+) or smaller (-) this card's checkpoint is than the one it is paired with. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse than the reference. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.
 {% endif %}
 {% if traces_published %}
 
