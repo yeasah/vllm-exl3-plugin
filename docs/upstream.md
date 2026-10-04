@@ -662,6 +662,18 @@ bit-identical on the same weight, and the old code fails that test.
 
 ---
 
+**Presence and frequency penalties count the prompt** (2026-10-04). `SS_PresFreqP`
+penalized every token of the job's whole sequence. vLLM and the OpenAI API count generated
+tokens only, and model cards' recommended penalties assume that (Ornith-1.5-9B recommends
+presence 1.5). Prompt-inclusive, a recommended penalty pushes the model away from the text it
+was given, and its effect grows turn by turn in a conversation. *Why it matters to them*:
+TabbyAPI users who follow a model card get a different sampler than the card describes.
+Fix (fork `ee22b60`): `CustomSampler.forward(num_generated=...)`, passed by `Job`;
+penalties count only the generated tail, and callers that do not pass it keep the old
+behavior. Repetition penalty unchanged (whole sequence, as in vLLM).
+
+---
+
 ### qbench: two defects found using it, 2026-09-10
 
 Both surfaced while measuring whether v1.4.9 cost quality (it did not --

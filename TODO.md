@@ -1637,7 +1637,8 @@ the Hessians see) and for eval (the text every card number is measured on). Noti
    support, renormalized, since truncated supports can differ). Same rankings -> raw KL stays
    as the more sensitive headline; different rankings -> the tail is reordering quants in a
    way real use would not see.
-5. *exllamav3's presence/frequency penalties count the prompt:* `past_ids` is the job's whole
+5. ~~*exllamav3's presence/frequency penalties count the prompt:*~~ **Fixed in the fork
+   2026-10-04** (generated tokens only when the job passes its count). Was: `past_ids` is the job's whole
    `sequence_ids`. vLLM and the OpenAI API count generated tokens only, which is what model
    cards mean. Prompt-inclusive, the penalty also drifts with conversation length: each turn
    adds to the penalized set. Needed before any trace uses a penalty (Ornith's general setting
