@@ -1596,6 +1596,29 @@ moved quality everywhere, and it needs no kernel, format or loader work.
 
 → [docs/calibration.md](docs/calibration.md)
 
+## `trace-sampling` — Generate traces with the model's own sampling, not exllamav3's default
+
+**Outcome wanted:** calibration and eval traces sampled the way the model is actually run,
+and a decision about per-mode recommendations.
+
+**Why:** `ctx_trace.py` creates its jobs without a sampler, so every trace so far used
+exllamav3's `DefaultSampler` (temperature 0.8, min-p 0.08), an arbitrary "sensible default".
+Ornith-1.5-9B's `generation_config.json` says temperature 1.0, top-k 20, top-p 0.95. Our
+traces are therefore lower-entropy than real use, for calibration (what the Hessians see) and
+for eval (the text every card number is measured on). Noticed 2026-10-03.
+
+**Open questions:**
+1. Read `generation_config.json` and apply it explicitly. Machine-readable, so cheap.
+2. Per-mode recommendations (thinking vs instruct, agentic vs conversational) exist only in
+   model-card prose, nowhere in metadata, and how many users follow them is arguable.
+   Options: the base default only; a per-model override file; or vary sampling across
+   conversations the way eval already varies thinking settings.
+3. How much does it move anything? A cheap check: regenerate one eval slice on Ornith with
+   the model's own defaults and see whether calibration rankings change. If not, it is a
+   correctness fix for future sets, not a reason to redo past measurements.
+
+→ docs/calibration.md
+
 ## `card-composite` — Cards that answer "which size?", and justify a duplicate only when there is one
 
 **Outcome wanted:** `quant.py`'s card generation emits two sections. **Always:** the card's
