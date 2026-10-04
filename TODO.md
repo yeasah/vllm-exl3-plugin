@@ -1610,8 +1610,14 @@ without the penalty for precise coding. (Qwen3.8-27B does ship one: temperature 
 the Hessians see) and for eval (the text every card number is measured on). Noticed
 2026-10-03.
 
+**Done 2026-10-04:** `ctx_trace.py --sampling_profile` picks sampling per conversation (slice,
+thinking); `quant.py traces` resolves a profile -- explicit, else checked-in
+`quantization/sampling/<org>__<model>.json`, else the base model's `generation_config.json`,
+else it refuses -- and publishes it as `traces/sampling.json`. Profiles exist for
+Ornith-1.5-9B (general / coding, swe -> coding) and Qwen3.8-27B (thinking / instruct).
+
 **Open questions:**
-1. Read `generation_config.json` and apply it explicitly. Machine-readable, so cheap.
+1. ~~Read `generation_config.json` and apply it explicitly.~~ Done (the fallback above).
 2. Per-mode recommendations (thinking vs instruct, agentic vs conversational) exist only in
    model-card prose, nowhere in metadata, and how many users follow them is arguable.
    Options: the base default only; a per-model override file; or vary sampling across

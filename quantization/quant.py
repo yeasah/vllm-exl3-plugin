@@ -452,7 +452,8 @@ def plot_vs_reference(job, ref, path):
 # Published in main/traces, so a set can be reproduced: (file in _traces, published name)
 PUBLISHED_TRACES = [("cal.safetensors", "calibration.safetensors"),
                     ("cal.manifest.json", "calibration.manifest.json"),
-                    ("cal_cal.json", "calibration.json")] + \
+                    ("cal_cal.json", "calibration.json"),
+                    ("sampling.json", "sampling.json")] + \
                    [(f"eval_{sl}.json", f"eval_{sl}.json") for sl in EVAL_SLICES]
 
 DATA_NOTICE = """# Data in this directory
@@ -467,6 +468,7 @@ Wikipedia text apply to the files that contain it, not to the model weights.
 | `calibration.safetensors` | the packed calibration rows passed to exllamav3's `convert.py --cal_data` | as `calibration.json`, plus exllamav3's bundled calibration corpus |
 | `calibration.json` | the conversational calibration trace before packing (documents, tool loops, the model's own answers) | exllamav3's bundled corpus (C4, Wikipedia, code, technical text); Wikipedia 20231101 in 13 languages ([wikimedia/wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia), CC BY-SA 3.0 / GFDL) |
 | `calibration.manifest.json` | slice shares and composition of the packed rows | - |
+| `sampling.json` | how every trace here was sampled: modes and the rules picking one per conversation; each trace row records its mode | the model publisher's recommendations (source inside) |
 | `eval_wild.json` | the card's real-user-prompt eval: first user turns, answered by the unquantized model | [allenai/WildChat-1M](https://huggingface.co/datasets/allenai/WildChat-1M) (ODC-BY) |
 | `eval_swe.json` | the card's agent-session eval: sessions cut at a turn the unquantized model rewrites | [nvidia/Open-SWE-Traces](https://huggingface.co/datasets/nvidia/Open-SWE-Traces) (CC BY 4.0) |
 
@@ -620,6 +622,38 @@ def run_until(output, cmd, log_path, tries, env=None, cleanup=None):
         run_logged(cmd, log_path, env)
     return os.path.exists(output)
 
+SAMPLING_DIR = os.path.join(HERE, "sampling")
+
+def resolve_sampling_profile(job, args, path):
+    """The sampling profile every trace is generated with, written to _traces/sampling.json:
+    an explicit --sampling-profile; else a checked-in quantization/sampling/<org>__<model>.json
+    (per-mode recommendations, which live only in model-card prose); else one mode from the
+    base model's generation_config.json. With none of those, refuse rather than fall back to
+    exllamav3's default, which is no model's recommendation -- unless asked for explicitly."""
+    out = os.path.join(job.traces, "sampling.json")
+    if args.sampling_profile == "exllamav3-default":
+        return None
+    src = args.sampling_profile or os.path.join(SAMPLING_DIR, job.base_repo.replace("/", "__") + ".json")
+    if os.path.isfile(src):
+        shutil.copy2(src, out)
+        return out
+    if args.sampling_profile:
+        raise FileNotFoundError(src)
+    gc = os.path.join(path, "generation_config.json")
+    keys = ("temperature", "top_k", "top_p", "min_p", "repetition_penalty")
+    if os.path.isfile(gc):
+        with open(gc) as f:
+            g = json.load(f)
+        mode = {k: g[k] for k in keys if k in g}
+        if mode:
+            with open(out, "w") as f:
+                json.dump({"source": f"{job.base_repo} generation_config.json", "modes": {"default": mode},
+                           "rules": [{"mode": "default"}]}, f, indent=1)
+            return out
+    raise SystemExit(f"=== no sampling profile for {job.base_repo}: no {src}, and the base model ships no "
+                     f"generation_config.json with sampling values. Write a profile from its model card, "
+                     f"or pass --sampling-profile exllamav3-default to use exllamav3's default ===")
+
 def do_traces(job, args):
     """Per-model trace artifacts: the calibration generator (an uncalibrated 8bpw), the
     conversational calibration trace it writes, and the bf16-generated eval traces the card's
@@ -631,6 +665,9 @@ def do_traces(job, args):
     path = snapshot_download(repo_id=job.base_repo)
     os.makedirs(job.traces, exist_ok=True)
     one_gpu = {"CUDA_VISIBLE_DEVICES": str(args.device)}
+    profile = resolve_sampling_profile(job, args, path)
+    sampling = ["--sampling_profile", profile] if profile else []
+    print(f"=== sampling: {profile or 'exllamav3 default (explicitly requested)'} ===")
     tries = args.retries + 1
 
     gen = os.path.join(job.traces, "gen-8bpw-uncal")
@@ -651,7 +688,7 @@ def do_traces(job, args):
                      [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
                        "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
                        "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
-                       "--exclude_self", EVAL_SELF_PROMPTS ],
+                       "--exclude_self", EVAL_SELF_PROMPTS ] + sampling,
                      job.log("traces-cal"), tries, env=one_gpu):
         print("=== calibration trace FAILED ==="); return False
 
@@ -665,7 +702,7 @@ def do_traces(job, args):
         if not run_until(job.eval_trace(sl),
                          [ "python3", "-u", ctx_trace, "-m", path, "-cs", "65536",
                            "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
-                           "--slices", sl, "-n", str(n), "--seed", str(EVAL_SEED) ],
+                           "--slices", sl, "-n", str(n), "--seed", str(EVAL_SEED) ] + sampling,
                          job.log(f"traces-eval-{sl}"), tries,
                          env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
             print(f"=== eval trace {sl} FAILED ==="); return False
@@ -675,7 +712,7 @@ def do_traces(job, args):
                      [ "python3", "-u", ctx_trace, "-m", path, "-cs", "65536",
                        "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
                        "--slices", ",".join(DIAG_SLICES), "-n", str(DIAG_N), "--seed", str(EVAL_SEED),
-                       "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ],
+                       "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ] + sampling,
                      job.log("traces-eval-diag"), tries,
                      env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
         print("=== diagnostic eval traces FAILED ==="); return False
@@ -809,6 +846,10 @@ def main():
     cmd_traces.add_argument('--eval-devices', default=None,
                             help='CUDA_VISIBLE_DEVICES for the bf16 eval traces (default: all visible)')
     cmd_traces.add_argument('--retries', type=int, default=2)
+    cmd_traces.add_argument('--sampling-profile', default=None,
+                            help='JSON of sampling modes and per-conversation rules (default: '
+                                 'quantization/sampling/<org>__<model>.json, else the base model\'s '
+                                 'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
     cmd_traces.set_defaults(func=do_traces)
 
     cmd_quantize = subparsers.add_parser('quantize')

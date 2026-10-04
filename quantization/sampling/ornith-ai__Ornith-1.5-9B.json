@@ -1,0 +1,12 @@
+{
+ "source": "ornith-ai/Ornith-1.5-9B README, 'Recommended sampling parameters' (the repo ships no generation_config.json); read 2026-10-04",
+ "notes": "Two use-case modes. swe takes 'coding' (the README's recommendation for precise coding), though the README's own agentic benchmarks ran at temperature 1.0, top_p 0.95: a choice, stated on the card.",
+ "modes": {
+  "general": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0},
+  "coding":  {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}
+ },
+ "rules": [
+  {"slice": "swe", "mode": "coding"},
+  {"mode": "general"}
+ ]
+}
