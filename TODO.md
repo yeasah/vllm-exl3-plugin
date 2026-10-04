@@ -1620,6 +1620,15 @@ for eval (the text every card number is measured on). Noticed 2026-10-03.
    if the mix keeps its margin over default and uncalibrated, the old-sampling calibration
    data is fine and only scoring changes going forward; if the margin shrinks, regenerate
    the calibration trace with corrected sampling and convert again.
+4. Should scoring see what sampling sees? qbench's KL is on the raw distribution (temperature
+   1, full vocabulary): the one an untruncated sampler draws from. Under a model's own
+   sampling (Ornith: top-k 20, top-p 0.95) tail divergence never reaches the output; keeping
+   it makes KL more sensitive and more general, dropping it more representative of real use.
+   Settle it empirically: compute a sampler-aware measure beside raw KL for the same arms
+   (both distributions are in hand at scoring time; TV or KL on the reference's truncated
+   support, renormalized, since truncated supports can differ). Same rankings -> raw KL stays
+   as the more sensitive headline; different rankings -> the tail is reordering quants in a
+   way real use would not see.
 
 → docs/calibration.md
 
