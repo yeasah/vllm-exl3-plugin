@@ -38,7 +38,7 @@ Each bitrate is available as a separate revision of this repository. When planni
 {% endif %}{% else %}- Raw-text excess KLD: how far each quant's next-token distribution is from the unquantized model's on plain web text, minus the unquantized model's own rounding noise (lower is better). This model has no chat template, so raw text is the distribution it was trained on.
 {% endif %}
 {% if composite %}
-These quantizations are calibrated on a conversational mix rather than the bundled raw-text corpus: documents pasted into user turns and returned as tool results, short tool-use loops, a little of the model's own voice, and the default corpus. Its answers come from an uncalibrated 8-bit quant of the same model. Against the default calibration at equal size, it cut excess KLD on real user prompts by 12-13% on Qwen3.8-27B and 8-11% on Ornith-1.5-9B (4 bpw), at no cost in bytes ([details](https://github.com/yeasah/vllm-exl3-plugin/blob/main/docs/calibration.md)).
+These quantizations are calibrated on a conversational mix rather than the bundled raw-text corpus: documents pasted into user turns and returned as tool results, short tool-use loops, real coding-agent sessions, a little of the model's own voice, and the default corpus. Its answers come from an uncalibrated 8-bit quant of the same model. Against the default calibration at equal size, it cut excess KLD on real user prompts by 12-13% on Qwen3.8-27B and 8-11% on Ornith-1.5-9B (4 bpw), at no cost in bytes ([details](https://github.com/yeasah/vllm-exl3-plugin/blob/main/docs/calibration.md)).
 {% endif %}
 {% if reference %}
 

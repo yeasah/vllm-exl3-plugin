@@ -69,6 +69,10 @@ class Job:
 # of its own -- with thinking on at medium effort and 1024 new tokens, the setup measured.
 CAL_TEMPLATE_VARS = '{"enable_thinking": true, "reasoning_effort": "medium"}'
 CAL_MAX_NEW_TOKENS = 1024
+# Calibration mix shares. agent: real coding-agent sessions (mini-swe-agent, Qwen3.8-27B, on
+# swe-rebench-v2 minus the eval slice's repositories), one or two 2048-token windows each,
+# 2026-10-04; it takes most of the scripted tool loops' share, which it is the real version of
+CAL_SHARES = {"raw": 0.20, "ctx": 0.30, "loop": 0.15, "agent": 0.20, "self": 0.10, "random": 0.05}
 # The card's composite is the independent tier only (TODO.md card-composite): real users'
 # first prompts (WildChat) and real coding-agent sessions (Open-SWE-Traces), as
 # (conversations, weight). Eval traces come from bf16: a calibration scores worse on another
@@ -466,7 +470,7 @@ Wikipedia text apply to the files that contain it, not to the model weights.
 | file | what it is | sources |
 |---|---|---|
 | `calibration.safetensors` | the packed calibration rows passed to exllamav3's `convert.py --cal_data` | as `calibration.json`, plus exllamav3's bundled calibration corpus |
-| `calibration.json` | the conversational calibration trace before packing (documents, tool loops, the model's own answers) | exllamav3's bundled corpus (C4, Wikipedia, code, technical text); Wikipedia 20231101 in 13 languages ([wikimedia/wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia), CC BY-SA 3.0 / GFDL) |
+| `calibration.json` | the conversational calibration trace before packing (documents, tool loops, coding-agent sessions, the model's own answers) | exllamav3's bundled corpus (C4, Wikipedia, code, technical text); Wikipedia 20231101 in 13 languages ([wikimedia/wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia), CC BY-SA 3.0 / GFDL); mini-swe-agent sessions from [nvidia/Open-SWE-Traces](https://huggingface.co/datasets/nvidia/Open-SWE-Traces) (CC BY 4.0), none from a repository the eval uses |
 | `calibration.manifest.json` | slice shares and composition of the packed rows | - |
 | `sampling.json` | how every trace here was sampled: modes and the rules picking one per conversation; each trace row records its mode | the model publisher's recommendations (source inside) |
 | `eval_wild.json` | the card's real-user-prompt eval: first user turns, answered by the unquantized model | [allenai/WildChat-1M](https://huggingface.co/datasets/allenai/WildChat-1M) (ODC-BY) |
@@ -683,14 +687,6 @@ def do_traces(job, args):
     shutil.rmtree(gen_work, ignore_errors=True)
 
     ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
-    print(f"=== calibration trace -> {job.cal_data} ===")
-    if not run_until(job.cal_data,
-                     [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
-                       "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
-                       "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
-                       "--exclude_self", EVAL_SELF_PROMPTS ] + sampling,
-                     job.log("traces-cal"), tries, env=one_gpu):
-        print("=== calibration trace FAILED ==="); return False
 
     # bf16 may need every visible GPU; a layer split on stock torch <= 2.14.1 is exposed to
     # pytorch#196258 (docs/upstream.md "PyTorch"), which the local library rebuild fixes
@@ -716,6 +712,17 @@ def do_traces(job, args):
                      job.log("traces-eval-diag"), tries,
                      env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
         print("=== diagnostic eval traces FAILED ==="); return False
+
+    # Calibration last: its agent slice must keep out every repository the eval swe slice uses
+    print(f"=== calibration trace -> {job.cal_data} ===")
+    if not run_until(job.cal_data,
+                     [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
+                       "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
+                       "--shares", json.dumps(CAL_SHARES),
+                       "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
+                       "--exclude_self", EVAL_SELF_PROMPTS, "--exclude_swe_from", job.eval_trace("swe") ] + sampling,
+                     job.log("traces-cal"), tries, env=one_gpu):
+        print("=== calibration trace FAILED ==="); return False
     decontaminate_self(job)
     return True
 
