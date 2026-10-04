@@ -1603,9 +1603,12 @@ and a decision about per-mode recommendations.
 
 **Why:** `ctx_trace.py` creates its jobs without a sampler, so every trace so far used
 exllamav3's `DefaultSampler` (temperature 0.8, min-p 0.08), an arbitrary "sensible default".
-Ornith-1.5-9B's `generation_config.json` says temperature 1.0, top-k 20, top-p 0.95. Our
-traces are therefore lower-entropy than real use, for calibration (what the Hessians see) and
-for eval (the text every card number is measured on). Noticed 2026-10-03.
+Ornith-1.5-9B ships no `generation_config.json` at all; its README recommends temperature 1.0,
+top-p 0.95, top-k 20, min-p 0, presence penalty 1.5 for general tasks, and temperature 0.6
+without the penalty for precise coding. (Qwen3.8-27B does ship one: temperature 1.0, top-k
+20, top-p 0.95.) Our traces are therefore lower-entropy than real use, for calibration (what
+the Hessians see) and for eval (the text every card number is measured on). Noticed
+2026-10-03.
 
 **Open questions:**
 1. Read `generation_config.json` and apply it explicitly. Machine-readable, so cheap.
@@ -1629,6 +1632,17 @@ for eval (the text every card number is measured on). Noticed 2026-10-03.
    support, renormalized, since truncated supports can differ). Same rankings -> raw KL stays
    as the more sensitive headline; different rankings -> the tail is reordering quants in a
    way real use would not see.
+5. *exllamav3's presence/frequency penalties count the prompt:* `past_ids` is the job's whole
+   `sequence_ids`. vLLM and the OpenAI API count generated tokens only, which is what model
+   cards mean. Prompt-inclusive, the penalty also drifts with conversation length: each turn
+   adds to the penalized set. Needed before any trace uses a penalty (Ornith's general setting
+   does): pass the sampler only the generated part of the sequence, in the fork. Report
+   upstream -- TabbyAPI users following a model card get something else.
+6. *Ship a `generation_config.json` where the base model has none,* from a small per-model
+   override citing its source (Ornith: the README's general setting). vLLM applies one by
+   default (`--generation-config auto`) but reads only temperature, top_k, top_p, min_p,
+   repetition_penalty and max_new_tokens -- a presence penalty can only be a line on the card.
+   The card should say where the values came from.
 
 → docs/calibration.md
 
