@@ -1616,7 +1616,12 @@ the Hessians see) and for eval (the text every card number is measured on). Noti
    model-card prose, nowhere in metadata, and how many users follow them is arguable.
    Options: the base default only; a per-model override file; or vary sampling across
    conversations the way eval already varies thinking settings.
-3. Does it cost the quants anything? Proxy, no conversions needed: regenerate Ornith's eval
+3. ~~Does it cost the quants anything?~~ **No (2026-10-04).** WildChat regenerated with
+   Ornith's general setting minus the penalty (temperature 1.0, top-k 20, top-p 0.95): bf16's
+   perplexity on its own text 1.463 -> 1.577, every group's excess +2-4%, default/uncalibrated
+   0.588 -> 0.589, mix/default 0.906 -> 0.883. The old-sampling calibration data stays; eval
+   traces move to model sampling, and old/new absolute numbers are not mixed. The test was:
+   Proxy, no conversions needed: regenerate Ornith's eval
    traces (bf16) with the model's own sampling and rescore the existing draws -- default,
    mix (built from old-sampling calibration traces) and uncalibrated. Compare *within* the
    corrected instrument (scores on different text are not comparable across instruments):

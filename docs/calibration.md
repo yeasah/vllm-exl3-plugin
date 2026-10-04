@@ -295,6 +295,25 @@ the stronger evidence. Own voice was scored on 25 of the 30 held-out prompts: th
 pipeline's first calibration trace did not exclude the held-out set, and the 5 it used
 are dropped from the eval (the pipeline now excludes them from calibration).
 
+## Eval sampling does not reorder calibrations (2026-10-04)
+
+Every trace until now was sampled with exllamav3's default (temperature 0.8, min-p 0.08),
+which is no model's recommendation. WildChat regenerated from bf16 with Ornith-1.5-9B's
+general-task setting minus its presence penalty (temperature 1.0, top-k 20, top-p 0.95;
+see TODO `trace-sampling` for why the penalty waits), and the same 4 bpw draws rescored:
+
+| | default sampling | model sampling |
+|---|---|---|
+| bf16 perplexity on its own text | 1.463 | 1.577 |
+| mix / default | 0.906 | 0.883 |
+| default / uncalibrated | 0.588 | 0.589 |
+| mix / uncalibrated | 0.533 | 0.520 |
+
+Hotter text raises every group's excess KLD 2-4%, and leaves the standings where they were;
+the mix's margin, if anything, widens (about 2 standard errors at 3-4 draws a side). The
+calibration data built with default sampling stays; eval traces use the model's own sampling
+from here on, and absolute numbers from the two are not mixed.
+
 ## Each calibration protects the regime it contains
 
 The same comparison across the three calibrations measured, by the kind of input:
