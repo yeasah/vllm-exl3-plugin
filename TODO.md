@@ -1613,9 +1613,13 @@ for eval (the text every card number is measured on). Noticed 2026-10-03.
    model-card prose, nowhere in metadata, and how many users follow them is arguable.
    Options: the base default only; a per-model override file; or vary sampling across
    conversations the way eval already varies thinking settings.
-3. How much does it move anything? A cheap check: regenerate one eval slice on Ornith with
-   the model's own defaults and see whether calibration rankings change. If not, it is a
-   correctness fix for future sets, not a reason to redo past measurements.
+3. Does it cost the quants anything? Proxy, no conversions needed: regenerate Ornith's eval
+   traces (bf16) with the model's own sampling and rescore the existing draws -- default,
+   mix (built from old-sampling calibration traces) and uncalibrated. Compare *within* the
+   corrected instrument (scores on different text are not comparable across instruments):
+   if the mix keeps its margin over default and uncalibrated, the old-sampling calibration
+   data is fine and only scoring changes going forward; if the margin shrinks, regenerate
+   the calibration trace with corrected sampling and convert again.
 
 → docs/calibration.md
 
