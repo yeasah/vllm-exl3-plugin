@@ -1593,8 +1593,12 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
    - a work-pattern source rather than more code text: real sessions from varied kinds of
      work (benchmark transcripts; licenses a chore), or an interactive loop where the model
      picks its own tool calls over fixed files;
-   - data formats the corpus nearly lacks (SQL, LaTeX/MathML, XML, diffs) as a document
-     kind, keeping `code.utf8`'s language spread.
+   - data formats as a document kind, keeping `code.utf8`'s language spread. The stress
+     test (docs/calibration.md "Where a calibration misses") ranks them: git diffs first
+     (highest absolute error of realistic content, 0.74 of uncalibrated, absent from the
+     corpus), typed chat transcripts, then written SQL (untested: the stress rows were a
+     package dump). Diff calibration from repositories other than deps/vllm, which the
+     stress trace uses.
 3. *Breadth at 27B:* 2 and 3 bpw, where the default draws were least smooth, and
    gemma-4-12B, the other draw-sensitive model measured (three default draws spread 3.2x
    in median KLD under render).

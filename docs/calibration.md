@@ -382,6 +382,69 @@ tool output arrives, over varied kinds of work rather than one repository-fix pa
 scripted loops have the shape but not that: their tool calls are fixed, and the model only
 writes the final answer.
 
+## Where a calibration misses: a stress test (2026-10-05)
+
+A calibrated quant minimizes error weighted by the calibration's Hessian, so the error it
+saves in covered input directions goes somewhere: into directions the calibration barely
+excites (floored at `sigma_reg` = 0.025 x mean diagonal, [quantize.py](../deps/exllamav3/exllamav3/modules/quant/exl3_lib/quantize.py)).
+An uncalibrated quant spreads it evenly. Content that lives in those weak directions should
+then do *worse* calibrated than uncalibrated. To find out how much worse, and on what, a
+stress trace of content chosen to miss the corpus (`quantization/stress/build.py`), scored
+on Ornith-1.5-9B 4 bpw: four uncalibrated draws, four of the control mix, three default.
+Non-special tokens only — no added token in any scored span — and no non-canonical
+tokenizations, which are closer to invalid input than to content. Each 2048-token row is
+scored on its last 1024 tokens, which also keeps the first positions out of it.
+
+Ratio of calibrated to uncalibrated excess KLD (below 1, calibration helped):
+
+| family | default / unc | mix / unc | unc excess per token |
+|---|---|---|---|
+| English wikitext (held out) | 0.56 | 0.52 | 0.073 |
+| **base64 of PNGs** | **1.28** [1.22, 1.35] | **1.28** [1.21, 1.35] | 0.026 |
+| base64 emitted as the assistant's reply | 1.11 | 1.34 | 0.021 |
+| SQL dump (dnf history: mostly INSERTs) | 0.86 | 0.82 | 0.009 |
+| pip RECORD files (paths and base64 hashes) | 0.82 | 0.81 | 0.096 |
+| rare scripts (ka, hy, am, bo, my, km, si, dv Wikipedia) | 0.78 | 0.80 | 0.047 |
+| math alphanumerics, `tree` output, emoji | 0.70-0.80 | 0.70-0.83 | 0.017-0.071 |
+| minified JS, git diffs, SVG, CSV | 0.71-0.78 | 0.69-0.76 | 0.011-0.109 |
+| ru, ar, hi, el, he, th, fa, uk Wikipedia | 0.70 | 0.69 | 0.045 |
+| chat markup typed as plain text | 0.70 | 0.66 | 0.223 |
+| hex dumps, LaTeX, XML | 0.60-0.67 | 0.66-0.69 | 0.012-0.049 |
+
+And by position, on 32k-token rows (public-domain books from pg19, concatenated source
+trees), against calibration rows that are 2048 tokens long:
+
+| position | 512 | 2k | 4k | 8k | 16k | 32k |
+|---|---|---|---|---|---|---|
+| books, mix / unc | 0.58 | 0.56 | 0.59 | 0.64 | 0.62 | 0.57 |
+| code, mix / unc | 0.62 | 0.61 | 0.59 | 0.58 | 0.49 | 0.50 |
+
+What it says:
+- **Most of calibration's gain is not about content.** Even Tibetan, emoji and hex dumps
+  keep 20-35% less error than uncalibrated: the Hessian's dominant structure (outlier
+  channels, the directions every input excites) is common to all text. The content-specific
+  part is the layer on top — 0.52 on prose like the corpus against 0.70-0.80 far from it.
+  Distance from the corpus is a gradient of shrinking benefit, not a sign flip.
+- **Context length is not a miss.** Positions up to 32k keep the benefit of 2048-token
+  calibration rows.
+- **The one flip is base64**: 28% worse than uncalibrated, both calibrations alike.
+  Near-uniform text over a 64-character alphabet, cut by the tokenizer into odd fragments,
+  is neither the corpus nor its random-token rows (uniform over the vocabulary); hex dumps,
+  as high-entropy but heavily structured, are fine at 0.67. It is large in relative and
+  small in absolute terms (calibrated, 0.033 per token, below prose's 0.038), and not
+  content worth calibrating for — but it is a ready worst case whenever one is needed.
+- **The stakes are absolute error times how common the content is.** By that, git diffs
+  stand out: the highest absolute excess of any realistic content (0.109 per token
+  uncalibrated, about 0.08 calibrated, twice prose), a 0.74 ratio, and constant in agent
+  work. Typed chat markup is higher still (0.22). SQL's ratio is poor but these rows are a
+  package-history dump with tiny absolute error; written schemas and queries are untested.
+- Repetition (a token, a short cycle, a sentence, repeated) cannot be read: the model is so
+  sure of it that the bf16 noise floor rivals the quants' excess, and the ratios' intervals
+  cross zero.
+
+Not run: the per-layer ceiling (Hessian eigenvectors against the dequantized weights) and a
+token search for worse than base64; the stakes above did not call for them.
+
 ## Each calibration protects the regime it contains
 
 The same comparison across the three calibrations measured, by the kind of input:
