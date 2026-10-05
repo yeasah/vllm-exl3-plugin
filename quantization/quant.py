@@ -69,10 +69,10 @@ class Job:
 # of its own -- with thinking on at medium effort and 1024 new tokens, the setup measured.
 CAL_TEMPLATE_VARS = '{"enable_thinking": true, "reasoning_effort": "medium"}'
 CAL_MAX_NEW_TOKENS = 1024
-# Calibration mix shares. agent: real coding-agent sessions (mini-swe-agent, Qwen3.8-27B, on
-# swe-rebench-v2 minus the eval slice's repositories), one or two 2048-token windows each,
-# 2026-10-04; it takes most of the scripted tool loops' share, which it is the real version of
-CAL_SHARES = {"raw": 0.20, "ctx": 0.30, "loop": 0.15, "agent": 0.20, "self": 0.10, "random": 0.05}
+# Calibration mix shares. No agent share: real coding-agent sessions (mini-swe-agent on
+# swe-rebench-v2) at 0.20 cost 3% on wild with no measurable swe gain on Ornith-9B, 2026-10-05
+# (docs/calibration.md); ctx_trace.py keeps the slice for a work-pattern source
+CAL_SHARES = {"raw": 0.25, "ctx": 0.35, "loop": 0.25, "self": 0.10, "random": 0.05}
 # The card's composite is the independent tier only (TODO.md card-composite): real users'
 # first prompts (WildChat) and real coding-agent sessions (Open-SWE-Traces), as
 # (conversations, weight). Eval traces come from bf16: a calibration scores worse on another

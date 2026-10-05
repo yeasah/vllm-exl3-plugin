@@ -1580,11 +1580,21 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
 2a. *27B eval traces need a generator:* exllamav3 reads FP8 only by dequantizing at load
    (54 GB for Qwen3.8-27B), so it is bf16 on the vast box, or a vLLM-backed generator for
    FP8 locally.
-2. *An agentic calibration slice, at 27B.* Real coding-agent sessions are where draws
-   still spread (0.73-0.89 for the mix, 0.94-1.23 for default); the mix's scripted loops
-   do not cover them, and the proxy cannot test it. Source: Open-SWE-Traces'
-   minisweagent sessions from the Qwen family on scale-swe tasks — disjoint in harness,
-   generator and task pool from the `swe` eval slice.
+2. *An agentic calibration slice.* Real coding-agent sessions are where draws still
+   spread (0.73-0.89 for the mix, 0.94-1.23 for default at 27B). Tried on the proxy
+   2026-10-05 as Open-SWE-Traces' minisweagent/qwen38_27b sessions at a 0.20 share: wild
+   3% worse, swe not measurably better (docs/calibration.md "An agentic calibration
+   slice"); `CAL_SHARES` reverted, `ctx_trace.py` keeps the slice. What remains:
+   - the 200-session swe eval says the slice is worth about 5% on swe (agent/control 0.944
+     [0.883, 1.014]; largest in Rust and Go), not enough to pay for 3% on wild at these
+     shares; a share that takes nothing from ctx would say whether the wild cost is
+     dilution. The card's swe slice should move to 200 sessions (`card-composite`), scored
+     in chunks: qbench's streamed reference holds all rows' activations on the device;
+   - a work-pattern source rather than more code text: real sessions from varied kinds of
+     work (benchmark transcripts; licenses a chore), or an interactive loop where the model
+     picks its own tool calls over fixed files;
+   - data formats the corpus nearly lacks (SQL, LaTeX/MathML, XML, diffs) as a document
+     kind, keeping `code.utf8`'s language spread.
 3. *Breadth at 27B:* 2 and 3 bpw, where the default draws were least smooth, and
    gemma-4-12B, the other draw-sensitive model measured (three default draws spread 3.2x
    in median KLD under render).
