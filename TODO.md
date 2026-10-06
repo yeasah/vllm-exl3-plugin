@@ -1595,8 +1595,8 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
      picks its own tool calls over fixed files;
    - data formats as a document kind: diffs done on the proxy 2026-10-05 (CommitPackFT,
      `--doc_kinds ...,diff`): held-out diffs 0.79 of control, nothing else moves
-     (docs/calibration.md "Diffs as a calibration document kind"). Adoption into
-     `quant.py` pending. Next by the stress test's ranking: typed chat transcripts, then
+     (docs/calibration.md "Diffs as a calibration document kind"). In `quant.py`
+     (`CAL_DOC_KINDS`) since 2026-10-05; unconfirmed at 27B. Next by the stress test's ranking: typed chat transcripts, then
      written SQL (CommitPackFT has a sql set).
 3. *Breadth at 27B:* 2 and 3 bpw, where the default draws were least smooth, and
    gemma-4-12B, the other draw-sensitive model measured (three default draws spread 3.2x

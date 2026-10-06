@@ -70,9 +70,13 @@ class Job:
 CAL_TEMPLATE_VARS = '{"enable_thinking": true, "reasoning_effort": "medium"}'
 CAL_MAX_NEW_TOKENS = 1024
 # Calibration mix shares. No agent share: real coding-agent sessions (mini-swe-agent on
-# swe-rebench-v2) at 0.20 cost 3% on wild with no measurable swe gain on Ornith-9B, 2026-10-05
+# swe-rebench-v2) at 0.20 bought ~5% on swe for 3% on wild on Ornith-9B, 2026-10-05
 # (docs/calibration.md); ctx_trace.py keeps the slice for a work-pattern source
 CAL_SHARES = {"raw": 0.25, "ctx": 0.35, "loop": 0.25, "self": 0.10, "random": 0.05}
+# English document kinds for the ctx and loop slices, drawn equally. diff: CommitPackFT commits
+# as `git log -p` shows them; 21% less error on held-out diffs, nothing else moved (Ornith-9B,
+# 2026-10-05, docs/calibration.md "Diffs as a calibration document kind")
+CAL_DOC_KINDS = "web,wiki,technical,code,diff"
 # The card's composite is the independent tier only (TODO.md card-composite): real users'
 # first prompts (WildChat) and real coding-agent sessions (Open-SWE-Traces), as
 # (conversations, weight). Eval traces come from bf16: a calibration scores worse on another
@@ -470,7 +474,7 @@ Wikipedia text apply to the files that contain it, not to the model weights.
 | file | what it is | sources |
 |---|---|---|
 | `calibration.safetensors` | the packed calibration rows passed to exllamav3's `convert.py --cal_data` | as `calibration.json`, plus exllamav3's bundled calibration corpus |
-| `calibration.json` | the conversational calibration trace before packing (documents, tool loops, coding-agent sessions, the model's own answers) | exllamav3's bundled corpus (C4, Wikipedia, code, technical text); Wikipedia 20231101 in 13 languages ([wikimedia/wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia), CC BY-SA 3.0 / GFDL); mini-swe-agent sessions from [nvidia/Open-SWE-Traces](https://huggingface.co/datasets/nvidia/Open-SWE-Traces) (CC BY 4.0), none from a repository the eval uses |
+| `calibration.json` | the conversational calibration trace before packing (documents, commits as diffs, tool loops, the model's own answers) | exllamav3's bundled corpus (C4, Wikipedia, code, technical text); Wikipedia 20231101 in 13 languages ([wikimedia/wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia), CC BY-SA 3.0 / GFDL); commits from [bigcode/commitpackft](https://huggingface.co/datasets/bigcode/commitpackft) (MIT; only samples whose repository license is permissive, each under that license) |
 | `calibration.manifest.json` | slice shares and composition of the packed rows | - |
 | `sampling.json` | how every trace here was sampled: modes and the rules picking one per conversation; each trace row records its mode | the model publisher's recommendations (source inside) |
 | `eval_wild.json` | the card's real-user-prompt eval: first user turns, answered by the unquantized model | [allenai/WildChat-1M](https://huggingface.co/datasets/allenai/WildChat-1M) (ODC-BY) |
@@ -718,7 +722,7 @@ def do_traces(job, args):
     if not run_until(job.cal_data,
                      [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
                        "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
-                       "--shares", json.dumps(CAL_SHARES),
+                       "--shares", json.dumps(CAL_SHARES), "--doc_kinds", CAL_DOC_KINDS,
                        "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
                        "--exclude_self", EVAL_SELF_PROMPTS, "--exclude_swe_from", job.eval_trace("swe") ] + sampling,
                      job.log("traces-cal"), tries, env=one_gpu):
@@ -778,7 +782,7 @@ def do_quantize(job, args):
             manifest = json.load(f)
         calibration = { "calibration": "conversational mix",
                         "generator": "uncalibrated 8bpw of the base model",
-                        **{k: manifest[k] for k in ("shares", "ml_frac", "cal_rows", "cal_cols", "composition")
+                        **{k: manifest[k] for k in ("shares", "doc_kinds", "ml_frac", "cal_rows", "cal_cols", "composition")
                            if k in manifest} }
     else:
         calibration = { "calibration": "exllamav3 default corpus" }
