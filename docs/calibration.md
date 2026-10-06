@@ -407,7 +407,7 @@ Ratio of calibrated to uncalibrated excess KLD (below 1, calibration helped):
 | rare scripts (ka, hy, am, bo, my, km, si, dv Wikipedia) | 0.78 | 0.80 | 0.047 |
 | math alphanumerics, `tree` output, emoji | 0.70-0.80 | 0.70-0.83 | 0.017-0.071 |
 | minified JS, git diffs, SVG, CSV | 0.71-0.78 | 0.69-0.76 | 0.011-0.109 |
-| ru, ar, hi, el, he, th, fa, uk Wikipedia | 0.70 | 0.69 | 0.045 |
+| ru, ar, hi, el, he, th, fa, uk Wikipedia (ru, ar, hi are in the calibration's 13) | 0.70 | 0.69 | 0.045 |
 | chat markup typed as plain text | 0.70 | 0.66 | 0.223 |
 | hex dumps, LaTeX, XML | 0.60-0.67 | 0.66-0.69 | 0.012-0.049 |
 
@@ -444,6 +444,34 @@ What it says:
 
 Not run: the per-layer ceiling (Hessian eigenvectors against the dequantized weights) and a
 token search for worse than base64; the stakes above did not call for them.
+
+## Diffs as a calibration document kind (2026-10-05)
+
+The stress test ranked git diffs first among realistic content the corpus misses. Added as a
+fifth English document kind (`ctx_trace.py --doc_kinds web,wiki,technical,code,diff`):
+CommitPackFT commits (MIT; each sample's repository license is checked, permissive only),
+rendered as `git log -p` shows them, six commits of one language per pool entry, 30
+languages and formats drawn equally (the usual code languages plus YAML, JSON, markdown,
+HTML, CSS, SQL, TOML, XML, TeX, Makefile, CMake). They enter the ctx and loop slices as a
+pasted patch or a tool's output; shares unchanged, so the other four kinds each give up a
+fifth of their documents. Calibration and eval take disjoint repositories (crc32 of the
+repository name). Four 4 bpw draws against the control mix's four:
+
+| eval | diff mix / control mix [90%] | draw sd, control → diff |
+|---|---|---|
+| **held-out diffs, CommitPackFT eval repositories (29 rows, one per language)** | **0.789** [0.695, 0.890] | |
+| **held-out diffs, deps/vllm git log (the stress rows)** | **0.789** [0.705, 0.881] | |
+| wild | 1.004 [0.981, 1.026] | 1.1% → 1.9% |
+| swe (200 sessions) | 1.003 [0.947, 1.062] | 2.2% → 5.6% |
+| ctx_user, ctx_tool, ctx_ml, loop, self | 0.984-1.016, every interval across 1 | |
+
+Against uncalibrated, diffs go from 0.71-0.73 (control) to 0.56-0.58: about where English
+prose sits (0.52), from the worst-placed realistic content in the stress test. The gain
+holds on the vllm rows, a repository and era CommitPackFT does not contain, and across
+languages (per-row diff/control 0.62-0.95 for 27 of 29; Go and Lua near 1, single rows).
+Nothing else measurably moves; the composite is 1.004. It does not help the swe slice —
+the model's own turns in an agent session are not diffs, even where the session is about
+one.
 
 ## Each calibration protects the regime it contains
 

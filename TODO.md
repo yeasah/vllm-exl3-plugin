@@ -1593,12 +1593,11 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
    - a work-pattern source rather than more code text: real sessions from varied kinds of
      work (benchmark transcripts; licenses a chore), or an interactive loop where the model
      picks its own tool calls over fixed files;
-   - data formats as a document kind, keeping `code.utf8`'s language spread. The stress
-     test (docs/calibration.md "Where a calibration misses") ranks them: git diffs first
-     (highest absolute error of realistic content, 0.74 of uncalibrated, absent from the
-     corpus), typed chat transcripts, then written SQL (untested: the stress rows were a
-     package dump). Diff calibration from repositories other than deps/vllm, which the
-     stress trace uses.
+   - data formats as a document kind: diffs done on the proxy 2026-10-05 (CommitPackFT,
+     `--doc_kinds ...,diff`): held-out diffs 0.79 of control, nothing else moves
+     (docs/calibration.md "Diffs as a calibration document kind"). Adoption into
+     `quant.py` pending. Next by the stress test's ranking: typed chat transcripts, then
+     written SQL (CommitPackFT has a sql set).
 3. *Breadth at 27B:* 2 and 3 bpw, where the default draws were least smooth, and
    gemma-4-12B, the other draw-sensitive model measured (three default draws spread 3.2x
    in median KLD under render).
