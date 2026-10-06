@@ -1590,9 +1590,12 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
      shares; a share that takes nothing from ctx would say whether the wild cost is
      dilution. The card's swe slice should move to 200 sessions (`card-composite`), scored
      in chunks: qbench's streamed reference holds all rows' activations on the device;
-   - a work-pattern source rather than more code text: real sessions from varied kinds of
-     work (benchmark transcripts; licenses a chore), or an interactive loop where the model
-     picks its own tool calls over fixed files;
+   - a work-pattern source rather than more code text: bounded on the proxy 2026-10-06
+     (docs/calibration.md "Headroom for a work-pattern slice"): swe keeps ~11% more of its
+     uncalibrated error than wild under every calibration, so at most ~2% composite, half of
+     which real sessions already showed costs more than it buys. Parked unless 27B shows a
+     larger swe-to-wild gap; the design if so is an interactive loop over the existing
+     document pools (the local terminal-bench archive is all GPQA, one tool call each);
    - data formats as a document kind: diffs done on the proxy 2026-10-05 (CommitPackFT,
      `--doc_kinds ...,diff`): held-out diffs 0.79 of control, nothing else moves
      (docs/calibration.md "Diffs as a calibration document kind"). In `quant.py`

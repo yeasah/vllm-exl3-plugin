@@ -445,6 +445,37 @@ What it says:
 Not run: the per-layer ceiling (Hessian eigenvectors against the dequantized weights) and a
 token search for worse than base64; the stakes above did not call for them.
 
+## Headroom for a work-pattern slice (2026-10-06)
+
+Whether calibrating on the model's own mid-task work (planning, reading and revising between
+tool results) could buy anything: the swe slice already scores exactly that — the model's next
+turn inside a real session — so the question is whether it gets less of calibration's benefit
+than chat does. Four uncalibrated 4 bpw draws scored on every eval slice, ratios of excess KLD
+to theirs (Ornith-1.5-9B, [90%] over draws and rows):
+
+| slice | default / unc | control mix / unc | diff mix / unc | agent mix / unc |
+|---|---|---|---|---|
+| wild | 0.585 | 0.515 [0.494, 0.538] | 0.517 | 0.531 |
+| ctx_user | 0.539 | 0.445 | 0.449 | 0.455 |
+| ctx_tool | 0.626 | 0.514 | 0.518 | 0.518 |
+| ctx_ml | 0.621 | 0.523 | 0.527 | 0.563 |
+| loop | 0.626 | 0.515 | 0.507 | 0.524 |
+| self | 0.628 | 0.548 | 0.557 | 0.569 |
+| **swe (200 sessions)** | **0.650** | **0.580** [0.548, 0.616] | 0.582 | **0.548** [0.508, 0.595] |
+
+Swe does lag: about 13% more of its uncalibrated error left than wild keeps. But the lag is
+the same under the default corpus (0.650 / 0.585, 11%) as under the mix (0.580 / 0.515), which
+added documents, tool loops and own voice and moved swe and wild in proportion. So the gap is
+not something the mix's structure left uncovered; whatever swe is made of takes calibration
+less well whatever the corpus. Real agent sessions closed about half of it (0.548), at the
+cost on wild and ctx_ml measured above — ctx_ml, at 0.563, is the dilution the agent share
+caused. The scripted loops' own slice is as well covered as chat (0.515).
+
+The bound this puts on a work-pattern slice: at most swe's gap to wild, about 11% on swe and
+2% on the 0.20-weighted composite, of which real sessions already showed half costs more
+elsewhere than it buys. Not worth an interactive generator at this size; it stays a candidate
+if 27B shows a larger gap.
+
 ## Diffs as a calibration document kind (2026-10-05)
 
 The stress test ranked git diffs first among realistic content the corpus misses. Added as a
