@@ -504,6 +504,36 @@ Nothing else measurably moves; the composite is 1.004. It does not help the swe 
 the model's own turns in an agent session are not diffs, even where the session is about
 one.
 
+## Forgotten data: a second stress batch (2026-10-06)
+
+Content agents and users handle constantly that the bundled corpus does not carry, measured
+the same way against the current mix (diffs included) and the default corpus
+(`quantization/stress/forgotten.py`; CommitPackFT file contents from repositories the diff
+calibration never sampled; logs, errors and terminal output from this host, measurement
+only). Excess KLD per token and ratio to uncalibrated, worst first:
+
+| family | unc / token | mix / token | default / unc | mix / unc [90%] | mix / default | bf16 floor / token |
+|---|---|---|---|---|---|---|
+| errors (tracebacks, interpreter and g++ errors) | 1.083 | 0.837 | 0.77 | 0.77 [0.72, 0.82] | 1.00 | 0.149 |
+| run logs (convert, qbench, ctx_trace; progress bars) | 0.397 | 0.295 | 0.65 | 0.74 [0.66, 0.83] | **1.14** | 0.070 |
+| TOML, markdown, notebooks, INI | 0.015-0.042 | 0.010-0.028 | 0.68-0.73 | 0.67-0.70 | 0.93-1.02 | ~0.001 |
+| terminal output (ls, ps, df, git log --stat, rpm -qa ...) | 0.105 | 0.070 | 0.71 | 0.66 [0.62, 0.73] | 0.94 | 0.006 |
+| *Python files (control)* | 0.027 | 0.018 | 0.69 | 0.65 [0.61, 0.71] | 0.94 | 0.001 |
+| YAML, reStructuredText, Makefiles, JSON | 0.031-0.045 | 0.019-0.029 | 0.65-0.81 | 0.61-0.64 | 0.76-0.95 | ~0.001 |
+| SQL files | 0.022 | 0.013 | 0.63 | 0.58 [0.55, 0.62] | 0.92 | 0.001 |
+| CSV | 0.133 | 0.077 | 0.61 | 0.58 [0.49, 0.66] | 0.95 | 0.023 |
+| *wikitext (control)* | 0.079 | 0.040 | 0.54 | 0.50 [0.39, 0.61] | 0.93 | 0.007 |
+
+Written SQL is fine — better covered than Python; the first stress batch's poor SQL number
+was its package-history dump. Configuration, data and documentation formats sit with code
+(0.58-0.70), and JSON gains most from the diffs (mix / default 0.76). Only errors and logs
+stand out: a weaker ratio, the largest absolute error of anything realistic measured
+(0.3-0.8 per token calibrated, 7-20x prose), and logs are the one family where the mix is
+worse than the default corpus. Both carry the typed-transcript signature too — a bf16 floor
+10-20x prose's — so part of it is the model's own fragility there. Caveats: the errors are
+few and distinct (tiled to fill windows), and the logs are this project's own, dominated by
+progress bars; neither is a fair sample yet.
+
 ## Each calibration protects the regime it contains
 
 The same comparison across the three calibrations measured, by the kind of input:

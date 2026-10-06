@@ -1599,8 +1599,12 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
    - data formats as a document kind: diffs done on the proxy 2026-10-05 (CommitPackFT,
      `--doc_kinds ...,diff`): held-out diffs 0.79 of control, nothing else moves
      (docs/calibration.md "Diffs as a calibration document kind"). In `quant.py`
-     (`CAL_DOC_KINDS`) since 2026-10-05; unconfirmed at 27B. Next by the stress test's ranking: typed chat transcripts, then
-     written SQL (CommitPackFT has a sql set).
+     (`CAL_DOC_KINDS`) since 2026-10-05; unconfirmed at 27B. A second stress batch
+     (docs/calibration.md "Forgotten data") cleared written SQL, configs, data formats and
+     terminal output (0.58-0.70 of uncalibrated, with code); only logs and error output
+     stand out (0.74-0.77, the largest absolute error measured, mix worse than default on
+     logs), on unrepresentative samples. Next if pursued: a fair log/error sample (output
+     of really building and testing a spread of open-source projects), then decide.
 3. *Breadth at 27B:* 2 and 3 bpw, where the default draws were least smooth, and
    gemma-4-12B, the other draw-sensitive model measured (three default draws spread 3.2x
    in median KLD under render).
