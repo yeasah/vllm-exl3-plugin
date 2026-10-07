@@ -534,6 +534,40 @@ worse than the default corpus. Both carry the typed-transcript signature too —
 few and distinct (tiled to fill windows), and the logs are this project's own, dominated by
 progress bars; neither is a fair sample yet.
 
+## Logs as a calibration document kind (2026-10-06, in progress)
+
+The forgotten-data batch's one standout, on a fair sample: `quantization/stress/logcorpus.py`
+builds and tests 24 permissively licensed projects (Python, C, Rust, Go, Node, Java; 4 each,
+one per ecosystem held out for eval) in their official container images, clean and with an
+injected fault (a flipped comparison; a misspelled identifier), as terminal transcripts.
+Scored on the held-out projects (toolz, zlib, itoa, yargs, jsoup; Go's is too terse for a
+row), the current mix keeps 0.733 [0.69, 0.77] of uncalibrated error against code's 0.65, at
+0.77 excess KLD per token — the most of any realistic content, about 20x prose — and a bf16
+floor of 0.15 per token, 24x prose's: most of the absolute error is the model's own
+fragility, the copy-heavy structure of logs, and stays whatever the calibration. The mix
+does no worse than the default corpus here (1.00); the 1.14 on our own run logs was their
+progress bars.
+
+Added as a sixth English document kind, drawn equally with the others:
+
+| eval | log mix / diff mix [90%] | diff mix / unc | log mix / unc |
+|---|---|---|---|
+| held-out logs | **0.892** [0.845, 0.925] | 0.733 | 0.654 |
+| held-out diffs | **1.177** [1.064, 1.307] | 0.561 | 0.661 |
+| wild, swe, ctx_user, ctx_tool, self | 0.980-1.006 | | |
+| ctx_ml, loop | 1.041, 1.024 (intervals reach 1) | | |
+
+Logs come to where code sits; diffs give most of their gain back, and as a lottery rather
+than a uniform loss — the log mix's four draws on the diff eval read 0.757, 0.645, 0.664,
+0.578 against the diff mix's 0.550-0.573. A sixth kind cut diff tokens from 59k to 48k, and
+that was enough: diff coverage sits near a threshold, every draw good above it, draws
+spreading below — the uncovered-regime signature again. Composite 0.995.
+
+`--doc_kinds` now takes per-kind weights (`kind:weight`, documents in proportion, applied
+in ctx and loop alike). A weighted arm keeps diffs at their token count (diff 1.27, log 1.08,
+the four prose and code kinds 1.0: about 20% and 17% of English documents), paying for logs
+out of prose, the best-covered content measured.
+
 ## Each calibration protects the regime it contains
 
 The same comparison across the three calibrations measured, by the kind of input:
