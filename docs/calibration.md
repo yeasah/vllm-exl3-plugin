@@ -534,7 +534,7 @@ worse than the default corpus. Both carry the typed-transcript signature too —
 few and distinct (tiled to fill windows), and the logs are this project's own, dominated by
 progress bars; neither is a fair sample yet.
 
-## Logs as a calibration document kind (2026-10-06, in progress)
+## Logs as a calibration document kind (2026-10-06 to -07)
 
 The forgotten-data batch's one standout, on a fair sample: `quantization/stress/logcorpus.py`
 builds and tests 24 permissively licensed projects (Python, C, Rust, Go, Node, Java; 4 each,
@@ -564,9 +564,24 @@ that was enough: diff coverage sits near a threshold, every draw good above it, 
 spreading below — the uncovered-regime signature again. Composite 0.995.
 
 `--doc_kinds` now takes per-kind weights (`kind:weight`, documents in proportion, applied
-in ctx and loop alike). A weighted arm keeps diffs at their token count (diff 1.27, log 1.08,
+in ctx and loop alike). A weighted arm kept diffs at their token count (diff 1.27, log 1.08,
 the four prose and code kinds 1.0: about 20% and 17% of English documents), paying for logs
-out of prose, the best-covered content measured.
+out of prose, the best-covered content measured:
+
+| eval | weighted / diff mix [90%] | weighted / equal-weight log mix | weighted / unc |
+|---|---|---|---|
+| held-out logs | 0.921 [0.876, 0.963] | 1.033 | 0.676 |
+| held-out diffs | 1.064 [0.975, 1.165] | 0.903 | 0.597 |
+| wild | 1.019 [0.997, 1.044] | 1.021 | 0.527 |
+| swe, ctx_user, ctx_tool, self | 0.981-1.001 | | |
+| ctx_ml, loop | 1.043, 1.031 (intervals reach 1) | | |
+
+Diff tokens held, and the diff lottery did not close: draws 0.647, 0.559, 0.559, 0.623
+against the diff mix's 0.550-0.573. So the threshold is not diff tokens alone — logs, close
+to diffs in what they excite, interfere with diff coverage whatever the counts. The log gain
+shrinks to 8%, wild pays 2%, the composite is 1.011. Logs stay out of the mix: the diff mix
+holds, and `logcorpus.py` and its corpus remain a stress instrument, unpublished. Most of
+logs' absolute error is the bf16 floor anyway, which no calibration reaches.
 
 ## Each calibration protects the regime it contains
 

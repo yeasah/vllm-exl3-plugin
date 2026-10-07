@@ -1603,8 +1603,10 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
      (docs/calibration.md "Forgotten data") cleared written SQL, configs, data formats and
      terminal output (0.58-0.70 of uncalibrated, with code); only logs and error output
      stand out (0.74-0.77, the largest absolute error measured, mix worse than default on
-     logs), on unrepresentative samples. Next if pursued: a fair log/error sample (output
-     of really building and testing a spread of open-source projects), then decide.
+     logs), on unrepresentative samples. Logs tried 2026-10-06/07 on a fair sample
+     (`logcorpus.py`): 8-11% better on logs but they bring back the diff lottery even
+     at equal diff tokens, composite 0.995-1.011; not adopted (docs/calibration.md "Logs as
+     a calibration document kind"). The forgotten-data search ends here for the proxy.
 3. *Breadth at 27B:* 2 and 3 bpw, where the default draws were least smooth, and
    gemma-4-12B, the other draw-sensitive model measured (three default draws spread 3.2x
    in median KLD under render).
