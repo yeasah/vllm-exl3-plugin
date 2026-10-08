@@ -93,6 +93,29 @@ EVAL_SELF_PROMPTS = os.path.join(HERE, "eval_self_prompts.json")       # held ou
 CODE_DOCS = os.path.join(HERE, "..", "deps", "vllm", "vllm", "**", "*.py")   # code documents for ctx slices
 
 
+def eval_generator_named(job):
+    """The repo that wrote the eval traces' answers, when it is not the base model itself (e.g. an
+    FP8 release generated through vLLM); None for the base model or no trace."""
+    path = job.eval_trace(next(iter(EVAL_SLICES)))
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        model = json.load(f).get("model", "")
+    m = re.search(r"models--([^/]+?)--([^/]+)/snapshots/", model)
+    repo = f"{m.group(1)}/{m.group(2)}" if m else model
+    return None if repo == job.base_repo else repo
+
+def eval_generator(job, args):
+    """(model path, backend args) for the eval traces. Never an EXL3 checkpoint: eval text from a
+    quant scores one calibration against another quant's sampled text (docs/calibration.md)."""
+    src = args.eval_generator or job.base_repo
+    path = src if os.path.isdir(src) else snapshot_download(repo_id=src)
+    qc = json.load(open(os.path.join(path, "config.json"))).get("quantization_config") or {}
+    if qc.get("quant_method") == "exl3" or os.path.isfile(os.path.join(path, "quantization_config.json")):
+        raise SystemExit(f"--eval-generator {src} is an EXL3 checkpoint; eval traces must come from the base model or an FP8/bf16 release")
+    backend = ["--backend", "vllm", "--vllm", args.vllm_args] if args.eval_backend == "vllm" else []
+    return path, backend
+
 def collect_metadata(job, qbench):
     """qbench: {slice: results list}. Excess KLD is each quant's KLD minus the slice's noise
     floor (bf16 rounding noise), so slices with different floors add up meaningfully."""
@@ -102,6 +125,8 @@ def collect_metadata(job, qbench):
     base_sizes = tensor_survey_remote(job.base_repo, 'main')
     data['base_disk_bytes'] = base_sizes['total']
     data['multimodal'] = base_sizes['encoder'] > 0
+
+    data['eval_generator'] = eval_generator_named(job)
 
     floor = {sl: parse_qbench(res, 'Noise floor')['kld'] for sl, res in qbench.items()}
     ref_ppl = {sl: next(r['ppl'] for r in res if r.get('group') == 'reference')
@@ -697,22 +722,24 @@ def do_traces(job, args):
     check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "torch-c10cuda-fix.sh")
     if subprocess.call([check, "--check"]):
         print("!! torch is not patched for pytorch#196258; a multi-GPU bf16 run may fault (fork free_mem() covers load)")
+    eval_path, eval_backend = eval_generator(job, args)
+    eval_desc = f"{args.eval_generator or 'bf16'}" + (" via vLLM" if eval_backend else "")
     for sl, (n, _) in EVAL_SLICES.items():
-        print(f"=== eval trace ({sl}, {n} conversations, bf16) -> {job.eval_trace(sl)} ===")
+        print(f"=== eval trace ({sl}, {n} conversations, {eval_desc}) -> {job.eval_trace(sl)} ===")
         if not run_until(job.eval_trace(sl),
-                         [ "python3", "-u", ctx_trace, "-m", path, "-cs", "65536",
+                         [ "python3", "-u", ctx_trace, "-m", eval_path, "-cs", "65536",
                            "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
-                           "--slices", sl, "-n", str(n), "--seed", str(EVAL_SEED) ] + sampling,
+                           "--slices", sl, "-n", str(n), "--seed", str(EVAL_SEED) ] + sampling + eval_backend,
                          job.log(f"traces-eval-{sl}"), tries,
                          env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
             print(f"=== eval trace {sl} FAILED ==="); return False
 
-    print(f"=== diagnostic eval traces ({', '.join(DIAG_SLICES)}, {DIAG_N} each, bf16) ===")
+    print(f"=== diagnostic eval traces ({', '.join(DIAG_SLICES)}, {DIAG_N} each, {eval_desc}) ===")
     if not run_until(job.eval_trace(list(DIAG_SLICES)[-1]),
-                     [ "python3", "-u", ctx_trace, "-m", path, "-cs", "65536",
+                     [ "python3", "-u", ctx_trace, "-m", eval_path, "-cs", "65536",
                        "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
                        "--slices", ",".join(DIAG_SLICES), "-n", str(DIAG_N), "--seed", str(EVAL_SEED),
-                       "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ] + sampling,
+                       "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ] + sampling + eval_backend,
                      job.log("traces-eval-diag"), tries,
                      env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
         print("=== diagnostic eval traces FAILED ==="); return False
@@ -857,6 +884,15 @@ def main():
     cmd_traces.add_argument('--eval-devices', default=None,
                             help='CUDA_VISIBLE_DEVICES for the bf16 eval traces (default: all visible)')
     cmd_traces.add_argument('--retries', type=int, default=2)
+    cmd_traces.add_argument('--eval-generator', default=None,
+                            help='repo or path that writes the eval traces\' answers (default: the base model). '
+                                 'For models too large to generate from locally in bf16, the FP8 release with '
+                                 '--eval-backend vllm. Never an EXL3 checkpoint')
+    cmd_traces.add_argument('--eval-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
+                            help='vllm: one engine per ctx_trace process, with --vllm-args')
+    cmd_traces.add_argument('--vllm-args', default='{}',
+                            help='vLLM engine arguments, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
+                                 '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')
     cmd_traces.add_argument('--sampling-profile', default=None,
                             help='JSON of sampling modes and per-conversation rules (default: '
                                  'quantization/sampling/<org>__<model>.json, else the base model\'s '
