@@ -79,9 +79,12 @@ CAL_SHARES = {"raw": 0.25, "ctx": 0.35, "loop": 0.25, "self": 0.10, "random": 0.
 CAL_DOC_KINDS = "web,wiki,technical,code,diff"
 # The card's composite is the independent tier only (TODO.md card-composite): real users'
 # first prompts (WildChat) and real coding-agent sessions (Open-SWE-Traces), as
-# (conversations, weight). Eval traces come from bf16: a calibration scores worse on another
-# quant's sampled text, and no pipeline quant may write the text it is judged on.
-EVAL_SLICES = {"wild": (60, 0.80), "swe": (40, 0.20)}
+# (conversations, weight). Eval traces come from bf16 (or an FP8 release): a calibration scores
+# worse on another quant's sampled text, and no pipeline quant may write the text it is judged
+# on. swe is 200 sessions: at 40, three rows carried half the excess and the draw spread was
+# mostly which rows were drawn (docs/calibration.md); qbench streams its 2M+ context tokens in
+# groups that fit the card
+EVAL_SLICES = {"wild": (60, 0.80), "swe": (200, 0.20)}
 EVAL_SEED = 1
 # Diagnostic slices, constructed by ctx_trace.py with scaffolding disjoint from calibration's:
 # never in the composite, only in the card's worst-slice check against a reference ladder

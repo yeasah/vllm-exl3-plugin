@@ -16,6 +16,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# quantization/ (quant.py, stress tests); also needs deps/exllamav3 installed with its eval extras
+quantization = ["huggingface_hub", "jinja2", "matplotlib", "numpy", "pyyaml", "transformers", "datasets", "pyarrow"]
 
 [project.entry-points."vllm.general_plugins"]
 exl3 = "vllm_exl3_plugin:register"
