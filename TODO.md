@@ -1577,9 +1577,12 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
    `ctx_trace.py --repack` away. Baseline first: Ornith's eval traces regenerated from
    bf16 and the default and uncalibrated-generator mix draws re-scored on them. Confirm
    the winner at 27B, which also tests whether the proxy ranks variants as the 27B does.
-2a. *27B eval traces need a generator:* exllamav3 reads FP8 only by dequantizing at load
-   (54 GB for Qwen3.8-27B), so it is bf16 on the vast box, or a vLLM-backed generator for
-   FP8 locally.
+2a. ~~*27B eval traces need a generator*~~ — done 2026-10-07: `ctx_trace.py --backend vllm`
+   generates them locally from Qwen3.8-27B FP8 at TP=2 (fit recipe in the `--vllm` help:
+   1024-token prefill chunks, eager, utilization 0.968, native sampler; ~0.12 GiB of slack).
+   Checked neutral on Ornith-9B: the wild eval regenerated through vLLM bf16 gives the same
+   ratios as exllamav3's (default/unc 0.582 vs 0.585, mix/unc 0.516 vs 0.517). Wiring it into
+   `quant.py traces` for models exllamav3 cannot hold is what remains.
 2. *An agentic calibration slice.* Real coding-agent sessions are where draws still
    spread (0.73-0.89 for the mix, 0.94-1.23 for default at 27B). Tried on the proxy
    2026-10-05 as Open-SWE-Traces' minisweagent/qwen38_27b sessions at a 0.20 share: wild
