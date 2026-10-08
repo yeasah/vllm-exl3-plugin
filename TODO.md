@@ -1592,8 +1592,8 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
    - the 200-session swe eval says the slice is worth about 5% on swe (agent/control 0.944
      [0.883, 1.014]; largest in Rust and Go), not enough to pay for 3% on wild at these
      shares; a share that takes nothing from ctx would say whether the wild cost is
-     dilution. The card's swe slice should move to 200 sessions (`card-composite`), scored
-     in chunks: qbench's streamed reference holds all rows' activations on the device;
+     dilution. The card's swe slice is 200 sessions since 2026-10-08 (`EVAL_SLICES`);
+     qbench streams long traces in row groups that fit the card;
    - a work-pattern source rather than more code text: bounded on the proxy 2026-10-06
      (docs/calibration.md "Headroom for a work-pattern slice"): swe keeps ~11% more of its
      uncalibrated error than wild under every calibration, so at most ~2% composite, half of
