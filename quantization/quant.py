@@ -9,6 +9,7 @@ import glob as globmod
 import subprocess
 import shutil
 import datetime
+import time
 import yaml
 from jinja2 import Environment, FileSystemLoader
 from huggingface_hub import ModelCard, ModelCardData, HfApi, hf_hub_download, snapshot_download
@@ -678,6 +679,25 @@ def do_qbench(job, args):
                      logit_cache_dir(job, args), "--unused-since", series_start.isoformat() ], job.log("qbench-prune"))
     return True
 
+def stamp():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+class Stamped:
+    """stdout with a timestamp at the start of each of quant.py's own lines. Children's output is
+    copied through .buffer (raw bytes, progress bars intact) and is not touched."""
+    def __init__(self, stream):
+        self._s, self._bol = stream, True
+    def write(self, text):
+        out = []
+        for part in text.splitlines(keepends=True):
+            if self._bol and part.strip():
+                out.append(stamp() + " ")
+            out.append(part)
+            self._bol = part.endswith("\n")
+        return self._s.write("".join(out))
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
 def run_logged(cmd, log_path, env=None, echo=True):
     """Run cmd, echoing its output to the terminal and appending it to log_path.
 
@@ -687,8 +707,9 @@ def run_logged(cmd, log_path, env=None, echo=True):
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     sys.stdout.flush()  # our own === lines must reach the terminal before the child's output
+    t0 = time.time()
     with open(log_path, "ab") as log:
-        log.write(f"\n=== {' '.join(cmd)}\n".encode())
+        log.write(f"\n=== {stamp()} {' '.join(cmd)}\n".encode())
         log.flush()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 env=None if env is None else {**os.environ, **env})
@@ -698,7 +719,11 @@ def run_logged(cmd, log_path, env=None, echo=True):
                 sys.stdout.buffer.flush()
             log.write(chunk)
             log.flush()
-        return proc.wait()
+        rc = proc.wait()
+        dt = time.time() - t0
+        took = f"{dt / 60:.1f} min" if dt >= 60 else f"{dt:.0f} s"
+        log.write(f"\n=== {stamp()} exit {rc} after {took}\n".encode())
+        return rc
 
 def run_until(output, cmd, log_path, tries, env=None, cleanup=None, echo=True):
     """Run cmd until it has produced output, at most `tries` times."""
@@ -998,6 +1023,7 @@ def do_quantize(job, args):
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
 def main():
+    sys.stdout = Stamped(sys.stdout)
     parser = argparse.ArgumentParser()
     parser.add_argument('-x', '--exllamav3dir', default='../deps/exllamav3')
     parser.add_argument('-w', '--workdir', default='work')
