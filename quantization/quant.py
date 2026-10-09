@@ -816,7 +816,10 @@ def do_traces(job, args):
         return False
     path = snapshot_download(repo_id=job.base_repo)
     os.makedirs(job.traces, exist_ok=True)
-    one_gpu = {"CUDA_VISIBLE_DEVICES": str(args.device)}
+    # -d may list several GPUs for the calibration trace (a large generator autosplits over them);
+    # the generator's conversion is single-GPU and sees only the first
+    gen_gpus = gpu_env(",".join(device_slots(args.device)))
+    one_gpu = gpu_env(device_slots(args.device)[0])
     profile = resolve_sampling_profile(job, args, path)
     sampling = ["--sampling_profile", profile] if profile else []
     print(f"=== sampling: {profile or 'exllamav3 default (explicitly requested)'} ===")
@@ -871,7 +874,7 @@ def do_traces(job, args):
                        "--shares", json.dumps(CAL_SHARES), "--doc_kinds", CAL_DOC_KINDS,
                        "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
                        "--exclude_self", EVAL_SELF_PROMPTS, "--exclude_swe_from", job.eval_trace("swe") ] + sampling,
-                     job.log("traces-cal"), tries, env=one_gpu):
+                     job.log("traces-cal"), tries, env=gen_gpus):
         print("=== calibration trace FAILED ==="); return False
     decontaminate_self(job)
     return True
@@ -1003,8 +1006,9 @@ def main():
     subparsers = parser.add_subparsers()
 
     cmd_traces = subparsers.add_parser('traces')
-    cmd_traces.add_argument('-d', '--device', default=0,
-                            help='GPU for the calibration generator and trace')
+    cmd_traces.add_argument('-d', '--device', default='0',
+                            help='GPUs for the calibration generator: its conversion uses the first, the '
+                                 'calibration trace all of them (a large generator autosplits), e.g. 0,1')
     cmd_traces.add_argument('--eval-devices', default=None,
                             help='CUDA_VISIBLE_DEVICES for the bf16 eval traces (default: all visible)')
     cmd_traces.add_argument('--retries', type=int, default=2)
