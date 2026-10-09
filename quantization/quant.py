@@ -643,8 +643,11 @@ def do_qbench(job, args):
     references = []
     for repo in args.reference or []:
         branches = [b.name for b in HfApi().list_repo_refs(repo).branches]
-        ladders = {name: {b: snapshot_download(repo, revision=b) for b in bs}
+        # Rungs below --reference-min-bits are left out (turboderp's SC ladder runs down to 1.4)
+        keep = lambda b: float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits
+        ladders = {name: {b: snapshot_download(repo, revision=b) for b in bs if keep(b)}
                    for name, bs in ladders_of(branches).items()}
+        ladders = {name: bs for name, bs in ladders.items() if bs}
         references.append({"repo": repo, "ladders": ladders})
         arms += [(ref_label(repo, b), p) for bs in ladders.values() for b, p in bs.items()]
     baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
@@ -1023,7 +1026,6 @@ def do_quantize(job, args):
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
 def main():
-    sys.stdout = Stamped(sys.stdout)
     parser = argparse.ArgumentParser()
     parser.add_argument('-x', '--exllamav3dir', default='../deps/exllamav3')
     parser.add_argument('-w', '--workdir', default='work')
@@ -1081,6 +1083,8 @@ def main():
                             help='after a successful series, evict reference logits it did not use')
     cmd_qbench.add_argument('-d', '--device', default='0',
                             help='GPUs, e.g. 0 or 0,1,2,3: one scorer per GPU at a time, the quants of each slice split across them (nvidia-smi numbering)')
+    cmd_qbench.add_argument('--reference-min-bits', type=float, default=0.0,
+                            help='skip reference rungs below this bit rate (e.g. 2.0)')
     cmd_qbench.add_argument('--reference', action='append',
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
@@ -1100,6 +1104,7 @@ def main():
     cmd_upload.set_defaults(func=do_upload)
 
     args = parser.parse_args()
+    sys.stdout = Stamped(sys.stdout)       # after parsing: --help and usage errors stay unstamped
     ok = args.func(Job(args), args)
     sys.exit(0 if ok is not False else 1)
 
