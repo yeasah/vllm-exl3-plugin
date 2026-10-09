@@ -400,7 +400,7 @@ def do_upload(job, args):
                           repo_id=job.repo,
                           revision=rev,
                           # qbench project files hold local paths; their results are published
-                          ignore_patterns=["qbench-*.yaml"])
+                          ignore_patterns=["qbench-*.yaml", "_qbench_parts/*"])
 
 def plot_quality_vs_size(job, meta, path):
     """Section 1 of the card: this card's own checkpoints, quality against size, no comparison."""
@@ -560,7 +560,7 @@ def logit_cache_dir(job, args):
     pruning what one model's bench series did not use cannot touch another model's entries."""
     return os.path.abspath(args.logit_cache or os.path.join(job.dir, "_logit_cache"))
 
-def qbench_project(job, args, slice_, arms):
+def qbench_project(job, args, slice_, arms, results=None):
     """One qbench project per slice: a bf16-generated eval trace, or raw web text. arms: [(label, path)]"""
     project = { "title": f"{job.name}: {slice_}",
                 "logit_cache": { "dir": logit_cache_dir(job, args),
@@ -569,7 +569,7 @@ def qbench_project(job, args, slice_, arms):
                               "repo": job.base_repo, "options": { "streaming": True } } ] +
                           [ { "label": label, "group": "EXL3", "engine": "exllamav3",
                               "source": os.path.abspath(path) } for label, path in arms ],
-                "output": { "results": os.path.abspath(os.path.join(job.main, f"qb_{slice_}.json")) } }
+                "output": { "results": os.path.abspath(results or os.path.join(job.main, f"qb_{slice_}.json")) } }
     if slice_ == "raw":
         # A guard, not a target: raw web text framed as nothing matches no real use
         project["test_data"] = { "source": "openwebtext10k", "rows": 50, "length": 2048, "stride": 2048 }
@@ -577,6 +577,53 @@ def qbench_project(job, args, slice_, arms):
     else:
         project["test_trace"] = os.path.abspath(job.eval_trace(slice_))
     return project
+
+def qbench_parallel(job, args, sl, sl_arms, slots, script):
+    """One slice over several GPUs: the bf16 reference and noise floor first, alone (two scorers
+    missing the cache together would each compute it), then the quants split across the GPUs
+    reading it from the shared cache, then their results merged into qb_<slice>.json in arm
+    order. The reference and floor come from the reference pass; every part recomputes neither."""
+    part_dir = os.path.join(job.main, "_qbench_parts")
+    os.makedirs(part_dir, exist_ok=True)
+    def part(name, part_arms, slot):
+        yml = os.path.join(part_dir, f"qbench-{sl}-{name}.yaml")
+        res = os.path.join(part_dir, f"qb_{sl}-{name}.json")
+        with open(yml, "w") as f:
+            yaml.safe_dump(qbench_project(job, args, sl, part_arms, results=res), f, sort_keys=False)
+        rc = run_logged([ "python3", script, yml, "-d", "0" ], job.log(f"qbench-{sl}-{name}"), gpu_env(slot), echo=False)
+        return res if rc == 0 and os.path.isfile(res) else None
+    print(f"=== qbench {sl}: reference and noise floor on gpu {slots[0]} ===", flush=True)
+    ref = part("ref", [], slots[0])
+    if ref is None:
+        report_failures(["reference"], f"qbench {sl}", {"reference": job.log(f"qbench-{sl}-ref")})
+        return False
+    k = min(len(slots), len(sl_arms))
+    groups = [sl_arms[i::k] for i in range(k)]                # round-robin: neighbouring bitrates spread
+    results = {}
+    def task(i):
+        def run(slot, echo):
+            results[i] = part(f"p{i}", groups[i], slot)
+            return results[i] is not None
+        return f"{sl} part {i} ({len(groups[i])} quants)", run
+    tasks = [task(i) for i in range(k)]
+    failed = run_jobs(tasks, slots[:k], "qbench")
+    if not report_failures(failed, "qbench", {name: job.log(f"qbench-{sl}-p{i}") for i, (name, _) in enumerate(tasks)}):
+        return False
+    with open(ref) as f:
+        merged = [r for r in json.load(f) if r.get("group") in ("reference", "noise_floor")]
+    by_label = {}
+    for i in range(k):
+        with open(results[i]) as f:
+            by_label.update({r["label"]: r for r in json.load(f) if r.get("group") not in ("reference", "noise_floor")})
+    missing = [label for label, _ in sl_arms if label not in by_label]
+    if missing:
+        print(f"=== qbench {sl}: no results for {', '.join(missing)} ===")
+        return False
+    merged += [by_label[label] for label, _ in sl_arms]
+    with open(os.path.join(job.main, f"qb_{sl}.json"), "w") as f:
+        json.dump(merged, f, indent=2)
+    print(f"=== qbench {sl}: {len(sl_arms)} quants over {k} GPUs, merged ===", flush=True)
+    return True
 
 def do_qbench(job, args):
     os.makedirs(job.main, exist_ok=True)
@@ -607,15 +654,21 @@ def do_qbench(job, args):
     print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
     series_start = datetime.datetime.now().replace(microsecond=0)
+    # One scorer per GPU: a second on the same card would size its memory budgets from the same
+    # free VRAM as the first
+    slots = list(dict.fromkeys(device_slots(args.device)))
     for sl in slices:
+        sl_arms = arms + (base_arms if sl in EVAL_SLICES else [])   # the baseline only enters through the composite
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
-        with open(qbench_file, "w") as f:
-            # the baseline only enters through the composite
-            yaml.safe_dump(qbench_project(job, args, sl, arms + (base_arms if sl in EVAL_SLICES else [])),
-                           f, sort_keys=False)
-        rc = run_logged([ "python3", script, qbench_file, "-d", str(args.device) ], job.log(f"qbench-{sl}"))
-        if rc:
-            print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
+        with open(qbench_file, "w") as f:                        # the whole slice, as run (or as merged)
+            yaml.safe_dump(qbench_project(job, args, sl, sl_arms), f, sort_keys=False)
+        if len(slots) == 1 or len(sl_arms) < 2:
+            rc = run_logged([ "python3", script, qbench_file, "-d", "0" ], job.log(f"qbench-{sl}"), gpu_env(slots[0]))
+            if rc:
+                print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
+                return False
+            continue
+        if not qbench_parallel(job, args, sl, sl_arms, slots, script):
             return False
     # The series succeeded: reference logits it did not use (a superseded eval trace, a dropped
     # reference) can only be dead weight. Results and KL vectors are never pruned.
@@ -625,7 +678,7 @@ def do_qbench(job, args):
                      logit_cache_dir(job, args), "--unused-since", series_start.isoformat() ], job.log("qbench-prune"))
     return True
 
-def run_logged(cmd, log_path, env=None):
+def run_logged(cmd, log_path, env=None, echo=True):
     """Run cmd, echoing its output to the terminal and appending it to log_path.
 
     convert.py's `!!` warnings (non-finite rows, Cholesky retries, fallbacks) and its
@@ -640,13 +693,14 @@ def run_logged(cmd, log_path, env=None):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 env=None if env is None else {**os.environ, **env})
         while chunk := os.read(proc.stdout.fileno(), 65536):
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
+            if echo:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
             log.write(chunk)
             log.flush()
         return proc.wait()
 
-def run_until(output, cmd, log_path, tries, env=None, cleanup=None):
+def run_until(output, cmd, log_path, tries, env=None, cleanup=None, echo=True):
     """Run cmd until it has produced output, at most `tries` times."""
     for attempt in range(1, tries + 1):
         if os.path.exists(output):
@@ -655,8 +709,70 @@ def run_until(output, cmd, log_path, tries, env=None, cleanup=None):
             print(f"=== ATTEMPT {attempt} of {tries} for {output} ===")
             if cleanup:
                 cleanup()
-        run_logged(cmd, log_path, env)
+        run_logged(cmd, log_path, env, echo)
     return os.path.exists(output)
+
+def device_slots(spec):
+    """-d for quantize/baseline/qbench: '0', or '0,1,2,3' for one job per GPU at a time; a device
+    listed twice ('0,0,1,1') runs two jobs on it (conversions only: they leave the GPU idle
+    through their CPU-bound stretches, and fit twice on a large card)."""
+    return [d.strip() for d in str(spec).split(",") if d.strip()]
+
+def gpu_env(slot):
+    """Each job sees only its own GPU, as device 0 -- one device per process, so nothing here ever
+    runs a multi-GPU context (pytorch#196258 aside, there is nothing to share). PCI order, so
+    the indices are nvidia-smi's."""
+    return {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": slot}
+
+def run_jobs(tasks, slots, what):
+    """tasks: [(name, fn(slot, echo) -> ok)]. One slot: in order, the child's output echoed as
+    before. More: a worker per slot, children's output to their logs only (four interleaved
+    progress bars read as noise), a line per start and finish. Every task runs, whatever fails;
+    returns the names that failed."""
+    if len(slots) == 1:
+        return [name for name, fn in tasks if not fn(slots[0], True)]
+    import queue, threading, time
+    from concurrent.futures import ThreadPoolExecutor
+    free = queue.Queue()
+    for slot in slots:
+        free.put(slot)
+    failed, lock = [], threading.Lock()
+    def say(line):                       # whole lines: print() writes text and newline separately
+        with lock:
+            sys.stdout.write(line + "\n"); sys.stdout.flush()
+    def worker(task):
+        name, fn = task
+        slot = free.get()
+        t0 = time.time()
+        say(f"=== [gpu {slot}] {what} {name} started ===")
+        ok = False
+        try:
+            ok = fn(slot, False)
+        except Exception as e:
+            say(f"=== [gpu {slot}] {what} {name}: {type(e).__name__}: {e} ===")
+        finally:
+            free.put(slot)
+        say(f"=== [gpu {slot}] {what} {name} {'done' if ok else 'FAILED'} after {(time.time() - t0) / 60:.0f} min ===")
+        if not ok:
+            with lock:
+                failed.append(name)
+    with ThreadPoolExecutor(len(slots)) as ex:
+        list(ex.map(worker, tasks))
+    return failed
+
+def report_failures(failed, what, logs):
+    """logs: name -> log path; prints each failure's log tail (parallel jobs did not echo)."""
+    for name in failed:
+        print(f"=== {what} {name} FAILED; end of {logs[name]}: ===")
+        try:
+            with open(logs[name], "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4000))
+                tail = f.read().decode(errors="replace").replace("\r", "\n")
+            print("\n".join(l for l in tail.split("\n") if l.strip())[-2000:])
+        except OSError:
+            pass
+    return not failed
 
 SAMPLING_DIR = os.path.join(HERE, "sampling")
 
@@ -780,26 +896,38 @@ def decontaminate_self(job):
         json.dump(trace, f)
     print(f"!! own-voice eval: dropped prompts {overlap}, which the calibration trace also used")
 
+def bit_specs(spec):
+    """'2:5,3:5,4' -> [(rev, bits, headbits)]"""
+    out = []
+    for b in spec.split(','):
+        tb = b.split(':')
+        bits, headbits = tb[0], (tb[1] if len(tb) > 1 else "6")
+        out.append((f"{float(bits):0.2f}bpw" + (f"-H{int(headbits)}" if len(tb) > 1 else ""), bits, headbits))
+    return out
+
 def do_baseline(job, args):
     """The uncalibrated sweep that card section 2 measures every ladder against: the same bit
     rates as `quantize`, converted with --uncalibrated (no calibration of any kind, so it favors
     no ladder), into <model>-exl3/_baseline. Uncalibrated jobs cannot resume; a failed one restarts."""
     path = snapshot_download(repo_id=job.base_repo)
-    for b in args.bits.split(','):
-        tb = b.split(':')
-        bits, headbits = tb[0], (tb[1] if len(tb) > 1 else "6")
-        rev = f"{float(bits):0.2f}bpw" + (f"-H{int(headbits)}" if len(tb) > 1 else "")
-        out = os.path.join(job.baseline, rev); work = os.path.join(job.baseline, f"_work-{rev}")
-        print(f"=== BASELINE {rev} (uncalibrated) ===")
-        if not run_until(os.path.join(out, "quantization_config.json"),
-                         [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
-                           "-hq", "-b", bits, "-hb", headbits, "-vb", "16",
-                           "-i", path, "-w", work, "-o", out, "-d", str(args.device) ],
-                         job.log(f"baseline-{rev}"), args.retries + 1,
-                         cleanup=lambda: shutil.rmtree(work, ignore_errors=True)):
-            print(f"=== BASELINE {rev} FAILED ==="); return False
-        shutil.rmtree(work, ignore_errors=True)
-    return True
+    def task(rev, bits, headbits):
+        def run(slot, echo):
+            out = os.path.join(job.baseline, rev); work = os.path.join(job.baseline, f"_work-{rev}")
+            if echo:
+                print(f"=== BASELINE {rev} (uncalibrated) ===")
+            ok = run_until(os.path.join(out, "quantization_config.json"),
+                           [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
+                             "-hq", "-b", bits, "-hb", headbits, "-vb", "16",
+                             "-i", path, "-w", work, "-o", out, "-d", "0" ],
+                           job.log(f"baseline-{rev}"), args.retries + 1, env=gpu_env(slot),
+                           cleanup=lambda: shutil.rmtree(work, ignore_errors=True), echo=echo)
+            if ok:
+                shutil.rmtree(work, ignore_errors=True)
+            return ok
+        return rev, run
+    specs = bit_specs(args.bits)
+    failed = run_jobs([task(*sp) for sp in specs], device_slots(args.device), "BASELINE")
+    return report_failures(failed, "BASELINE", {rev: job.log(f"baseline-{rev}") for rev, _, _ in specs})
 
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
@@ -816,62 +944,55 @@ def do_quantize(job, args):
                            if k in manifest} }
     else:
         calibration = { "calibration": "exllamav3 default corpus" }
+    script = os.path.join(args.exllamav3dir, "convert.py")
 
-    for b in args.bits.split(','):
-        tb = b.split(':')
-        bits = tb[0]
-        headbits = "6"
-        rev = f"{float(bits):0.2f}bpw"
-        if len(tb) > 1:
-            headbits = tb[1]
-            rev += f"-H{int(headbits)}"
-
-        revdir=job.revdir(rev)
-        workdir=os.path.join(revdir, "_work")
-        donefile=os.path.join(revdir, "quantization_config.json")
-        script=os.path.join(args.exllamav3dir, "convert.py")
-        # Outside revdir on purpose: `upload` publishes each revision directory whole.
-        log_path=job.log(rev)
-
-        # A failed attempt resumes from its checkpoint rather than ending the sweep. The
-        # usual failure is a host OOM at the head, the job's memory peak, and resuming is
-        # safe: a conversion OOM-killed there and resumed came out byte-identical to an
-        # uninterrupted one (single GPU, 2026-09-21).
-        attempt = 0
-        while not os.path.isfile(donefile) and attempt <= args.retries:
-            if attempt:
-                print(f"=== ATTEMPT {attempt + 1} of {args.retries + 1} FOR {revdir} ===")
-            attempt += 1
-            if os.path.isfile(os.path.join(workdir, "args.json")):
-                print(f"=== RESUMING QUANTIZTION OF {revdir} ===")
-                run_logged([ "python3", script,
-                             "-w", workdir,
-                             "-r",
-                             "-d", str(args.device) ], log_path)
-            else:
-                print(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
-                run_logged([ "python3", script,
-                             "-hq",
-                             "-b", bits,
-                             "-hb", headbits,
-                             "-vb", "16",
-                             "-i", path,
-                             "-w", workdir,
-                             "-o", revdir,
-                             "-d", str(args.device) ] +
-                           ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []), log_path)
-
-        if not os.path.isfile(donefile):
-            print(f"=== QUANTIZATION OF {revdir} FAILED after {attempt} attempt(s) ===")
-            return False
-        else:
-            print(f"=== QUANTIZATION OF {revdir} COMPLETE ===")
+    def task(rev, bits, headbits):
+        def run(slot, echo):
+            revdir = job.revdir(rev)
+            workdir = os.path.join(revdir, "_work")
+            donefile = os.path.join(revdir, "quantization_config.json")
+            # Outside revdir on purpose: `upload` publishes each revision directory whole.
+            log_path = job.log(rev)
+            say = print if echo else (lambda *a, **k: None)
+            # A failed attempt resumes from its checkpoint rather than ending the sweep. The
+            # usual failure is a host OOM at the head, the job's memory peak, and resuming is
+            # safe: a conversion OOM-killed there and resumed came out byte-identical to an
+            # uninterrupted one (single GPU, 2026-09-21).
+            attempt = 0
+            while not os.path.isfile(donefile) and attempt <= args.retries:
+                if attempt:
+                    print(f"=== ATTEMPT {attempt + 1} of {args.retries + 1} FOR {revdir} ===")
+                attempt += 1
+                if os.path.isfile(os.path.join(workdir, "args.json")):
+                    say(f"=== RESUMING QUANTIZTION OF {revdir} ===")
+                    run_logged([ "python3", script, "-w", workdir, "-r", "-d", "0" ], log_path, gpu_env(slot), echo)
+                else:
+                    say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
+                    run_logged([ "python3", script,
+                                 "-hq",
+                                 "-b", bits,
+                                 "-hb", headbits,
+                                 "-vb", "16",
+                                 "-i", path,
+                                 "-w", workdir,
+                                 "-o", revdir,
+                                 "-d", "0" ] +
+                               ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []),
+                               log_path, gpu_env(slot), echo)
+            if not os.path.isfile(donefile):
+                say(f"=== QUANTIZATION OF {revdir} FAILED after {attempt} attempt(s) ===")
+                return False
+            say(f"=== QUANTIZATION OF {revdir} COMPLETE ===")
             if os.path.isdir(workdir):
                 shutil.rmtree(workdir)
             # Nothing in an EXL3 checkpoint records its calibration (docs/calibration.md)
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
                 json.dump(calibration, f, indent=1)
-    return True
+            return True
+        return rev, run
+    specs = bit_specs(args.bits)
+    failed = run_jobs([task(*sp) for sp in specs], device_slots(args.device), "QUANTIZE")
+    return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
 def main():
     parser = argparse.ArgumentParser()
@@ -904,7 +1025,8 @@ def main():
 
     cmd_quantize = subparsers.add_parser('quantize')
     cmd_quantize.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
-    cmd_quantize.add_argument('-d', '--device', default=0)
+    cmd_quantize.add_argument('-d', '--device', default='0',
+                              help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_quantize.add_argument('--calibration', default='mix', choices=['mix', 'default'],
                               help='mix: the conversational trace from `traces`; default: the bundled corpus')
     cmd_quantize.add_argument('--retries', type=int, default=2,
@@ -913,7 +1035,8 @@ def main():
 
     cmd_baseline = subparsers.add_parser('baseline')
     cmd_baseline.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
-    cmd_baseline.add_argument('-d', '--device', default=0)
+    cmd_baseline.add_argument('-d', '--device', default='0',
+                              help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
     cmd_baseline.set_defaults(func=do_baseline)
 
@@ -926,7 +1049,8 @@ def main():
     cmd_qbench.add_argument('--logit_cache_size', default=200, type=int, help='cap in GB')
     cmd_qbench.add_argument('--prune', default=True, action=argparse.BooleanOptionalAction,
                             help='after a successful series, evict reference logits it did not use')
-    cmd_qbench.add_argument('-d', '--device', default=0)
+    cmd_qbench.add_argument('-d', '--device', default='0',
+                            help='GPUs, e.g. 0 or 0,1,2,3: one scorer per GPU at a time, the quants of each slice split across them (nvidia-smi numbering)')
     cmd_qbench.add_argument('--reference', action='append',
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
