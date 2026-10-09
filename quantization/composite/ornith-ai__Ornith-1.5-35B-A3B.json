@@ -1,0 +1,9 @@
+{
+  "source": "https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B (model card: published benchmarks)",
+  "notes": "Same family and positioning as Ornith-1.5-9B: coding and agentic benchmarks throughout. Decided 2026-10-09, before any scoring under the conversational calibration (the earlier published set used the default calibration).",
+  "summary": "weighted toward agent sessions, as the publisher positions this model for coding and agentic work",
+  "weights": {
+    "wild": 0.3,
+    "swe": 0.7
+  }
+}
