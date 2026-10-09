@@ -40,6 +40,20 @@ RUN pip install --no-cache-dir --no-build-isolation \
 # build plugin + quantization
 RUN pip install --no-cache-dir -e vllm-exl3-plugin[quantization]
 
+# Bring the checkout up to dev's head without rebuilding the layers above. The clone layer is
+# cached by its command text, so a rebuild otherwise keeps the code from the first build; this
+# ADD's content is dev's current commit, so the cache breaks here exactly when dev has moved.
+# Editable installs pick up the pulled code; extras declared since are installed. A pull that
+# changes exllamav3's CUDA sources still needs its extension rebuilt (pip install -e ... again)
+ADD https://api.github.com/repos/yeasah/vllm-exl3-plugin/git/refs/heads/dev /tmp/dev-ref.json
+RUN cd vllm-exl3-plugin \
+    && git pull --ff-only --recurse-submodules \
+    && git submodule update --init --recursive \
+    && pip install --no-cache-dir $(python -c 'import tomllib; print(" ".join( \
+        d for f, e in [("deps/exllamav3/pyproject.toml", "eval"), ("pyproject.toml", "quantization")] \
+        for d in tomllib.load(open(f, "rb"))["project"]["optional-dependencies"][e]))') \
+    && git log --oneline -1
+
 # torch's libc10_cuda.so rebuilt with the fix for pytorch#196258 (expandable segments unmap
 # on the wrong device: Xid 31 or silent corruption on multi-GPU). Last, after every pip
 # install: any torch reinstall restores the stock library. Remove once torch carries 3fda599
