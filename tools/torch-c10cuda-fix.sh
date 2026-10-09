@@ -59,8 +59,12 @@ REF=$LIB; [ -f "$ORIG" ] && REF=$ORIG
 missing=$(comm -23 <(nm -DC --defined-only "$REF" | awk '$2 == "T" {$1=""; $2=""; print}' | sort) \
                    <(nm -DC --defined-only libc10_cuda.so | awk '$2 == "T" {$1=""; $2=""; print}' | sort))
 if [ -n "$missing" ]; then echo "!! rebuilt library lacks exported functions:"; echo "$missing"; exit 1; fi
-nm -C libc10_cuda.so | grep -q 'ExpandableSegment::unmapHandles' || { echo "!! expandable segments compiled out"; exit 1; }
+# grep reads everything (no -q): under pipefail, grep -q exiting at its first match SIGPIPEs
+# nm, and the pipeline then fails on a match -- a false "compiled out" on Ubuntu 24.04
+nm -C libc10_cuda.so | grep 'ExpandableSegment::unmapHandles' >/dev/null || { echo "!! expandable segments compiled out"; exit 1; }
 
 [ -f "$ORIG" ] || cp -p "$LIB" "$ORIG"
-cp libc10_cuda.so "$LIB"; sha256sum < "$LIB" > "$STAMP"
+# Write alongside and rename over: a process with torch loaded has the old file mapped, and
+# rewriting it in place would pull pages out from under it
+cp libc10_cuda.so "$LIB.new"; mv -f "$LIB.new" "$LIB"; sha256sum < "$LIB" > "$STAMP"
 echo "installed patched libc10_cuda.so into torch $TV (original: $ORIG)"
