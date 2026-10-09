@@ -519,7 +519,7 @@ def publish_traces(job):
     out = os.path.join(job.main, "traces")
     os.makedirs(out, exist_ok=True)
     for src, dst in have:
-        shutil.copy2(os.path.join(job.traces, src), os.path.join(out, dst))
+        shutil.copyfile(os.path.join(job.traces, src), os.path.join(out, dst))
     with open(os.path.join(out, "DATA_NOTICE.md"), "w") as f:
         f.write(DATA_NOTICE)
     return True
@@ -671,7 +671,7 @@ def resolve_sampling_profile(job, args, path):
         return None
     src = args.sampling_profile or os.path.join(SAMPLING_DIR, job.base_repo.replace("/", "__") + ".json")
     if os.path.isfile(src):
-        shutil.copy2(src, out)
+        shutil.copyfile(src, out)          # contents only: some volumes refuse chmod/utime
         return out
     if args.sampling_profile:
         raise FileNotFoundError(src)
