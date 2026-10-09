@@ -1684,6 +1684,21 @@ Ornith-1.5-9B (general / coding, swe -> coding) and Qwen3.8-27B (thinking / inst
 
 → docs/calibration.md
 
+## `pipeline-throughput` — Review the 27B run's timings for what to speed up
+
+First full pipeline on rented hardware (Qwen3.8-27B, 4x RTX PRO 4500, 2026-10-09). Not worth
+optimizing mid-run; review against the run's timestamped logs (`logs/*.log` carry start, exit
+and duration per command since b6d4665) once it is done. Candidates so far:
+- *Calibration trace through vLLM + the plugin at TP=4.* It still runs on exllamav3 with the
+  8bpw EXL3 generator layer-split over two cards (one busy at a time). The eval traces made the
+  same move: wild went from a projected ~1 h on exllamav3 (2 cards) to 5.1 min on vLLM TP=4,
+  roughly 4x from cards and 3x from batching. Needs TP for this dense model through the plugin,
+  and a check that a vLLM-generated calibration trace quantizes as well as exllamav3's.
+- *vLLM as the default eval backend* whenever more than one GPU is visible, not only when
+  exllamav3 cannot hold the model.
+- *Generator conversion:* 33.8 min on local disk; on /workspace it stalled for 20+ min writing
+  its output. Whatever the review finds slow in conversion applies ten times over to the ladders.
+
 ## `card-composite` — Cards that answer "which size?", and justify a duplicate only when there is one
 
 **Outcome wanted:** `quant.py`'s card generation emits two sections. **Always:** the card's
