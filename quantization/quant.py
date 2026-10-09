@@ -86,6 +86,21 @@ CAL_DOC_KINDS = "web,wiki,technical,code,diff"
 # mostly which rows were drawn (docs/calibration.md); qbench streams its 2M+ context tokens in
 # groups that fit the card
 EVAL_SLICES = {"wild": (60, 0.80), "swe": (200, 0.20)}
+# Per-model composite weights, quantization/composite/<org>__<model>.json: a model its publisher
+# positions for one use (Qwen3.8-27B: coding and agents) is weighted for that use. Decide them
+# from the publisher's description, before seeing which ladder a weighting favors.
+COMPOSITE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "composite")
+
+def composite_weights(job):
+    """(weights {slice: w}, summary or None): the model's file, else EVAL_SLICES' defaults."""
+    path = os.path.join(COMPOSITE_DIR, job.base_repo.replace("/", "__") + ".json")
+    if not os.path.isfile(path):
+        return {sl: w for sl, (_, w) in EVAL_SLICES.items()}, None
+    with open(path) as f:
+        spec = json.load(f)
+    w = spec["weights"]
+    assert set(w) == set(EVAL_SLICES) and abs(sum(w.values()) - 1) < 1e-6, f"{path}: weights must cover {list(EVAL_SLICES)} and sum to 1"
+    return w, spec.get("summary")
 EVAL_SEED = 1
 # Diagnostic slices, constructed by ctx_trace.py with scaffolding disjoint from calibration's:
 # never in the composite, only in the card's worst-slice check against a reference ladder
@@ -137,6 +152,8 @@ def collect_metadata(job, qbench):
                for sl, res in qbench.items()}
     composite = [sl for sl in EVAL_SLICES if sl in qbench]
     data['composite'] = len(composite) == len(EVAL_SLICES)
+    W, data['composite_note'] = composite_weights(job)
+    data['eval_slices'] = {sl: (n, W[sl]) for sl, (n, _) in EVAL_SLICES.items()}
     data['base_raw_ppl'] = ref_ppl.get('raw')
 
     revs = []
@@ -161,8 +178,8 @@ def collect_metadata(job, qbench):
               'raw_excess': excess.get('raw'),
               'raw_ppl': qb['raw']['ppl'] if 'raw' in qb else None }
         if data['composite']:
-            r['composite'] = sum(EVAL_SLICES[sl][1] * excess[sl] for sl in composite)
-            r['dppl'] = 100 * sum(EVAL_SLICES[sl][1] * (qb[sl]['ppl'] / ref_ppl[sl] - 1)
+            r['composite'] = sum(W[sl] * excess[sl] for sl in composite)
+            r['dppl'] = 100 * sum(W[sl] * (qb[sl]['ppl'] / ref_ppl[sl] - 1)
                                   for sl in composite)
         revs.append(r)
     data['revisions'] = sorted(revs, key=lambda x: x['bits'])
@@ -228,7 +245,7 @@ def reference_section(job, qbench, floor, data):
             return None
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
         return { **survey(path), 'label': label, 'excess': ex,
-                 'composite': sum(w * ex[sl] for sl, (_, w) in EVAL_SLICES.items()) }
+                 'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
     def interp(ladder, x):
         pts = sorted((r['body'], r['composite']) for r in ladder)
         if len(pts) < 2 or not pts[0][0] * 0.98 <= x <= pts[-1][0] * 1.02:
@@ -435,7 +452,7 @@ def plot_quality_vs_size(job, meta, path):
     ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
     ax.set_ylabel("excess KLD vs bf16 (log, lower is better)", color=INK2)
     fig.text(0.1, 0.97, f"{job.name}: quality vs size", fontsize=11.5, color=INK, va="top")
-    sub = ("composite: " + " + ".join(f"{w:.2f} {DESCRIBE[sl]}" for sl, (_, w) in EVAL_SLICES.items())
+    sub = ("composite: " + " + ".join(f"{w:.2f} {DESCRIBE[sl]}" for sl, w in composite_weights(job)[0].items())
            if meta['composite'] else "raw web text (this model has no chat template)")
     fig.text(0.1, 0.915, sub, fontsize=7.5, color=INK2, va="top")
     fig.subplots_adjust(top=0.86, left=0.13, right=0.97, bottom=0.13)
@@ -553,7 +570,7 @@ def do_card(job, args):
     base_metadata['tags'].append('exl3')
     card_data = ModelCardData(**base_metadata)
     card = ModelCard.from_template(card_data, template_path=args.template,
-                                   show_ppl=args.ppl, eval_slices=EVAL_SLICES, **meta)
+                                   show_ppl=args.ppl, **meta)
     card.save(os.path.join(job.main, "README.md"))
 
 def logit_cache_dir(job, args):

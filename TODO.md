@@ -1763,6 +1763,12 @@ regenerated; docs/calibration.md "An uncalibrated reference").
 
 → [docs/qbench.md](docs/qbench.md) "Conversational trace slices"
 
+**Per-model weights (2026-10-09):** `quantization/composite/<org>__<model>.json` overrides the
+0.80 wild / 0.20 swe default. Qwen3.8-27B is 0.30 / 0.70: its publisher leads with "excels at
+coding, agentic workflows, and office automation tasks". Weights are decided from the
+publisher's positioning before swe is scored, never chosen from results; 0.30 / 0.70 is a
+reasonable default for any similarly agent-first model. The card states the weighting.
+
 ## `moe-tp` — Finish the job on MoE + TP
 
 Not new, but still outstanding. TP=2/4/8 are validated on hardware, MoE+TP is no
