@@ -249,6 +249,82 @@ def load_reference_info(job):
         info = {"references": [{"repo": info["repo"], "ladders": {"": info["revisions"]}}], "baseline": {}}
     return info
 
+# Which calibration trace a reference ladder was built from, by its publisher's convention (the
+# configs do not record one): turboderp's SC_ ladders use the cal_trace.json on main; a set made
+# by this pipeline records "conversational mix" per revision and publishes traces/calibration.json
+def calibration_trace_of(repo, ladder, branches):
+    try:
+        if ladder == "SC":
+            return hf_hub_download(repo, "cal_trace.json")
+        with open(hf_hub_download(repo, "calibration.json", revision=next(iter(branches)))) as f:
+            if json.load(f).get("calibration") == "conversational mix":
+                return hf_hub_download(repo, "traces/calibration.json")
+    except Exception:
+        pass
+    return None
+
+def eval_prompt_snippets(job, sl, tok):
+    """Per eval row, a few short windows of its first user message: what a calibration trace
+    containing the same prompt would also contain. From the eval trace; for the self slice
+    without one (not published before 2026-10-10), from the held-out list, whose text is
+    sc_trace.py's CONVERSATIONS."""
+    def windows(text):
+        # 50-character windows at a quarter, half and three quarters of the prompt, clamped to it:
+        # unclamped, a short prompt's first window started below zero and came out empty, and an
+        # empty window is "found" in any text (5 false wild hits against turboderp's SC trace)
+        text = text.strip()
+        if len(text) < 60:
+            return [text] if len(text) >= 20 else []
+        out = []
+        for f in (0.25, 0.5, 0.75):
+            a = min(max(0, int(len(text) * f) - 25), len(text) - 50)
+            out.append(text[a:a + 50])
+        return [w for w in out if len(w) >= 20]
+    path = job.eval_trace(sl)
+    if os.path.isfile(path):
+        with open(path) as f:
+            rows = json.load(f)["rows"]
+        out = []
+        for r in rows:
+            m = re.search(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", tok.decode(r["input_ids"]), re.S)
+            out.append(windows(m.group(1)) if m else [])
+        return out if any(out) else None
+    if sl == "self":
+        sys.path.insert(0, os.path.join(HERE, "..", "deps", "exllamav3"))
+        from sc_trace import CONVERSATIONS
+        with open(EVAL_SELF_PROMPTS) as f:
+            return [windows(CONVERSATIONS[r["conversation"]][0]) for r in json.load(f)["rows"]]
+    return None
+
+def contamination_map(job, info, slices):
+    """{repo: {ladder: {slice: fraction of eval rows whose prompt is in that ladder's calibration}}},
+    for ladders with a known calibration trace; cached in main/contamination.json."""
+    cache = os.path.join(job.main, "contamination.json")
+    if os.path.isfile(cache):
+        with open(cache) as f:
+            return json.load(f)
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(job.base_repo)
+    snippets = {sl: sn for sl in slices if (sn := eval_prompt_snippets(job, sl, tok))}
+    out = {}
+    for ref in info.get("references", []):
+        for ladder, branches in ref["ladders"].items():
+            trace = calibration_trace_of(ref["repo"], ladder, branches)
+            if not trace:
+                continue
+            with open(trace) as f:
+                text = "\n".join(tok.decode(r.get("input_ids", []) + r.get("response_ids", [])) for r in json.load(f)["rows"])
+            out.setdefault(ref["repo"], {})[ladder] = {
+                sl: sum(any(w in text for w in ws) for ws in sn if ws) / max(1, sum(1 for ws in sn if ws))
+                for sl, sn in snippets.items() }
+            hit = {sl: round(v, 2) for sl, v in out[ref["repo"]][ladder].items() if v >= CONTAMINATED}
+            print(f"=== calibration of {ref['repo']} ({ladder or 'plain'}) contains eval prompts: {hit or 'none'} ===")
+    with open(cache, "w") as f:
+        json.dump(out, f, indent=1)
+    return out
+
+CONTAMINATED = 0.05     # share of a slice's prompts found in a competitor's calibration
+
 def reference_section(job, qbench, floor, data):
     """Section 2 of the card. Plot: every ladder -- this card's and each reference's -- as excess
     KLD relative to the uncalibrated baseline at equal body size, so no ladder is drawn as a
@@ -287,14 +363,14 @@ def reference_section(job, qbench, floor, data):
             return None
         return float(np.exp(np.interp(x, [p[0] for p in pts], np.log([p[1] for p in pts]))))
     W = composite_weights(job)[0]
-    def geo(a, b):
+    def geo(a, b, skip=()):
         """Weighted geometric mean of per-slice excess ratios a/b over the composite's slices
         ({slice: excess} each): every slice counts at its stated weight, whatever its absolute
         scale (a weighted sum of excesses lets the slice with the larger excess dominate). A
         slice where both sides sit under 2x its noise floor is left out and the rest
         reweighted; if all are, all are used. Returns (ratio, slices left out, all near floor)."""
-        keep = [sl for sl in W if max(a[sl], b[sl]) >= 2 * floor[sl]]
-        dropped = [sl for sl in W if sl not in keep]
+        keep = [sl for sl in W if max(a[sl], b[sl]) >= 2 * floor[sl] and sl not in skip]
+        dropped = [sl for sl in W if sl not in keep and sl not in skip]
         use = keep or list(W)
         tw = sum(W[sl] for sl in use)
         r = float(np.exp(sum(W[sl] / tw * np.log(max(a[sl], 1e-12) / max(b[sl], 1e-12)) for sl in use)))
@@ -306,6 +382,7 @@ def reference_section(job, qbench, floor, data):
     if not ours:
         return None
     lo = min(v['body'] for v in ours.values()) * 0.9; hi = max(v['body'] for v in ours.values()) * 1.1
+    contam = contamination_map(job, info, every)
     ladders = []   # (display name, [rungs])
     for ref in info["references"]:
         named = [n for n in ref["ladders"]]
@@ -314,6 +391,8 @@ def reference_section(job, qbench, floor, data):
             for r, b in zip(rungs, branches):
                 if r:
                     r['branch'] = b
+                    r['contaminated'] = sorted(sl for sl, v in contam.get(ref["repo"], {}).get(name, {}).items()
+                                               if v >= CONTAMINATED)
             # rungs far outside this card's size range (SC's 1.4-1.8 bpw against a 2-6 bpw set) add nothing
             rungs = [r for r in rungs if r and lo <= r['body'] <= hi]
             if rungs:
@@ -335,19 +414,22 @@ def reference_section(job, qbench, floor, data):
         if not o:
             continue
         row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False,
-                'near_floor': False, 'dropped': [] }
+                'near_floor': False, 'dropped': [], 'contaminated': [] }
         # same nominal bit rate, preferring the same head bits within a ladder; the strongest
         # competitor across ladders is the one our ratio against is highest
         same = []
         for disp, rungs in ladders:
             m = [x for x in rungs if x['bits'] is not None and abs(x['bits'] - r['bits']) < 0.01]
             if m:
-                pick = min(m, key=lambda x: (x['head_bits'] != o['head_bits'], -geo(o['excess'], x['excess'])[0]))
-                same.append((geo(o['excess'], pick['excess']), disp, pick))
+                pick = min(m, key=lambda x: (x['head_bits'] != o['head_bits'],
+                                             -geo(o['excess'], x['excess'], x.get('contaminated', ()))[0]))
+                same.append((geo(o['excess'], pick['excess'], pick.get('contaminated', ())), disp, pick))
         if same:
             (ratio, dropped, allnear), disp, best = max(same, key=lambda t: t[0][0])
             row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped] })
-            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices}
+            # A slice the competitor was calibrated on compares its in-sample score with our held-out one
+            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices if sl not in best.get('contaminated', ())}
+            row['contaminated'] = [describe_slice(sl) for sl in best.get('contaminated', ())]
             worst = max(rel, key=rel.get)
             d = o['total'] - best['total']
             row.update({ 'against': f"{disp}: {best['branch']}",
@@ -412,7 +494,8 @@ def slice_comparisons(job, qbench, floor, data, ref):
                     cells.append(None); continue
                 x = min(m, key=lambda x: (x['head_bits'] != o.get('head_bits'), x['excess'][sl]))
                 cells.append({ 'ratio': o['excess'][sl] / x['excess'][sl] if x['excess'][sl] > 0 else None,
-                               'near': max(o['excess'][sl], x['excess'][sl]) < 2 * floor[sl], 'branch': x.get('branch') })
+                               'near': max(o['excess'][sl], x['excess'][sl]) < 2 * floor[sl], 'branch': x.get('branch'),
+                               'contaminated': sl in x.get('contaminated', ()) })
             table.append({ 'bits': o['bits'], 'excess': o['excess'][sl], 'cells': cells })
         table.sort(key=lambda t: t['bits'])
         n = trace_stats(job, sl) if sl != "raw" else None
@@ -679,7 +762,7 @@ PUBLISHED_TRACES = [("cal.safetensors", "calibration.safetensors"),
                     ("cal.manifest.json", "calibration.manifest.json"),
                     ("cal_cal.json", "calibration.json"),
                     ("sampling.json", "sampling.json")] + \
-                   [(f"eval_{sl}.json", f"eval_{sl}.json") for sl in EVAL_SLICES]
+                   [(f"eval_{sl}.json", f"eval_{sl}.json") for sl in list(EVAL_SLICES) + list(DIAG_SLICES)]
 
 DATA_NOTICE = """# Data in this directory
 
@@ -696,6 +779,8 @@ Wikipedia text apply to the files that contain it, not to the model weights.
 | `sampling.json` | how every trace here was sampled: modes and the rules picking one per conversation; each trace row records its mode | the model publisher's recommendations (source inside) |
 | `eval_wild.json` | the card's real-user-prompt eval: first user turns, answered by the unquantized model | [allenai/WildChat-1M](https://huggingface.co/datasets/allenai/WildChat-1M) (ODC-BY) |
 | `eval_swe.json` | the card's agent-session eval: sessions cut at a turn the unquantized model rewrites | [nvidia/Open-SWE-Traces](https://huggingface.co/datasets/nvidia/Open-SWE-Traces) (CC BY 4.0) |
+| `eval_ctx_user.json`, `eval_ctx_tool.json`, `eval_ctx_ml.json`, `eval_loop.json` | the diagnostic evals: held-out documents in a user turn, as tool results, multilingual, and in tool-use loops, answered by the unquantized model | [stas/openwebtext-10k](https://huggingface.co/datasets/stas/openwebtext-10k) (OpenWebText, CC0), [Salesforce/wikitext](https://huggingface.co/datasets/Salesforce/wikitext) (CC BY-SA 3.0), source files of [vLLM](https://github.com/vllm-project/vllm) (Apache 2.0), Wikipedia 20231101 (CC BY-SA 3.0 / GFDL) |
+| `eval_self.json` | the diagnostic own-voice eval: prompts held out of calibration, answered by the unquantized model | the prompt list of exllamav3's `sc_trace.py` (MIT) |
 
 Built with `quantization/quant.py traces` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
 """

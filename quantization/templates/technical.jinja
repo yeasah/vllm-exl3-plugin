@@ -27,7 +27,7 @@ Two uses, computed differently:
 
 # Every slice compared
 
-{% if reference and reference.ladders %}Each slice's excess KLD for this set and every other set of this model, by size, on a log scale; the shaded band is within twice the slice's noise floor. The table is this set against each other set's rung at the same bit rate (ratio of excess KLD, below 1.00 better); * marks a pair that both sit within twice the noise floor, where the ratio is mostly noise.{% else %}Each slice's excess KLD by size, on a log scale; the shaded band is within twice the slice's noise floor.{% endif %}
+{% if reference and reference.ladders %}Each slice's excess KLD for this set and every other set of this model, by size, on a log scale; the shaded band is within twice the slice's noise floor. The table is this set against each other set's rung at the same bit rate (ratio of excess KLD, below 1.00 better); * marks a pair that both sit within twice the noise floor, where the ratio is mostly noise. *(in-sample)* marks a set whose own calibration contains this slice's prompts: it is scored on prompts it was calibrated on, this set on prompts held out of its calibration.{% else %}Each slice's excess KLD by size, on a log scale; the shaded band is within twice the slice's noise floor.{% endif %}
 
 {% for s in slices %}
 ## {{ s.title }}
@@ -36,7 +36,7 @@ Two uses, computed differently:
 
 {% if s.ladders %}| BPW | Excess KLD |{% for l in s.ladders %} vs {{ l }} |{% endfor %}
 |---|---|{% for l in s.ladders %}---|{% endfor %}
-{% for t in s.table %}|{{ '{0:0.2f}'.format(t.bits) }}|{{ '{0:0.5f}'.format(t.excess) }}|{% for c in t.cells %}{% if c and c.ratio is not none %}{{ '{0:0.2f}'.format(c.ratio) }}{% if c.near %}\*{% endif %}{% else %}-{% endif %}|{% endfor %}
+{% for t in s.table %}|{{ '{0:0.2f}'.format(t.bits) }}|{{ '{0:0.5f}'.format(t.excess) }}|{% for c in t.cells %}{% if c and c.ratio is not none %}{{ '{0:0.2f}'.format(c.ratio) }}{% if c.near %}\*{% endif %}{% if c.contaminated %} (in-sample){% endif %}{% else %}-{% endif %}|{% endfor %}
 {% endfor %}{% else %}| BPW | Excess KLD |
 |---|---|
 {% for t in s.table %}|{{ '{0:0.2f}'.format(t.bits) }}|{{ '{0:0.5f}'.format(t.excess) }}|

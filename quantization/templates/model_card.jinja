@@ -61,7 +61,9 @@ Ratios of excess KLD, below 1.00 better: the composite ratio is the geometric me
 
 \* No other quant at this bit rate: compared against the most competitive set's ladder, interpolated (log scale) at equal size, counting the transformer body only, since output-head bits can differ between rungs.{% endif %}{% if reference.rows | selectattr('near_floor') | list %}
 
-† Within about twice the unquantized model's own rounding noise: both quants here are, in practice, indistinguishable from the original, and the ratio compares differences too small to matter in use. Read it as noise, not as a ranking.{% endif %}{% for r in reference.rows if r.dropped and not r.near_floor %}{% if loop.first %}
+† Within about twice the unquantized model's own rounding noise: both quants here are, in practice, indistinguishable from the original, and the ratio compares differences too small to matter in use. Read it as noise, not as a ranking.{% endif %}{% for r in reference.rows if r.contaminated %}{% if loop.first %}
+
+Left out of the worst-slice column: slices whose prompts are in the compared quant's own calibration, where it is scored in-sample and this set is not:{% endif %} {{ '{0:0.2f}'.format(r.bits) }} bpw ({{ r.contaminated | join(', ') }}){% if not loop.last %};{% else %}.{% endif %}{% endfor %}{% for r in reference.rows if r.dropped and not r.near_floor %}{% if loop.first %}
 
 ‡ A composite slice is left out where both quants sit within about twice the unquantized model's own rounding noise on it; the ratio is over the other slice alone:{% endif %} {{ '{0:0.2f}'.format(r.bits) }} bpw ({{ r.dropped | join(', ') }} left out){% if not loop.last %};{% else %}.{% endif %}{% endfor %}
 {% endif %}
