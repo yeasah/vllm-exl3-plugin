@@ -661,7 +661,10 @@ def do_upload(job, args):
                     repo_type='model',
                     exist_ok=True)
 
-    for rev in ['main'] + job.revisions():
+    fetched = os.path.isfile(os.path.join(job.dir, "FETCHED.json"))
+    if fetched:
+        print("=== fetched job dir: uploading main only (its revisions are weightless stand-ins) ===")
+    for rev in ['main'] + ([] if fetched else job.revisions()):
         if not job.is_complete(rev):
             continue
         print(f"=== UPLOADING {job.revdir(rev)} ===")
@@ -1459,9 +1462,9 @@ def main():
 
     args = parser.parse_args()
     fetched = os.path.join(args.workdir, f"{args.model.split('/')[1]}-exl3", "FETCHED.json")
-    if os.path.isfile(fetched) and args.func not in (do_card, do_fetch):
+    if os.path.isfile(fetched) and args.func not in (do_card, do_fetch, do_upload):
         sys.exit(f"{os.path.dirname(fetched)} was made by `fetch` from the published repo and holds no weights: "
-                 "only card (and fetch) run there")
+                 "only card, upload (main only) and fetch run there")
     sys.stdout = Stamped(sys.stdout)       # after parsing: --help and usage errors stay unstamped
     ok = args.func(Job(args), args)
     sys.exit(0 if ok is not False else 1)
