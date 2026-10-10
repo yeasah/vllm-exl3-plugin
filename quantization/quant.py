@@ -131,14 +131,42 @@ SLICE_DOCS = {
             "calibration costs on text it does not cover."),
 }
 
+RAW_SPEC = { "source": "openwebtext10k", "rows": 50, "length": 2048, "stride": 2048 }   # qbench's raw slice
+
 def trace_stats(job, sl):
-    """(conversations, context tokens, scored tokens) of an eval trace, or None."""
+    """(rows, context tokens, scored tokens) of an eval slice, or None: from its trace, else
+    main/slices.json (recorded whenever the trace was present, published, fetched), else for raw
+    its fixed spec (passages scored at every position)."""
     path = job.eval_trace(sl)
-    if not os.path.isfile(path):
-        return None
-    with open(path) as f:
-        meta = json.load(f).get("meta", {})
-    return meta.get("rows"), meta.get("input_tokens"), meta.get("output_tokens")
+    if os.path.isfile(path):
+        with open(path) as f:
+            meta = json.load(f).get("meta", {})
+        return meta.get("rows"), meta.get("input_tokens"), meta.get("output_tokens")
+    rec = os.path.join(job.main, "slices.json")
+    if os.path.isfile(rec):
+        with open(rec) as f:
+            got = json.load(f).get(sl)
+        if got:
+            return tuple(got)
+    if sl == "raw":
+        n = RAW_SPEC["rows"] * RAW_SPEC["length"]
+        return RAW_SPEC["rows"], n, n
+    return None
+
+def record_slice_stats(job):
+    """main/slices.json: every slice's trace size, kept when a trace is later absent (a fetched
+    job has only what was published)."""
+    rec = os.path.join(job.main, "slices.json")
+    stats = {}
+    if os.path.isfile(rec):
+        with open(rec) as f:
+            stats = json.load(f)
+    for sl in list(EVAL_SLICES) + list(DIAG_SLICES) + ["raw"]:
+        if (t := trace_stats(job, sl)) is not None:
+            stats[sl] = list(t)
+    os.makedirs(job.main, exist_ok=True)
+    with open(rec, "w") as f:
+        json.dump(stats, f, indent=1)
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVAL_SELF_PROMPTS = os.path.join(HERE, "eval_self_prompts.json")       # held out of calibration
 CODE_DOCS = os.path.join(HERE, "..", "deps", "vllm", "vllm", "**", "*.py")   # code documents for ctx slices
@@ -502,10 +530,11 @@ def slice_comparisons(job, qbench, floor, data, ref):
                                'contaminated': sl in x.get('contaminated', ()) })
             table.append({ 'bits': o['bits'], 'excess': o['excess'][sl], 'cells': cells })
         table.sort(key=lambda t: t['bits'])
-        n = trace_stats(job, sl) if sl != "raw" else None
+        n = trace_stats(job, sl)
         title, what, why = SLICE_DOCS.get(sl, (sl, "", ""))
         tainted_by = sorted({disp for disp, rungs in ladders for x in rungs if sl in x.get('contaminated', ())})
-        out.append({ 'slice': sl, 'title': title, 'what': what, 'why': why, 'floor': floor[sl], 'tainted_by': tainted_by,
+        anchor = re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", title.lower()).strip())
+        out.append({ 'slice': sl, 'title': title, 'anchor': anchor, 'what': what, 'why': why, 'floor': floor[sl], 'tainted_by': tainted_by,
                      'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
                      'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png" })
     return out
@@ -818,6 +847,7 @@ def do_card(job, args):
     if 'raw' not in qbench:
         print("=== no qbench results: run qbench first ===")
         return False
+    record_slice_stats(job)
     meta = collect_metadata(job, qbench)
     plot_quality_vs_size(job, meta, os.path.join(job.main, "quality_vs_size.png"))
     meta['traces_published'] = publish_traces(job)
@@ -870,8 +900,8 @@ def do_fetch(job, args):
     revs = [b.name for b in api.list_repo_refs(job.repo).branches if b.name != "main"]
     os.makedirs(job.main, exist_ok=True)
     os.makedirs(job.traces, exist_ok=True)
-    snap = snapshot_download(job.repo, revision="main", allow_patterns=["qb_*.json", "reference.json", "traces/*"])
-    for f in globmod.glob(os.path.join(snap, "qb_*.json")):
+    snap = snapshot_download(job.repo, revision="main", allow_patterns=["qb_*.json", "reference.json", "slices.json", "traces/*"])
+    for f in globmod.glob(os.path.join(snap, "qb_*.json")) + globmod.glob(os.path.join(snap, "slices.json")):
         shutil.copyfile(f, os.path.join(job.main, os.path.basename(f)))
     published = {dst: src for src, dst in PUBLISHED_TRACES}
     for f in globmod.glob(os.path.join(snap, "traces", "*")):
@@ -932,7 +962,7 @@ def qbench_project(job, args, slice_, arms, results=None):
                 "output": { "results": os.path.abspath(results or os.path.join(job.main, f"qb_{slice_}.json")) } }
     if slice_ == "raw":
         # A guard, not a target: raw web text framed as nothing matches no real use
-        project["test_data"] = { "source": "openwebtext10k", "rows": 50, "length": 2048, "stride": 2048 }
+        project["test_data"] = dict(RAW_SPEC)
         project["tokenizer"] = { "repo": job.base_repo, "template": False }
     else:
         project["test_trace"] = os.path.abspath(job.eval_trace(slice_))
@@ -1035,6 +1065,7 @@ def do_qbench(job, args):
             return False
     # The series succeeded: reference logits it did not use (a superseded eval trace, a dropped
     # reference) can only be dead weight. Results and KL vectors are never pruned.
+    record_slice_stats(job)
     if args.prune:
         print(f"=== pruning reference logits unused since {series_start.isoformat()} ===")
         run_logged([ "python3", os.path.join(args.exllamav3dir, "eval", "qbench_prune.py"),
