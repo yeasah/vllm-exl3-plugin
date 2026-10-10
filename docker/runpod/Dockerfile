@@ -40,6 +40,11 @@ RUN pip install --no-cache-dir --no-build-isolation \
 # build plugin + quantization
 RUN pip install --no-cache-dir -e vllm-exl3-plugin[quantization]
 
+# causal-conv1d, built against this image's torch: a prebuilt or older build fails to import on
+# an ABI mismatch, and transformers then falls back to its slow reference path while saying the
+# package "is not installed". (flash-linear-attention, pure Triton, comes with the eval extras.)
+RUN pip install --no-cache-dir --no-build-isolation causal-conv1d
+
 # Bring the checkout up to dev's head without rebuilding the layers above. The clone layer is
 # cached by its command text, so a rebuild otherwise keeps the code from the first build; this
 # ADD's content is dev's current commit, so the cache breaks here exactly when dev has moved.
@@ -53,11 +58,6 @@ RUN cd vllm-exl3-plugin \
         d for f, e in [("deps/exllamav3/pyproject.toml", "eval"), ("pyproject.toml", "quantization")] \
         for d in tomllib.load(open(f, "rb"))["project"]["optional-dependencies"][e]))') \
     && git log --oneline -1
-
-# causal-conv1d, built against this image's torch: a prebuilt or older build fails to import on
-# an ABI mismatch, and transformers then falls back to its slow reference path while saying the
-# package "is not installed". (flash-linear-attention, pure Triton, comes with the eval extras.)
-RUN pip install --no-cache-dir --no-build-isolation causal-conv1d
 
 # torch's libc10_cuda.so rebuilt with the fix for pytorch#196258 (expandable segments unmap
 # on the wrong device: Xid 31 or silent corruption on multi-GPU). Last, after every pip
