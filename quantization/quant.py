@@ -408,13 +408,18 @@ def reference_section(job, qbench, floor, data):
     # within ~2x the unquantized model's own rounding noise compares differences too small to
     # matter (Qwen3.8-27B 6 bpw: swe excess at a third of the floor) and is left out, the row
     # saying so; a row where every slice is is marked as noise, not dropped
+    # A slice any compared set was calibrated on is out of the worst-slice column for every row:
+    # dropping it only against that set would leave the column measuring different things per row
+    tainted = sorted({sl for _, rungs in ladders for x in rungs for sl in x.get('contaminated', ())})
+    tainted_by = {sl: sorted({disp for disp, rungs in ladders for x in rungs if sl in x.get('contaminated', ())})
+                  for sl in tainted}
     rows = []
     for r in data['revisions']:
         o = ours.get(r['name'])
         if not o:
             continue
         row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False,
-                'near_floor': False, 'dropped': [], 'contaminated': [] }
+                'near_floor': False, 'dropped': [] }
         # same nominal bit rate, preferring the same head bits within a ladder; the strongest
         # competitor across ladders is the one our ratio against is highest
         same = []
@@ -427,9 +432,7 @@ def reference_section(job, qbench, floor, data):
         if same:
             (ratio, dropped, allnear), disp, best = max(same, key=lambda t: t[0][0])
             row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped] })
-            # A slice the competitor was calibrated on compares its in-sample score with our held-out one
-            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices if sl not in best.get('contaminated', ())}
-            row['contaminated'] = [describe_slice(sl) for sl in best.get('contaminated', ())]
+            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices if sl not in tainted}
             worst = max(rel, key=rel.get)
             d = o['total'] - best['total']
             row.update({ 'against': f"{disp}: {best['branch']}",
@@ -460,7 +463,8 @@ def reference_section(job, qbench, floor, data):
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
              'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices],
-             'ladders': ladders, 'ours': ours, 'base': base }
+             'ladders': ladders, 'ours': ours, 'base': base,
+             'tainted': [{'slice': describe_slice(sl), 'by': tainted_by[sl]} for sl in tainted] }
 
 def slice_comparisons(job, qbench, floor, data, ref):
     """TECHNICAL.md's per-slice section: for each slice, every ladder's excess by size (the plot)
@@ -500,7 +504,8 @@ def slice_comparisons(job, qbench, floor, data, ref):
         table.sort(key=lambda t: t['bits'])
         n = trace_stats(job, sl) if sl != "raw" else None
         title, what, why = SLICE_DOCS.get(sl, (sl, "", ""))
-        out.append({ 'slice': sl, 'title': title, 'what': what, 'why': why, 'floor': floor[sl],
+        tainted_by = sorted({disp for disp, rungs in ladders for x in rungs if sl in x.get('contaminated', ())})
+        out.append({ 'slice': sl, 'title': title, 'what': what, 'why': why, 'floor': floor[sl], 'tainted_by': tainted_by,
                      'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
                      'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png" })
     return out

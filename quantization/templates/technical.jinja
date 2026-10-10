@@ -26,11 +26,19 @@ Two uses, computed differently:
 - *Against other quants* (the card's second table and plot): the weighted geometric mean of the per-slice ratios. A sum of excesses lets the slice with the larger absolute excess dominate whatever its weight (real user prompts' excess runs several times agent sessions'); the geometric mean gives each slice its stated weight. A slice where both quants sit within about twice its noise floor is left out of the comparison and the other reweighted.
 
 # Every slice compared
+{% for s in slices if s.tainted_by %}
+
+> ⚠️ **{{ s.title }}: not a valid comparison against {{ s.tainted_by | join(', ') }}.** This slice's prompts are in that set's own calibration trace: it is scored on prompts it was calibrated on, while this set is scored on prompts held out of its calibration. Its numbers on this slice are in-sample and say nothing about how it handles unseen input of this kind; they are shown below, marked, and left out of every summary. The slice is still a fair comparison between the other sets.
+{% endfor %}
 
 {% if reference and reference.ladders %}Each slice's excess KLD for this set and every other set of this model, by size, on a log scale; the shaded band is within twice the slice's noise floor. The table is this set against each other set's rung at the same bit rate (ratio of excess KLD, below 1.00 better); * marks a pair that both sit within twice the noise floor, where the ratio is mostly noise. *(in-sample)* marks a set whose own calibration contains this slice's prompts: it is scored on prompts it was calibrated on, this set on prompts held out of its calibration.{% else %}Each slice's excess KLD by size, on a log scale; the shaded band is within twice the slice's noise floor.{% endif %}
 
 {% for s in slices %}
 ## {{ s.title }}
+{% if s.tainted_by %}
+
+> ⚠️ **Invalid against {{ s.tainted_by | join(', ') }}: its calibration contains this slice's prompts.** Those ratios are in-sample; see the warning at the top of this section.
+{% endif %}
 
 ![{{ s.title }}](./{{ s.plot }})
 

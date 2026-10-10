@@ -1786,6 +1786,15 @@ coding, agentic workflows, and office automation tasks". Weights are decided fro
 publisher's positioning before swe is scored, never chosen from results; 0.30 / 0.70 is a
 reasonable default for any similarly agent-first model. The card states the weighting.
 
+**Own-voice eval prompts collide with SC's calibration (2026-10-10).** The `self` eval slice
+holds out 30 prompts from `sc_trace.py`'s `CONVERSATIONS`, and turboderp's SC calibration uses
+that whole list, so SC is scored in-sample there (all 30 found in his Qwen3.8-27B
+`cal_trace.json`). Cards now detect this (`main/contamination.json`), drop the slice from the
+worst-slice column for every row and warn prominently in TECHNICAL.md. The fix: a fresh
+own-voice eval prompt set disjoint from `CONVERSATIONS` (our calibration's self slice can keep
+using the list), which restores SC's own-voice comparison, likely one of its real strengths.
+Diagnostic only, so not urgent.
+
 ## `moe-tp` — Finish the job on MoE + TP
 
 Not new, but still outstanding. TP=2/4/8 are validated on hardware, MoE+TP is no
