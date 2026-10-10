@@ -107,6 +107,38 @@ EVAL_SEED = 1
 DIAG_SLICES = {"ctx_user": "documents in a user turn", "ctx_tool": "documents as tool results",
                "ctx_ml": "multilingual documents", "loop": "tool-use loops", "self": "the model's own voice"}
 DIAG_N = 30
+# What each eval slice is and what it is for: TECHNICAL.md's slice section
+SLICE_DOCS = {
+    "wild": ("Real user prompts", "First user turns from WildChat-1M: real people's requests, in many languages, about half "
+             "with pasted material. The unquantized model answers; the quant is scored on those answers.",
+             "Everyday conversational use."),
+    "swe": ("Real agent sessions", "Coding-agent sessions from Open-SWE-Traces: the task, the tool schemas, another agent's "
+            "recorded actions and the real tool output, cut at an assistant turn that the unquantized model writes "
+            "itself. Repositories are disjoint from any calibration source.",
+            "The model's own turns deep inside long agentic contexts."),
+    "ctx_user": ("Documents in a user turn", "Held-out web text, Wikipedia and source files pasted into a user turn "
+                 "with a question about them. Constructed.", "Reading external text a user supplies."),
+    "ctx_tool": ("Documents as tool results", "The same kinds of held-out documents returned by a tool call. "
+                 "Constructed, with tool names and phrasing calibration never uses.", "Reading tool output."),
+    "ctx_ml": ("Multilingual documents", "Wikipedia articles in 13 languages, in a user turn or as tool results. "
+               "Constructed.", "Reading non-English text."),
+    "loop": ("Tool-use loops", "Two or three tool calls in a row, each returning a document, then the model's answer. "
+             "Constructed.", "Multi-step tool use."),
+    "self": ("The model's own voice", "Conversational prompts held out of calibration, answered by the model.",
+             "The model's own conversational register: where calibrating on the model's own chat is strongest."),
+    "raw": ("Raw web text", "Plain web text (openwebtext), no chat template, scored at every position.",
+            "A guard, not a target: no real use looks like this, so it bounds what a conversational "
+            "calibration costs on text it does not cover."),
+}
+
+def trace_stats(job, sl):
+    """(conversations, context tokens, scored tokens) of an eval trace, or None."""
+    path = job.eval_trace(sl)
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        meta = json.load(f).get("meta", {})
+    return meta.get("rows"), meta.get("input_tokens"), meta.get("output_tokens")
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVAL_SELF_PROMPTS = os.path.join(HERE, "eval_self_prompts.json")       # held out of calibration
 CODE_DOCS = os.path.join(HERE, "..", "deps", "vllm", "vllm", "**", "*.py")   # code documents for ctx slices
@@ -148,6 +180,7 @@ def collect_metadata(job, qbench):
     data['eval_generator'] = eval_generator_named(job)
 
     floor = {sl: parse_qbench(res, 'Noise floor')['kld'] for sl, res in qbench.items()}
+    data['floor'] = floor
     ref_ppl = {sl: next(r['ppl'] for r in res if r.get('group') == 'reference')
                for sl, res in qbench.items()}
     composite = [sl for sl in EVAL_SLICES if sl in qbench]
@@ -267,7 +300,8 @@ def reference_section(job, qbench, floor, data):
         r = float(np.exp(sum(W[sl] / tw * np.log(max(a[sl], 1e-12) / max(b[sl], 1e-12)) for sl in use)))
         return r, (dropped if keep else []), not keep
 
-    ours = {r['name']: arm(r['name'], job.revdir(r['name']), slices) for r in data['revisions']}
+    every = list(qbench)                    # raw included: TECHNICAL.md shows every slice
+    ours = {r['name']: arm(r['name'], job.revdir(r['name']), every) for r in data['revisions']}
     ours = {k: v for k, v in ours.items() if v}
     if not ours:
         return None
@@ -276,7 +310,7 @@ def reference_section(job, qbench, floor, data):
     for ref in info["references"]:
         named = [n for n in ref["ladders"]]
         for name, branches in ref["ladders"].items():
-            rungs = [arm(ref_label(ref["repo"], b), p, slices) for b, p in branches.items()]
+            rungs = [arm(ref_label(ref["repo"], b), p, every) for b, p in branches.items()]
             for r, b in zip(rungs, branches):
                 if r:
                     r['branch'] = b
@@ -343,7 +377,97 @@ def reference_section(job, qbench, floor, data):
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
-             'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices] }
+             'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices],
+             'ladders': ladders, 'ours': ours, 'base': base }
+
+def slice_comparisons(job, qbench, floor, data, ref):
+    """TECHNICAL.md's per-slice section: for each slice, every ladder's excess by size (the plot)
+    and ours against each ladder's rung at the same bit rate (the table), cells where both sit
+    under 2x the slice's noise floor marked. Without references, ours (and the baseline) only."""
+    if ref:
+        ours, ladders, base = ref['ours'], ref['ladders'], ref['base']
+    else:
+        ours = {}
+        for r in data['revisions']:
+            ex = {sl: (row['kld'] - floor[sl]) for sl in qbench if (row := parse_qbench(qbench[sl], r['name']))}
+            if ex:
+                ours[r['name']] = {'label': r['name'], 'excess': ex, 'size': r['disk_bytes'] / 1024**3 - r['embed_bytes'] / 1024**3,
+                                   'bits': r['bits']}
+        ladders, base = [], []
+    out = []
+    for sl in qbench:
+        series = [("this card", [(o['size'], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
+        series += [(disp, [(x['size'], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
+        if base and all(sl in b['excess'] for b in base):
+            series.append(("uncalibrated (baseline)", [(b['size'], b['excess'][sl]) for b in base], False))
+        table = []
+        for name, o in ours.items():
+            if sl not in o['excess']:
+                continue
+            cells = []
+            for disp, rungs in ladders:
+                m = [x for x in rungs if x.get('bits') is not None and o.get('bits') is not None
+                     and abs(x['bits'] - o['bits']) < 0.01 and sl in x['excess']]
+                if not m:
+                    cells.append(None); continue
+                x = min(m, key=lambda x: (x['head_bits'] != o.get('head_bits'), x['excess'][sl]))
+                cells.append({ 'ratio': o['excess'][sl] / x['excess'][sl] if x['excess'][sl] > 0 else None,
+                               'near': max(o['excess'][sl], x['excess'][sl]) < 2 * floor[sl], 'branch': x.get('branch') })
+            table.append({ 'bits': o['bits'], 'excess': o['excess'][sl], 'cells': cells })
+        table.sort(key=lambda t: t['bits'])
+        n = trace_stats(job, sl) if sl != "raw" else None
+        title, what, why = SLICE_DOCS.get(sl, (sl, "", ""))
+        out.append({ 'slice': sl, 'title': title, 'what': what, 'why': why, 'floor': floor[sl],
+                     'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
+                     'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png" })
+    return out
+
+def plot_slice(sc, path):
+    """One slice: every ladder's excess KLD by size, log scale, the region under 2x the slice's
+    noise floor shaded (differences there are within the unquantized model's own rounding noise)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
+    OURS, BASE = "#eb6834", "#888888"
+    OTHERS = iter(["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"])
+    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=150)
+    fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
+    ax.grid(True, which="major", color=GRID, lw=0.8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(AXES)
+    ax.tick_params(colors=INK2, which="both")
+    ys_all = []
+    for name, pts, ours in sc['series']:
+        pts = sorted(p for p in pts if p[1] > 0)
+        if not pts:
+            continue
+        xs, ys = zip(*pts); ys_all += ys
+        base = name.startswith("uncalibrated")
+        color = OURS if ours else BASE if base else next(OTHERS)
+        ax.plot(xs, ys, color=color, lw=2, ls=(0, (2, 2)) if base else "-", zorder=3 if ours else 2,
+                marker="D" if ours else None if base else "o", markersize=5, markeredgecolor=SURF, label=name)
+    ax.set_yscale("log")
+    if ys_all:
+        lo = min(min(ys_all), sc['floor']) / 1.5
+        ax.set_ylim(lo, max(ys_all) * 1.5)
+        ax.axhspan(lo, 2 * sc['floor'], color="#ffffff", alpha=0.07, lw=0, zorder=0)
+        ax.axhline(2 * sc['floor'], color=INK2, lw=0.8, ls=":", zorder=1)
+        ax.text(0.99, 2 * sc['floor'], "2x noise floor", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+                fontsize=7, color=INK2)
+    ax.margins(x=0.06)
+    ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
+    ax.set_ylabel("excess KLD (log)", color=INK2)
+    leg = ax.legend(frameon=False, fontsize=7.5, loc="upper right")
+    for t in leg.get_texts():
+        t.set_color(INK2)
+    fig.text(0.13, 0.97, sc['title'], fontsize=11, color=INK, va="top")
+    fig.subplots_adjust(top=0.89, left=0.13, right=0.97, bottom=0.14)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fig.savefig(path, facecolor=SURF)
+    plt.close(fig)
 
 def calibration_of(job, rev):
     path = os.path.join(job.revdir(rev), "calibration.json")
@@ -601,6 +725,27 @@ def do_card(job, args):
     card = ModelCard.from_template(card_data, template_path=args.template,
                                    show_ppl=args.ppl, **meta)
     card.save(os.path.join(job.main, "README.md"))
+
+    # The companion: what each eval slice is, every slice compared, calibration, reproducing
+    slices = slice_comparisons(job, qbench, meta['floor'], meta, meta['reference'])
+    for sc in slices:
+        plot_slice(sc, os.path.join(job.main, sc['plot']))
+    calib = {}
+    for r in meta['revisions']:
+        path = os.path.join(job.revdir(r['name']), "calibration.json")
+        if os.path.isfile(path):
+            with open(path) as f:
+                calib = json.load(f)
+            break
+    weights, note = composite_weights(job)
+    spec_path = os.path.join(COMPOSITE_DIR, job.base_repo.replace("/", "__") + ".json")
+    weight_spec = json.load(open(spec_path)) if os.path.isfile(spec_path) else None
+    env = Environment(loader=FileSystemLoader(os.path.dirname(os.path.abspath(args.template))))
+    with open(os.path.join(job.main, "TECHNICAL.md"), "w") as f:
+        f.write(env.get_template("technical.jinja").render(
+            this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
+            weight_spec=weight_spec, calibration=calib, reference=meta['reference'], **{k: meta[k] for k in
+            ('traces_published', 'eval_generator') if k in meta}))
 
 def logit_cache_dir(job, args):
     """Each model owns its logit cache by default (<model>-exl3/_logit_cache, never uploaded), so

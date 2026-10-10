@@ -65,9 +65,8 @@ Ratios of excess KLD, below 1.00 better: the composite ratio is the geometric me
 
 ‡ A composite slice is left out where both quants sit within about twice the unquantized model's own rounding noise on it; the ratio is over the other slice alone:{% endif %} {{ '{0:0.2f}'.format(r.bits) }} bpw ({{ r.dropped | join(', ') }} left out){% if not loop.last %};{% else %}.{% endif %}{% endfor %}
 {% endif %}
-{% if traces_published %}
 
-# Reproducing these quants
+# More detail
 
-Each revision's `quantization_config.json` records its calibration (source, and the SHA-256 of the calibration file) and any non-default seed offset; `calibration.json` beside it records the calibration mix's shares and composition. The data itself is in [`traces/`](./traces) on this branch: the packed calibration rows passed to `convert.py --cal_data`, the trace they were packed from, and the two eval traces behind the table above, with their sources and licenses in [`traces/DATA_NOTICE.md`](./traces/DATA_NOTICE.md). The pipeline that produced them is `quantization/quant.py` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
-{% endif %}
+What each eval slice is, every slice compared on its own, how the composite is built, the calibration, and how to reproduce these quants: [TECHNICAL.md](./TECHNICAL.md).
+
