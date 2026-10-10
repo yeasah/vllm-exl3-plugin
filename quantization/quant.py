@@ -337,6 +337,8 @@ def contamination_map(job, info, slices):
     snippets = {sl: sn for sl in slices if (sn := eval_prompt_snippets(job, sl, tok))}
     out = {}
     for ref in info.get("references", []):
+        if ref.get("type") == "gguf":           # imatrix data: not checked yet
+            continue
         for ladder, branches in ref["ladders"].items():
             trace = calibration_trace_of(ref["repo"], ladder, branches)
             if not trace:
@@ -370,19 +372,22 @@ def reference_section(job, qbench, floor, data):
     # Sizes as on the rest of the card (minus input embeddings), the total for the size column,
     # and the body (minus the output head too) for anything interpolated: head bits can change
     # between rungs (turboderp's 2.75bpw_H5 -> 3.0bpw), and those bytes buy little
-    def survey(path):
-        sz = tensor_survey_local(path)
-        with open(os.path.join(path, "quantization_config.json")) as f:
-            q = json.load(f)
-        return { 'size': (sz['total'] - sz['embed']) / 1024**3, 'total': sz['total'] / 1024**3,
-                 'body': (sz['total'] - sz['embed'] - sz['head']) / 1024**3,
-                 'bits': q.get('bits'), 'head_bits': q.get('head_bits') }
+    recorded = info.get("sizes", {})
+    def survey(path, label=None):
+        sz = recorded.get(label) or quant_size(path)
+        # The comparison axes count language-model weights only: GGUF keeps the vision encoder in
+        # a separate mmproj file and drops the MTP draft, so EXL3's (0.85 GiB + 0.12 GiB on an
+        # Ornith-9B checkpoint) would otherwise read as size that buys nothing
+        other = sz.get('mtp', 0) + sz.get('encoder', 0)
+        return { 'size': (sz['total'] - sz['embed'] - other) / 1024**3, 'total': sz['total'] / 1024**3,
+                 'body': (sz['total'] - sz['embed'] - sz['head'] - other) / 1024**3,
+                 'bits': sz.get('bits'), 'head_bits': sz.get('head_bits'), 'gguf': path.endswith(".gguf") }
     def arm(label, path, need):
         rows = {sl: parse_qbench(qbench[sl], label) for sl in need}
         if any(r is None for r in rows.values()):
             return None
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
-        return { **survey(path), 'label': label, 'excess': ex,
+        return { **survey(path, label), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
     def interp(ladder, x, sl=None):
         """A ladder's composite (or one slice's excess) at body size x, log-interpolated."""
@@ -493,7 +498,11 @@ def reference_section(job, qbench, floor, data):
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
              'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices],
              'ladders': ladders, 'ours': ours, 'base': base,
-             'tainted': [{'slice': describe_slice(sl), 'by': tainted_by[sl]} for sl in tainted] }
+             'tainted': [{'slice': describe_slice(sl), 'by': tainted_by[sl]} for sl in tainted],
+             'parity': [{'repo': ref['repo'], 'excess': {describe_slice(sl): row['kld'] - floor[sl] for sl in every
+                                                         if (row := parse_qbench(qbench[sl], ref_label(ref['repo'], 'bf16')))},
+                         'floor': {describe_slice(sl): floor[sl] for sl in every}}
+                        for ref in info.get('references', []) if ref.get('parity')] }
 
 def slice_comparisons(job, qbench, floor, data, ref):
     """TECHNICAL.md's per-slice section: for each slice, every ladder's excess by size (the plot)
@@ -524,7 +533,16 @@ def slice_comparisons(job, qbench, floor, data, ref):
                 m = [x for x in rungs if x.get('bits') is not None and o.get('bits') is not None
                      and abs(x['bits'] - o['bits']) < 0.01 and sl in x['excess']]
                 if not m:
-                    cells.append(None); continue
+                    # No rung at this rate (a GGUF ladder never has one): log-interpolated at equal body size
+                    pts = sorted((x['body'], x['excess'][sl]) for x in rungs if sl in x['excess'] and 'body' in x)
+                    if len(pts) >= 2 and pts[0][0] * 0.98 <= o.get('body', 0) <= pts[-1][0] * 1.02 and min(p[1] for p in pts) > 0:
+                        import numpy as np
+                        v = float(np.exp(np.interp(o['body'], [p[0] for p in pts], np.log([p[1] for p in pts]))))
+                        cells.append({ 'ratio': o['excess'][sl] / v, 'near': max(o['excess'][sl], v) < 2 * floor[sl],
+                                       'interpolated': True, 'contaminated': False })
+                    else:
+                        cells.append(None)
+                    continue
                 x = min(m, key=lambda x: (x['head_bits'] != o.get('head_bits'), x['excess'][sl]))
                 cells.append({ 'ratio': o['excess'][sl] / x['excess'][sl] if x['excess'][sl] > 0 else None,
                                'near': max(o['excess'][sl], x['excess'][sl]) < 2 * floor[sl], 'branch': x.get('branch'),
@@ -576,7 +594,7 @@ def plot_slice(sc, path):
         ax.text(0.99, 2 * sc['floor'], "2x noise floor", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                 fontsize=7, color=INK2)
     ax.margins(x=0.06)
-    ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
+    ax.set_xlabel("language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
     ax.set_ylabel("excess KLD (log)", color=INK2)
     leg = ax.legend(frameon=False, fontsize=7.5, loc="upper right")
     for t in leg.get_texts():
@@ -603,6 +621,10 @@ def tensor_category(name):
         return "embed"
     if re.search(r"\.lm_head\.", m) and not name.startswith("mtp."):
         return "head"
+    # The MTP draft block (1.7% of an Ornith-9B 4 bpw checkpoint): a model feature, not quantized
+    # weight a format comparison should be sized by -- GGUF conversions drop it
+    if name.startswith("mtp.") or ".mtp." in m:
+        return "mtp"
     return None
 
 def quant_config(job, revision):
@@ -617,7 +639,8 @@ def tensor_survey(tensors):
     out = { 'total': 0,
             'embed': 0,
             'encoder': 0,
-            'head': 0 }
+            'head': 0,
+            'mtp': 0 }
     for name, size in tensors:
         out['total'] += size
         cat = tensor_category(name)
@@ -655,6 +678,39 @@ def tensor_survey_local(path):
                 a, b = meta["data_offsets"]
                 yield name, b - a
     return tensor_survey(tensors())
+
+def gguf_tensor_survey(path):
+    """tensor_survey for a GGUF: token_embd is the input embedding, output.weight the head,
+    NextN blocks the draft (mtp); bits per weight from element counts, for the size axis."""
+    from gguf import GGUFReader
+    out = {'total': 0, 'embed': 0, 'encoder': 0, 'head': 0, 'mtp': 0}
+    body_bytes = body_n = head_bytes = head_n = 0
+    for t in GGUFReader(path).tensors:
+        out['total'] += t.n_bytes
+        if t.name == "token_embd.weight":
+            out['embed'] += t.n_bytes
+        elif t.name == "output.weight":
+            out['head'] += t.n_bytes; head_bytes += t.n_bytes; head_n += t.n_elements
+        elif ".nextn." in t.name:
+            out['mtp'] += t.n_bytes
+        elif len(t.shape) >= 2:
+            body_bytes += t.n_bytes; body_n += t.n_elements
+    out['bits'] = round(8 * body_bytes / body_n, 2) if body_n else None
+    out['head_bits'] = round(8 * head_bytes / head_n, 2) if head_n else None
+    return out
+
+def quant_size(path):
+    """Sizes for a quant, in bytes: an EXL3 checkpoint dir (or its published stand-in) or a GGUF
+    file, by category (embed, head, encoder, mtp) of the total."""
+    if path.endswith(".gguf"):
+        sz = gguf_tensor_survey(path)
+        bits, head_bits = sz.pop('bits'), sz.pop('head_bits')
+    else:
+        sz = tensor_survey_local(path)
+        with open(os.path.join(path, "quantization_config.json")) as f:
+            q = json.load(f)
+        bits, head_bits = q.get('bits'), q.get('head_bits')
+    return { **sz, 'bits': bits, 'head_bits': head_bits }
 
 def tensor_survey_remote(repo, revision):
     def tensors():
@@ -785,7 +841,7 @@ def plot_vs_reference(job, ref, path):
     pad = max(0.03, (hi - lo) * 0.12)
     ax.set_ylim(lo - pad, hi + pad)
     ax.margins(x=0.06)
-    ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
+    ax.set_xlabel("language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
     ax.set_ylabel("excess KLD relative to\nuncalibrated at equal size", color=INK2)
     leg = ax.legend(frameon=False, fontsize=7.5, loc="best")
     for t in leg.get_texts():
@@ -926,6 +982,8 @@ def do_fetch(job, args):
         with open(ref_path) as f:
             info = json.load(f)
         for ref in info.get("references", []):
+            if ref.get("type") == "gguf":       # sizes are recorded in reference.json; no stand-in needed
+                continue
             for ladder in ref["ladders"].values():
                 for b in ladder:
                     ladder[b] = os.path.abspath(os.path.join(job.dir, "_published", f"{ref['repo'].replace('/', '__')}@{b}"))
@@ -958,7 +1016,9 @@ def qbench_project(job, args, slice_, arms, results=None):
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
                               "repo": job.base_repo, "options": { "streaming": True } } ] +
-                          [ { "label": label, "group": "EXL3", "engine": "exllamav3",
+                          [ { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
+                                "options": { "n_gpu_layers": 999 } } if path.endswith(".gguf") else
+                            { "label": label, "group": "EXL3", "engine": "exllamav3",
                               "source": os.path.abspath(path) } for label, path in arms ],
                 "output": { "results": os.path.abspath(results or os.path.join(job.main, f"qb_{slice_}.json")) } }
     if slice_ == "raw":
@@ -1016,6 +1076,33 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script):
     print(f"=== qbench {sl}: {len(sl_arms)} quants over {k} GPUs, merged ===", flush=True)
     return True
 
+def qbench_parity(job, args, sl, parity_arms, slots, script):
+    """A GGUF set's bf16 file, scored like a quant: what llama.cpp's numerics alone differ from the
+    bf16 reference by. It may not fit one card (16.7 GB for a 9B), so llama.cpp gets every listed
+    GPU in one process (its own layer split, not torch's). Optional: a failure is reported and the
+    slice's results stand without it."""
+    part_dir = os.path.join(job.main, "_qbench_parts")
+    os.makedirs(part_dir, exist_ok=True)
+    yml = os.path.join(part_dir, f"qbench-{sl}-parity.yaml")
+    res = os.path.join(part_dir, f"qb_{sl}-parity.json")
+    with open(yml, "w") as f:
+        yaml.safe_dump(qbench_project(job, args, sl, parity_arms, results=res), f, sort_keys=False)
+    print(f"=== qbench {sl}: GGUF bf16 parity on gpu {','.join(slots)} ===", flush=True)
+    rc = run_logged([ "python3", script, yml, "-d", "0" ], job.log(f"qbench-{sl}-parity"),
+                    {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": ",".join(slots)}, echo=False)
+    if rc or not os.path.isfile(res):
+        print(f"=== qbench {sl}: GGUF parity FAILED (exit {rc}); results stand without it ===")
+        return False
+    out = os.path.join(job.main, f"qb_{sl}.json")
+    with open(out) as f:
+        merged = json.load(f)
+    with open(res) as f:
+        add = {r["label"]: r for r in json.load(f) if r.get("group") not in ("reference", "noise_floor")}
+    merged = [r for r in merged if r["label"] not in add] + list(add.values())
+    with open(out, "w") as f:
+        json.dump(merged, f, indent=2)
+    return True
+
 def do_qbench(job, args):
     os.makedirs(job.main, exist_ok=True)
     revisions = [rev for rev in job.revisions() if job.is_complete(rev)]
@@ -1040,10 +1127,31 @@ def do_qbench(job, args):
         ladders = {name: bs for name, bs in ladders.items() if bs}
         references.append({"repo": repo, "ladders": ladders})
         arms += [(ref_label(repo, b), p) for bs in ladders.values() for b, p in bs.items()]
+    # GGUF sets: one ladder of the chosen quant types, scored by llama.cpp; with --gguf-parity, the
+    # set's bf16 GGUF too, whose excess is llama.cpp's own numerics against the bf16 reference
+    parity_arms = []
+    for repo in args.reference_gguf or []:
+        files = [f for f in HfApi().list_repo_files(repo) if f.endswith(".gguf") and not f.startswith("mmproj")]
+        def pick(q):
+            m = [f for f in files if re.search(rf"[-_.]{re.escape(q)}\.gguf$", f, re.I)]
+            if not m:
+                print(f"=== {repo} has no {q} GGUF: left out ===")
+            return m[0] if m else None
+        rungs = {q: hf_hub_download(repo, f) for q in args.gguf_quants.split(",") if (f := pick(q))}
+        ref = {"repo": repo, "type": "gguf", "ladders": {"GGUF": rungs} if rungs else {}}
+        if args.gguf_parity and (f := pick("bf16") or pick("f16")):
+            ref["parity"] = hf_hub_download(repo, f)
+            parity_arms.append((ref_label(repo, "bf16"), ref["parity"]))
+        references.append(ref)
+        arms += [(ref_label(repo, q), p) for q, p in rungs.items()]
     baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
     if references or baseline:
+        # Every compared quant's size, recorded where the scores are: a re-card from the published
+        # repo then needs neither the weights nor a header the Hub cannot parse (GGUF)
+        sizes = {label: quant_size(p) for label, p in arms if label.startswith("ref:")}
+        sizes.update({baseline_label(rev): quant_size(p) for rev, p in baseline.items()})
         with open(os.path.join(job.main, "reference.json"), "w") as f:
-            json.dump({"references": references, "baseline": baseline}, f, indent=1)
+            json.dump({"references": references, "baseline": baseline, "sizes": sizes}, f, indent=1)
     base_arms = [(baseline_label(rev), p) for rev, p in baseline.items()]
     print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
@@ -1064,6 +1172,9 @@ def do_qbench(job, args):
             continue
         if not qbench_parallel(job, args, sl, sl_arms, slots, script):
             return False
+    if parity_arms:
+        for sl in slices:
+            qbench_parity(job, args, sl, parity_arms, slots, script)
     # The series succeeded: reference logits it did not use (a superseded eval trace, a dropped
     # reference) can only be dead weight. Results and KL vectors are never pruned.
     record_slice_stats(job)
@@ -1474,6 +1585,12 @@ def main():
                             help='after a successful series, evict reference logits it did not use')
     cmd_qbench.add_argument('-d', '--device', default='0',
                             help='GPUs, e.g. 0 or 0,1,2,3: one scorer per GPU at a time, the quants of each slice split across them (nvidia-smi numbering)')
+    cmd_qbench.add_argument('--reference-gguf', action='append',
+                            help='a GGUF repo to compare against (repeatable): the --gguf-quants files, scored by llama.cpp')
+    cmd_qbench.add_argument('--gguf-quants', default='Q3_K_M,Q4_K_M,Q5_K_M,Q6_K,Q8_0',
+                            help='quant types to take from each --reference-gguf repo')
+    cmd_qbench.add_argument('--gguf-parity', default=True, action=argparse.BooleanOptionalAction,
+                            help="also score the repo's bf16 GGUF: llama.cpp's own numerics against the bf16 reference")
     cmd_qbench.add_argument('--reference-min-bits', type=float, default=0.0,
                             help='skip reference rungs below this bit rate (e.g. 2.0)')
     cmd_qbench.add_argument('--reference', action='append',
