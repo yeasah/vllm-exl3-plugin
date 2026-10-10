@@ -1699,6 +1699,23 @@ and duration per command since b6d4665) once it is done. Candidates so far:
 - *Generator conversion:* 33.8 min on local disk; on /workspace it stalled for 20+ min writing
   its output. Whatever the review finds slow in conversion applies ten times over to the ladders.
 
+Measured on the run (2026-10-09/10, 4x RTX PRO 4500, logs on /workspace/quant_work):
+- Traces: generator 33.8 min; eval slices 22 min total on vLLM TP=4; calibration trace 2 h 03
+  (exllamav3, two cards), now the longest step.
+- Conversions: calibration roughly doubles one (6 bpw 71 min calibrated vs 35 uncalibrated);
+  lower rates are slower (uncalibrated 35 -> 53 min from 6 to 2 bpw); running 3-4 at once costs
+  little. Five rungs on four GPUs leaves one alone: start the baseline on the idle cards (done
+  by hand this time) or let one scheduler take both ladders.
+- qbench: swe's bf16 reference 58 min without FLA (the image has it now); swe scoring ~37 min
+  per quant with 42.8 GiB of row states round-tripping host memory (grouped passes fix it,
+  02489af+). The reference pass runs alone on one GPU while the rest wait: compute the next
+  slice's reference during the current slice's scoring.
+- Disk: reference logits are kept for the whole series and the cache trims only after a write;
+  raw's 47 GB reference would have hit a full disk. A watcher dropped each finished slice's
+  logits by hand: make it a quant.py option, or put the cache on /dev/shm (176 GB on that pod).
+- Archive: sync_outputs.py skips the logit cache, so the per-token KL vectors (and per-model
+  results) needed a manual copy before shutdown. Sync them (kl_*, results_*, manifest.json).
+
 ## `card-composite` — Cards that answer "which size?", and justify a duplicate only when there is one
 
 **Outcome wanted:** `quant.py`'s card generation emits two sections. **Always:** the card's
