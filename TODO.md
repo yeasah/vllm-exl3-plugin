@@ -1811,6 +1811,13 @@ On the wild plot the imatrix GGUF ladder sits no better than our *uncalibrated* 
 logits move ~1e-3 KL with the shape of the last 512-token batch (about the bf16 noise floor),
 so compare at the high rungs only net of the `--gguf-parity` offset.
 
+Which imatrix varies by upload: the 0.6B used bartowski's generic `calibration_datav3`; newer
+uploads (Ornith-1.5-9B) use calibration-v6, rendered through the model's chat template with
+special tokens, 63% tool-calling/reasoning conversations, and publish the rendered corpus and
+the imatrix in the repo. Against v6 the experiment is closer to a like-for-like data comparison,
+and the published corpus needs the contamination check (`contamination_map`) before any card
+compares against it.
+
 ## `moe-tp` — Finish the job on MoE + TP
 
 Not new, but still outstanding. TP=2/4/8 are validated on hardware, MoE+TP is no
