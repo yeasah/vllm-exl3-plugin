@@ -507,9 +507,27 @@ def tensor_survey(tensors):
             out[cat] += size
     return out
 
+# A weightless stand-in for a published quant (`fetch`): {"repo", "revision"}; sizes are read
+# from the Hub's safetensors headers instead
+PUBLISHED_MARKER = "published.json"
+
 def tensor_survey_local(path):
+    marker = os.path.join(path, PUBLISHED_MARKER)
+    if not globmod.glob(os.path.join(path, "*.safetensors")) and os.path.isfile(marker):
+        with open(marker) as f:
+            m = json.load(f)
+        return tensor_survey_remote(m["repo"], m["revision"])
+    # The shards the index lists, as the Hub's metadata counts them: a branch inherits main's
+    # files, and turboderp's carry cal_trace.safetensors (4 MiB of calibration token ids), which a
+    # bare glob counted as weights
+    index = os.path.join(path, "model.safetensors.index.json")
+    if os.path.isfile(index):
+        with open(index) as f:
+            shards = sorted(os.path.join(path, s) for s in set(json.load(f)["weight_map"].values()))
+    else:
+        shards = sorted(globmod.glob(os.path.join(path, "*.safetensors")))
     def tensors():
-        for shard in sorted(globmod.glob(os.path.join(path, "*.safetensors"))):
+        for shard in shards:
             with open(shard, "rb") as f:
                 n = int.from_bytes(f.read(8), "little")
                 header = json.loads(f.read(n))
@@ -746,6 +764,63 @@ def do_card(job, args):
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], **{k: meta[k] for k in
             ('traces_published', 'eval_generator') if k in meta}))
+
+def do_fetch(job, args):
+    """A card-only job directory from the published repo, no weights: main's results,
+    reference.json and traces, each revision's configs, and weightless stand-ins (published.json)
+    for every quant the card reads sizes from -- ours, each reference rung, and the uncalibrated
+    baseline, which is not published: an uncalibrated conversion at the same bits and head bits is
+    byte-identical in size to a calibrated one (Ornith-1.5-9B 4 bpw: 7311656070 bytes uncalibrated,
+    default and mix alike), so our same-named revision stands in. The job is marked FETCHED, and
+    every command but card and fetch refuses it."""
+    api = HfApi()
+    revs = [b.name for b in api.list_repo_refs(job.repo).branches if b.name != "main"]
+    os.makedirs(job.main, exist_ok=True)
+    os.makedirs(job.traces, exist_ok=True)
+    snap = snapshot_download(job.repo, revision="main", allow_patterns=["qb_*.json", "reference.json", "traces/*"])
+    for f in globmod.glob(os.path.join(snap, "qb_*.json")):
+        shutil.copyfile(f, os.path.join(job.main, os.path.basename(f)))
+    published = {dst: src for src, dst in PUBLISHED_TRACES}
+    for f in globmod.glob(os.path.join(snap, "traces", "*")):
+        name = os.path.basename(f)
+        if name in published:
+            shutil.copyfile(f, os.path.join(job.traces, published[name]))
+    def stand_in(path, repo, revision, **extra):
+        os.makedirs(path, exist_ok=True)
+        for name in ("quantization_config.json", "calibration.json"):
+            try:
+                shutil.copyfile(hf_hub_download(repo, name, revision=revision), os.path.join(path, name))
+            except Exception:
+                if name == "quantization_config.json":
+                    raise
+        with open(os.path.join(path, PUBLISHED_MARKER), "w") as f:
+            json.dump({"repo": repo, "revision": revision, **extra}, f, indent=1)
+    for rev in revs:
+        stand_in(job.revdir(rev), job.repo, rev)
+    ref_path = os.path.join(snap, "reference.json")
+    if os.path.isfile(ref_path):
+        with open(ref_path) as f:
+            info = json.load(f)
+        for ref in info.get("references", []):
+            for ladder in ref["ladders"].values():
+                for b in ladder:
+                    ladder[b] = os.path.abspath(os.path.join(job.dir, "_published", f"{ref['repo'].replace('/', '__')}@{b}"))
+                    stand_in(ladder[b], ref["repo"], b)
+        base = {}
+        for rev in info.get("baseline", {}):
+            if rev in revs:
+                base[rev] = os.path.abspath(os.path.join(job.baseline, rev))
+                stand_in(base[rev], job.repo, rev, size_stand_in="our same-named revision: an uncalibrated "
+                         "conversion at the same bits and head bits is byte-identical in size")
+            else:
+                print(f"=== baseline {rev} has no published revision of the same name to stand in for its size: left out ===")
+        info["baseline"] = base
+        with open(os.path.join(job.main, "reference.json"), "w") as f:
+            json.dump(info, f, indent=1)
+    with open(os.path.join(job.dir, "FETCHED.json"), "w") as f:
+        json.dump({"repo": job.repo, "revisions": revs, "fetched": stamp()}, f, indent=1)
+    print(f"=== fetched {job.repo}: {len(revs)} revisions, card-only (no weights) ===")
+    return True
 
 def logit_cache_dir(job, args):
     """Each model owns its logit cache by default (<model>-exl3/_logit_cache, never uploaded), so
@@ -1289,12 +1364,19 @@ def main():
                           action=argparse.BooleanOptionalAction)
     cmd_card.set_defaults(func=do_card)
 
+    cmd_fetch = subparsers.add_parser('fetch', help="card-only job dir from the published repo (no weights)")
+    cmd_fetch.set_defaults(func=do_fetch)
+
     cmd_upload = subparsers.add_parser('upload')
     cmd_upload.add_argument('--private', default=True,
                             action=argparse.BooleanOptionalAction)
     cmd_upload.set_defaults(func=do_upload)
 
     args = parser.parse_args()
+    fetched = os.path.join(args.workdir, f"{args.model.split('/')[1]}-exl3", "FETCHED.json")
+    if os.path.isfile(fetched) and args.func not in (do_card, do_fetch):
+        sys.exit(f"{os.path.dirname(fetched)} was made by `fetch` from the published repo and holds no weights: "
+                 "only card (and fetch) run there")
     sys.stdout = Stamped(sys.stdout)       # after parsing: --help and usage errors stay unstamped
     ok = args.func(Job(args), args)
     sys.exit(0 if ok is not False else 1)
