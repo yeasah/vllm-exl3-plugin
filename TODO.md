@@ -1824,6 +1824,9 @@ On the wild plot the imatrix GGUF ladder sits no better than our *uncalibrated* 
 logits move ~1e-3 KL with the shape of the last 512-token batch (about the bf16 noise floor),
 but bf16 parity is within the noise floor on every slice (llama.cpp's bf16 path is clean), so
 that wobble belongs to the quantized path (activation quantization) and stays in the GGUF numbers.
+`--gguf-parity` is off by default since: it tests the bench against llama.cpp, not a model's
+quants. Run it once on a larger model (a 9B with its bf16 GGUF) to confirm parity holds beyond
+0.6B, then only when llama.cpp or the bench changes.
 
 Which imatrix varies by upload: the 0.6B used bartowski's generic `calibration_datav3`; newer
 uploads (Ornith-1.5-9B) use calibration-v6, rendered through the model's chat template with

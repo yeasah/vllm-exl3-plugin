@@ -550,7 +550,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
         series = [("this card", [(o[xk], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
         series += [(disp, [(x[xk], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
         if base and all(sl in b['excess'] for b in base):
-            series.append(("uncalibrated (baseline)", [(b[xk], b['excess'][sl]) for b in base], False))
+            series.append(("uncalibrated EXL3 (baseline)", [(b[xk], b['excess'][sl]) for b in base], False))
         table = []
         for name, o in ours.items():
             if sl not in o['excess']:
@@ -856,7 +856,7 @@ def plot_vs_reference(job, ref, path):
     for sp in ("left", "bottom"):
         ax.spines[sp].set_color(AXES)
     ax.tick_params(colors=INK2, which="both")
-    ax.axhline(1.0, color=BASE, lw=1.5, ls=(0, (2, 2)), zorder=1, label="uncalibrated (baseline)")
+    ax.axhline(1.0, color=BASE, lw=1.5, ls=(0, (2, 2)), zorder=1, label="uncalibrated EXL3 (baseline)")
     ys_all = [1.0]
     any_ext = False
     labels = []     # (x, y, text, color, ours)
@@ -878,7 +878,7 @@ def plot_vs_reference(job, ref, path):
     ax.set_ylim(lo - pad, hi + pad)
     ax.margins(x=0.08)
     ax.set_xlabel("transformer body (GiB; no output head, input embeddings, encoder or MTP)", color=INK2)
-    ax.set_ylabel("excess KLD relative to\nuncalibrated at equal size", color=INK2)
+    ax.set_ylabel("excess KLD relative to\nuncalibrated EXL3 at equal size", color=INK2)
     if any_ext:
         ax.scatter([], [], marker="o", s=36, facecolor=SURF, edgecolor=INK2, linewidth=1.5,
                    label="hollow: past the baseline's sizes, extrapolated")
@@ -1663,10 +1663,14 @@ def main():
     cmd_qbench.add_argument('--reference-gguf', action='append',
                             help='a GGUF repo to compare against (repeatable): the --gguf-quants files, scored by llama.cpp')
     # The best GGUF per byte at each size: below ~3.5 bpw the lattice-codebook I-quants (EXL3's
-    # nearest relatives; K-quants are scalar), IQ4_XS's non-linear grid at 4, scalar K-quants above
-    cmd_qbench.add_argument('--gguf-quants', default='IQ3_XXS,IQ3_M,IQ4_XS,Q5_K_M,Q6_K,Q8_0',
+    # nearest relatives; K-quants are scalar), IQ4_XS's non-linear grid at 4, scalar K-quants above.
+    # No Q8_0: ~8.5 real bpw is outside any card's comparison window, so it would be scored and dropped
+    cmd_qbench.add_argument('--gguf-quants', default='IQ3_XXS,IQ3_M,IQ4_XS,Q5_K_M,Q6_K',
                             help='quant types to take from each --reference-gguf repo (a type the repo lacks is left out)')
-    cmd_qbench.add_argument('--gguf-parity', default=True, action=argparse.BooleanOptionalAction,
+    # Off by default: it checks the bench's relationship to llama.cpp, not this model's quants
+    # (within the noise floor on every slice, Qwen3-0.6B 2026-10-10), and a bf16 GGUF is the most
+    # expensive file in the set. Rerun when llama.cpp or the bench changes
+    cmd_qbench.add_argument('--gguf-parity', default=False, action=argparse.BooleanOptionalAction,
                             help="also score the repo's bf16 GGUF: llama.cpp's own numerics against the bf16 reference")
     cmd_qbench.add_argument('--reference-min-bits', type=float, default=0.0,
                             help='skip reference rungs below this bit rate (e.g. 2.0)')
