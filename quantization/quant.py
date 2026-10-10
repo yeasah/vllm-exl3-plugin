@@ -235,6 +235,9 @@ def collect_metadata(job, qbench):
               'disk_bytes': sizes['total'],
               'embed_bytes': sizes['embed'],
               'encoder_bytes': sizes['encoder'],
+              # The MTP draft: off by default in both engines (exllamav3 loads it only as a separate
+              # draft model), and an external draft model is often the better choice where supported
+              'mtp_bytes': sizes.get('mtp', 0),
               'blockq_bytes': int(sizes['embed'] / 16 * 4.5),
               'excess': excess,
               'raw_excess': excess.get('raw'),
@@ -515,7 +518,8 @@ def slice_comparisons(job, qbench, floor, data, ref):
         for r in data['revisions']:
             ex = {sl: (row['kld'] - floor[sl]) for sl in qbench if (row := parse_qbench(qbench[sl], r['name']))}
             if ex:
-                ours[r['name']] = {'label': r['name'], 'excess': ex, 'size': r['disk_bytes'] / 1024**3 - r['embed_bytes'] / 1024**3,
+                ours[r['name']] = {'label': r['name'], 'excess': ex,
+                                   'size': (r['disk_bytes'] - r['embed_bytes'] - r['encoder_bytes'] - r['mtp_bytes']) / 1024**3,
                                    'bits': r['bits']}
         ladders, base = [], []
     out = []
@@ -777,7 +781,7 @@ def plot_quality_vs_size(job, meta, path):
     AXES, GRID, GRID2, LINE = "#555555", "#555555", "#444444", "#2a78d6"
     key = 'composite' if meta['composite'] else 'raw_excess'
     revs = [r for r in meta['revisions'] if r.get(key)]
-    xs = [(r['disk_bytes'] - r['embed_bytes']) / 1024**3 for r in revs]
+    xs = [(r['disk_bytes'] - r['embed_bytes'] - r['mtp_bytes']) / 1024**3 for r in revs]
     ys = [r[key] for r in revs]
     fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
@@ -797,7 +801,7 @@ def plot_quality_vs_size(job, meta, path):
                     fontsize=6, color=INK)
     ax.set_yscale("log")
     ax.margins(x=0.1)
-    ax.set_xlabel("weight size (GiB, excluding input embeddings)", color=INK2)
+    ax.set_xlabel("weight size (GiB, excluding input embeddings and MTP)", color=INK2)
     ax.set_ylabel("excess KLD vs bf16 (log, lower is better)", color=INK2)
     fig.text(0.1, 0.97, f"{job.name}: quality vs size", fontsize=11.5, color=INK, va="top")
     sub = ("composite: " + " + ".join(f"{w:.2f} {DESCRIBE[sl]}" for sl, w in composite_weights(job)[0].items())

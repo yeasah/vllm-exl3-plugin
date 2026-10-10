@@ -61,7 +61,7 @@ The calibration covers what models read and write at work rather than only web t
 
 # Memory
 
-The card's VRAM columns are lower than the checkpoint size because of how the input embeddings{% if multimodal %} and the vision encoder{% endif %} are handled. The embeddings are not quantized, because EXL3 is not an efficient format for them; the two platforms deal with that differently:
+The card's VRAM columns are lower than the checkpoint size because of how the input embeddings{% if multimodal %} and the vision encoder{% endif %} are handled. Neither column counts the MTP draft layers some models ship: speculative decoding with them is off by default in both engines, rarely the first choice at low bit rates, and often outdone by an external draft model where one is supported. The embeddings are not quantized, because EXL3 is not an efficient format for them; the two platforms deal with that differently:
 - exllamav3 typically offloads the input embeddings to CPU, which costs some speed but removes them from VRAM entirely.
 - vllm-exl3-plugin typically quantizes them at load time to `blockq`, a cheap, embedding-compatible format: resident in VRAM, but much smaller.
 {% if multimodal %}

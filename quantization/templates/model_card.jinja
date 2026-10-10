@@ -20,13 +20,13 @@ Each bitrate is available as a separate revision of this repository. When planni
 
 | BPW | Size on disk | VRAM (exllamav3) | VRAM (vLLM) |{% if composite %} Excess KLD |{% if show_ppl %} Δ perplexity |{% endif %}{% else %} Raw-text excess KLD |{% endif %}{% if mixed_cal %} Calibration |{% endif %}
 |---|---|---|---|{% if composite %}---|{% if show_ppl %}---|{% endif %}{% else %}---|{% endif %}{% if mixed_cal %}---|{% endif %}
-{% for rev in revisions %}|[{{ '{0:0.2f}'.format(rev.bits) }}](https://huggingface.co/{{ this_model }}/tree/{{ rev.name }})|{{ '{0:0.2f}'.format(rev.disk_bytes / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes) / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.encoder_bytes+rev.blockq_bytes) / 1024**3) }} GiB|{% if composite %}{{ '{0:0.4f}'.format(rev.composite) }}|{% if show_ppl %}{{ '{0:+0.2f}'.format(rev.dppl) }}%|{% endif %}{% else %}{{ '{0:0.4f}'.format(rev.raw_excess) }}|{% endif %}{% if mixed_cal %}{{ rev.calibration }}|{% endif %}
+{% for rev in revisions %}|[{{ '{0:0.2f}'.format(rev.bits) }}](https://huggingface.co/{{ this_model }}/tree/{{ rev.name }})|{{ '{0:0.2f}'.format(rev.disk_bytes / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.mtp_bytes) / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.encoder_bytes-rev.mtp_bytes+rev.blockq_bytes) / 1024**3) }} GiB|{% if composite %}{{ '{0:0.4f}'.format(rev.composite) }}|{% if show_ppl %}{{ '{0:+0.2f}'.format(rev.dppl) }}%|{% endif %}{% else %}{{ '{0:0.4f}'.format(rev.raw_excess) }}|{% endif %}{% if mixed_cal %}{{ rev.calibration }}|{% endif %}
 {% endfor %}|(base)|{{ '{0:0.2f}'.format(base_disk_bytes / 1024**3) }} GiB|||{% if composite %}|{% if show_ppl %}|{% endif %}{% else %}|{% endif %}{% if mixed_cal %}|{% endif %}
 
-- BPW: Average bits per weight across tensors (not including input embeddings, encoders, or output head)
+- BPW: Average bits per weight across tensors (not including input embeddings, encoders, MTP draft layers, or output head)
 - Size on disk: Total aggregate size of tensors in checkpoint, in GiB
-- VRAM (exllamav3): Total VRAM consumption as typically used in exllamav3, in GiB (minus embeddings)
-- VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB (blockq embeddings, offloaded/omitted encoders)
+- VRAM (exllamav3): Total VRAM consumption as typically used in exllamav3, in GiB (minus embeddings and MTP draft layers)
+- VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB (blockq embeddings, offloaded/omitted encoders, no MTP draft layers)
 {% if composite %}- Excess KLD: how far each quant's next-token distribution is from the unquantized model's, minus the unquantized model's own rounding noise, so 0 would be indistinguishable from the original (lower is better)
 {% if show_ppl %}- Δ perplexity: change in perplexity on the same text, same weights (lower is better)
 {% endif %}{% else %}- Raw-text excess KLD: how far each quant's next-token distribution is from the unquantized model's on plain web text, minus the unquantized model's own rounding noise (lower is better). This model has no chat template, so raw text is the distribution it was trained on.
