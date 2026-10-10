@@ -68,4 +68,8 @@ RUN TORCH_FIX_WORK=/tmp/pytorch-c10fix bash vllm-exl3-plugin/tools/torch-c10cuda
 
 # The fast kernels transformers looks for on hybrid models (Qwen3.5+, gated delta nets): any
 # import error here would otherwise only show as a slow reference pass at run time
-RUN python -c "import fla, causal_conv1d; print('fla', fla.__version__, 'causal_conv1d', causal_conv1d.__version__)"
+# llama_supports_gpu_offload() needs a visible GPU, which a build has none of; a CPU-only wheel
+# lacks the CUDA backend library, and qbench would then score GGUF on the CPU (it refuses at runtime)
+RUN python -c "import fla, causal_conv1d; print('fla', fla.__version__, 'causal_conv1d', causal_conv1d.__version__)" && \
+    python -c "import llama_cpp, os; d = os.path.join(os.path.dirname(llama_cpp.__file__), 'lib'); \
+assert any(f.startswith('libggml-cuda') for f in os.listdir(d)), 'llama-cpp-python is a CPU-only build'; print('llama_cpp', llama_cpp.__version__, 'cuda backend ok')"
