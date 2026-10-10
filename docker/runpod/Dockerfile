@@ -54,9 +54,18 @@ RUN cd vllm-exl3-plugin \
         for d in tomllib.load(open(f, "rb"))["project"]["optional-dependencies"][e]))') \
     && git log --oneline -1
 
+# causal-conv1d, built against this image's torch: a prebuilt or older build fails to import on
+# an ABI mismatch, and transformers then falls back to its slow reference path while saying the
+# package "is not installed". (flash-linear-attention, pure Triton, comes with the eval extras.)
+RUN pip install --no-cache-dir --no-build-isolation causal-conv1d
+
 # torch's libc10_cuda.so rebuilt with the fix for pytorch#196258 (expandable segments unmap
 # on the wrong device: Xid 31 or silent corruption on multi-GPU). Last, after every pip
 # install: any torch reinstall restores the stock library. Remove once torch carries 3fda599
 RUN TORCH_FIX_WORK=/tmp/pytorch-c10fix bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh \
     && bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh --check \
     && rm -rf /tmp/pytorch-c10fix
+
+# The fast kernels transformers looks for on hybrid models (Qwen3.5+, gated delta nets): any
+# import error here would otherwise only show as a slow reference pass at run time
+RUN python -c "import fla, causal_conv1d; print('fla', fla.__version__, 'causal_conv1d', causal_conv1d.__version__)"
