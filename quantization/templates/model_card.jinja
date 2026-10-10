@@ -54,14 +54,16 @@ Every set is plotted relative to the same baseline: an uncalibrated quantization
 
 | BPW | Composite vs best other quant | Compared against | Size difference | Worst eval slice | Slice |
 |---|---|---|---|---|---|
-{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.vs is not none %}{{ '{0:0.2f}'.format(r.vs) }}{% if r.interpolated %}\*{% endif %}{% if r.near_floor %}†{% endif %}{% else %}-{% endif %}|{{ r.against | default('-') }}|{% if r.worst is defined %}{{ r.size_delta }} ({{ '{0:+0.1f}'.format(r.size_delta_pct) }}%)|{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-|-{% endif %}|
+{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.vs is not none %}{{ '{0:0.2f}'.format(r.vs) }}{% if r.interpolated %}\*{% endif %}{% if r.near_floor %}†{% elif r.dropped %}‡{% endif %}{% else %}-{% endif %}|{{ r.against | default('-') }}|{% if r.worst is defined %}{{ r.size_delta }} ({{ '{0:+0.1f}'.format(r.size_delta_pct) }}%)|{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-|-{% endif %}|
 {% endfor %}
 
-Ratios of excess KLD, below 1.00 better. Each revision is compared with the most competitive quant at the same nominal bit rate among the sets above; the size column shows how much larger (+) or smaller (-) this card's checkpoint is than that one. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.{% if reference.rows | selectattr('interpolated') | list %}
+Ratios of excess KLD, below 1.00 better: the composite ratio is the geometric mean of the two composite slices' ratios at their weights, so each slice counts as weighted whatever its absolute scale. Each revision is compared with the most competitive quant at the same nominal bit rate among the sets above; the size column shows how much larger (+) or smaller (-) this card's checkpoint is than that one. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.{% if reference.rows | selectattr('interpolated') | list %}
 
 \* No other quant at this bit rate: compared against the most competitive set's ladder, interpolated (log scale) at equal size, counting the transformer body only, since output-head bits can differ between rungs.{% endif %}{% if reference.rows | selectattr('near_floor') | list %}
 
-† Within about twice the unquantized model's own rounding noise: both quants here are, in practice, indistinguishable from the original, and the ratio compares differences too small to matter in use. Read it as noise, not as a ranking.{% endif %}
+† Within about twice the unquantized model's own rounding noise: both quants here are, in practice, indistinguishable from the original, and the ratio compares differences too small to matter in use. Read it as noise, not as a ranking.{% endif %}{% for r in reference.rows if r.dropped and not r.near_floor %}{% if loop.first %}
+
+‡ A composite slice is left out where both quants sit within about twice the unquantized model's own rounding noise on it; the ratio is over the other slice alone:{% endif %} {{ '{0:0.2f}'.format(r.bits) }} bpw ({{ r.dropped | join(', ') }} left out){% if not loop.last %};{% else %}.{% endif %}{% endfor %}
 {% endif %}
 {% if traces_published %}
 

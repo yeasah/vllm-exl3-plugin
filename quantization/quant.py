@@ -246,11 +246,26 @@ def reference_section(job, qbench, floor, data):
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
         return { **survey(path), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
-    def interp(ladder, x):
-        pts = sorted((r['body'], r['composite']) for r in ladder)
-        if len(pts) < 2 or not pts[0][0] * 0.98 <= x <= pts[-1][0] * 1.02:
+    def interp(ladder, x, sl=None):
+        """A ladder's composite (or one slice's excess) at body size x, log-interpolated."""
+        val = (lambda r: r['composite']) if sl is None else (lambda r: r['excess'][sl])
+        pts = sorted((r['body'], val(r)) for r in ladder)
+        if len(pts) < 2 or not pts[0][0] * 0.98 <= x <= pts[-1][0] * 1.02 or min(p[1] for p in pts) <= 0:
             return None
         return float(np.exp(np.interp(x, [p[0] for p in pts], np.log([p[1] for p in pts]))))
+    W = composite_weights(job)[0]
+    def geo(a, b):
+        """Weighted geometric mean of per-slice excess ratios a/b over the composite's slices
+        ({slice: excess} each): every slice counts at its stated weight, whatever its absolute
+        scale (a weighted sum of excesses lets the slice with the larger excess dominate). A
+        slice where both sides sit under 2x its noise floor is left out and the rest
+        reweighted; if all are, all are used. Returns (ratio, slices left out, all near floor)."""
+        keep = [sl for sl in W if max(a[sl], b[sl]) >= 2 * floor[sl]]
+        dropped = [sl for sl in W if sl not in keep]
+        use = keep or list(W)
+        tw = sum(W[sl] for sl in use)
+        r = float(np.exp(sum(W[sl] / tw * np.log(max(a[sl], 1e-12) / max(b[sl], 1e-12)) for sl in use)))
+        return r, (dropped if keep else []), not keep
 
     ours = {r['name']: arm(r['name'], job.revdir(r['name']), slices) for r in data['revisions']}
     ours = {k: v for k, v in ours.items() if v}
@@ -276,29 +291,28 @@ def reference_section(job, qbench, floor, data):
 
     def describe_slice(sl):
         return DESCRIBE.get(sl) or DIAG_SLICES.get(sl, sl)
-    # A ratio of two excesses both within ~2x the unquantized model's own rounding noise compares
-    # differences too small to matter, and is mostly noise (Qwen3.8-27B 6 bpw: swe excess at a
-    # third of the floor, "1.18" against SC). Such rows are marked, not dropped
-    W = composite_weights(job)[0]
-    floor_c = sum(w * floor[sl] for sl, w in W.items() if sl in floor)
-    near = lambda *c: min(c) < 2 * floor_c
+    # Ratios are geo(): per-slice ratios, geometrically weighted. A slice where both quants sit
+    # within ~2x the unquantized model's own rounding noise compares differences too small to
+    # matter (Qwen3.8-27B 6 bpw: swe excess at a third of the floor) and is left out, the row
+    # saying so; a row where every slice is is marked as noise, not dropped
     rows = []
     for r in data['revisions']:
         o = ours.get(r['name'])
         if not o:
             continue
-        row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False, 'near_floor': False }
-        # same nominal bit rate, preferring the same head bits within a ladder; best across ladders
+        row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False,
+                'near_floor': False, 'dropped': [] }
+        # same nominal bit rate, preferring the same head bits within a ladder; the strongest
+        # competitor across ladders is the one our ratio against is highest
         same = []
         for disp, rungs in ladders:
             m = [x for x in rungs if x['bits'] is not None and abs(x['bits'] - r['bits']) < 0.01]
             if m:
-                pick = min(m, key=lambda x: (x['head_bits'] != o['head_bits'], x['composite']))
-                same.append((pick['composite'], disp, pick))
+                pick = min(m, key=lambda x: (x['head_bits'] != o['head_bits'], -geo(o['excess'], x['excess'])[0]))
+                same.append((geo(o['excess'], pick['excess']), disp, pick))
         if same:
-            _, disp, best = min(same, key=lambda t: t[0])
-            row['vs'] = o['composite'] / best['composite']
-            row['near_floor'] = near(o['composite'], best['composite'])
+            (ratio, dropped, allnear), disp, best = max(same, key=lambda t: t[0][0])
+            row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped] })
             rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices}
             worst = max(rel, key=rel.get)
             d = o['total'] - best['total']
@@ -307,18 +321,25 @@ def reference_section(job, qbench, floor, data):
                          'size_delta_pct': 100 * (o['total'] / best['total'] - 1),
                          'worst': rel[worst], 'worst_desc': describe_slice(worst) })
         else:
-            cands = [(v, disp) for disp, rungs in ladders if (v := interp(rungs, o['body'])) is not None]
+            cands = []
+            for disp, rungs in ladders:
+                v = {sl: interp(rungs, o['body'], sl) for sl in W}
+                if all(x is not None for x in v.values()):
+                    cands.append((geo(o['excess'], v), disp))
             if cands:
-                v, disp = min(cands)
-                row.update({ 'vs': o['composite'] / v, 'interpolated': True, 'against': disp,
-                             'near_floor': near(o['composite'], v) })
+                (ratio, dropped, allnear), disp = max(cands, key=lambda t: t[0][0])
+                row.update({ 'vs': ratio, 'interpolated': True, 'against': disp, 'near_floor': allnear,
+                             'dropped': [describe_slice(sl) for sl in dropped] })
         rows.append(row)
 
     traces = []
     if len(base) >= 2:
         for disp, rungs in [("this card", list(ours.values()))] + ladders:
-            pts = [(x['size'], x['composite'] / b) for x in sorted(rungs, key=lambda x: x['body'])
-                   if (b := interp(base, x['body'])) is not None]
+            pts = []
+            for x in sorted(rungs, key=lambda x: x['body']):
+                b = {sl: interp(base, x['body'], sl) for sl in W}
+                if all(v is not None for v in b.values()):
+                    pts.append((x['size'], geo(x['excess'], b)[0]))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
