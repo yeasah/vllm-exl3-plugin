@@ -214,6 +214,7 @@ def collect_metadata(job, qbench):
     composite = [sl for sl in EVAL_SLICES if sl in qbench]
     data['composite'] = len(composite) == len(EVAL_SLICES)
     W, data['composite_note'] = composite_weights(job)
+    data['agentic'] = W.get('swe', 0) > W.get('wild', 0)        # the weights put agent work first
     data['eval_slices'] = {sl: (n, W[sl]) for sl, (n, _) in EVAL_SLICES.items()}
     data['base_raw_ppl'] = ref_ppl.get('raw')
 
@@ -886,7 +887,7 @@ def do_card(job, args):
         f.write(env.get_template("technical.jinja").render(
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], **{k: meta[k] for k in
-            ('traces_published', 'eval_generator') if k in meta}))
+            ('traces_published', 'eval_generator', 'multimodal') if k in meta}))
 
 def do_fetch(job, args):
     """A card-only job directory from the published repo, no weights: main's results,
