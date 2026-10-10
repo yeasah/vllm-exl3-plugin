@@ -276,12 +276,18 @@ def reference_section(job, qbench, floor, data):
 
     def describe_slice(sl):
         return DESCRIBE.get(sl) or DIAG_SLICES.get(sl, sl)
+    # A ratio of two excesses both within ~2x the unquantized model's own rounding noise compares
+    # differences too small to matter, and is mostly noise (Qwen3.8-27B 6 bpw: swe excess at a
+    # third of the floor, "1.18" against SC). Such rows are marked, not dropped
+    W = composite_weights(job)[0]
+    floor_c = sum(w * floor[sl] for sl, w in W.items() if sl in floor)
+    near = lambda *c: min(c) < 2 * floor_c
     rows = []
     for r in data['revisions']:
         o = ours.get(r['name'])
         if not o:
             continue
-        row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False }
+        row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False, 'near_floor': False }
         # same nominal bit rate, preferring the same head bits within a ladder; best across ladders
         same = []
         for disp, rungs in ladders:
@@ -292,6 +298,7 @@ def reference_section(job, qbench, floor, data):
         if same:
             _, disp, best = min(same, key=lambda t: t[0])
             row['vs'] = o['composite'] / best['composite']
+            row['near_floor'] = near(o['composite'], best['composite'])
             rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices}
             worst = max(rel, key=rel.get)
             d = o['total'] - best['total']
@@ -303,7 +310,8 @@ def reference_section(job, qbench, floor, data):
             cands = [(v, disp) for disp, rungs in ladders if (v := interp(rungs, o['body'])) is not None]
             if cands:
                 v, disp = min(cands)
-                row.update({ 'vs': o['composite'] / v, 'interpolated': True, 'against': disp })
+                row.update({ 'vs': o['composite'] / v, 'interpolated': True, 'against': disp,
+                             'near_floor': near(o['composite'], v) })
         rows.append(row)
 
     traces = []
