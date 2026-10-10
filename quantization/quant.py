@@ -798,7 +798,7 @@ def plot_quality_vs_size(job, meta, path):
         ax.spines[sp].set_visible(False)
     for sp in ("left", "bottom"):
         ax.spines[sp].set_color(AXES)
-    ax.tick_params(colors=INK2)
+    ax.tick_params(colors=INK2, which="both")
     ax.plot(xs, ys, color=LINE, lw=2, zorder=2)
     ax.scatter(xs, ys, s=70, color=LINE, edgecolor=SURF, linewidth=1.5, zorder=3)
     for r, x, y in zip(revs, xs, ys):
@@ -835,7 +835,7 @@ def plot_vs_reference(job, ref, path):
         ax.spines[sp].set_visible(False)
     for sp in ("left", "bottom"):
         ax.spines[sp].set_color(AXES)
-    ax.tick_params(colors=INK2)
+    ax.tick_params(colors=INK2, which="both")
     ax.axhline(1.0, color=BASE, lw=1.5, ls=(0, (2, 2)), zorder=1, label="uncalibrated (baseline)")
     ys_all = [1.0]
     others = iter(OTHERS)
