@@ -481,11 +481,18 @@ def reference_section(job, qbench, floor, data):
             for disp, rungs in ladders:
                 v = {sl: interp(rungs, o['body'], sl) for sl in W}
                 if all(x is not None for x in v.values()):
-                    cands.append((geo(o['excess'], v), disp))
+                    cands.append((geo(o['excess'], v), disp, rungs))
             if cands:
-                (ratio, dropped, allnear), disp = max(cands, key=lambda t: t[0][0])
+                (ratio, dropped, allnear), disp, rungs = max(cands, key=lambda t: t[0][0])
                 row.update({ 'vs': ratio, 'interpolated': True, 'against': disp, 'near_floor': allnear,
                              'dropped': [describe_slice(sl) for sl in dropped] })
+                # the worst slice against the same equal-size interpolation (a GGUF ladder is
+                # always compared this way, so without it the column would never cover one)
+                rel = {sl: o['excess'][sl] / v for sl in slices if sl not in tainted
+                       if (v := interp(rungs, o['body'], sl))}
+                if rel:
+                    worst = max(rel, key=rel.get)
+                    row.update({ 'worst': rel[worst], 'worst_desc': describe_slice(worst) })
         rows.append(row)
 
     traces = []
