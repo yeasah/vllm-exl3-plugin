@@ -506,11 +506,22 @@ def reference_section(job, qbench, floor, data):
             # The baseline is extrapolated up to the card's own 10% size window, so a rung just past
             # its ends (Q6_K's ~6.6 real bpw against a 6 bpw top) still plots; drawn hollow
             bl, bh = min(b['body'] for b in base), max(b['body'] for b in base)
+            ours_trace = disp == "this card"
             pts = []
             for x in sorted(rungs, key=lambda x: x['body']):
                 b = {sl: interp(base, x['body'], sl, reach=1.1) for sl in W}
                 if all(v is not None for v in b.values()):
-                    pts.append((x['size'], geo(x['excess'], b)[0], not bl <= x['body'] <= bh))
+                    # label: our bit rate, or the other set's branch / quant type; plus its head bits
+                    # where they differ by a bit or more from the baseline's at that size, which the body
+                    # axis credits without charging (large only where the head is a big share: tiny
+                    # models). GGUF heads are ~Q6_K throughout, half a bit off: tagging those is noise
+                    near = min(base, key=lambda b: abs(b['body'] - x['body']))
+                    lab = f"{x['bits']:.2f}" if ours_trace else re.sub(r"(?i)bpw", "", str(x.get('branch') or x['label']))
+                    hb = x.get('head_bits')
+                    if hb is not None and near.get('head_bits') is not None and abs(hb - near['head_bits']) >= 1 \
+                            and not re.search(rf"H{hb:g}\b", lab):
+                        lab += f" H{hb:.3g}"
+                    pts.append((x['body'], geo(x['excess'], b)[0], not bl <= x['body'] <= bh, lab))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
@@ -539,10 +550,13 @@ def slice_comparisons(job, qbench, floor, data, ref):
         ladders, base = [], []
     out = []
     for sl in qbench:
-        series = [("this card", [(o['size'], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
-        series += [(disp, [(x['size'], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
+        # Compared sets are drawn on the body axis their numbers are computed on (a rung with a
+        # bigger head sits further right on total size than the size its ratios assume)
+        xk = 'body' if ladders else 'size'
+        series = [("this card", [(o[xk], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
+        series += [(disp, [(x[xk], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
         if base and all(sl in b['excess'] for b in base):
-            series.append(("uncalibrated (baseline)", [(b['size'], b['excess'][sl]) for b in base], False))
+            series.append(("uncalibrated (baseline)", [(b[xk], b['excess'][sl]) for b in base], False))
         table = []
         for name, o in ours.items():
             if sl not in o['excess']:
@@ -574,7 +588,8 @@ def slice_comparisons(job, qbench, floor, data, ref):
         anchor = re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", title.lower()).strip())
         out.append({ 'slice': sl, 'title': title, 'anchor': anchor, 'what': what, 'why': why, 'floor': floor[sl], 'tainted_by': tainted_by,
                      'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
-                     'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png" })
+                     'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png",
+                     'body_axis': bool(ladders) })
     return out
 
 def plot_slice(sc, path):
@@ -613,7 +628,8 @@ def plot_slice(sc, path):
         ax.text(0.99, 2 * sc['floor'], "2x noise floor", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                 fontsize=7, color=INK2)
     ax.margins(x=0.06)
-    ax.set_xlabel("language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
+    ax.set_xlabel("transformer body (GiB; no output head, input embeddings, encoder or MTP)" if sc.get('body_axis') else
+                  "language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
     ax.set_ylabel("excess KLD (log)", color=INK2)
     leg = ax.legend(frameon=False, fontsize=7.5, loc="upper right")
     for t in leg.get_texts():
@@ -829,14 +845,16 @@ def plot_quality_vs_size(job, meta, path):
 DESCRIBE = {"wild": "real user prompts (WildChat)", "swe": "real agent sessions (Open-SWE-Traces)"}
 
 def plot_vs_reference(job, ref, path):
-    """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal size."""
+    """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal body size,
+    every point labelled (our bit rate and ratio; another set's branch or quant type)."""
+    import numpy as np
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
     OURS, BASE = "#eb6834", "#888888"
     OTHERS = ["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"]
-    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=150)
+    fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
     for sp in ("top", "right"):
@@ -847,9 +865,10 @@ def plot_vs_reference(job, ref, path):
     ax.axhline(1.0, color=BASE, lw=1.5, ls=(0, (2, 2)), zorder=1, label="uncalibrated (baseline)")
     ys_all = [1.0]
     any_ext = False
+    labels = []     # (x, y, text, color, ours)
     others = iter(OTHERS)
     for t in ref['traces']:
-        xs, ys, ext = zip(*t['points']); ys_all += ys
+        xs, ys, ext, labs = zip(*t['points']); ys_all += ys
         color = OURS if t['ours'] else next(others)
         mk = "D" if t['ours'] else "o"
         ax.plot(xs, ys, color=color, lw=2, zorder=3 if t['ours'] else 2, label=t['name'])
@@ -858,15 +877,13 @@ def plot_vs_reference(job, ref, path):
         ax.scatter([x for x, e in zip(xs, ext) if e], [y for y, e in zip(ys, ext) if e],
                    marker=mk, s=36, facecolor=SURF, edgecolor=color, linewidth=1.5, zorder=4)
         any_ext = any_ext or any(ext)
-        if t['ours']:
-            for x, y in zip(xs, ys):
-                ax.annotate(f"{y:.2f}", (x, y), xytext=(0, -13), textcoords="offset points",
-                            fontsize=7, color=INK, ha="center")
+        labels += [(x, y, f"{l}: {y:.2f}" if t['ours'] else l, INK if t['ours'] else color, t['ours'])
+                   for x, y, l in zip(xs, ys, labs)]
     lo, hi = min(ys_all), max(ys_all)
-    pad = max(0.03, (hi - lo) * 0.12)
+    pad = max(0.03, (hi - lo) * 0.14)
     ax.set_ylim(lo - pad, hi + pad)
-    ax.margins(x=0.06)
-    ax.set_xlabel("language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
+    ax.margins(x=0.08)
+    ax.set_xlabel("transformer body (GiB; no output head, input embeddings, encoder or MTP)", color=INK2)
     ax.set_ylabel("excess KLD relative to\nuncalibrated at equal size", color=INK2)
     if any_ext:
         ax.scatter([], [], marker="o", s=36, facecolor=SURF, edgecolor=INK2, linewidth=1.5,
@@ -875,7 +892,43 @@ def plot_vs_reference(job, ref, path):
     for t in leg.get_texts():
         t.set_color(INK2)
     fig.text(0.13, 0.97, "Against other quants of this model", fontsize=11, color=INK, va="top")
-    fig.subplots_adjust(top=0.89, left=0.15, right=0.97, bottom=0.14)
+    fig.subplots_adjust(top=0.89, left=0.15, right=0.97, bottom=0.13)
+
+    # Greedy label placement: ours first, each label at the first of a few offsets around its
+    # point that overlaps no marker, no placed label, the legend, and stays inside the axes
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    box = ax.get_window_extent(rend)
+    taken = [leg.get_window_extent(rend)]
+    for x, y, *_ in labels:
+        px, py = ax.transData.transform((x, y))
+        taken.append(matplotlib.transforms.Bbox([[px - 5, py - 5], [px + 5, py + 5]]))
+    for t in ref['traces']:         # the lines too, sampled along each segment
+        d = ax.transData.transform([(p[0], p[1]) for p in t['points']])
+        for (x0, y0), (x1, y1) in zip(d[:-1], d[1:]):
+            for f in np.linspace(0, 1, 12):
+                px, py = x0 + f * (x1 - x0), y0 + f * (y1 - y0)
+                taken.append(matplotlib.transforms.Bbox([[px - 1.5, py - 1.5], [px + 1.5, py + 1.5]]))
+    offsets = [(0, 7, "center", "bottom"), (0, -7, "center", "top"), (7, 0, "left", "center"),
+               (-7, 0, "right", "center"), (6, 6, "left", "bottom"), (-6, 6, "right", "bottom"),
+               (6, -6, "left", "top"), (-6, -6, "right", "top"), (0, 16, "center", "bottom"),
+               (0, -16, "center", "top")]
+    for x, y, text, color, ours in sorted(labels, key=lambda l: not l[4]):
+        best = None
+        for dx, dy, ha, va in offsets:
+            a = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, va=va,
+                            fontsize=6.5 if ours else 6, color=color, zorder=5)
+            bb = a.get_window_extent(rend).expanded(1.05, 1.1)
+            inside = box.x0 <= bb.x0 and bb.x1 <= box.x1 and box.y0 <= bb.y0 and bb.y1 <= box.y1
+            if inside and not any(bb.overlaps(t) for t in taken):
+                best = a
+                break
+            a.remove()
+        if best is None:    # nothing clear: the first position, overlapping
+            dx, dy, ha, va = offsets[0]
+            best = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, va=va,
+                               fontsize=6.5 if ours else 6, color=color, zorder=5)
+        taken.append(best.get_window_extent(rend))
     fig.savefig(path, facecolor=SURF)
     plt.close(fig)
 
