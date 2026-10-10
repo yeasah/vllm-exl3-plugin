@@ -1795,6 +1795,22 @@ own-voice eval prompt set disjoint from `CONVERSATIONS` (our calibration's self 
 using the list), which restores SC's own-voice comparison, likely one of its real strengths.
 Diagnostic only, so not urgent.
 
+## `gguf-our-imatrix` — GGUF quantized from our calibration: is the gap the data or the format?
+
+**Outcome wanted:** for one model with a GGUF reference ladder, llama.cpp quants (Q4_K_M,
+Q6_K at least) built from an imatrix computed on our calibration mix, scored beside
+bartowski's on every slice. Splits our lead over the GGUF ladder into what the calibration
+data buys and what the format buys.
+
+**What it unblocks:** a sentence on the card or in docs/calibration.md about whether the mix
+transfers to other quantizers, which bears on publishing it as a corpus.
+
+Context, 2026-10-10 (Qwen3-0.6B, wild): bartowski's quants already carry an imatrix
+(`calibration_datav3`, 137 chunks, in the GGUF metadata). The K-quants use it; Q8_0 ignores it.
+On the wild plot the imatrix GGUF ladder sits no better than our *uncalibrated* EXL3 ladder. llama.cpp's
+logits move ~1e-3 KL with the shape of the last 512-token batch (about the bf16 noise floor),
+so compare at the high rungs only net of the `--gguf-parity` offset.
+
 ## `moe-tp` — Finish the job on MoE + TP
 
 Not new, but still outstanding. TP=2/4/8 are validated on hardware, MoE+TP is no
