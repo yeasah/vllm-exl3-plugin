@@ -1795,6 +1795,19 @@ own-voice eval prompt set disjoint from `CONVERSATIONS` (our calibration's self 
 using the list), which restores SC's own-voice comparison, likely one of its real strengths.
 Diagnostic only, so not urgent.
 
+**The size axis with more than one fixed-bit category (2026-10-10).** Comparisons are computed
+at equal *body* size, excluding the output head, because interpolating total size across a
+ladder whose head bits change (turboderp's 2.75bpw_H5 -> 3.0bpw) kinks the curve: head bytes buy
+far less KLD than body bytes. The cost is that a set with a bigger head gets that quality
+uncharged, which TECHNICAL.md states (material only where the head is a big share: ~37% of a
+0.6B's quantized bytes). Head bits are deliberately not annotated anywhere, ours or theirs: an
+optimization detail users shouldn't need. That holds while the head is the only such category.
+Qwen3.8-Next (and likely Qwen4) add an n-gram embedding that exllamav3 quantizes as another
+fixed-bit category, also varied across bit rates; with two, body-only credits both and total
+size kinks on both. Revisit when a model of that family is small enough to card: candidates are
+interpolating total size piecewise between rungs with matching category bits, or pricing each
+category's bytes at its own marginal KLD rate. Not label annotations.
+
 ## `gguf-our-imatrix` — GGUF quantized from our calibration: is the gap the data or the format?
 
 **Outcome wanted:** for one model with a GGUF reference ladder, llama.cpp quants (Q4_K_M,

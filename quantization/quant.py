@@ -511,16 +511,10 @@ def reference_section(job, qbench, floor, data):
             for x in sorted(rungs, key=lambda x: x['body']):
                 b = {sl: interp(base, x['body'], sl, reach=1.1) for sl in W}
                 if all(v is not None for v in b.values()):
-                    # label: our bit rate, or the other set's branch / quant type; plus its head bits
-                    # where they differ by a bit or more from the baseline's at that size, which the body
-                    # axis credits without charging (large only where the head is a big share: tiny
-                    # models). GGUF heads are ~Q6_K throughout, half a bit off: tagging those is noise
-                    near = min(base, key=lambda b: abs(b['body'] - x['body']))
+                    # label: our bit rate, or the other set's branch / quant type. Head bits stay out of
+                    # it, as they do for ours: a branch name carries a non-default head where its
+                    # publisher put one, and TECHNICAL.md states what the body axis credits a big head
                     lab = f"{x['bits']:.2f}" if ours_trace else re.sub(r"(?i)bpw", "", str(x.get('branch') or x['label']))
-                    hb = x.get('head_bits')
-                    if hb is not None and near.get('head_bits') is not None and abs(hb - near['head_bits']) >= 1 \
-                            and not re.search(rf"H{hb:g}\b", lab):
-                        lab += f" H{hb:.3g}"
                     pts.append((x['body'], geo(x['excess'], b)[0], not bl <= x['body'] <= bh, lab))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
