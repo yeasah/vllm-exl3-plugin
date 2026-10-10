@@ -392,13 +392,18 @@ def reference_section(job, qbench, floor, data):
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
         return { **survey(path, label), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
-    def interp(ladder, x, sl=None):
-        """A ladder's composite (or one slice's excess) at body size x, log-interpolated."""
+    def interp(ladder, x, sl=None, reach=1.02):
+        """A ladder's composite (or one slice's excess) at body size x, log-interpolated. Within
+        `reach` of either end it extends the end segment's log-linear slope instead."""
         val = (lambda r: r['composite']) if sl is None else (lambda r: r['excess'][sl])
         pts = sorted((r['body'], val(r)) for r in ladder)
-        if len(pts) < 2 or not pts[0][0] * 0.98 <= x <= pts[-1][0] * 1.02 or min(p[1] for p in pts) <= 0:
+        if len(pts) < 2 or not pts[0][0] / reach <= x <= pts[-1][0] * reach or min(p[1] for p in pts) <= 0:
             return None
-        return float(np.exp(np.interp(x, [p[0] for p in pts], np.log([p[1] for p in pts]))))
+        xs, ly = [p[0] for p in pts], np.log([p[1] for p in pts])
+        if xs[0] <= x <= xs[-1]:
+            return float(np.exp(np.interp(x, xs, ly)))
+        i = 0 if x < xs[0] else len(xs) - 2
+        return float(np.exp(ly[i] + (x - xs[i]) * (ly[i + 1] - ly[i]) / (xs[i + 1] - xs[i])))
     W = composite_weights(job)[0]
     def geo(a, b, skip=()):
         """Weighted geometric mean of per-slice excess ratios a/b over the composite's slices
@@ -498,11 +503,14 @@ def reference_section(job, qbench, floor, data):
     traces = []
     if len(base) >= 2:
         for disp, rungs in [("this card", list(ours.values()))] + ladders:
+            # The baseline is extrapolated up to the card's own 10% size window, so a rung just past
+            # its ends (Q6_K's ~6.6 real bpw against a 6 bpw top) still plots; drawn hollow
+            bl, bh = min(b['body'] for b in base), max(b['body'] for b in base)
             pts = []
             for x in sorted(rungs, key=lambda x: x['body']):
-                b = {sl: interp(base, x['body'], sl) for sl in W}
+                b = {sl: interp(base, x['body'], sl, reach=1.1) for sl in W}
                 if all(v is not None for v in b.values()):
-                    pts.append((x['size'], geo(x['excess'], b)[0]))
+                    pts.append((x['size'], geo(x['excess'], b)[0], not bl <= x['body'] <= bh))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
@@ -838,12 +846,18 @@ def plot_vs_reference(job, ref, path):
     ax.tick_params(colors=INK2, which="both")
     ax.axhline(1.0, color=BASE, lw=1.5, ls=(0, (2, 2)), zorder=1, label="uncalibrated (baseline)")
     ys_all = [1.0]
+    any_ext = False
     others = iter(OTHERS)
     for t in ref['traces']:
-        xs, ys = zip(*t['points']); ys_all += ys
+        xs, ys, ext = zip(*t['points']); ys_all += ys
         color = OURS if t['ours'] else next(others)
-        ax.plot(xs, ys, color=color, lw=2, zorder=3 if t['ours'] else 2,
-                marker="D" if t['ours'] else "o", markersize=6, markeredgecolor=SURF, label=t['name'])
+        mk = "D" if t['ours'] else "o"
+        ax.plot(xs, ys, color=color, lw=2, zorder=3 if t['ours'] else 2, label=t['name'])
+        ax.scatter([x for x, e in zip(xs, ext) if not e], [y for y, e in zip(ys, ext) if not e],
+                   marker=mk, s=36, color=color, edgecolor=SURF, zorder=4)
+        ax.scatter([x for x, e in zip(xs, ext) if e], [y for y, e in zip(ys, ext) if e],
+                   marker=mk, s=36, facecolor=SURF, edgecolor=color, linewidth=1.5, zorder=4)
+        any_ext = any_ext or any(ext)
         if t['ours']:
             for x, y in zip(xs, ys):
                 ax.annotate(f"{y:.2f}", (x, y), xytext=(0, -13), textcoords="offset points",
@@ -854,6 +868,9 @@ def plot_vs_reference(job, ref, path):
     ax.margins(x=0.06)
     ax.set_xlabel("language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
     ax.set_ylabel("excess KLD relative to\nuncalibrated at equal size", color=INK2)
+    if any_ext:
+        ax.scatter([], [], marker="o", s=36, facecolor=SURF, edgecolor=INK2, linewidth=1.5,
+                   label="hollow: past the baseline's sizes, extrapolated")
     leg = ax.legend(frameon=False, fontsize=7.5, loc="best")
     for t in leg.get_texts():
         t.set_color(INK2)
