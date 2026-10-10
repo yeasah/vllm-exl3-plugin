@@ -1809,7 +1809,8 @@ Context, 2026-10-10 (Qwen3-0.6B, wild): bartowski's quants already carry an imat
 (`calibration_datav3`, 137 chunks, in the GGUF metadata). The K-quants use it; Q8_0 ignores it.
 On the wild plot the imatrix GGUF ladder sits no better than our *uncalibrated* EXL3 ladder. llama.cpp's
 logits move ~1e-3 KL with the shape of the last 512-token batch (about the bf16 noise floor),
-so compare at the high rungs only net of the `--gguf-parity` offset.
+but bf16 parity is within the noise floor on every slice (llama.cpp's bf16 path is clean), so
+that wobble belongs to the quantized path (activation quantization) and stays in the GGUF numbers.
 
 Which imatrix varies by upload: the 0.6B used bartowski's generic `calibration_datav3`; newer
 uploads (Ornith-1.5-9B) use calibration-v6, rendered through the model's chat template with

@@ -1591,8 +1591,10 @@ def main():
                             help='GPUs, e.g. 0 or 0,1,2,3: one scorer per GPU at a time, the quants of each slice split across them (nvidia-smi numbering)')
     cmd_qbench.add_argument('--reference-gguf', action='append',
                             help='a GGUF repo to compare against (repeatable): the --gguf-quants files, scored by llama.cpp')
-    cmd_qbench.add_argument('--gguf-quants', default='Q3_K_M,Q4_K_M,Q5_K_M,Q6_K,Q8_0',
-                            help='quant types to take from each --reference-gguf repo')
+    # The best GGUF per byte at each size: below ~3.5 bpw the lattice-codebook I-quants (EXL3's
+    # nearest relatives; K-quants are scalar), IQ4_XS's non-linear grid at 4, scalar K-quants above
+    cmd_qbench.add_argument('--gguf-quants', default='IQ3_XXS,IQ3_M,IQ4_XS,Q5_K_M,Q6_K,Q8_0',
+                            help='quant types to take from each --reference-gguf repo (a type the repo lacks is left out)')
     cmd_qbench.add_argument('--gguf-parity', default=True, action=argparse.BooleanOptionalAction,
                             help="also score the repo's bf16 GGUF: llama.cpp's own numerics against the bf16 reference")
     cmd_qbench.add_argument('--reference-min-bits', type=float, default=0.0,
