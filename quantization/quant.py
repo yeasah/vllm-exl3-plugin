@@ -1208,9 +1208,13 @@ def do_qbench(job, args):
     for repo in args.reference_gguf or []:
         files = [f for f in HfApi().list_repo_files(repo) if f.endswith(".gguf") and not f.startswith("mmproj")]
         def pick(q):
-            m = [f for f in files if re.search(rf"[-_.]{re.escape(q)}\.gguf$", f, re.I)]
+            # The quant type is the whole suffix: "IQ3_XXS" must not take unsloth's "UD-IQ3_XXS"
+            # (a different recipe, then labelled as the plain type and possibly scored twice)
+            m = [f for f in files if re.search(rf"(?<![A-Za-z0-9])(?<!UD-){re.escape(q)}\.gguf$", f, re.I)]
             if not m:
                 print(f"=== {repo} has no {q} GGUF: left out ===")
+            elif len(m) > 1:
+                raise SystemExit(f"=== {repo}: {q} matches {m}; name the file's own quant suffix ===")
             return m[0] if m else None
         rungs = {q: hf_hub_download(repo, f) for q in args.gguf_quants.split(",") if (f := pick(q))}
         ref = {"repo": repo, "type": "gguf", "ladders": {"GGUF": rungs} if rungs else {}}
