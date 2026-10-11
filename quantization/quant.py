@@ -31,8 +31,14 @@ class Job:
         # Not a revision: a leading underscore keeps it out of revisions(), so never uploaded.
         self.traces = os.path.join(self.dir, "_traces")
         self.cal_data = os.path.join(self.traces, "cal.safetensors")
-        # Uncalibrated sweep: card section 2's common baseline. Kept, not uploaded.
+        # Uncalibrated sweep: card section 2's common baseline. Not in the model repo; `upload
+        # --uncalibrated` puts it (and the generator) in a separate repo, `fetch --uncalibrated`
+        # brings them back
         self.baseline = os.path.join(self.dir, "_baseline")
+        # The calibration generator, an uncalibrated 8bpw: built by `baseline` (or by `traces` if
+        # missing), used by `traces`
+        self.generator = os.path.join(self.traces, "gen-8bpw-uncal")
+        self.uncal_repo = f"{self.repo}-uncalibrated"
 
     def revdir(self, rev):
         return os.path.join(self.dir, rev)
@@ -774,7 +780,61 @@ def parse_qbench(qbench, label):
             return res
     return None
 
+UNCAL_README = """---
+base_model: {base}
+tags:
+- exl3
+- not-for-inference
+---
+# {name}: uncalibrated conversions (not for inference)
+
+Working artifacts for [{repo}](https://huggingface.co/{repo}), not quants to run. Use that repo.
+
+- `baseline/<rev>/`: uncalibrated EXL3 conversions of [{base}](https://huggingface.co/{base}) at
+  the published bit rates, the common baseline every set on the model card is measured against.
+  No calibration of any kind, so they favor no calibration, and are worse than every published quant.
+- `generator/`: an uncalibrated 8 bpw conversion that generates the calibration trace's answers.
+
+Each folder's `converter.json` records the exllamav3 converter that made it (git tree hashes);
+the pipeline refuses to compare against a conversion from a different converter. Made and used by
+`quantization/quant.py` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin)
+(`upload --uncalibrated`, `fetch --uncalibrated`).
+"""
+
+def upload_uncalibrated(job, args):
+    """The uncalibrated conversions (baseline ladder, calibration generator) to <repo>-uncalibrated:
+    a separate repo, so its storage can be retired whole and it carries its own not-for-inference
+    card; subfolders rather than branches, which further discourages loading them."""
+    if os.path.isfile(os.path.join(job.dir, "FETCHED.json")):
+        # its _baseline holds weightless size stand-ins, not conversions
+        print("=== card-only job dir: no uncalibrated conversions to upload ==="); return False
+    items = [(os.path.join(job.baseline, rev), f"baseline/{rev}") for rev in job.baseline_revisions()]
+    if os.path.isfile(os.path.join(job.generator, "quantization_config.json")):
+        items.append((job.generator, "generator"))
+    if not items:
+        print("=== no uncalibrated conversions to upload ==="); return True
+    api = HfApi()
+    api.create_repo(repo_id=job.uncal_repo, private=args.private, repo_type='model', exist_ok=True)
+    readme = os.path.join(job.dir, "_uncal_README.md")
+    with open(readme, "w") as f:
+        f.write(UNCAL_README.format(name=job.name, repo=job.repo, base=job.base_repo))
+    api.upload_file(path_or_fileobj=readme, path_in_repo="README.md", repo_id=job.uncal_repo)
+    for local, remote in items:
+        if not os.path.isfile(os.path.join(local, CONVERTER_FILE)):
+            # built before converters were recorded: published as unknown, which a fetch refuses by default
+            with open(os.path.join(local, CONVERTER_FILE), "w") as f:
+                json.dump({"tree": None, "commit": None, "dirty": None,
+                           "note": "made before the converter was recorded"}, f, indent=1)
+        print(f"=== UPLOADING {local} -> {job.uncal_repo}/{remote} ===")
+        api.upload_folder(folder_path=local, repo_id=job.uncal_repo, path_in_repo=remote)
+    return True
+
 def do_upload(job, args):
+    if args.uncalibrated:
+        if not upload_uncalibrated(job, args):
+            return False
+    if not args.quants:
+        return True
     api = HfApi()
     api.create_repo(repo_id=job.repo,
                     private=args.private,
@@ -1020,6 +1080,39 @@ def do_card(job, args):
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], **{k: meta[k] for k in
             ('traces_published', 'eval_generator', 'multimodal') if k in meta}))
 
+def fetch_uncalibrated(job, args):
+    """Populate a working job dir with the uncalibrated conversions published in <repo>-uncalibrated
+    (baseline rungs, calibration generator), so `baseline` (and `traces`) skip what is already
+    made. Only what is missing locally is downloaded; nothing is marked FETCHED."""
+    if os.path.isfile(os.path.join(job.dir, "FETCHED.json")):
+        print("=== this job dir is card-only (fetched without --uncalibrated): fetch uncalibrated "
+              "conversions into a working job dir instead ==="); return False
+    api = HfApi()
+    files = api.list_repo_files(job.uncal_repo)
+    want = {}
+    for f in files:
+        parts = f.split("/")
+        if parts[0] == "baseline" and len(parts) > 2:
+            want.setdefault(f"baseline/{parts[1]}", os.path.join(job.baseline, parts[1]))
+        elif parts[0] == "generator" and len(parts) > 1:
+            want.setdefault("generator", job.generator)
+    have = {r: d for r, d in want.items() if os.path.isfile(os.path.join(d, "quantization_config.json"))}
+    for r in have:
+        print(f"=== {r}: present locally, kept ===")
+    todo = {r: d for r, d in want.items() if r not in have}
+    if todo:
+        stage = os.path.join(job.dir, "_uncal_fetch")
+        snapshot_download(job.uncal_repo, local_dir=stage, allow_patterns=[f"{r}/*" for r in todo])
+        for r, d in todo.items():
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            os.rename(os.path.join(stage, r), d)        # same filesystem: no second copy of the weights
+            print(f"=== {r} -> {d} ===")
+        shutil.rmtree(stage, ignore_errors=True)
+    for p, why in converter_mismatches(list(want.values()), args).items():
+        print(f"!! {p}: {why}; `baseline` and `qbench` will refuse it without --allow-converter-mismatch")
+    print(f"=== fetched {len(todo)} uncalibrated conversion(s) from {job.uncal_repo} ===")
+    return True
+
 def do_fetch(job, args):
     """A card-only job directory from the published repo, no weights: main's results,
     reference.json and traces, each revision's configs, and weightless stand-ins (published.json)
@@ -1027,7 +1120,9 @@ def do_fetch(job, args):
     baseline, which is not published: an uncalibrated conversion at the same bits and head bits is
     byte-identical in size to a calibrated one (Ornith-1.5-9B 4 bpw: 7311656070 bytes uncalibrated,
     default and mix alike), so our same-named revision stands in. The job is marked FETCHED, and
-    every command but card and fetch refuses it."""
+    every command but card and fetch refuses it. With --uncalibrated, instead: see fetch_uncalibrated."""
+    if args.uncalibrated:
+        return fetch_uncalibrated(job, args)
     api = HfApi()
     revs = [b.name for b in api.list_repo_refs(job.repo).branches if b.name != "main"]
     os.makedirs(job.main, exist_ok=True)
@@ -1224,6 +1319,8 @@ def do_qbench(job, args):
         references.append(ref)
         arms += [(ref_label(repo, q), p) for q, p in rungs.items()]
     baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
+    if refuse_converter_mismatch(list(baseline.values()), args, "baseline"):
+        return False
     if references or baseline:
         # Every compared quant's size, recorded where the scores are: a re-card from the published
         # repo then needs neither the weights nor a header the Hub cannot parse (GGUF)
@@ -1416,9 +1513,9 @@ def resolve_sampling_profile(job, args, path):
                      f"or pass --sampling-profile exllamav3-default to use exllamav3's default ===")
 
 def do_traces(job, args):
-    """Per-model trace artifacts: the calibration generator (an uncalibrated 8bpw), the
-    conversational calibration trace it writes, and the bf16-generated eval traces the card's
-    composite is scored on. Each step is skipped when its output already exists."""
+    """Per-model trace artifacts: the conversational calibration trace, written by the calibration
+    generator (an uncalibrated 8bpw from `baseline`, built here if missing), and the bf16-generated
+    eval traces the card's composite is scored on. Each step is skipped when its output exists."""
     if not has_chat_template(job.base_repo):
         print(f"=== {job.base_repo} has no chat template: conversational traces do not apply; "
               f"quantize with --calibration default ===")
@@ -1434,17 +1531,13 @@ def do_traces(job, args):
     print(f"=== sampling: {profile or 'exllamav3 default (explicitly requested)'} ===")
     tries = args.retries + 1
 
-    gen = os.path.join(job.traces, "gen-8bpw-uncal")
-    gen_work = os.path.join(job.traces, "_work-gen")
-    print(f"=== calibration generator: uncalibrated 8bpw -> {gen} ===")
-    if not run_until(os.path.join(gen, "quantization_config.json"),
-                     [ "python3", os.path.join(args.exllamav3dir, "convert.py"),
-                       "-b", "8", "-hb", "8", "-vb", "16", "--uncalibrated",
-                       "-i", path, "-w", gen_work, "-o", gen, "-d", "0" ],
-                     job.log("traces-gen"), tries, env=one_gpu,
-                     cleanup=lambda: shutil.rmtree(gen_work, ignore_errors=True)):   # uncalibrated jobs cannot resume
-        print("=== calibration generator FAILED ==="); return False
-    shutil.rmtree(gen_work, ignore_errors=True)
+    gen = job.generator
+    if not os.path.isfile(os.path.join(gen, "quantization_config.json")):
+        # Normally made by `baseline` alongside the uncalibrated ladder (the same kind of job, so it
+        # spreads over GPUs with them); built here when traces are wanted without baselines
+        print("=== calibration generator missing (normally made by `baseline`): building it ===")
+        if not build_generator(job, args, path, one_gpu):
+            print("=== calibration generator FAILED ==="); return False
 
     ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
 
@@ -1508,6 +1601,76 @@ def decontaminate_self(job):
         json.dump(trace, f)
     print(f"!! own-voice eval: dropped prompts {overlap}, which the calibration trace also used")
 
+# Uncalibrated conversions are stable artifacts for a model *and converter*: a baseline from an
+# older converter is a different converter's draw, and every card ratio against it would mix the
+# converter change into the calibration comparison. Each records the converter that made it: git's
+# tree hashes of exllamav3/ and convert.py (not the commit, which also moves for eval-only changes)
+CONVERTER_FILE = "converter.json"
+
+def converter_id(xdir):
+    """The converter in exllamav3dir: {'tree', 'commit', 'dirty'}; tree None when not knowable."""
+    def git(*a):
+        return subprocess.check_output(["git", "-C", xdir, *a], text=True, stderr=subprocess.DEVNULL).strip()
+    try:
+        trees = git("rev-parse", "HEAD:exllamav3", "HEAD:convert.py").split()
+        dirty = bool(git("status", "--porcelain", "--", "exllamav3", "convert.py"))
+        return {"tree": None if dirty else ":".join(trees), "commit": git("rev-parse", "HEAD"), "dirty": dirty}
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {"tree": None, "commit": None, "dirty": None}
+
+def record_converter(out, args):
+    with open(os.path.join(out, CONVERTER_FILE), "w") as f:
+        json.dump({**converter_id(args.exllamav3dir), "recorded": stamp()}, f, indent=1)
+
+def converter_mismatches(paths, args):
+    """{path: why} for uncalibrated conversions not provably from the current converter."""
+    cur = converter_id(args.exllamav3dir)
+    out = {}
+    for p in paths:
+        try:
+            with open(os.path.join(p, CONVERTER_FILE)) as f:
+                rec = json.load(f)
+        except FileNotFoundError:
+            rec = {"tree": None}
+        if cur["tree"] is None:
+            out[p] = "the current converter has uncommitted changes" if cur["dirty"] else "the current converter is not a git checkout"
+        elif rec.get("tree") is None:
+            out[p] = "made by an unrecorded or modified converter"
+        elif rec["tree"] != cur["tree"]:
+            out[p] = f"made by converter {(rec.get('commit') or '?')[:10]}, current {cur['commit'][:10]}"
+    return out
+
+def refuse_converter_mismatch(paths, args, what):
+    bad = converter_mismatches(paths, args)
+    if not bad:
+        return False
+    for p, why in bad.items():
+        print(f"!! {what} {p}: {why}")
+    if args.allow_converter_mismatch:
+        print(f"!! --allow-converter-mismatch: using them anyway")
+        return False
+    print(f"=== {what}: not from the current converter, so comparisons against them would include the "
+          f"converter change; rebuild them (delete the directories) or pass --allow-converter-mismatch ===")
+    return True
+
+def build_generator(job, args, path, env, echo=True):
+    """The calibration generator: an uncalibrated 8bpw conversion of the base model."""
+    work = os.path.join(job.traces, "_work-gen")
+    os.makedirs(job.traces, exist_ok=True)
+    existed = os.path.isfile(os.path.join(job.generator, "quantization_config.json"))
+    if echo:
+        print(f"=== calibration generator: uncalibrated 8bpw -> {job.generator} ===")
+    ok = run_until(os.path.join(job.generator, "quantization_config.json"),
+                   [ "python3", os.path.join(args.exllamav3dir, "convert.py"),
+                     "-b", "8", "-hb", "8", "-vb", "16", "--uncalibrated",
+                     "-i", path, "-w", work, "-o", job.generator, "-d", "0" ],
+                   job.log("traces-gen"), args.retries + 1, env=env,
+                   cleanup=lambda: shutil.rmtree(work, ignore_errors=True), echo=echo)   # uncalibrated jobs cannot resume
+    shutil.rmtree(work, ignore_errors=True)
+    if ok and not existed:      # only what this run built: never stamp an older conversion as current
+        record_converter(job.generator, args)
+    return ok
+
 def bit_specs(spec):
     """'2:5,3:5,4' -> [(rev, bits, headbits)]"""
     out = []
@@ -1520,11 +1683,25 @@ def bit_specs(spec):
 def do_baseline(job, args):
     """The uncalibrated sweep that card section 2 measures every ladder against: the same bit
     rates as `quantize`, converted with --uncalibrated (no calibration of any kind, so it favors
-    no ladder), into <model>-exl3/_baseline. Uncalibrated jobs cannot resume; a failed one restarts."""
+    no ladder), into <model>-exl3/_baseline; and the calibration generator `traces` uses, an
+    uncalibrated 8bpw (for models with a chat template). One task pool, spread over -d. A rung or
+    generator already present (made earlier, or brought by `fetch --uncalibrated`) is kept if the
+    current converter made it. Uncalibrated jobs cannot resume; a failed one restarts."""
     path = snapshot_download(repo_id=job.base_repo)
+    specs = bit_specs(args.bits)
+    present = [os.path.join(job.baseline, rev) for rev, _, _ in specs
+               if os.path.isfile(os.path.join(job.baseline, rev, "quantization_config.json"))]
+    if refuse_converter_mismatch(present, args, "baseline"):
+        return False
+    gen_wanted = args.generator and has_chat_template(job.base_repo)
+    if gen_wanted and os.path.isfile(os.path.join(job.generator, "quantization_config.json")):
+        for p, why in converter_mismatches([job.generator], args).items():
+            # traces only; no comparison runs against it, so a note rather than a refusal
+            print(f"!! calibration generator {p}: {why} (kept: it writes calibration text, not a comparison)")
     def task(rev, bits, headbits):
         def run(slot, echo):
             out = os.path.join(job.baseline, rev); work = os.path.join(job.baseline, f"_work-{rev}")
+            existed = os.path.isfile(os.path.join(out, "quantization_config.json"))
             if echo:
                 print(f"=== BASELINE {rev} (uncalibrated) ===")
             ok = run_until(os.path.join(out, "quantization_config.json"),
@@ -1535,11 +1712,18 @@ def do_baseline(job, args):
                            cleanup=lambda: shutil.rmtree(work, ignore_errors=True), echo=echo)
             if ok:
                 shutil.rmtree(work, ignore_errors=True)
+                if not existed:     # only what this run built: never stamp an older rung as current
+                    record_converter(out, args)
             return ok
         return rev, run
-    specs = bit_specs(args.bits)
-    failed = run_jobs([task(*sp) for sp in specs], device_slots(args.device), "BASELINE")
-    return report_failures(failed, "BASELINE", {rev: job.log(f"baseline-{rev}") for rev, _, _ in specs})
+    def gen_task():
+        def run(slot, echo):
+            return build_generator(job, args, path, gpu_env(slot), echo)
+        return "generator", run
+    tasks = ([gen_task()] if gen_wanted else []) + [task(*sp) for sp in specs]   # biggest first
+    failed = run_jobs(tasks, device_slots(args.device), "BASELINE")
+    return report_failures(failed, "BASELINE", {**{rev: job.log(f"baseline-{rev}") for rev, _, _ in specs},
+                                                "generator": job.log("traces-gen")})
 
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
@@ -1607,14 +1791,29 @@ def do_quantize(job, args):
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="EXL3 quantization pipeline. Usual order: baseline, traces, "
+                                     "quantize, qbench, card, upload")
     parser.add_argument('-x', '--exllamav3dir', default='../deps/exllamav3')
     parser.add_argument('-w', '--workdir', default='work')
     parser.add_argument('-m', '--model', required=True)
     parser.add_argument('-o', '--org', default='yeasah')
     subparsers = parser.add_subparsers()
 
-    cmd_traces = subparsers.add_parser('traces')
+    cmd_baseline = subparsers.add_parser('baseline', help="uncalibrated conversions: the card's baseline ladder and "
+                                         "the calibration generator (single-GPU jobs, spread over -d)")
+    cmd_baseline.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
+    cmd_baseline.add_argument('-d', '--device', default='0',
+                              help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
+    cmd_baseline.add_argument('--retries', type=int, default=2)
+    cmd_baseline.add_argument('--generator', default=True, action=argparse.BooleanOptionalAction,
+                              help='also the uncalibrated 8bpw calibration generator `traces` uses (models with a chat template)')
+    cmd_baseline.add_argument('--allow-converter-mismatch', action='store_true',
+                              help='reuse rungs a different (or unrecorded) converter made')
+    cmd_baseline.set_defaults(func=do_baseline)
+
+
+    cmd_traces = subparsers.add_parser('traces', help="eval traces, and the calibration trace from the generator "
+                                       "(built here if `baseline` has not)")
     cmd_traces.add_argument('-d', '--device', default='0',
                             help='GPUs for the calibration generator: its conversion uses the first, the '
                                  'calibration trace all of them (a large generator autosplits), e.g. 0,1')
@@ -1636,7 +1835,7 @@ def main():
                                  'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
     cmd_traces.set_defaults(func=do_traces)
 
-    cmd_quantize = subparsers.add_parser('quantize')
+    cmd_quantize = subparsers.add_parser('quantize', help="the calibrated ladder")
     cmd_quantize.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
     cmd_quantize.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
@@ -1646,14 +1845,9 @@ def main():
                               help='resume a failed revision this many times before stopping')
     cmd_quantize.set_defaults(func=do_quantize)
 
-    cmd_baseline = subparsers.add_parser('baseline')
-    cmd_baseline.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
-    cmd_baseline.add_argument('-d', '--device', default='0',
-                              help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
-    cmd_baseline.add_argument('--retries', type=int, default=2)
-    cmd_baseline.set_defaults(func=do_baseline)
-
-    cmd_qbench = subparsers.add_parser('qbench')
+    cmd_qbench = subparsers.add_parser('qbench', help="score every set on the eval slices against the bf16 reference")
+    cmd_qbench.add_argument('--allow-converter-mismatch', action='store_true',
+                            help='score baseline rungs a different (or unrecorded) converter made')
     cmd_qbench.add_argument('--logit_cache', default=None,
                             help='logit cache dir (default: <model>-exl3/_logit_cache, owned by this model)')
     # Reference logits are full-vocabulary: ~35 GB for a 60-conversation WildChat trace on a
@@ -1683,7 +1877,7 @@ def main():
                                  '(card section 2); repeatable')
     cmd_qbench.set_defaults(func=do_qbench)
 
-    cmd_card = subparsers.add_parser('card')
+    cmd_card = subparsers.add_parser('card', help="the model card and TECHNICAL.md from the qbench results")
     cmd_card.add_argument('--template', default='templates/model_card.jinja')
     # Raw-text perplexity is meaningless for some models (gpt-oss: ~3600 even for
     # the unquantized reference, on every engine); KLD stays valid, so drop only PPL.
@@ -1691,12 +1885,20 @@ def main():
                           action=argparse.BooleanOptionalAction)
     cmd_card.set_defaults(func=do_card)
 
-    cmd_fetch = subparsers.add_parser('fetch', help="card-only job dir from the published repo (no weights)")
+    cmd_fetch = subparsers.add_parser('fetch', help="card-only job dir from the published repo (no weights); "
+                                     "with --uncalibrated, the published uncalibrated conversions into a working job dir")
+    cmd_fetch.add_argument('--uncalibrated', action='store_true',
+                           help='baseline rungs and the generator from <repo>-uncalibrated, so `baseline` can skip them')
     cmd_fetch.set_defaults(func=do_fetch)
 
-    cmd_upload = subparsers.add_parser('upload')
+    cmd_upload = subparsers.add_parser('upload', help="the ladder and main to <org>/<model>-exl3")
     cmd_upload.add_argument('--private', default=True,
                             action=argparse.BooleanOptionalAction)
+    cmd_upload.add_argument('--uncalibrated', action='store_true',
+                            help='also the baseline rungs and the generator, to <org>/<model>-exl3-uncalibrated '
+                                 '(a separate, not-for-inference repo)')
+    cmd_upload.add_argument('--quants', default=True, action=argparse.BooleanOptionalAction,
+                            help='the model repo itself (--no-quants with --uncalibrated: only the uncalibrated repo)')
     cmd_upload.set_defaults(func=do_upload)
 
     args = parser.parse_args()
