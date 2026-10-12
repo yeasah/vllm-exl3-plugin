@@ -1671,13 +1671,14 @@ def build_generator(job, args, path, env, echo=True):
         record_converter(job.generator, args)
     return ok
 
-def bit_specs(spec):
-    """'2:5,3:5,4' -> [(rev, bits, headbits)]"""
+def bit_specs(spec, suffix=None):
+    """'2:5,3:5,4' -> [(rev, bits, headbits)]; a suffix is appended to every revision name"""
     out = []
     for b in spec.split(','):
         tb = b.split(':')
         bits, headbits = tb[0], (tb[1] if len(tb) > 1 else "6")
-        out.append((f"{float(bits):0.2f}bpw" + (f"-H{int(headbits)}" if len(tb) > 1 else ""), bits, headbits))
+        out.append((f"{float(bits):0.2f}bpw" + (f"-H{int(headbits)}" if len(tb) > 1 else "") + (f"-{suffix}" if suffix else ""),
+                    bits, headbits))
     return out
 
 def do_baseline(job, args):
@@ -1750,6 +1751,19 @@ def do_quantize(job, args):
             # Outside revdir on purpose: `upload` publishes each revision directory whole.
             log_path = job.log(rev)
             say = print if echo else (lambda *a, **k: None)
+            # With --measurement, the bits come from a per-tensor recipe solved for this rate
+            # (sc_optimize), passed to convert.py in place of -b/-hb
+            recipe = os.path.join(job.dir, "_recipes", f"{rev}.yaml") if args.measurement else None
+            if recipe and not os.path.isfile(donefile) and not os.path.isfile(os.path.join(workdir, "args.json")):
+                os.makedirs(os.path.dirname(recipe), exist_ok=True)
+                rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
+                                  "-m", args.measurement, "-b", bits, "-hb", headbits,
+                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-o", recipe ] +
+                                ([ "-rr", args.rfn ] if args.rfn else []),
+                                job.log(f"{rev}-recipe"), None, echo)
+                if rc or not os.path.isfile(recipe):
+                    print(f"=== RECIPE FOR {rev} FAILED (sc_optimize exit {rc}, log {job.log(f'{rev}-recipe')}); not converting ===")
+                    return False
             # A failed attempt resumes from its checkpoint rather than ending the sweep. The
             # usual failure is a host OOM at the head, the job's memory peak, and resuming is
             # safe: a conversion OOM-killed there and resumed came out byte-identical to an
@@ -1766,13 +1780,12 @@ def do_quantize(job, args):
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
                     run_logged([ "python3", script,
                                  "-hq",
-                                 "-b", bits,
-                                 "-hb", headbits,
                                  "-vb", "16",
                                  "-i", path,
                                  "-w", workdir,
                                  "-o", revdir,
                                  "-d", "0" ] +
+                               ([ "-rcp", recipe ] if recipe else [ "-b", bits, "-hb", headbits ]) +
                                ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []),
                                log_path, gpu_env(slot), echo)
             if not os.path.isfile(donefile):
@@ -1781,12 +1794,18 @@ def do_quantize(job, args):
             say(f"=== QUANTIZATION OF {revdir} COMPLETE ===")
             if os.path.isdir(workdir):
                 shutil.rmtree(workdir)
-            # Nothing in an EXL3 checkpoint records its calibration (docs/calibration.md)
+            # Nothing in an EXL3 checkpoint records its calibration (docs/calibration.md), nor the
+            # solver inputs behind a recipe's allocation: the recipe is published beside it
+            rec = dict(calibration)
+            if recipe:
+                shutil.copyfile(recipe, os.path.join(revdir, "recipe.yaml"))
+                rec["recipe"] = { "measurement": os.path.basename(args.measurement), "rfn": args.rfn and os.path.basename(args.rfn),
+                                  "alpha": args.alpha, "min_k": args.min_k }
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
-                json.dump(calibration, f, indent=1)
+                json.dump(rec, f, indent=1)
             return True
         return rev, run
-    specs = bit_specs(args.bits)
+    specs = bit_specs(args.bits, args.suffix)
     failed = run_jobs([task(*sp) for sp in specs], device_slots(args.device), "QUANTIZE")
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
@@ -1843,6 +1862,16 @@ def main():
                               help='mix: the conversational trace from `traces`; default: the bundled corpus')
     cmd_quantize.add_argument('--retries', type=int, default=2,
                               help='resume a failed revision this many times before stopping')
+    cmd_quantize.add_argument('--suffix', default=None,
+                              help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
+    cmd_quantize.add_argument('--measurement', default=None,
+                              help='sc_measure.py sensitivity JSON: each revision\'s bits come from a recipe sc_optimize '
+                                   'solves for its rate (published beside it as recipe.yaml) instead of uniform -b/-hb')
+    cmd_quantize.add_argument('--rfn', default=None,
+                              help='per-tensor error anchors (sc_rfn_probe.py JSON) for sc_optimize, as used for the measurement')
+    cmd_quantize.add_argument('--alpha', type=float, default=2.0,
+                              help='sc_optimize KLD-vs-noise exponent (its docs recommend 2.0 over the fitted value)')
+    cmd_quantize.add_argument('--min-k', type=int, default=2, help='sc_optimize minimum per-tensor bits')
     cmd_quantize.set_defaults(func=do_quantize)
 
     cmd_qbench = subparsers.add_parser('qbench', help="score every set on the eval slices against the bf16 reference")
