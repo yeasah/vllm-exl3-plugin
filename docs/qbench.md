@@ -628,6 +628,12 @@ uses raw text when it does not, as for base models like `meta-llama/Llama-3.2-3B
 
 ## Per-tensor bit allocation does not compose (2026-08-23)
 
+> **Scope (2026-10-11):** this null was measured on phi-4-mini at 3.0 bpw against the raw-text
+> eval. On Qwen3-0.6B (also plain attention), Ornith-1.5-9B and Qwen3.8-27B at 4-5 bpw against
+> the conversational slices, the same `sc_optimize` pipeline clears the bar by 5-16%, budget-matched;
+> see [the SC recipe on the conversational eval](#the-sc-recipe-clears-the-bar-on-the-conversational-eval-2026-10-11).
+> What is measured below stays true of what it measured.
+
 *Survives the exllamav3 v1.4.3 bump unrevisited, and provably.* The study ran from
 `~/git/exllamav3-dev`, cloned at `2398c05` on 2026-08-23 and never fetched since — its
 reflog holds a single `clone:` entry. Upstream then tagged **v1.4.3 at that same
@@ -1247,6 +1253,71 @@ so ppl is saturated at 4 bpw on this model and KLD carries the result alone. Eve
 other finding in this sequence had two metrics agreeing; this one does not.
 
 Raw results: `quantization/work/Ornith-1.5-35B-A3B-exl3/main/qb_results.json`.
+
+## The SC recipe clears the bar on the conversational eval (2026-10-11)
+
+Published `EXL3-SC` beat our quants on Qwen3.8-27B's chat slice at 5-6 bpw while SC's
+calibration data alone only tied our mix on a 9B proxy ([calibration.md](calibration.md),
+"SC's calibration, separated from its recipe"). That left the recipe — per-tensor bits
+from `sc_measure` (shaped noise) and `sc_optimize` (greedy allocation) — as the candidate,
+against [the null above](#per-tensor-bit-allocation-does-not-compose-2026-08-23). Every
+arm below is budget-matched (sizes equal to within 4 MB) and scored on the seven
+conversational slices; settings as upstream's `doc/optimize.md` recommends (`--shaped`,
+rfn anchors at scales 1.0/0.5, `--alpha 2.0`, `--min_k 2`). Our fork's `sc_*` scripts are
+upstream's `abf4911` (2026-08-22), unchanged through the fork point, which is the code
+turboderp's 27B SC sets were made with.
+
+**It clears the bar, on dense and hybrid models alike.** Excess KLD, recipe ÷ plain uniform
+conversion with the same calibration:
+
+| model, bpw | wild | swe | ctx_user | ctx_tool | ctx_ml | loop | self |
+|---|---|---|---|---|---|---|---|
+| Qwen3-0.6B, 4 (plain attention), draw 0 / draw 1 | 0.90 / 0.92 | 0.84 / 0.84 | 0.91 / 0.93 | 0.89 / 0.98 | 0.90 / 0.91 | 0.95 / 0.92 | 0.95 / 0.96 |
+| Ornith-1.5-9B, 4 (hybrid), SC trace calibration | 0.95 | 0.87 | 0.86 | 0.87 | 0.93 | 0.86 | 0.96 |
+| Qwen3.8-27B, 5 (hybrid), wild only | 0.89 | — | — | — | — | — | — |
+
+The 0.6B arms move ±4% between draws, so its 5-16% is above noise; the 27B row is published
+SC (0.867 of ours) against its own trace through plain convert (0.972 and 0.975 over two
+draws, 0.3% apart). The 27B comparison also spans a converter version (his v1.4.2 tree
+against our fork) where the 9B and 0.6B ones do not.
+
+**Why the null does not carry over is open.** The difference is not attention type (the 0.6B
+is plain attention, like phi-4-mini) and not opposed moves as such: the 9B recipe demotes 29
+tensors and promotes 43, the regime [the promotion section](#extra-budget-promotion-does-compose-and-the-null-was-about-opposed-moves-2026-09-20)
+blamed. Left: the eval (raw text against conversational), the bit rate (3.0 against 4-5),
+the alpha (a floor-biased fit of 1.791 against 2.0), and the model.
+
+**The gain is in the per-tensor detail, not the family pattern.** The 9B recipe's moves follow
+tensor families (full-attention k/v and o, linear-attention `out_proj` and `down_proj` up;
+`in_proj_qkv`, `q_proj` down). Setting each family uniformly to its rounded mean, budget-matched
+(k/v/o and `out_proj` at 5, `q_proj` at 3, `in_proj_qkv` at 3 on 10 of 24 layers evenly over
+depth), is **worse than plain on every slice** (+3-14%) and 8-31% worse than the recipe it came
+from. Category bits do not carry it.
+
+**Recipe and calibration are separable, and stack.** SC's recipe (measured on SC's trace) applied
+with our conversational mix as the converter's calibration beats our mix alone on every slice:
+wild 0.97, swe 0.91, ctx_user 0.88, ctx_tool 0.90, ctx_ml 0.93, loop 0.86, self 0.93.
+
+**The recipe takes the shape of what it is measured on.** Measured on our mix instead (its
+eval rows mostly raw text and code), the recipe gains on agent work and loses on chat:
+
+| measured on (converted with our mix) | wild | swe | ctx_user | ctx_tool | ctx_ml | loop | self |
+|---|---|---|---|---|---|---|---|
+| no recipe | 0.506 | 0.575 | 0.443 | 0.517 | 0.544 | 0.528 | 0.553 |
+| our mix, 10 eval rows (the default) | 0.764 | 0.483 | 0.551 | 0.484 | 0.573 | 0.498 | 0.860 |
+| our mix, 40 eval rows | 0.643 | **0.445** | 0.463 | **0.425** | 0.556 | 0.454 | 0.743 |
+| SC's trace, 10 rows | **0.491** | 0.524 | **0.390** | 0.463 | **0.505** | 0.454 | **0.512** |
+
+(excess as a share of the uncalibrated quant's.) Four times the eval rows improves every slice
+3-16%, so the default 10 is too few; but the chat penalty survives it. Sensitivity is fitted on
+the measurement's eval rows only (the Hessian rows shape the noise), and a code- and agent-heavy
+measurement spends the budget protecting what that content exercises. A chat-shaped measurement
+generalizes more evenly. Whether a blend of the two avoids the trade, or the mix measurement
+actively steers against chat, is being measured.
+
+Two tool changes made the 9B measurable on 16 GB cards: `sc_measure --gpu_split` (it holds the
+whole fp16 model) and `--boundary_cpu` (its per-module input cache, ~4x the device at 40 rows;
+bit-identical results). `quant.py quantize --measurement` builds a ladder from a measurement.
 
 ## Known limitations, and what closing them would unlock
 
