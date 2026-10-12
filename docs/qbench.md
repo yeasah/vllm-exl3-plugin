@@ -1312,8 +1312,41 @@ eval rows mostly raw text and code), the recipe gains on agent work and loses on
 3-16%, so the default 10 is too few; but the chat penalty survives it. Sensitivity is fitted on
 the measurement's eval rows only (the Hessian rows shape the noise), and a code- and agent-heavy
 measurement spends the budget protecting what that content exercises. A chat-shaped measurement
-generalizes more evenly. Whether a blend of the two avoids the trade, or the mix measurement
-actively steers against chat, is being measured.
+generalizes more evenly.
+
+**Why: absolute KL weights the rows, and the rows want different tensors (2026-10-12).** Per
+eval row, mean KL across all perturbed tensors spans **145x** within our mix (0.00036 to 0.052):
+raw text and code are loud, the model's own chat quiet, so a plain mean is set by a few rows.
+And the two distributions rank tensors differently: per tensor, mix-measured KL runs 2-18x the
+chat-measured (10th to 90th percentile), Spearman 0.77 between the two sensitivity rankings.
+Measurements at 40 rows, all converted with our mix, equal size:
+
+| measured on | wild | swe | ctx_user | ctx_tool | ctx_ml | loop | self | composite, agentic (0.3/0.7) | chat-first (0.8/0.2) |
+|---|---|---|---|---|---|---|---|---|---|
+| no recipe | 0.506 | 0.575 | 0.443 | 0.517 | 0.544 | 0.528 | 0.553 | 1.00 | 1.00 |
+| SC's trace | **0.476** | 0.523 | 0.402 | 0.470 | 0.501 | 0.469 | 0.516 | 0.92 | **0.93** |
+| our own-voice rows | 0.483 | 0.518 | 0.405 | 0.463 | 0.506 | 0.458 | **0.504** | 0.92 | 0.94 |
+| our mix | 0.643 | **0.445** | 0.463 | **0.425** | 0.556 | 0.454 | 0.743 | 0.90 | 1.15 |
+| our mix, rows normalized to equal mean KL | 0.512 | 0.534 | 0.418 | 0.449 | **0.476** | **0.438** | 0.568 | 0.95 | 1.00 |
+| SC's trace + our mix, 50/50 | 0.537 | 0.448 | **0.396** | 0.446 | 0.507 | 0.442 | 0.605 | **0.86** | 1.00 |
+
+(composites: weighted geometric mean of the wild and swe ratios against no recipe.)
+
+- **It is a trade, not poisoning, and the measurement's weighting is where it is set.** Blending
+  the two measurements 50/50 (each first normalized to equal total KL; a raw average would be
+  the mix measurement alone, its KL running ~9x the chat one) keeps nearly all of the mix's agent
+  gains and recovers three quarters of the chat loss. Normalizing rows *within* the mix recovers
+  chat further but gives back most of the swe gain: the loud rows were carrying real signal for
+  agent work. Row weighting picks a point on the trade; it does not remove it.
+- **Our calibration's own-voice slice is SC's trace, for this purpose.** Measured on 40 of its
+  rows (Hessians from the mix), the recipe matches SC-40 within ±2.3% on every slice, and the
+  sensitivity rankings agree at Spearman 0.990. The chat end of the dial needs no separate trace.
+- **SC's trace does not need 40 rows** (within ±3% of 10 on every slice); a homogeneous corpus is
+  stable early. Our mix does (40 beat 10 by 3-16%).
+
+So the recipe stage reduces to one knob, the own-voice share of the measurement, drawn from data
+the pipeline already generates: all own-voice for a chat-first model, an even blend for an
+agent-first one. A sweep of the share is running.
 
 Two tool changes made the 9B measurable on 16 GB cards: `sc_measure --gpu_split` (it holds the
 whole fp16 model) and `--boundary_cpu` (its per-module input cache, ~4x the device at 40 rows;
