@@ -1637,8 +1637,34 @@ def converter_mismatches(paths, args):
         elif rec.get("tree") is None:
             out[p] = "made by an unrecorded or modified converter"
         elif rec["tree"] != cur["tree"]:
-            out[p] = f"made by converter {(rec.get('commit') or '?')[:10]}, current {cur['commit'][:10]}"
+            how = "adopted under" if rec.get("adopted") else "made by"
+            out[p] = f"{how} converter {(rec.get('commit') or '?')[:10]}, current {cur['commit'][:10]}"
     return out
+
+def adopt_converter(paths, args):
+    """Record the current converter on conversions that carry no record, after a human has checked
+    that the converter has not changed since they were made (e.g. the fork's history under
+    exllamav3/ and convert.py). One recorded decision instead of an override passed on every run,
+    which would teach the flag and dilute the refusal. Never overwrites a record that names
+    another converter: that one is a true record of a different converter, and must be rebuilt."""
+    cur = converter_id(args.exllamav3dir)
+    if cur["tree"] is None:
+        print("=== cannot adopt: the current converter has uncommitted changes or is not a git checkout ==="); return False
+    for p in paths:
+        try:
+            with open(os.path.join(p, CONVERTER_FILE)) as f:
+                rec = json.load(f)
+        except FileNotFoundError:
+            rec = {"tree": None}
+        if rec.get("tree") is not None:
+            print(f"=== {p}: already recorded ({'current' if rec['tree'] == cur['tree'] else 'a different converter'}); not adopted ===")
+            continue
+        with open(os.path.join(p, CONVERTER_FILE), "w") as f:
+            json.dump({**cur, "adopted": True, "recorded": stamp(),
+                       "note": "adopted: made before converters were recorded, judged by a person to be from this "
+                               "converter; not verified by a build"}, f, indent=1)
+        print(f"=== {p}: adopted under converter {cur['commit'][:10]} ===")
+    return True
 
 def refuse_converter_mismatch(paths, args, what):
     bad = converter_mismatches(paths, args)
@@ -1692,6 +1718,10 @@ def do_baseline(job, args):
     specs = bit_specs(args.bits)
     present = [os.path.join(job.baseline, rev) for rev, _, _ in specs
                if os.path.isfile(os.path.join(job.baseline, rev, "quantization_config.json"))]
+    if args.adopt_converter:
+        gen = [job.generator] if os.path.isfile(os.path.join(job.generator, "quantization_config.json")) else []
+        if not adopt_converter(present + gen, args):
+            return False
     if refuse_converter_mismatch(present, args, "baseline"):
         return False
     gen_wanted = args.generator and has_chat_template(job.base_repo)
@@ -1827,7 +1857,11 @@ def main():
     cmd_baseline.add_argument('--generator', default=True, action=argparse.BooleanOptionalAction,
                               help='also the uncalibrated 8bpw calibration generator `traces` uses (models with a chat template)')
     cmd_baseline.add_argument('--allow-converter-mismatch', action='store_true',
-                              help='reuse rungs a different (or unrecorded) converter made')
+                              help='reuse rungs a different (or unrecorded) converter made, this run only')
+    cmd_baseline.add_argument('--adopt-converter', action='store_true',
+                              help='record the current converter on present rungs (and the generator) that carry no '
+                                   'record, once you have checked the converter has not changed since they were made; '
+                                   'never overrides a record of a different converter')
     cmd_baseline.set_defaults(func=do_baseline)
 
 
