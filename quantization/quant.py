@@ -847,7 +847,7 @@ def portable(path, job):
             pub = json.load(f)
         if not pub.get("size_stand_in"):        # a baseline's stand-in only lends its size: not its identity
             return f"hf:{pub['repo']}@{pub['revision']}"
-    hf = HF_SNAPSHOT.search(path)
+    hf = HF_SNAPSHOT.search(path.rstrip("/"))
     if hf:
         org, name, sha, rest = hf.groups()
         return f"hf:{org}/{name}@{sha}" + (f"/{rest}" if rest else "")
