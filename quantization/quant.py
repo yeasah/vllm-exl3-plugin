@@ -686,6 +686,7 @@ def tensor_survey(tensors):
 # A weightless stand-in for a published quant (`fetch`): {"repo", "revision"}; sizes are read
 # from the Hub's safetensors headers instead
 PUBLISHED_MARKER = "published.json"
+FETCHED_REFERENCE = "_fetched_reference.json"     # in a fetched job dir: reference.json as published
 
 def tensor_survey_local(path):
     marker = os.path.join(path, PUBLISHED_MARKER)
@@ -818,7 +819,8 @@ def upload_uncalibrated(job, args):
     readme = os.path.join(job.dir, "_uncal_README.md")
     with open(readme, "w") as f:
         f.write(UNCAL_README.format(name=job.name, repo=job.repo, base=job.base_repo))
-    api.upload_file(path_or_fileobj=readme, path_in_repo="README.md", repo_id=job.uncal_repo)
+    api.upload_file(path_or_fileobj=readme, path_in_repo="README.md", repo_id=job.uncal_repo,
+                    commit_message=args.message or f"{job.name}: uncalibrated conversions, README")
     for local, remote in items:
         if not os.path.isfile(os.path.join(local, CONVERTER_FILE)):
             # built before converters were recorded: published as unknown, which a fetch refuses by default
@@ -826,8 +828,60 @@ def upload_uncalibrated(job, args):
                 json.dump({"tree": None, "commit": None, "dirty": None,
                            "note": "made before the converter was recorded"}, f, indent=1)
         print(f"=== UPLOADING {local} -> {job.uncal_repo}/{remote} ===")
-        api.upload_folder(folder_path=local, repo_id=job.uncal_repo, path_in_repo=remote)
+        api.upload_folder(folder_path=local, repo_id=job.uncal_repo, path_in_repo=remote,
+                          commit_message=args.message or f"{job.name}: uncalibrated {remote}")
     return True
+
+# Published JSON must not carry this machine's paths: they mean nothing elsewhere, and a re-card
+# from a fetched stub once published the stubs' paths in place of the real sources. On upload,
+# every absolute path becomes something resolvable anywhere.
+HF_SNAPSHOT = re.compile(r"/models--([^/]+?)--([^/]+)/snapshots/([0-9a-f]{7,})(?:/(.+))?$")
+
+def portable(path, job):
+    """An absolute path as an identifier that means the same thing on any machine."""
+    marker = f"/{job.name}/"
+    local = os.path.join(job.dir, path.split(marker, 1)[1]) if marker in path else path   # another machine's job dir
+    m = os.path.join(local, PUBLISHED_MARKER)
+    if os.path.isfile(m):                       # a fetched stand-in: the published quant it stands for
+        with open(m) as f:
+            pub = json.load(f)
+        if not pub.get("size_stand_in"):        # a baseline's stand-in only lends its size: not its identity
+            return f"hf:{pub['repo']}@{pub['revision']}"
+    hf = HF_SNAPSHOT.search(path)
+    if hf:
+        org, name, sha, rest = hf.groups()
+        return f"hf:{org}/{name}@{sha}" + (f"/{rest}" if rest else "")
+    if marker in path or os.path.abspath(local).startswith(os.path.abspath(job.dir) + os.sep):
+        return os.path.relpath(local, job.dir)
+    return f"local:{os.path.basename(path.rstrip('/'))}"
+
+def portable_paths(obj, job, skip=("rows",)):
+    """Every absolute-path string in a JSON value made portable; `skip` keys (trace rows: prompt
+    text that could look like a path) are left untouched."""
+    if isinstance(obj, dict):
+        return {k: (v if k in skip else portable_paths(v, job, skip)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [portable_paths(v, job, skip) for v in obj]
+    if isinstance(obj, str) and obj.startswith("/") and "\n" not in obj and len(obj) < 4096:
+        return portable(obj, job)
+    return obj
+
+def stage_main(job, fetched):
+    """main/ as published: a copy with portable JSON. A fetched job dir publishes the
+    reference.json it fetched, not the one fetch rewrote to point at its local stand-ins."""
+    stage = os.path.join(job.dir, "_upload_main")
+    shutil.rmtree(stage, ignore_errors=True)
+    shutil.copytree(job.main, stage, ignore=shutil.ignore_patterns("qbench-*.yaml", "_qbench_parts"))
+    original = os.path.join(job.dir, FETCHED_REFERENCE)
+    if fetched and os.path.isfile(original):
+        shutil.copyfile(original, os.path.join(stage, "reference.json"))
+    for f in [os.path.join(stage, "reference.json")] + globmod.glob(os.path.join(stage, "traces", "*.json")):
+        if os.path.isfile(f):
+            with open(f) as fh:
+                d = json.load(fh)
+            with open(f, "w") as fh:
+                json.dump(portable_paths(d, job), fh, indent=None if os.path.getsize(f) > 1 << 20 else 1)
+    return stage
 
 def do_upload(job, args):
     if args.uncalibrated:
@@ -847,15 +901,21 @@ def do_upload(job, args):
     for rev in ['main'] + ([] if fetched else job.revisions()):
         if not job.is_complete(rev):
             continue
-        print(f"=== UPLOADING {job.revdir(rev)} ===")
+        folder = stage_main(job, fetched) if rev == "main" else job.revdir(rev)
+        msg = args.message or (f"{job.name}: model card, results and traces" if rev == "main"
+                               else f"{job.name} {rev}")
+        print(f"=== UPLOADING {job.revdir(rev)}: {msg} ===")
         api.create_branch(repo_id=job.repo,
                           branch=rev,
                           exist_ok=True)
-        api.upload_folder(folder_path=job.revdir(rev),
+        api.upload_folder(folder_path=folder,
                           repo_id=job.repo,
                           revision=rev,
+                          commit_message=msg,
                           # qbench project files hold local paths; their results are published
                           ignore_patterns=["qbench-*.yaml", "_qbench_parts/*"])
+        if rev == "main":
+            shutil.rmtree(folder, ignore_errors=True)
 
 def plot_quality_vs_size(job, meta, path):
     """Section 1 of the card: this card's own checkpoints, quality against size, no comparison."""
@@ -1149,6 +1209,7 @@ def do_fetch(job, args):
         stand_in(job.revdir(rev), job.repo, rev)
     ref_path = os.path.join(snap, "reference.json")
     if os.path.isfile(ref_path):
+        shutil.copyfile(ref_path, os.path.join(job.dir, FETCHED_REFERENCE))
         with open(ref_path) as f:
             info = json.load(f)
         for ref in info.get("references", []):
@@ -1960,6 +2021,8 @@ def main():
     cmd_upload.add_argument('--uncalibrated', action='store_true',
                             help='also the baseline rungs and the generator, to <org>/<model>-exl3-uncalibrated '
                                  '(a separate, not-for-inference repo)')
+    cmd_upload.add_argument('-M', '--message', default=None,
+                            help='commit message for every upload (default: names the model and revision)')
     cmd_upload.add_argument('--quants', default=True, action=argparse.BooleanOptionalAction,
                             help='the model repo itself (--no-quants with --uncalibrated: only the uncalibrated repo)')
     cmd_upload.set_defaults(func=do_upload)
