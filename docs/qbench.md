@@ -1351,8 +1351,39 @@ Measurements at 40 rows, all converted with our mix, equal size:
   stable early. Our mix does (40 beat 10 by 3-16%).
 
 So the recipe stage reduces to one knob, the own-voice share of the measurement, drawn from data
-the pipeline already generates: all own-voice for a chat-first model, an even blend for an
-agent-first one. A sweep of the share is running.
+the pipeline already generates.
+
+**The share, swept on two models (2026-10-12).** Own-voice and mix measurements blended at each
+share (normalized to equal total), solved at 4 bpw, converted with the model's own mix, all
+budget-matched; composites against no recipe:
+
+| own-voice share | Ornith-9B wild | swe | agentic | chat-first | Qwen3-0.6B wild | swe | agentic | chat-first |
+|---|---|---|---|---|---|---|---|---|
+| no recipe | 0.506 | 0.575 | 1.00 | 1.00 | 0.650 | 0.656 | 1.00 | 1.00 |
+| 0% | 0.643 | 0.445 | 0.90 | 1.15 | 0.608 | 0.567 | 0.89 | 0.92 |
+| 25% | 0.588 | 0.465 | 0.90 | 1.08 | 0.602 | 0.575 | 0.89 | 0.92 |
+| 37.5% | 0.565 | **0.419** | **0.83** | 1.03 | 0.585 | 0.555 | 0.86 | 0.89 |
+| 50% | 0.549 | 0.437 | 0.85 | 1.01 | **0.575** | 0.535 | 0.84 | **0.87** |
+| 75% | **0.483** | 0.515 | 0.91 | **0.94** | 0.585 | **0.528** | **0.83** | 0.88 |
+| 100% | **0.483** | 0.518 | 0.92 | **0.94** | 0.577 | 0.542 | 0.85 | 0.88 |
+
+- **The shapes differ; the settings carry.** On the hybrid 9B the trade is steep: chat recovers
+  quickly from the mix end and saturates by 75%, swe holds near its best through 50% and
+  collapses between 50 and 75%. On the dense 0.6B there is no trade: a mix-measured recipe
+  *improves* chat too, every share beats no recipe, and the curve flattens from ~50% within the
+  ±4% draw noise. That the conflict is a hybrid-architecture property is a guess, untested.
+- **Defaults: 40% own voice for agent-first models, 75% for the rest.** At most a few percent
+  from the best on either model, where the wrong end of the dial costs the 9B 15-27%.
+- On the 9B, 75% also beats both ends on the document slices (ctx_user, ctx_ml), and 25% scores
+  worse on swe than 0% and 37.5% both: swe moves ~±5% between conversions at this size.
+- The 50% point matches the earlier SC-trace-based 50/50 blend within 2.5% on wild and swe.
+
+**In the pipeline.** `quant.py measure` records both measurements once (own-voice rows packed from
+the calibration trace, up to 40; the calibration itself, 40 rows; rfn anchors from the 2 bpw
+baseline; per-row KLs and each row's content category, so they can be regrouped later).
+`quantize` then blends them per revision at `--ownvoice-share`, defaulting by the composite
+weights. Measurements are reused: a new share costs a solve and a conversion. On Qwen3-0.6B the
+stage reproduces the hand-built experiment exactly, measurement and recipe.
 
 Two tool changes made the 9B measurable on 16 GB cards: `sc_measure --gpu_split` (it holds the
 whole fp16 model) and `--boundary_cpu` (its per-module input cache, ~4x the device at 40 rows;
