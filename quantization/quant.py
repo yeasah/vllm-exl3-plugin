@@ -1462,6 +1462,76 @@ def do_qbench(job, args):
                      logit_cache_dir(job, args), "--unused-since", series_start.isoformat() ], job.log("qbench-prune"))
     return True
 
+def do_compare(job, args):
+    """A table of scored revisions from main/qb_<slice>.json, for exploring variants: per slice,
+    excess KLD as a share of the uncalibrated baseline at the same rate (absolute excess where no
+    baseline rung matches); the model's composite (weighted geometric mean over its composite
+    slices); with --base, every number as a ratio to that revision; the recipe's own-voice share."""
+    import math
+    qb = {}
+    for sl in list(EVAL_SLICES) + list(DIAG_SLICES):
+        p = os.path.join(job.main, f"qb_{sl}.json")
+        if os.path.isfile(p):
+            with open(p) as f:
+                qb[sl] = json.load(f)
+    if args.slices:
+        alias = {"scored": list(EVAL_SLICES), "diag": list(DIAG_SLICES)}
+        want = [x for w in args.slices.split(",") for x in alias.get(w, [w])]
+        qb = {sl: v for sl, v in qb.items() if sl in want}
+    if not qb:
+        print("=== no qbench results ==="); return False
+    scored = sorted({r["label"] for v in qb.values() for r in v
+                     if r.get("group") not in ("reference", "noise_floor") and ":" not in r["label"]})
+    revs = args.revisions.split(",") if args.revisions else scored
+    base_revs = job.baseline_revisions()
+    def baseline_of(rev):        # the uncalibrated rung at the same rate: the longest baseline name it starts with
+        m = [b for b in base_revs if rev == b or rev.startswith(b + "-")]
+        return max(m, key=len) if m else None
+    def value(rev, sl):
+        rows = {r["label"]: r for r in qb[sl]}
+        fl = rows.get("Noise floor", {}).get("kld")
+        r = rows.get(rev)
+        if r is None or fl is None:
+            return None
+        b = rows.get(baseline_label(baseline_of(rev))) if baseline_of(rev) else None
+        return (r["kld"] - fl) / (b["kld"] - fl) if b else r["kld"] - fl
+    def share(rev):
+        try:
+            with open(os.path.join(job.revdir(rev), "calibration.json")) as f:
+                m = json.load(f).get("recipe", {}).get("measurement", "")
+        except (FileNotFoundError, json.JSONDecodeError):
+            return "-"
+        hit = re.search(r"own-voice share ([0-9.]+)", m)
+        return hit.group(1) if hit else ("custom" if m else "uniform")
+    if not args.revisions:          # by rate, then uniform first, then by share
+        def key(rev):
+            sh = share(rev)
+            return (baseline_of(rev) or rev, -1.0 if sh == "uniform" else float(sh) if sh[0].isdigit() else 2.0, rev)
+        revs = sorted(revs, key=key)
+    W = {sl: w for sl, w in composite_weights(job)[0].items() if sl in qb}
+    sls = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if sl in qb]
+    table = {rev: {sl: value(rev, sl) for sl in sls} for rev in revs}
+    base = table.get(args.base) if args.base else None
+    if args.base and base is None:
+        print(f"=== --base {args.base}: not scored ==="); return False
+    def comp(v):
+        if any(v.get(sl) is None or v[sl] <= 0 for sl in W) or not W:
+            return None
+        tw = sum(W.values())
+        return math.exp(sum(w / tw * math.log(v[sl]) for sl, w in W.items()))
+    rel = lambda v: {sl: (v[sl] / base[sl] if v[sl] is not None and base and base.get(sl) else v[sl]) for sl in sls}
+    shown = {rev: rel(v) if base else v for rev, v in table.items()}
+    unit = f"ratio to {args.base}" if base else ("share of uncalibrated at the same rate" if base_revs else "absolute excess KLD")
+    print(f"{unit}; composite: " + " + ".join(f"{w:.2f} {sl}" for sl, w in W.items()) + " (geometric)")
+    w0 = max(len(r) for r in revs + ["revision"])
+    print(f"{'revision':{w0}s} {'share':>7s} " + " ".join(f"{sl:>8s}" for sl in sls) + f" {'composite':>9s}")
+    for rev in revs:
+        v = shown[rev]
+        c = comp(v)
+        cells = " ".join(f"{v[sl]:8.3f}" if v[sl] is not None else f"{'-':>8s}" for sl in sls)
+        print(f"{rev:{w0}s} {share(rev):>7s} {cells} {c:9.3f}" if c is not None else f"{rev:{w0}s} {share(rev):>7s} {cells} {'-':>9s}")
+    return True
+
 def stamp():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2292,6 +2362,13 @@ def main():
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
     cmd_qbench.set_defaults(func=do_qbench)
+
+    cmd_compare = subparsers.add_parser('compare', help="table of scored revisions: per slice and composite, against the "
+                                         "uncalibrated baseline or a --base revision (for exploring variants)")
+    cmd_compare.add_argument('--revisions', default=None, help='revisions to show (default: every scored one)')
+    cmd_compare.add_argument('--base', default=None, help='show every number as a ratio to this revision')
+    cmd_compare.add_argument('--slices', default=None, help="only these slices ('scored', 'diag', or names)")
+    cmd_compare.set_defaults(func=do_compare)
 
     cmd_card = subparsers.add_parser('card', help="the model card and TECHNICAL.md from the qbench results")
     cmd_card.add_argument('--template', default='templates/model_card.jinja')
