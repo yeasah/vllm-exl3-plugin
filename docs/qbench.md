@@ -1299,7 +1299,7 @@ with our conversational mix as the converter's calibration beats our mix alone o
 wild 0.97, swe 0.91, ctx_user 0.88, ctx_tool 0.90, ctx_ml 0.93, loop 0.86, self 0.93.
 
 **The recipe takes the shape of what it is measured on.** Measured on our mix instead (its
-eval rows mostly raw text and code), the recipe gains on agent work and loses on chat:
+eval rows a sample of the whole calibration), the recipe gains on agent work and loses on chat:
 
 | measured on (converted with our mix) | wild | swe | ctx_user | ctx_tool | ctx_ml | loop | self |
 |---|---|---|---|---|---|---|---|
