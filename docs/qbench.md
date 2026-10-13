@@ -1311,12 +1311,18 @@ eval rows mostly raw text and code), the recipe gains on agent work and loses on
 (excess as a share of the uncalibrated quant's.) Four times the eval rows improves every slice
 3-16%, so the default 10 is too few; but the chat penalty survives it. Sensitivity is fitted on
 the measurement's eval rows only (the Hessian rows shape the noise), and a code- and agent-heavy
-measurement spends the budget protecting what that content exercises. A chat-shaped measurement
+measurement spends the budget protecting what that content exercises (documents and tool output
+in conversation, it turns out, not raw text: see below). A chat-shaped measurement
 generalizes more evenly.
 
 **Why: absolute KL weights the rows, and the rows want different tensors (2026-10-12).** Per
-eval row, mean KL across all perturbed tensors spans **145x** within our mix (0.00036 to 0.052):
-raw text and code are loud, the model's own chat quiet, so a plain mean is set by a few rows.
+eval row, mean KL across all perturbed tensors spans **145x** within our mix (0.00036 to 0.052),
+so a plain mean is set by a few rows. Which ones, labelled by content: documents and tool output
+inside conversations (tool loops 0.019, documents as tool results 0.022, in a user turn 0.012 mean
+per row) carry **96%** of the mix measurement; raw web text (0.0011), the model's own voice (0.0016)
+and random tokens (0.0004) together 3%, though they are 40% of its rows. The loudness is a model
+working with pasted or returned material, not a kind of text, which is why a mix-measured recipe
+helps exactly the slices built from it.
 And the two distributions rank tensors differently: per tensor, mix-measured KL runs 2-18x the
 chat-measured (10th to 90th percentile), Spearman 0.77 between the two sensitivity rankings.
 Measurements at 40 rows, all converted with our mix, equal size:

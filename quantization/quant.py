@@ -39,6 +39,9 @@ class Job:
         # missing), used by `traces`
         self.generator = os.path.join(self.traces, "gen-8bpw-uncal")
         self.uncal_repo = f"{self.repo}-uncalibrated"
+        # Per-tensor sensitivity measurements from `measure`: two ends of the recipe's measurement
+        # mix, blended at quantize time (--ownvoice-share), so a new share needs no remeasuring
+        self.measure = os.path.join(self.dir, "_measure")
 
     def revdir(self, rev):
         return os.path.join(self.dir, rev)
@@ -1817,6 +1820,98 @@ def do_baseline(job, args):
     return report_failures(failed, "BASELINE", {**{rev: job.log(f"baseline-{rev}") for rev, _, _ in specs},
                                                 "generator": job.log("traces-gen")})
 
+# A per-tensor bit recipe (sc_measure -> sc_optimize) beats uniform bits at equal size by 5-16%,
+# and what it is measured on decides where: our mix's own-voice rows protect chat, the whole mix
+# protects agent work, and on a hybrid 9B the two trade hard (docs/qbench.md "The SC recipe clears
+# the bar on the conversational eval"). Two ends are measured once; quantize blends them.
+MEASURE_ROWS = 40          # eval rows: 40 beat sc_measure's default 10 by 3-16% on our mix
+MEASURE_MIN_OWNVOICE = 10  # an own-voice measurement is stable from ~10 rows (homogeneous text)
+OWNVOICE_SHARE = {True: 0.4, False: 0.75}   # agent-first, else: the 9B and 0.6B sweeps' optima
+
+def measurement_paths(job):
+    return {k: os.path.join(job.measure, f"{k}.json") for k in ("ownvoice", "mix")}
+
+def ownvoice_rows(job, cols):
+    """The calibration trace's own-voice conversations, packed as the calibration packs them:
+    concatenated and cut into full-width rows."""
+    with open(os.path.join(job.traces, "cal_cal.json")) as f:
+        rows = json.load(f)["rows"]
+    stream = [t for r in rows if r.get("slice") == "self" for t in r["input_ids"] + r["response_ids"]]
+    return [stream[i * cols:(i + 1) * cols] for i in range(len(stream) // cols)]
+
+def do_measure(job, args):
+    """Per-tensor sensitivity of the unquantized model, measured twice: on the calibration's
+    own-voice rows and on the whole calibration. Reused by every later quantize; each is skipped
+    if present. Needs `traces` (the calibration) and, for rfn anchors, a 2 bpw `baseline` rung."""
+    import torch
+    from safetensors.torch import load_file, save_file
+    if not os.path.isfile(job.cal_data):
+        print("=== no calibration (run traces first) ==="); return False
+    path = snapshot_download(repo_id=job.base_repo)
+    os.makedirs(job.measure, exist_ok=True)
+    cal = load_file(job.cal_data)["input_ids"]
+    h_rows = 64
+    own = ownvoice_rows(job, cal.shape[1])
+    if len(own) < MEASURE_MIN_OWNVOICE:
+        print(f"=== only {len(own)} own-voice rows in the calibration trace (need {MEASURE_MIN_OWNVOICE}) ==="); return False
+    n_own = min(MEASURE_ROWS, len(own))
+    inputs = {"ownvoice": (os.path.join(job.measure, "ownvoice_rows.safetensors"), n_own),
+              "mix": (job.cal_data, MEASURE_ROWS)}
+    if not os.path.isfile(inputs["ownvoice"][0]):
+        # eval rows: own voice; Hessian rows: the calibration that will convert
+        save_file({"input_ids": torch.cat([torch.tensor(own[:n_own], dtype=torch.long), cal[:h_rows]], 0).contiguous()},
+                  inputs["ownvoice"][0])
+    rfn = os.path.join(job.measure, "rfn.json")
+    two = sorted(r for r in job.baseline_revisions() if r.startswith("2.00bpw"))
+    gpus = device_slots(args.device)
+    env_all = gpu_env(",".join(gpus))
+    if not os.path.isfile(rfn):
+        if two:
+            rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_rfn_probe.py"), "-mq",
+                              os.path.join(job.baseline, two[0]), "-mr", path, "-d", "0", "-o", rfn ],
+                            job.log("measure-rfn"), gpu_env(gpus[0]))
+            if rc or not os.path.isfile(rfn):
+                print(f"=== rfn probe FAILED (log {job.log('measure-rfn')}) ==="); return False
+        else:
+            print("!! no 2 bpw baseline rung for rfn anchors: measuring at sc_measure's global noise levels")
+    for k, out in measurement_paths(job).items():
+        if os.path.isfile(out):
+            print(f"=== measurement {k}: present, kept ==="); continue
+        trace, n = inputs[k]
+        print(f"=== measuring sensitivity on {k} ({n} eval rows) ===")
+        dev = ["-gs", args.gpu_split] if args.gpu_split else ["-d", "0"]
+        rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_measure.py"), "-m", path, *dev,
+                          "-r", str(n), "-hr", str(h_rows), "--shaped", "-rk", "-tr", trace, "-o", out + ".part" ] +
+                        (["-bc"] if args.boundary_cpu else []) +
+                        (["-rr", rfn, "-rs", "1.0,0.5"] if os.path.isfile(rfn) else []),
+                        job.log(f"measure-{k}"), env_all if args.gpu_split else gpu_env(gpus[0]))
+        if rc or not os.path.isfile(out + ".part"):
+            print(f"=== measurement {k} FAILED (log {job.log(f'measure-{k}')}) ==="); return False
+        os.replace(out + ".part", out)
+    return True
+
+def blend_measurement(job, share, out):
+    """Own-voice and mix sensitivities blended at `share` own voice, each first normalized to equal
+    total KL: absolute KL on raw text and code runs ~10x a model's own chat, so an unnormalized
+    blend is the mix alone. Allocation depends only on relative sensitivity."""
+    p = measurement_paths(job)
+    with open(p["ownvoice"]) as f:
+        a = json.load(f)
+    with open(p["mix"]) as f:
+        b = json.load(f)
+    bk = {r["key"]: r for r in b["results"]}
+    na = sum(l["kld"] for r in a["results"] for l in r["levels"])
+    nb = sum(l["kld"] for r in b["results"] for l in r["levels"])
+    for r in a["results"]:
+        for la, lb in zip(r["levels"], bk[r["key"]]["levels"]):
+            assert la["rfn"] == lb["rfn"], f"{r['key']}: the two measurements used different noise levels"
+            la["kld"] = share * la["kld"] / na + (1 - share) * lb["kld"] / nb
+            la.pop("kld_rows", None)
+    a["trace"] = f"blend: {share} own voice, {1 - share} calibration mix (each normalized to equal total KL)"
+    with open(out, "w") as f:
+        json.dump(a, f)
+    return out
+
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
     if args.calibration == "mix" and not os.path.isfile(job.cal_data):
@@ -1833,6 +1928,19 @@ def do_quantize(job, args):
     else:
         calibration = { "calibration": "exllamav3 default corpus" }
     script = os.path.join(args.exllamav3dir, "convert.py")
+    # Where each revision's bits come from: an explicit --measurement; else, if `measure` has run,
+    # a blend at --ownvoice-share (default by the model's use: agent-first or not); else uniform
+    measured = all(os.path.isfile(p) for p in measurement_paths(job).values())
+    recipe_source = args.recipe and (args.measurement or measured)
+    agentic = (lambda w: w.get("swe", 0) > w.get("wild", 0))(composite_weights(job)[0])
+    share = args.ownvoice_share if args.ownvoice_share is not None else OWNVOICE_SHARE[agentic]
+    rfn = args.rfn or (os.path.join(job.measure, "rfn.json") if os.path.isfile(os.path.join(job.measure, "rfn.json")) else None)
+    if recipe_source:
+        print(f"=== per-tensor recipe from " + (args.measurement if args.measurement else
+              f"the measurements, own-voice share {share} ({'agent-first' if agentic else 'chat-first'} default)"
+              if args.ownvoice_share is None else f"the measurements, own-voice share {share}") + " ===")
+    elif args.recipe and not measured:
+        print("=== uniform bits: no measurements (run `measure` for a per-tensor recipe) ===")
 
     def task(rev, bits, headbits):
         def run(slot, echo):
@@ -1844,13 +1952,15 @@ def do_quantize(job, args):
             say = print if echo else (lambda *a, **k: None)
             # With --measurement, the bits come from a per-tensor recipe solved for this rate
             # (sc_optimize), passed to convert.py in place of -b/-hb
-            recipe = os.path.join(job.dir, "_recipes", f"{rev}.yaml") if args.measurement else None
+            recipe = os.path.join(job.dir, "_recipes", f"{rev}.yaml") if recipe_source else None
             if recipe and not os.path.isfile(donefile) and not os.path.isfile(os.path.join(workdir, "args.json")):
                 os.makedirs(os.path.dirname(recipe), exist_ok=True)
+                # blended here, per revision, so a share is a quantize-time choice (and could vary by rung)
+                meas = args.measurement or blend_measurement(job, share, os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
-                                  "-m", args.measurement, "-b", bits, "-hb", headbits,
+                                  "-m", meas, "-b", bits, "-hb", headbits,
                                   "-al", str(args.alpha), "-mink", str(args.min_k), "-o", recipe ] +
-                                ([ "-rr", args.rfn ] if args.rfn else []),
+                                ([ "-rr", rfn ] if rfn else []),
                                 job.log(f"{rev}-recipe"), None, echo)
                 if rc or not os.path.isfile(recipe):
                     print(f"=== RECIPE FOR {rev} FAILED (sc_optimize exit {rc}, log {job.log(f'{rev}-recipe')}); not converting ===")
@@ -1890,8 +2000,9 @@ def do_quantize(job, args):
             rec = dict(calibration)
             if recipe:
                 shutil.copyfile(recipe, os.path.join(revdir, "recipe.yaml"))
-                rec["recipe"] = { "measurement": os.path.basename(args.measurement), "rfn": args.rfn and os.path.basename(args.rfn),
-                                  "alpha": args.alpha, "min_k": args.min_k }
+                rec["recipe"] = { "measurement": os.path.basename(args.measurement) if args.measurement else
+                                      f"blend of own-voice and calibration-mix sensitivities, own-voice share {share}",
+                                  "rfn": rfn and os.path.basename(rfn), "alpha": args.alpha, "min_k": args.min_k }
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
                 json.dump(rec, f, indent=1)
             return True
@@ -1902,7 +2013,7 @@ def do_quantize(job, args):
 
 def main():
     parser = argparse.ArgumentParser(description="EXL3 quantization pipeline. Usual order: baseline, traces, "
-                                     "quantize, qbench, card, upload")
+                                     "measure, quantize, qbench, card, upload")
     parser.add_argument('-x', '--exllamav3dir', default='../deps/exllamav3')
     parser.add_argument('-w', '--workdir', default='work')
     parser.add_argument('-m', '--model', required=True)
@@ -1949,6 +2060,15 @@ def main():
                                  'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
     cmd_traces.set_defaults(func=do_traces)
 
+    cmd_measure = subparsers.add_parser('measure', help="per-tensor sensitivity on the calibration's own-voice rows and "
+                                         "on the whole calibration, for quantize's recipes (reused across shares)")
+    cmd_measure.add_argument('-d', '--device', default='0', help='GPU for the measurement (the first listed; all with --gpu-split)')
+    cmd_measure.add_argument('--gpu-split', default=None,
+                             help='GB per listed GPU to split the unquantized model across, e.g. 9,10 for a 9B on 2x16 GB')
+    cmd_measure.add_argument('--boundary-cpu', default=True, action=argparse.BooleanOptionalAction,
+                             help="keep sc_measure's per-module input cache in host memory (needed past ~10 rows of a 9B on 16 GB)")
+    cmd_measure.set_defaults(func=do_measure)
+
     cmd_quantize = subparsers.add_parser('quantize', help="the calibrated ladder")
     cmd_quantize.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
     cmd_quantize.add_argument('-d', '--device', default='0',
@@ -1959,6 +2079,11 @@ def main():
                               help='resume a failed revision this many times before stopping')
     cmd_quantize.add_argument('--suffix', default=None,
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
+    cmd_quantize.add_argument('--recipe', default=True, action=argparse.BooleanOptionalAction,
+                              help='per-tensor recipe from `measure`\'s measurements when present (--no-recipe: uniform bits)')
+    cmd_quantize.add_argument('--ownvoice-share', type=float, default=None,
+                              help='own-voice share of the recipe measurement, 0..1 (default: 0.4 for agent-first models by '
+                                   'their composite weights, else 0.75)')
     cmd_quantize.add_argument('--measurement', default=None,
                               help='sc_measure.py sensitivity JSON: each revision\'s bits come from a recipe sc_optimize '
                                    'solves for its rate (published beside it as recipe.yaml) instead of uniform -b/-hb')
