@@ -1263,7 +1263,7 @@ def qbench_project(job, args, slice_, arms, results=None):
         project["test_trace"] = os.path.abspath(job.eval_trace(slice_))
     return project
 
-def qbench_parallel(job, args, sl, sl_arms, slots, script):
+def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     """One slice over several GPUs: the bf16 reference and noise floor first, alone (two scorers
     missing the cache together would each compute it), then the quants split across the GPUs
     reading it from the shared cache, then their results merged into qb_<slice>.json in arm
@@ -1305,7 +1305,7 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script):
         print(f"=== qbench {sl}: no results for {', '.join(missing)} ===")
         return False
     merged += [by_label[label] for label, _ in sl_arms]
-    with open(os.path.join(job.main, f"qb_{sl}.json"), "w") as f:
+    with open(out or os.path.join(job.main, f"qb_{sl}.json"), "w") as f:
         json.dump(merged, f, indent=2)
     print(f"=== qbench {sl}: {len(sl_arms)} quants over {k} GPUs, merged ===", flush=True)
     return True
@@ -1337,13 +1337,46 @@ def qbench_parity(job, args, sl, parity_arms, slots, script):
         json.dump(merged, f, indent=2)
     return True
 
+def merge_results(path, new_path):
+    """qb_<slice>.json after a subset run: the new rows replace same-labelled ones, the rest stay
+    (earlier variants, references and the baseline need not be rescored to keep their rows)."""
+    with open(new_path) as f:
+        new = json.load(f)
+    old = []
+    if os.path.isfile(path):
+        with open(path) as f:
+            old = json.load(f)
+    labels = {r["label"] for r in new}
+    keep_ref = [r for r in old if r.get("group") in ("reference", "noise_floor")]
+    merged = (keep_ref or [r for r in new if r.get("group") in ("reference", "noise_floor")]) + \
+             [r for r in old if r.get("group") not in ("reference", "noise_floor") and r["label"] not in labels] + \
+             [r for r in new if r.get("group") not in ("reference", "noise_floor")]
+    with open(path, "w") as f:
+        json.dump(merged, f, indent=2)
+
 def do_qbench(job, args):
     os.makedirs(job.main, exist_ok=True)
     revisions = [rev for rev in job.revisions() if job.is_complete(rev)]
+    # Subsets for fast exploration: --revisions scores only those (merged into the existing results,
+    # no references or baseline), --slices only those slices. Decisions still want a full run
+    subset = bool(args.revisions or args.slices)
+    if args.revisions:
+        want = args.revisions.split(",")
+        unknown = [r for r in want if r not in revisions]
+        if unknown:
+            print(f"=== no complete revision {', '.join(unknown)} ==="); return False
+        revisions = [r for r in revisions if r in want]
     if not revisions:
         print("=== no revisions found ===")
         return False
     slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if os.path.isfile(job.eval_trace(sl))] + ["raw"]
+    if args.slices:
+        alias = {"scored": list(EVAL_SLICES), "diag": list(DIAG_SLICES)}
+        want = [x for w in args.slices.split(",") for x in alias.get(w, [w])]
+        bad = [w for w in want if w not in slices]
+        if bad:
+            print(f"=== no eval trace for slice {', '.join(bad)} (have: {', '.join(slices)}) ==="); return False
+        slices = [sl for sl in slices if sl in want]
     missing = [sl for sl in EVAL_SLICES if sl not in slices]
     if missing:
         print(f"=== no eval traces for {', '.join(missing)}: the card falls back to raw text "
@@ -1352,7 +1385,7 @@ def do_qbench(job, args):
     # Existing sets of this model's quants (each grouped into ladders by branch name), and the
     # uncalibrated baseline sweep from `baseline`: section 2 of the card
     references = []
-    for repo in args.reference or []:
+    for repo in ([] if args.revisions else args.reference or []):
         branches = [b.name for b in HfApi().list_repo_refs(repo).branches]
         # Rungs below --reference-min-bits are left out (turboderp's SC ladder runs down to 1.4)
         keep = lambda b: float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits
@@ -1364,7 +1397,7 @@ def do_qbench(job, args):
     # GGUF sets: one ladder of the chosen quant types, scored by llama.cpp; with --gguf-parity, the
     # set's bf16 GGUF too, whose excess is llama.cpp's own numerics against the bf16 reference
     parity_arms = []
-    for repo in args.reference_gguf or []:
+    for repo in ([] if args.revisions else args.reference_gguf or []):
         files = [f for f in HfApi().list_repo_files(repo) if f.endswith(".gguf") and not f.startswith("mmproj")]
         def pick(q):
             # The quant type is the whole suffix: "IQ3_XXS" must not take unsloth's "UD-IQ3_XXS"
@@ -1382,10 +1415,10 @@ def do_qbench(job, args):
             parity_arms.append((ref_label(repo, "bf16"), ref["parity"]))
         references.append(ref)
         arms += [(ref_label(repo, q), p) for q, p in rungs.items()]
-    baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
+    baseline = {} if args.revisions else {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
     if refuse_converter_mismatch(list(baseline.values()), args, "baseline"):
         return False
-    if references or baseline:
+    if (references or baseline) and not args.revisions:
         # Every compared quant's size, recorded where the scores are: a re-card from the published
         # repo then needs neither the weights nor a header the Hub cannot parse (GGUF)
         sizes = {label: quant_size(p) for label, p in arms if label.startswith("ref:")}
@@ -1402,23 +1435,28 @@ def do_qbench(job, args):
     for sl in slices:
         sl_arms = arms + (base_arms if sl in EVAL_SLICES else [])   # the baseline only enters through the composite
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
+        final = os.path.join(job.main, f"qb_{sl}.json")
+        out = os.path.join(job.main, f"_qb_{sl}.subset.json") if args.revisions else final
         with open(qbench_file, "w") as f:                        # the whole slice, as run (or as merged)
-            yaml.safe_dump(qbench_project(job, args, sl, sl_arms), f, sort_keys=False)
+            yaml.safe_dump(qbench_project(job, args, sl, sl_arms, results=None if out == final else out), f, sort_keys=False)
         if len(slots) == 1 or len(sl_arms) < 2:
             rc = run_logged([ "python3", script, qbench_file, "-d", "0" ], job.log(f"qbench-{sl}"), gpu_env(slots[0]))
             if rc:
                 print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
                 return False
-            continue
-        if not qbench_parallel(job, args, sl, sl_arms, slots, script):
+        elif not qbench_parallel(job, args, sl, sl_arms, slots, script, out=out):
             return False
+        if out != final:
+            merge_results(final, out); os.remove(out)
+            print(f"=== qbench {sl}: {', '.join(l for l, _ in sl_arms)} merged into {os.path.basename(final)} ===")
     if parity_arms:
         for sl in slices:
             qbench_parity(job, args, sl, parity_arms, slots, script)
     # The series succeeded: reference logits it did not use (a superseded eval trace, a dropped
     # reference) can only be dead weight. Results and KL vectors are never pruned.
     record_slice_stats(job)
-    if args.prune:
+    # A subset series used only some slices' reference logits: pruning would evict the others
+    if args.prune and not subset:
         print(f"=== pruning reference logits unused since {series_start.isoformat()} ===")
         run_logged([ "python3", os.path.join(args.exllamav3dir, "eval", "qbench_prune.py"),
                      logit_cache_dir(job, args), "--unused-since", series_start.isoformat() ], job.log("qbench-prune"))
@@ -1824,20 +1862,15 @@ def do_baseline(job, args):
 # and what it is measured on decides where: our mix's own-voice rows protect chat, the whole mix
 # protects agent work, and on a hybrid 9B the two trade hard (docs/qbench.md "The SC recipe clears
 # the bar on the conversational eval"). Two ends are measured once; quantize blends them.
-MEASURE_ROWS = 40          # eval rows: 40 beat sc_measure's default 10 by 3-16% on our mix
-MEASURE_MIN_OWNVOICE = 10  # an own-voice measurement is stable from ~10 rows (homogeneous text)
+# Measured per content category, at the finest grain the calibration trace labels: own voice,
+# documents by kind in a user turn and as tool results, tool loops, raw web text, random tokens.
+# sc_measure scores every row independently and perturbs by (tensor, level) seed with Hessians from
+# fixed rows, so per-category runs are an exact partition of one big measurement: any grouping or
+# weighting is arithmetic afterwards, and a run can be chunked to bound memory.
+MEASURE_ROWS = {"self": 20, "ctx_user:*": 2, "ctx_tool:*": 2, "loop": 12, "raw": 6, "random": 2}
+MEASURE_CHUNK = 20         # rows per sc_measure run: its boundary cache grows with rows
+MEASURE_H_ROWS = 64        # Hessian-capture rows, the same in every run: the calibration's first
 OWNVOICE_SHARE = {True: 0.4, False: 0.75}   # agent-first, else: the 9B and 0.6B sweeps' optima
-
-def measurement_paths(job):
-    return {k: os.path.join(job.measure, f"{k}.json") for k in ("ownvoice", "mix")}
-
-def ownvoice_rows(job, cols):
-    """The calibration trace's own-voice conversations, packed as the calibration packs them:
-    concatenated and cut into full-width rows."""
-    with open(os.path.join(job.traces, "cal_cal.json")) as f:
-        rows = json.load(f)["rows"]
-    stream = [t for r in rows if r.get("slice") == "self" for t in r["input_ids"] + r["response_ids"]]
-    return [stream[i * cols:(i + 1) * cols] for i in range(len(stream) // cols)]
 
 def row_labels(job, ids, k=32):
     """Each calibration row's content category, by matching its opening tokens against the
@@ -1848,39 +1881,74 @@ def row_labels(job, ids, k=32):
     for r in rows:
         seq = r["input_ids"] + r["response_ids"]
         for i in range(len(seq) - k + 1):
-            idx.setdefault(hash(tuple(seq[i:i + k])), set()).add(r.get("slice") or r.get("kind") or "?")
+            idx.setdefault(hash(tuple(seq[i:i + k])), set()).add(r.get("slice") or "?")
     out = []
     for row in ids:
         hit = idx.get(hash(tuple(row[:k].tolist())))
         out.append("/".join(sorted(hit)) if hit else ("random" if row.float().std() > 0.25 * row.max() else "raw"))
     return out
 
+def measure_categories(job, cal):
+    """{category: [rows of token ids]}: trace conversations packed per category as the calibration
+    packs a slice (concatenated, cut to full width), kind-pure; raw and random rows from the
+    calibration file past its Hessian rows."""
+    cols = cal.shape[1]
+    with open(os.path.join(job.traces, "cal_cal.json")) as f:
+        rows = json.load(f)["rows"]
+    streams = {}
+    for r in rows:
+        sl = r.get("slice")
+        cat = f"{sl}:{r.get('kind')}" if sl in ("ctx_user", "ctx_tool") else sl
+        streams.setdefault(cat, []).extend(r["input_ids"] + r["response_ids"])
+    out = {c: [st[i * cols:(i + 1) * cols] for i in range(len(st) // cols)] for c, st in streams.items()}
+    rest = cal[MEASURE_H_ROWS:]
+    for i, lab in enumerate(row_labels(job, rest)):
+        if lab in ("raw", "random"):
+            out.setdefault(lab, []).append(rest[i].tolist())
+    return out
+
+def measure_counts(cats, spec):
+    """Rows wanted per category: the defaults, overridden by --rows 'pattern=N,...' (fnmatch)."""
+    import fnmatch
+    rules = list(MEASURE_ROWS.items()) + [(k.strip(), int(v)) for k, v in
+                                          (x.split("=") for x in (spec or "").split(",") if x.strip())]
+    want = {}
+    for c in cats:
+        for pat, n in rules:                    # later rules win
+            if fnmatch.fnmatch(c, pat):
+                want[c] = n
+    return want
+
+def category_dir(job):
+    return os.path.join(job.measure, "categories")
+
+def category_chunks(job, cat):
+    """[(start, end, path)] of this category's measured row ranges, in order."""
+    d, out = category_dir(job), []
+    for f in os.listdir(d) if os.path.isdir(d) else []:
+        m = re.fullmatch(re.escape(cat.replace(":", "__")) + r"\.(\d+)-(\d+)\.json", f)
+        if m:
+            out.append((int(m.group(1)), int(m.group(2)), os.path.join(d, f)))
+    return sorted(out)
+
 def do_measure(job, args):
-    """Per-tensor sensitivity of the unquantized model, measured twice: on the calibration's
-    own-voice rows and on the whole calibration. Reused by every later quantize; each is skipped
-    if present. Needs `traces` (the calibration) and, for rfn anchors, a 2 bpw `baseline` rung."""
+    """Per-tensor sensitivity of the unquantized model per content category (see MEASURE_ROWS;
+    --rows raises or lowers a category's count, e.g. 'ctx_*:code=10'). Reused by every later
+    quantize; raising a count measures only the rows not yet measured. Needs `traces` and, for rfn
+    anchors, a 2 bpw `baseline` rung."""
     import torch
     from safetensors.torch import load_file, save_file
     if not os.path.isfile(job.cal_data):
         print("=== no calibration (run traces first) ==="); return False
     path = snapshot_download(repo_id=job.base_repo)
-    os.makedirs(job.measure, exist_ok=True)
+    os.makedirs(category_dir(job), exist_ok=True)
     cal = load_file(job.cal_data)["input_ids"]
-    h_rows = 64
-    own = ownvoice_rows(job, cal.shape[1])
-    if len(own) < MEASURE_MIN_OWNVOICE:
-        print(f"=== only {len(own)} own-voice rows in the calibration trace (need {MEASURE_MIN_OWNVOICE}) ==="); return False
-    n_own = min(MEASURE_ROWS, len(own))
-    inputs = {"ownvoice": (os.path.join(job.measure, "ownvoice_rows.safetensors"), n_own),
-              "mix": (job.cal_data, MEASURE_ROWS)}
-    if not os.path.isfile(inputs["ownvoice"][0]):
-        # eval rows: own voice; Hessian rows: the calibration that will convert
-        save_file({"input_ids": torch.cat([torch.tensor(own[:n_own], dtype=torch.long), cal[:h_rows]], 0).contiguous()},
-                  inputs["ownvoice"][0])
+    hess = cal[:MEASURE_H_ROWS]
+    cats = measure_categories(job, cal)
+    want = measure_counts(cats, args.rows)
     rfn = os.path.join(job.measure, "rfn.json")
     two = sorted(r for r in job.baseline_revisions() if r.startswith("2.00bpw"))
     gpus = device_slots(args.device)
-    env_all = gpu_env(",".join(gpus))
     if not os.path.isfile(rfn):
         if two:
             rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_rfn_probe.py"), "-mq",
@@ -1890,49 +1958,117 @@ def do_measure(job, args):
                 print(f"=== rfn probe FAILED (log {job.log('measure-rfn')}) ==="); return False
         else:
             print("!! no 2 bpw baseline rung for rfn anchors: measuring at sc_measure's global noise levels")
-    for k, out in measurement_paths(job).items():
-        if os.path.isfile(out):
-            print(f"=== measurement {k}: present, kept ==="); continue
-        trace, n = inputs[k]
-        print(f"=== measuring sensitivity on {k} ({n} eval rows) ===")
+    plan = []
+    for cat in sorted(cats):
+        n = min(want.get(cat, 0), len(cats[cat]))
+        if want.get(cat, 0) > len(cats[cat]):
+            print(f"!! {cat}: {want[cat]} rows wanted, the trace holds {len(cats[cat])}")
+        done = category_chunks(job, cat)
+        start = done[-1][1] if done else 0
+        for a in range(start, n, MEASURE_CHUNK):
+            plan.append((cat, a, min(a + MEASURE_CHUNK, n)))
+    print(f"=== measuring {len(plan)} run(s): " + ", ".join(f"{c}[{a}:{b}]" for c, a, b in plan) + " ===" if plan
+          else "=== every category measured to its row count ===")
+    for cat, a, b in plan:
+        name = f"{cat.replace(':', '__')}.{a}-{b}"
+        rows_file = os.path.join(category_dir(job), name + ".safetensors")
+        save_file({"input_ids": torch.cat([torch.tensor(cats[cat][a:b], dtype=torch.long), hess], 0).contiguous()}, rows_file)
+        out = os.path.join(category_dir(job), name + ".json")
         dev = ["-gs", args.gpu_split] if args.gpu_split else ["-d", "0"]
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_measure.py"), "-m", path, *dev,
-                          "-r", str(n), "-hr", str(h_rows), "--shaped", "-rk", "-tr", trace, "-o", out + ".part" ] +
+                          "-r", str(b - a), "-hr", str(MEASURE_H_ROWS), "--shaped", "-rk", "-tr", rows_file, "-o", out + ".part" ] +
                         (["-bc"] if args.boundary_cpu else []) +
                         (["-rr", rfn, "-rs", "1.0,0.5"] if os.path.isfile(rfn) else []),
-                        job.log(f"measure-{k}"), env_all if args.gpu_split else gpu_env(gpus[0]))
+                        job.log(f"measure-{name}"), gpu_env(",".join(gpus)) if args.gpu_split else gpu_env(gpus[0]))
+        os.remove(rows_file)
         if rc or not os.path.isfile(out + ".part"):
-            print(f"=== measurement {k} FAILED (log {job.log(f'measure-{k}')}) ==="); return False
+            print(f"=== measurement {name} FAILED (log {job.log(f'measure-{name}')}) ==="); return False
         os.replace(out + ".part", out)
-    # Every eval row's category beside its per-row KLs (kld_rows): a measurement can be regrouped or
-    # reweighted by category afterwards; rows are independent of each other in sc_measure
-    labels = os.path.join(job.measure, "row_labels.json")
-    if not os.path.isfile(labels):
-        with open(labels, "w") as f:
-            json.dump({"ownvoice": ["self"] * n_own, "mix": row_labels(job, cal[:MEASURE_ROWS])}, f, indent=1)
     return True
 
-def blend_measurement(job, share, out):
-    """Own-voice and mix sensitivities blended at `share` own voice, each first normalized to equal
-    total KL: absolute KL on raw text and code runs ~10x a model's own chat, so an unnormalized
-    blend is the mix alone. Allocation depends only on relative sensitivity."""
-    p = measurement_paths(job)
-    with open(p["ownvoice"]) as f:
-        a = json.load(f)
-    with open(p["mix"]) as f:
-        b = json.load(f)
-    bk = {r["key"]: r for r in b["results"]}
-    na = sum(l["kld"] for r in a["results"] for l in r["levels"])
-    nb = sum(l["kld"] for r in b["results"] for l in r["levels"])
-    for r in a["results"]:
-        for la, lb in zip(r["levels"], bk[r["key"]]["levels"]):
-            assert la["rfn"] == lb["rfn"], f"{r['key']}: the two measurements used different noise levels"
-            la["kld"] = share * la["kld"] / na + (1 - share) * lb["kld"] / nb
-            la.pop("kld_rows", None)
-    a["trace"] = f"blend: {share} own voice, {1 - share} calibration mix (each normalized to equal total KL)"
+def category_klds(job, cat, n=None):
+    """(template measurement, {tensor: [[row KLs] per level]}) over a category's first n measured rows."""
+    chunks = category_chunks(job, cat)
+    tmpl, per = None, {}
+    for _, _, p in chunks:
+        with open(p) as f:
+            d = json.load(f)
+        tmpl = tmpl or d
+        for r in d["results"]:
+            lv = per.setdefault(r["key"], [[] for _ in r["levels"]])
+            for i, l in enumerate(r["levels"]):
+                lv[i].extend(l["kld_rows"])
+    if n is not None:
+        per = {k: [l[:n] for l in lv] for k, lv in per.items()}
+    return tmpl, per
+
+def measured_categories(job):
+    d = category_dir(job)
+    return sorted({re.sub(r"\.\d+-\d+\.json$", "", f).replace("__", ":") for f in os.listdir(d)
+                   if re.search(r"\.\d+-\d+\.json$", f)}) if os.path.isdir(d) else []
+
+def mix_weights(job, cats):
+    """The calibration's own proportions over the measured categories (rows per slice from its
+    manifest; a document slice split over its kinds by their tokens in the trace): weighting
+    category means by these, un-normalized, is measuring the whole calibration."""
+    with open(os.path.join(job.traces, "cal.manifest.json")) as f:
+        comp = {k: v["rows"] for k, v in json.load(f)["composition"].items()}
+    with open(os.path.join(job.traces, "cal_cal.json")) as f:
+        rows = json.load(f)["rows"]
+    tok = {}
+    for r in rows:
+        if r.get("slice") in ("ctx_user", "ctx_tool"):
+            k = f"{r['slice']}:{r.get('kind')}"
+            tok[k] = tok.get(k, 0) + len(r["input_ids"]) + len(r["response_ids"])
+    ctx_tok = sum(v for k, v in tok.items() if k in cats)
+    w = {}
+    for c in cats:
+        if c in tok:
+            w[c] = comp.get("ctx", 0) * tok[c] / ctx_tok
+        else:
+            w[c] = comp.get(c, 0)
+    return w
+
+def blend_measurement(job, groups, out):
+    """A measurement for sc_optimize from category measurements: each group ({category: weight},
+    weights over category mean KLs, un-normalized) sums to a sensitivity per tensor and level; each
+    group is normalized to equal total KL (absolute KL differs ~10x by content, and allocation
+    depends only on relative sensitivity), then the groups are blended at their shares."""
+    cache, tmpl = {}, None
+    def mean_kl(cat):
+        if cat not in cache:
+            t, per = category_klds(job, cat)
+            cache[cat] = {k: [sum(l) / len(l) for l in lv] for k, lv in per.items()}
+            nonlocal tmpl
+            tmpl = tmpl or t
+        return cache[cat]
+    acc = {}
+    for share, members in groups:
+        tw = sum(members.values())
+        g = {}
+        for cat, w in members.items():
+            for k, lv in mean_kl(cat).items():
+                cur = g.setdefault(k, [0.0] * len(lv))
+                for i, v in enumerate(lv):
+                    cur[i] += w / tw * v
+        total = sum(v for lv in g.values() for v in lv)
+        for k, lv in g.items():
+            cur = acc.setdefault(k, [0.0] * len(lv))
+            for i, v in enumerate(lv):
+                cur[i] += share * v / total
+    for r in tmpl["results"]:
+        for i, l in enumerate(r["levels"]):
+            l["kld"] = acc[r["key"]][i]
+            l.pop("kld_rows", None)
+    tmpl["trace"] = "blend: " + "; ".join(f"{s} x {sorted(m)}" for s, m in groups)
     with open(out, "w") as f:
-        json.dump(a, f)
+        json.dump(tmpl, f)
     return out
+
+def ownvoice_groups(job, share):
+    """The own-voice dial: own voice at `share`, the whole calibration at the rest."""
+    cats = measured_categories(job)
+    return [(share, {"self": 1.0}), (1 - share, mix_weights(job, cats))]
 
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
@@ -1952,7 +2088,7 @@ def do_quantize(job, args):
     script = os.path.join(args.exllamav3dir, "convert.py")
     # Where each revision's bits come from: an explicit --measurement; else, if `measure` has run,
     # a blend at --ownvoice-share (default by the model's use: agent-first or not); else uniform
-    measured = all(os.path.isfile(p) for p in measurement_paths(job).values())
+    measured = "self" in measured_categories(job) and len(measured_categories(job)) > 1
     recipe_source = args.recipe and (args.measurement or measured)
     agentic = (lambda w: w.get("swe", 0) > w.get("wild", 0))(composite_weights(job)[0])
     share = args.ownvoice_share if args.ownvoice_share is not None else OWNVOICE_SHARE[agentic]
@@ -1978,7 +2114,8 @@ def do_quantize(job, args):
             if recipe and not os.path.isfile(donefile) and not os.path.isfile(os.path.join(workdir, "args.json")):
                 os.makedirs(os.path.dirname(recipe), exist_ok=True)
                 # blended here, per revision, so a share is a quantize-time choice (and could vary by rung)
-                meas = args.measurement or blend_measurement(job, share, os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
+                meas = args.measurement or blend_measurement(job, ownvoice_groups(job, share),
+                                                             os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
                                   "-m", meas, "-b", bits, "-hb", headbits,
                                   "-al", str(args.alpha), "-mink", str(args.min_k), "-o", recipe ] +
@@ -2084,6 +2221,9 @@ def main():
     cmd_measure = subparsers.add_parser('measure', help="per-tensor sensitivity on the calibration's own-voice rows and "
                                          "on the whole calibration, for quantize's recipes (reused across shares)")
     cmd_measure.add_argument('-d', '--device', default='0', help='GPU for the measurement (the first listed; all with --gpu-split)')
+    cmd_measure.add_argument('--rows', default=None,
+                             help="rows per category over the defaults, 'pattern=N,...' (fnmatch): e.g. 'ctx_*:code=10,self=40'. "
+                                  "Categories: self, ctx_user:<kind>, ctx_tool:<kind>, loop, raw, random")
     cmd_measure.add_argument('--gpu-split', default=None,
                              help='GB per listed GPU to split the unquantized model across, e.g. 9,10 for a 9B on 2x16 GB')
     cmd_measure.add_argument('--boundary-cpu', default=True, action=argparse.BooleanOptionalAction,
@@ -2118,6 +2258,12 @@ def main():
     cmd_qbench = subparsers.add_parser('qbench', help="score every set on the eval slices against the bf16 reference")
     cmd_qbench.add_argument('--allow-converter-mismatch', action='store_true',
                             help='score baseline rungs a different (or unrecorded) converter made')
+    cmd_qbench.add_argument('--slices', default=None,
+                            help="only these slices, e.g. wild,swe ('scored': the composite's; 'diag': the diagnostic ones). "
+                                 "For exploration: no pruning, and the card wants every slice")
+    cmd_qbench.add_argument('--revisions', default=None,
+                            help='only these revisions (e.g. a new --suffix variant), merged into the existing results; '
+                                 'references and the baseline are not rescored')
     cmd_qbench.add_argument('--logit_cache', default=None,
                             help='logit cache dir (default: <model>-exl3/_logit_cache, owned by this model)')
     # Reference logits are full-vocabulary: ~35 GB for a 60-conversation WildChat trace on a

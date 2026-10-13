@@ -1378,12 +1378,18 @@ budget-matched; composites against no recipe:
   worse on swe than 0% and 37.5% both: swe moves ~±5% between conversions at this size.
 - The 50% point matches the earlier SC-trace-based 50/50 blend within 2.5% on wild and swe.
 
-**In the pipeline.** `quant.py measure` records both measurements once (own-voice rows packed from
-the calibration trace, up to 40; the calibration itself, 40 rows; rfn anchors from the 2 bpw
-baseline; per-row KLs and each row's content category, so they can be regrouped later).
-`quantize` then blends them per revision at `--ownvoice-share`, defaulting by the composite
-weights. Measurements are reused: a new share costs a solve and a conversion. On Qwen3-0.6B the
-stage reproduces the hand-built experiment exactly, measurement and recipe.
+**In the pipeline.** `quant.py measure` measures per content category: own voice, documents of
+each kind (code, diff, multilingual, technical, web, wiki) in a user turn and as tool results, tool
+loops, raw text, random tokens -- each packed kind-pure from the calibration trace, with the same
+Hessian rows and rfn anchors in every run, so the runs are an exact partition of one measurement
+(two chunks of own voice reproduce a single 22-row run to rounding). Row counts default modestly
+(own voice 20, each document category 2, loops 12, raw 6, random 2) and `--rows 'pattern=N'`
+raises any of them; a raised count measures only the rows not yet measured. `quantize` blends
+per revision at `--ownvoice-share` (own voice against the whole calibration, rebuilt from the
+categories at the manifest's proportions), defaulting by the composite weights; on Qwen3-0.6B the
+category-built 0.75 recipe matches the two-measurement one on 194 of 196 tensors and scores within
+±3.4% of it on every slice. For exploration, `qbench --revisions` scores just a new variant and
+merges it into the existing results, and `--slices` (e.g. `scored`) narrows the slices.
 
 Two tool changes made the 9B measurable on 16 GB cards: `sc_measure --gpu_split` (it holds the
 whole fp16 model) and `--boundary_cpu` (its per-module input cache, ~4x the device at 40 rows;
