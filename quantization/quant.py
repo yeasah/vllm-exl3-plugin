@@ -1839,6 +1839,22 @@ def ownvoice_rows(job, cols):
     stream = [t for r in rows if r.get("slice") == "self" for t in r["input_ids"] + r["response_ids"]]
     return [stream[i * cols:(i + 1) * cols] for i in range(len(stream) // cols)]
 
+def row_labels(job, ids, k=32):
+    """Each calibration row's content category, by matching its opening tokens against the
+    calibration trace's conversations (raw web text and random tokens are not in the trace)."""
+    with open(os.path.join(job.traces, "cal_cal.json")) as f:
+        rows = json.load(f)["rows"]
+    idx = {}
+    for r in rows:
+        seq = r["input_ids"] + r["response_ids"]
+        for i in range(len(seq) - k + 1):
+            idx.setdefault(hash(tuple(seq[i:i + k])), set()).add(r.get("slice") or r.get("kind") or "?")
+    out = []
+    for row in ids:
+        hit = idx.get(hash(tuple(row[:k].tolist())))
+        out.append("/".join(sorted(hit)) if hit else ("random" if row.float().std() > 0.25 * row.max() else "raw"))
+    return out
+
 def do_measure(job, args):
     """Per-tensor sensitivity of the unquantized model, measured twice: on the calibration's
     own-voice rows and on the whole calibration. Reused by every later quantize; each is skipped
@@ -1888,6 +1904,12 @@ def do_measure(job, args):
         if rc or not os.path.isfile(out + ".part"):
             print(f"=== measurement {k} FAILED (log {job.log(f'measure-{k}')}) ==="); return False
         os.replace(out + ".part", out)
+    # Every eval row's category beside its per-row KLs (kld_rows): a measurement can be regrouped or
+    # reweighted by category afterwards; rows are independent of each other in sc_measure
+    labels = os.path.join(job.measure, "row_labels.json")
+    if not os.path.isfile(labels):
+        with open(labels, "w") as f:
+            json.dump({"ownvoice": ["self"] * n_own, "mix": row_labels(job, cal[:MEASURE_ROWS])}, f, indent=1)
     return True
 
 def blend_measurement(job, share, out):
@@ -1980,13 +2002,12 @@ def do_quantize(job, args):
                 else:
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
                     run_logged([ "python3", script,
-                                 "-hq",
                                  "-vb", "16",
                                  "-i", path,
                                  "-w", workdir,
                                  "-o", revdir,
                                  "-d", "0" ] +
-                               ([ "-rcp", recipe ] if recipe else [ "-b", bits, "-hb", headbits ]) +
+                               ([ "-rcp", recipe ] if recipe else [ "-hq", "-b", bits, "-hb", headbits ]) +
                                ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []),
                                log_path, gpu_env(slot), echo)
             if not os.path.isfile(donefile):
