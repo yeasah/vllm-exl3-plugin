@@ -1377,7 +1377,7 @@ def do_qbench(job, args):
         if bad:
             print(f"=== no eval trace for slice {', '.join(bad)} (have: {', '.join(slices)}) ==="); return False
         slices = [sl for sl in slices if sl in want]
-    missing = [sl for sl in EVAL_SLICES if sl not in slices]
+    missing = [sl for sl in EVAL_SLICES if not os.path.isfile(job.eval_trace(sl))]    # absent traces, not --slices
     if missing:
         print(f"=== no eval traces for {', '.join(missing)}: the card falls back to raw text "
               f"(run `traces` first for the composite) ===")
