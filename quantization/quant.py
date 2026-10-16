@@ -1387,13 +1387,17 @@ def do_qbench(job, args):
     # Subsets for fast exploration: --revisions scores only those (merged into the existing results,
     # no references or baseline), --slices only those slices. Decisions still want a full run
     subset = bool(args.revisions or args.slices)
+    base_want = []
     if args.revisions:
         want = [] if args.revisions == "none" else args.revisions.split(",")
-        unknown = [r for r in want if r not in revisions]
+        # baseline rungs by label (baseline:<rev>): a sampled or new slice needs its normalizer scored
+        base_want = [w.split(":", 1)[1] for w in want if w.startswith("baseline:")]
+        want = [w for w in want if not w.startswith("baseline:")]
+        unknown = [r for r in want if r not in revisions] + [b for b in base_want if b not in job.baseline_revisions()]
         if unknown:
             print(f"=== no complete revision {', '.join(unknown)} ==="); return False
         revisions = [r for r in revisions if r in want]
-    if not revisions and not (args.revisions and (args.reference or args.reference_gguf)):
+    if not revisions and not (args.revisions and (args.reference or args.reference_gguf or base_want)):
         print("=== no revisions found ===")
         return False
     slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if os.path.isfile(job.eval_trace(sl))] + ["raw"]
@@ -1449,7 +1453,8 @@ def do_qbench(job, args):
             parity_arms.append((ref_label(repo, "bf16"), ref["parity"]))
         references.append(ref)
         arms += [(ref_label(repo, q), p) for q, p in rungs.items()]
-    baseline = {} if args.revisions else {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
+    baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()
+                if not args.revisions or rev in base_want}
     if refuse_converter_mismatch(list(baseline.values()), args, "baseline"):
         return False
     if references or baseline:
