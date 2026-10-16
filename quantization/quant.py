@@ -1361,12 +1361,12 @@ def do_qbench(job, args):
     # no references or baseline), --slices only those slices. Decisions still want a full run
     subset = bool(args.revisions or args.slices)
     if args.revisions:
-        want = args.revisions.split(",")
+        want = [] if args.revisions == "none" else args.revisions.split(",")
         unknown = [r for r in want if r not in revisions]
         if unknown:
             print(f"=== no complete revision {', '.join(unknown)} ==="); return False
         revisions = [r for r in revisions if r in want]
-    if not revisions:
+    if not revisions and not (args.revisions and (args.reference or args.reference_gguf)):
         print("=== no revisions found ===")
         return False
     slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if os.path.isfile(job.eval_trace(sl))] + ["raw"]
@@ -1385,10 +1385,11 @@ def do_qbench(job, args):
     # Existing sets of this model's quants (each grouped into ladders by branch name), and the
     # uncalibrated baseline sweep from `baseline`: section 2 of the card
     references = []
-    for repo in ([] if args.revisions else args.reference or []):
+    for repo in args.reference or []:
         branches = [b.name for b in HfApi().list_repo_refs(repo).branches]
         # Rungs below --reference-min-bits are left out (turboderp's SC ladder runs down to 1.4)
-        keep = lambda b: float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits
+        # Rungs above --reference-max-bits are left out (default 8.9 catches up to a hypothetical 8bpw + HQ)
+        keep = lambda b: args.reference_max_bits >= float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits
         ladders = {name: {b: snapshot_download(repo, revision=b) for b in bs if keep(b)}
                    for name, bs in ladders_of(branches).items()}
         ladders = {name: bs for name, bs in ladders.items() if bs}
@@ -1397,7 +1398,7 @@ def do_qbench(job, args):
     # GGUF sets: one ladder of the chosen quant types, scored by llama.cpp; with --gguf-parity, the
     # set's bf16 GGUF too, whose excess is llama.cpp's own numerics against the bf16 reference
     parity_arms = []
-    for repo in ([] if args.revisions else args.reference_gguf or []):
+    for repo in args.reference_gguf or []:
         files = [f for f in HfApi().list_repo_files(repo) if f.endswith(".gguf") and not f.startswith("mmproj")]
         def pick(q):
             # The quant type is the whole suffix: "IQ3_XXS" must not take unsloth's "UD-IQ3_XXS"
@@ -1418,13 +1419,20 @@ def do_qbench(job, args):
     baseline = {} if args.revisions else {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()}
     if refuse_converter_mismatch(list(baseline.values()), args, "baseline"):
         return False
-    if (references or baseline) and not args.revisions:
+    if references or baseline:
         # Every compared quant's size, recorded where the scores are: a re-card from the published
         # repo then needs neither the weights nor a header the Hub cannot parse (GGUF)
         sizes = {label: quant_size(p) for label, p in arms if label.startswith("ref:")}
         sizes.update({baseline_label(rev): quant_size(p) for rev, p in baseline.items()})
+        info = {"references": references, "baseline": baseline, "sizes": sizes}
+        prev = load_reference_info(job) if args.revisions else None
+        if prev:
+            # a subset run adds or replaces its own references and keeps every other entry
+            mine = {r["repo"] for r in references}
+            info = {"references": [r for r in prev.get("references", []) if r["repo"] not in mine] + references,
+                    "baseline": prev.get("baseline", {}), "sizes": {**prev.get("sizes", {}), **sizes}}
         with open(os.path.join(job.main, "reference.json"), "w") as f:
-            json.dump({"references": references, "baseline": baseline, "sizes": sizes}, f, indent=1)
+            json.dump(info, f, indent=1)
     base_arms = [(baseline_label(rev), p) for rev, p in baseline.items()]
     print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
@@ -1481,10 +1489,16 @@ def do_compare(job, args):
     if not qb:
         print("=== no qbench results ==="); return False
     scored = sorted({r["label"] for v in qb.values() for r in v
-                     if r.get("group") not in ("reference", "noise_floor") and ":" not in r["label"]})
+                     if r.get("group") not in ("reference", "noise_floor") and not r["label"].startswith("baseline:")})
     revs = args.revisions.split(",") if args.revisions else scored
+    if args.no_references:
+        revs = [r for r in revs if not r.startswith("ref:")]
     base_revs = job.baseline_revisions()
     def baseline_of(rev):        # the uncalibrated rung at the same rate: the longest baseline name it starts with
+        if rev.startswith("ref:"):  # a reference rung: by its nominal bit rate (heads may differ)
+            hit = re.search(r"(\d+(?:\.\d+)?)bpw", rev.split("@", 1)[-1])
+            m = [b for b in base_revs if hit and abs(float(re.match(r"[\d.]+", b).group()) - float(hit.group(1))) < 0.01]
+            return min(m, key=len) if m else None
         m = [b for b in base_revs if rev == b or rev.startswith(b + "-")]
         return max(m, key=len) if m else None
     def value(rev, sl):
@@ -1496,6 +1510,8 @@ def do_compare(job, args):
         b = rows.get(baseline_label(baseline_of(rev))) if baseline_of(rev) else None
         return (r["kld"] - fl) / (b["kld"] - fl) if b else r["kld"] - fl
     def share(rev):
+        if rev.startswith("ref:"):
+            return "ref"
         try:
             with open(os.path.join(job.revdir(rev), "calibration.json")) as f:
                 m = json.load(f).get("recipe", {}).get("measurement", "")
@@ -1503,10 +1519,11 @@ def do_compare(job, args):
             return "-"
         hit = re.search(r"own-voice share ([0-9.]+)", m)
         return hit.group(1) if hit else ("custom" if m else "uniform")
-    if not args.revisions:          # by rate, then uniform first, then by share
+    if not args.revisions:          # by rate, then references, uniform, then by share
         def key(rev):
             sh = share(rev)
-            return (baseline_of(rev) or rev, -1.0 if sh == "uniform" else float(sh) if sh[0].isdigit() else 2.0, rev)
+            return (baseline_of(rev) or rev, -2.0 if sh == "ref" else -1.0 if sh == "uniform" else
+                    float(sh) if sh[0].isdigit() else 2.0, rev)
         revs = sorted(revs, key=key)
     W = {sl: w for sl, w in composite_weights(job)[0].items() if sl in qb}
     sls = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if sl in qb]
@@ -1523,6 +1540,7 @@ def do_compare(job, args):
     shown = {rev: rel(v) if base else v for rev, v in table.items()}
     unit = f"ratio to {args.base}" if base else ("share of uncalibrated at the same rate" if base_revs else "absolute excess KLD")
     print(f"{unit}; composite: " + " + ".join(f"{w:.2f} {sl}" for sl, w in W.items()) + " (geometric)")
+    revs = [r for r in revs if any(table[r][sl] is not None for sl in sls)]
     w0 = max(len(r) for r in revs + ["revision"])
     print(f"{'revision':{w0}s} {'share':>7s} " + " ".join(f"{sl:>8s}" for sl in sls) + f" {'composite':>9s}")
     for rev in revs:
@@ -2077,10 +2095,12 @@ def measured_categories(job):
     return sorted({re.sub(r"\.\d+-\d+\.json$", "", f).replace("__", ":") for f in os.listdir(d)
                    if re.search(r"\.\d+-\d+\.json$", f)}) if os.path.isdir(d) else []
 
-def mix_weights(job, cats):
+def mix_weights(job, cats, cat_shares):
     """The calibration's own proportions over the measured categories (rows per slice from its
     manifest; a document slice split over its kinds by their tokens in the trace): weighting
     category means by these, un-normalized, is measuring the whole calibration."""
+    import fnmatch
+    rules = [(k.strip(), float(v)) for k, v in (x.split("=") for x in cat_shares.split(",") if x.strip())] if cat_shares else []
     with open(os.path.join(job.traces, "cal.manifest.json")) as f:
         comp = {k: v["rows"] for k, v in json.load(f)["composition"].items()}
     with open(os.path.join(job.traces, "cal_cal.json")) as f:
@@ -2097,6 +2117,9 @@ def mix_weights(job, cats):
             w[c] = comp.get("ctx", 0) * tok[c] / ctx_tok
         else:
             w[c] = comp.get(c, 0)
+        for pat, n in rules:
+            if fnmatch.fnmatch(c, pat):
+                w[c] *= n
     return w
 
 def blend_measurement(job, groups, out):
@@ -2117,6 +2140,7 @@ def blend_measurement(job, groups, out):
         tw = sum(members.values())
         g = {}
         for cat, w in members.items():
+            print(f"including {round(w/tw*share*100, 2)}% {cat}")
             for k, lv in mean_kl(cat).items():
                 cur = g.setdefault(k, [0.0] * len(lv))
                 for i, v in enumerate(lv):
@@ -2135,10 +2159,10 @@ def blend_measurement(job, groups, out):
         json.dump(tmpl, f)
     return out
 
-def ownvoice_groups(job, share):
+def ownvoice_groups(job, share, cat_shares):
     """The own-voice dial: own voice at `share`, the whole calibration at the rest."""
     cats = measured_categories(job)
-    return [(share, {"self": 1.0}), (1 - share, mix_weights(job, cats))]
+    return [(share, {"self": 1.0}), (1 - share, mix_weights(job, cats, cat_shares))]
 
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
@@ -2184,7 +2208,7 @@ def do_quantize(job, args):
             if recipe and not os.path.isfile(donefile) and not os.path.isfile(os.path.join(workdir, "args.json")):
                 os.makedirs(os.path.dirname(recipe), exist_ok=True)
                 # blended here, per revision, so a share is a quantize-time choice (and could vary by rung)
-                meas = args.measurement or blend_measurement(job, ownvoice_groups(job, share),
+                meas = args.measurement or blend_measurement(job, ownvoice_groups(job, share, args.category_shares),
                                                              os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
                                   "-m", meas, "-b", bits, "-hb", headbits,
@@ -2315,6 +2339,10 @@ def main():
     cmd_quantize.add_argument('--ownvoice-share', type=float, default=None,
                               help='own-voice share of the recipe measurement, 0..1 (default: 0.4 for agent-first models by '
                                    'their composite weights, else 0.75)')
+    cmd_quantize.add_argument('--category-shares', default=None,
+                             help="scale recipe shares per category (0..1), 'pattern=N,...' (fnmatch): e.g. 'ctx_*:code=0.5,self=0'. "
+                                  "Categories: self, ctx_user:<kind>, ctx_tool:<kind>, loop, raw, random "
+                                  "Kinds: code, diff, ml, technical, web, wiki")
     cmd_quantize.add_argument('--measurement', default=None,
                               help='sc_measure.py sensitivity JSON: each revision\'s bits come from a recipe sc_optimize '
                                    'solves for its rate (published beside it as recipe.yaml) instead of uniform -b/-hb')
@@ -2332,8 +2360,8 @@ def main():
                             help="only these slices, e.g. wild,swe ('scored': the composite's; 'diag': the diagnostic ones). "
                                  "For exploration: no pruning, and the card wants every slice")
     cmd_qbench.add_argument('--revisions', default=None,
-                            help='only these revisions (e.g. a new --suffix variant), merged into the existing results; '
-                                 'references and the baseline are not rescored')
+                            help="only these revisions (e.g. a new --suffix variant; 'none' for references only), merged "
+                                 "into the existing results; the baseline is not rescored, references only if given")
     cmd_qbench.add_argument('--logit_cache', default=None,
                             help='logit cache dir (default: <model>-exl3/_logit_cache, owned by this model)')
     # Reference logits are full-vocabulary: ~35 GB for a 60-conversation WildChat trace on a
@@ -2358,6 +2386,8 @@ def main():
                             help="also score the repo's bf16 GGUF: llama.cpp's own numerics against the bf16 reference")
     cmd_qbench.add_argument('--reference-min-bits', type=float, default=0.0,
                             help='skip reference rungs below this bit rate (e.g. 2.0)')
+    cmd_qbench.add_argument('--reference-max-bits', type=float, default=8.9,
+                            help='skip reference rungs above this bit rate (e.g. 6.0)')
     cmd_qbench.add_argument('--reference', action='append',
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
@@ -2368,6 +2398,7 @@ def main():
     cmd_compare.add_argument('--revisions', default=None, help='revisions to show (default: every scored one)')
     cmd_compare.add_argument('--base', default=None, help='show every number as a ratio to this revision')
     cmd_compare.add_argument('--slices', default=None, help="only these slices ('scored', 'diag', or names)")
+    cmd_compare.add_argument('--no-references', action='store_true', help='leave out reference rows (ref:<repo>@<branch>)')
     cmd_compare.set_defaults(func=do_compare)
 
     cmd_card = subparsers.add_parser('card', help="the model card and TECHNICAL.md from the qbench results")
