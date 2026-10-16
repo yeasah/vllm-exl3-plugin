@@ -1354,6 +1354,33 @@ def merge_results(path, new_path):
     with open(path, "w") as f:
         json.dump(merged, f, indent=2)
 
+SAMPLE_SEED = 0
+
+def sample_spec(spec):
+    """'swe=50,wild=20' -> {'swe': 50, 'wild': 20}"""
+    return {k.strip(): int(v) for k, v in (x.split("=") for x in (spec or "").split(",") if x.strip())}
+
+def sampled_trace(job, sl, n):
+    """A fixed subset of a slice's eval trace, for screening (the same rows for every variant):
+    eval_<slice>.s<n>.json, written once. Its own results (qb_<slice>.s<n>.json) and its own
+    reference logits (the cache is keyed by trace), so it never mixes with the full slice."""
+    key = f"{sl}.s{n}"
+    out = job.eval_trace(key)
+    if not os.path.isfile(out):
+        import random
+        with open(job.eval_trace(sl)) as f:
+            t = json.load(f)
+        if n >= len(t["rows"]):
+            raise SystemExit(f"=== --sample {sl}={n}: the trace has only {len(t['rows'])} rows ===")
+        idx = sorted(random.Random(SAMPLE_SEED).sample(range(len(t["rows"])), n))
+        t["rows"] = [t["rows"][i] for i in idx]
+        t["meta"] = {**t.get("meta", {}), "rows": n, "sample": {"of": os.path.basename(job.eval_trace(sl)),
+                                                                 "seed": SAMPLE_SEED, "indices": idx}}
+        with open(out, "w") as f:
+            json.dump(t, f)
+        print(f"=== {sl}: sampled {n} of its rows -> {os.path.basename(out)} ===")
+    return key
+
 def do_qbench(job, args):
     os.makedirs(job.main, exist_ok=True)
     revisions = [rev for rev in job.revisions() if job.is_complete(rev)]
@@ -1377,6 +1404,12 @@ def do_qbench(job, args):
         if bad:
             print(f"=== no eval trace for slice {', '.join(bad)} (have: {', '.join(slices)}) ==="); return False
         slices = [sl for sl in slices if sl in want]
+    # --sample: screen on a fixed subset of a slice's rows (results and reference logits kept apart)
+    samples = sample_spec(args.sample)
+    bad = [sl for sl in samples if sl not in slices or sl == "raw"]
+    if bad:
+        print(f"=== --sample: {', '.join(bad)} not among the slices scored ==="); return False
+    slices = [sampled_trace(job, sl, samples[sl]) if sl in samples else sl for sl in slices]
     missing = [sl for sl in EVAL_SLICES if not os.path.isfile(job.eval_trace(sl))]    # absent traces, not --slices
     if missing:
         print(f"=== no eval traces for {', '.join(missing)}: the card falls back to raw text "
@@ -1441,7 +1474,7 @@ def do_qbench(job, args):
     # free VRAM as the first
     slots = list(dict.fromkeys(device_slots(args.device)))
     for sl in slices:
-        sl_arms = arms + (base_arms if sl in EVAL_SLICES else [])   # the baseline only enters through the composite
+        sl_arms = arms + (base_arms if sl.split(".")[0] in EVAL_SLICES else [])   # the baseline only enters through the composite
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
         final = os.path.join(job.main, f"qb_{sl}.json")
         out = os.path.join(job.main, f"_qb_{sl}.subset.json") if args.revisions else final
@@ -1477,11 +1510,14 @@ def do_compare(job, args):
     slices); with --base, every number as a ratio to that revision; the recipe's own-voice share."""
     import math
     qb = {}
+    samples = sample_spec(args.sample)
     for sl in list(EVAL_SLICES) + list(DIAG_SLICES):
-        p = os.path.join(job.main, f"qb_{sl}.json")
+        p = os.path.join(job.main, f"qb_{sl}.s{samples[sl]}.json" if sl in samples else f"qb_{sl}.json")
         if os.path.isfile(p):
             with open(p) as f:
                 qb[sl] = json.load(f)
+        elif sl in samples:
+            print(f"=== no {os.path.basename(p)}: score it with qbench --sample {sl}={samples[sl]} ==="); return False
     if args.slices:
         alias = {"scored": list(EVAL_SLICES), "diag": list(DIAG_SLICES)}
         want = [x for w in args.slices.split(",") for x in alias.get(w, [w])]
@@ -1542,7 +1578,8 @@ def do_compare(job, args):
     print(f"{unit}; composite: " + " + ".join(f"{w:.2f} {sl}" for sl, w in W.items()) + " (geometric)")
     revs = [r for r in revs if any(table[r][sl] is not None for sl in sls)]
     w0 = max(len(r) for r in revs + ["revision"])
-    print(f"{'revision':{w0}s} {'share':>7s} " + " ".join(f"{sl:>8s}" for sl in sls) + f" {'composite':>9s}")
+    print(f"{'revision':{w0}s} {'share':>7s} " + " ".join(f"{(sl + '.s' + str(samples[sl]) if sl in samples else sl):>8s}" for sl in sls)
+          + f" {'composite':>9s}")
     for rev in revs:
         v = shown[rev]
         c = comp(v)
@@ -2359,6 +2396,9 @@ def main():
     cmd_qbench.add_argument('--slices', default=None,
                             help="only these slices, e.g. wild,swe ('scored': the composite's; 'diag': the diagnostic ones). "
                                  "For exploration: no pruning, and the card wants every slice")
+    cmd_qbench.add_argument('--sample', default=None,
+                            help="screen on a fixed subset of a slice's rows, 'slice=N,...' (e.g. swe=50): its own trace "
+                                 "(eval_<slice>.s<N>.json), results (qb_<slice>.s<N>.json) and reference logits")
     cmd_qbench.add_argument('--revisions', default=None,
                             help="only these revisions (e.g. a new --suffix variant; 'none' for references only), merged "
                                  "into the existing results; the baseline is not rescored, references only if given")
@@ -2399,6 +2439,7 @@ def main():
     cmd_compare.add_argument('--base', default=None, help='show every number as a ratio to this revision')
     cmd_compare.add_argument('--slices', default=None, help="only these slices ('scored', 'diag', or names)")
     cmd_compare.add_argument('--no-references', action='store_true', help='leave out reference rows (ref:<repo>@<branch>)')
+    cmd_compare.add_argument('--sample', default=None, help="read a slice's sampled results instead, 'slice=N' (as qbench --sample)")
     cmd_compare.set_defaults(func=do_compare)
 
     cmd_card = subparsers.add_parser('card', help="the model card and TECHNICAL.md from the qbench results")
