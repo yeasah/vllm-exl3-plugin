@@ -2159,9 +2159,11 @@ def mix_weights(job, cats, cat_shares):
             w[c] = comp.get("ctx", 0) * tok[c] / ctx_tok
         else:
             w[c] = comp.get(c, 0)
-        for pat, n in rules:
+        factor = 1.0
+        for pat, n in rules:                    # later rules win, as in measure --rows: '*=0,ctx_user:code=1'
             if fnmatch.fnmatch(c, pat):
-                w[c] *= n
+                factor = n
+        w[c] *= factor
     return w
 
 def blend_measurement(job, groups, out):
@@ -2180,6 +2182,9 @@ def blend_measurement(job, groups, out):
     acc = {}
     for share, members in groups:
         tw = sum(members.values())
+        if tw <= 0:
+            raise SystemExit(f"=== recipe blend: every category in a group with share {share} has weight 0 "
+                             f"(check --category-shares) ===")
         g = {}
         for cat, w in members.items():
             print(f"including {round(w/tw*share*100, 2)}% {cat}")
@@ -2205,6 +2210,42 @@ def ownvoice_groups(job, share, cat_shares):
     """The own-voice dial: own voice at `share`, the whole calibration at the rest."""
     cats = measured_categories(job)
     return [(share, {"self": 1.0}), (1 - share, mix_weights(job, cats, cat_shares))]
+
+def plan_recipes(job, args, recipe_source, share, rfn):
+    """quantize --plan: solve each revision's recipe as the real run would (seconds), convert
+    nothing, and compare it with every recipe already solved here. Near the solver's decision
+    boundaries many knob settings give the same allocation, hence the same quant: an exact match
+    means the conversion (about an hour at 27B) would duplicate an existing variant."""
+    import yaml
+    if not recipe_source:
+        print("=== --plan: these revisions would be uniform bits; nothing to solve ==="); return True
+    rdir = os.path.join(job.dir, "_recipes"); pdir = os.path.join(rdir, "_plan")
+    os.makedirs(pdir, exist_ok=True)
+    existing = {}
+    for f in sorted(globmod.glob(os.path.join(rdir, "*.yaml"))):
+        with open(f) as fh:
+            existing[os.path.basename(f)[:-5]] = yaml.safe_load(fh)["tensors"]
+    for rev, bits, headbits in bit_specs(args.bits, args.suffix):
+        meas = args.measurement or blend_measurement(job, ownvoice_groups(job, share, args.category_shares),
+                                                     os.path.join(pdir, f"{rev}.measurement.json"))
+        out = os.path.join(pdir, f"{rev}.yaml")
+        rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"), "-m", meas, "-b", bits, "-hb", headbits,
+                          "-al", str(args.alpha), "-mink", str(args.min_k), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
+                        job.log(f"plan-{rev}"), None, False)
+        if rc or not os.path.isfile(out):
+            print(f"=== {rev}: solve FAILED (log {job.log(f'plan-{rev}')}) ==="); return False
+        with open(out) as fh:
+            t = yaml.safe_load(fh)["tensors"]
+        k = int(float(bits))
+        diffs = sorted((sum(t[x] != e.get(x) for x in t), name) for name, e in existing.items() if set(e) == set(t))
+        same = [n for d, n in diffs if d == 0]
+        hist = dict(sorted({b: list(t.values()).count(b) for b in set(t.values())}.items()))
+        print(f"=== {rev}: {sum(b != k for b in t.values())} of {len(t)} tensors off uniform {k}; bits {hist} ===")
+        if same:
+            print(f"    SAME RECIPE as {', '.join(same)}: converting would duplicate it")
+        else:
+            print("    nearest: " + ", ".join(f"{n} ({d} tensors differ)" for d, n in diffs[:4]) if diffs else "    nothing to compare with")
+    return True
 
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
@@ -2235,6 +2276,8 @@ def do_quantize(job, args):
               if args.ownvoice_share is None else f"the measurements, own-voice share {share}") + " ===")
     elif args.recipe and not measured:
         print("=== uniform bits: no measurements (run `measure` for a per-tensor recipe) ===")
+    if args.plan:
+        return plan_recipes(job, args, recipe_source, share, rfn)
 
     def task(rev, bits, headbits):
         def run(slot, echo):
@@ -2374,6 +2417,9 @@ def main():
                               help='mix: the conversational trace from `traces`; default: the bundled corpus')
     cmd_quantize.add_argument('--retries', type=int, default=2,
                               help='resume a failed revision this many times before stopping')
+    cmd_quantize.add_argument('--plan', action='store_true',
+                              help='solve the recipes and compare them with every recipe already solved (identical = '
+                                   'the conversion would duplicate a variant); convert nothing')
     cmd_quantize.add_argument('--suffix', default=None,
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
     cmd_quantize.add_argument('--recipe', default=True, action=argparse.BooleanOptionalAction,
