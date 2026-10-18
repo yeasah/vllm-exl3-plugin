@@ -1535,6 +1535,7 @@ def do_compare(job, args):
     if args.no_references:
         revs = [r for r in revs if not r.startswith("ref:")]
     base_revs = job.baseline_revisions()
+    unmatched = set()
     def baseline_of(rev):        # the uncalibrated rung at the same rate: the longest baseline name it starts with
         if rev.startswith("ref:"):  # a reference rung: by its nominal bit rate (heads may differ)
             hit = re.search(r"(\d+(?:\.\d+)?)bpw", rev.split("@", 1)[-1])
@@ -1549,6 +1550,8 @@ def do_compare(job, args):
         if r is None or fl is None:
             return None
         b = rows.get(baseline_label(baseline_of(rev))) if baseline_of(rev) else None
+        if b is None and base_revs and not args.base:
+            unmatched.add(rev)          # no baseline at its rate: absolute excess, marked, not a share
         return (r["kld"] - fl) / (b["kld"] - fl) if b else r["kld"] - fl
     def share(rev):
         if rev.startswith("ref:"):
@@ -1588,8 +1591,11 @@ def do_compare(job, args):
     for rev in revs:
         v = shown[rev]
         c = comp(v)
-        cells = " ".join(f"{v[sl]:8.3f}" if v[sl] is not None else f"{'-':>8s}" for sl in sls)
+        mark = "^" if rev in unmatched else " "
+        cells = " ".join(f"{v[sl]:7.3f}{mark}" if v[sl] is not None else f"{'-':>8s}" for sl in sls)
         print(f"{rev:{w0}s} {share(rev):>7s} {cells} {c:9.3f}" if c is not None else f"{rev:{w0}s} {share(rev):>7s} {cells} {'-':>9s}")
+    if unmatched:
+        print("^ no uncalibrated baseline at this rate: absolute excess KLD, not comparable with the shares above")
     return True
 
 def stamp():
