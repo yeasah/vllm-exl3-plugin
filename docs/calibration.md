@@ -715,6 +715,7 @@ winner at 27B; an agentic calibration slice, which as real coding sessions cost 
 proxy for no measurable gain and now waits on a work-pattern source; 2-3 bpw at 27B, and gemma-4-12B; and wiring the mix into
 `quant.py` under the generator policy above. Whether the 27B's raw text carries the 9B's
 3-7% cost is unmeasured at a resolution that could see it, and accepted either way. Whether
-an uncalibrated quant becomes the card's reference is open in `card-composite`. A per-tensor recipe on top of the mix
-(SC's, measured on its trace) is the leading candidate for the pipeline; what to measure it on
-is open in [qbench.md](qbench.md) "The SC recipe clears the bar on the conversational eval".
+an uncalibrated quant becomes the card's reference is open in `card-composite`. A per-tensor recipe on top of the mix, measured
+on the calibration's own-voice rows, is the pipeline default since 2026-10-18 (`quant.py measure`;
+[qbench.md](qbench.md) "The recipe on Qwen3.8-27B, what makes a measurement loud, and the
+default"); better measurement mixes for a particular model are a search on that model.
