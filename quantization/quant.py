@@ -2238,7 +2238,7 @@ def plan_recipes(job, args, recipe_source, share, rfn):
                                                      os.path.join(pdir, f"{rev}.measurement.json"))
         out = os.path.join(pdir, f"{rev}.yaml")
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"), "-m", meas, "-b", bits, "-hb", headbits,
-                          "-al", str(args.alpha), "-mink", str(args.min_k), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
+                          "-al", str(args.alpha), "-mink", str(args.min_k), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
                         job.log(f"plan-{rev}"), None, False)
         if rc or not os.path.isfile(out):
             print(f"=== {rev}: solve FAILED (log {job.log(f'plan-{rev}')}) ==="); return False
@@ -2303,7 +2303,7 @@ def do_quantize(job, args):
                                                              os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
                                   "-m", meas, "-b", bits, "-hb", headbits,
-                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-o", recipe ] +
+                                  "-al", str(args.alpha), "-mink", str(args.min_k), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", recipe ] +
                                 ([ "-rr", rfn ] if rfn else []),
                                 job.log(f"{rev}-recipe"), None, echo)
                 if rc or not os.path.isfile(recipe):
@@ -2345,7 +2345,8 @@ def do_quantize(job, args):
                 shutil.copyfile(recipe, os.path.join(revdir, "recipe.yaml"))
                 rec["recipe"] = { "measurement": os.path.basename(args.measurement) if args.measurement else
                                       f"blend of own-voice and calibration-mix sensitivities, own-voice share {share}",
-                                  "rfn": rfn and os.path.basename(rfn), "alpha": args.alpha, "min_k": args.min_k }
+                                  "rfn": rfn and os.path.basename(rfn), "alpha": args.alpha, "min_k": args.min_k,
+                                  **({"alpha_low": args.alpha_low} if args.alpha_low else {}) }
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
                 json.dump(rec, f, indent=1)
             return True
@@ -2446,6 +2447,9 @@ def main():
     cmd_quantize.add_argument('--alpha', type=float, default=2.0,
                               help='sc_optimize KLD-vs-noise exponent (its docs recommend 2.0 over the fitted value)')
     cmd_quantize.add_argument('--min-k', type=int, default=2, help='sc_optimize minimum per-tensor bits')
+    cmd_quantize.add_argument('--alpha-low', type=float, default=None,
+                              help='sc_optimize exponent for demotions below the 2-bit rfn anchor (with --min-k 1; '
+                                   'upstream measured 2.35 on Qwen3.8-27B for 2->1 bits)')
     cmd_quantize.set_defaults(func=do_quantize)
 
     cmd_qbench = subparsers.add_parser('qbench', help="score every set on the eval slices against the bf16 reference")
