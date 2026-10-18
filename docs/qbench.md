@@ -1395,6 +1395,53 @@ Two tool changes made the 9B measurable on 16 GB cards: `sc_measure --gpu_split`
 whole fp16 model) and `--boundary_cpu` (its per-module input cache, ~4x the device at 40 rows;
 bit-identical results). `quant.py quantize --measurement` builds a ladder from a measurement.
 
+## The recipe on Qwen3.8-27B, what makes a measurement loud, and the default (2026-10-16 to -18)
+
+**On the 27B, own voice alone is best, by a clear margin.** A kitchen-sink measurement (every
+category, ~150 rows, on an H100) blended at 4 bpw, all budget-matched, our calibration; excess as a
+share of the uncalibrated 4 bpw, wild and the full swe slice, composite 0.3/0.7:
+
+| set | wild | swe | composite |
+|---|---|---|---|
+| uniform bits, published (same calibration and converter) | 0.566 | 0.551 | 0.556 |
+| own voice only (ov100) | **0.520** | **0.480** | **0.492** (-11.5%) |
+| 75% own voice | 0.568 | 0.505 | 0.523 |
+| 40% own voice | 0.820 | 0.697 | 0.732 |
+| mix only | 3.146 | 2.099 | 2.370 |
+| mix only, `--min-k 3` | 1.588 | (swe-50: 1.135) | |
+| turboderp 4.00bpw / SC_4.00bpw_H5 | 0.644 / 0.581 | 0.675 / 0.700 | 0.665 / 0.662 |
+
+The mix-only recipe pushes 46 tensors to 2 bits and 16 to 7 (large opposed moves, the regime
+where [superposition fails](#per-tensor-bit-allocation-does-not-compose-2026-08-23)); a 3-bit floor
+halves the damage but does not rescue it. Isolating categories at 25% beside own voice (screened on
+a fixed 50-session swe sample, which tracks the full slice within ±7% per arm) found nothing that
+beats own voice alone: the one category that tied it, documents in a user turn in other languages,
+has no loud rows at all and ranks tensors like own voice (Spearman 0.73).
+
+**Loud rows are the whole story, and loudness belongs to the context, not the content type.**
+Within every category, quiet rows (mean KL < 0.002) rank tensors like own voice (0.58-0.89) and
+loud rows (0.004-0.16) do not (-0.08 to 0.25); loud rows carry 77-100% of most categories' weight.
+They are the rows where the model works with external material: tool schemas and calls, diffs,
+conversation openings. On the 27B, loud rows move sensitivity from the MLPs (69% -> 52%) to the
+sequence-mixing layers (linear attention 22% -> 35%, full attention 9% -> 13%, `k_proj` doubling);
+on Ornith-9B, loud and quiet rows split by family the same way, which is why its mix measurement
+traded chat for agent work instead of collapsing. Per-position KLs (`sc_measure --dump_positions`,
+9B) show the loudness is a level across the row, not a few spikes (top 5% of positions: 53-61% of
+a loud row's KL, 48% of a quiet one's); exact in-context copies (an 8-gram seen earlier in the row)
+run 1.5-5x hotter than the rest of a loud row -- a diff's `+++` path repeating its `---` path, a
+tool schema's boilerplate -- but are only 4-6% of its positions. Own voice copies itself too (1.6%
+of positions: a regex restated, a phrase repeated), yet those positions are 3-30x *colder* than
+its other positions and carry 0.1% of its KL: the same kind of event, three orders of magnitude
+apart, so masking own voice's copies would change nothing.
+
+**Default since 2026-10-18: an unconditional own-voice recipe.** On all three models own voice
+alone was best or near-best on every slice; mixes won only the 9B's agent composite, and at a cost
+the 27B shows can be severe. Better mixes may exist for a given model, but finding them is a search
+on that model (the tools for it stay: `measure --rows` for other categories,
+`quantize --ownvoice-share`/`--category-shares`/`--plan`, `qbench --sample`), with gains that have
+not generalized. `quant.py measure` now measures own voice only by default (20 rows) and `quantize`
+uses share 1.
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)

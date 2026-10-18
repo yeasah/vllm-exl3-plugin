@@ -1997,10 +1997,13 @@ def do_baseline(job, args):
 # sc_measure scores every row independently and perturbs by (tensor, level) seed with Hessians from
 # fixed rows, so per-category runs are an exact partition of one big measurement: any grouping or
 # weighting is arithmetic afterwards, and a run can be chunked to bound memory.
-MEASURE_ROWS = {"self": 20, "ctx_user:*": 2, "ctx_tool:*": 2, "loop": 12, "raw": 6, "random": 2}
+# Default: own voice only, all a recipe at the default share uses. On Qwen3-0.6B, Ornith-1.5-9B and
+# Qwen3.8-27B an own-voice recipe was best or near-best everywhere; mixes helped only the 9B's agent
+# slices and cost the 27B badly (docs/qbench.md). Other categories (--rows) are for exploring
+MEASURE_ROWS = {"self": 20, "ctx_user:*": 0, "ctx_tool:*": 0, "loop": 0, "raw": 0, "random": 0}
 MEASURE_CHUNK = 20         # rows per sc_measure run: its boundary cache grows with rows
 MEASURE_H_ROWS = 64        # Hessian-capture rows, the same in every run: the calibration's first
-OWNVOICE_SHARE = {True: 0.4, False: 0.75}   # agent-first, else: the 9B and 0.6B sweeps' optima
+OWNVOICE_SHARE = 1.0       # unconditional: see MEASURE_ROWS
 
 def row_labels(job, ids, k=32):
     """Each calibration row's content category, by matching its opening tokens against the
@@ -2207,8 +2210,13 @@ def blend_measurement(job, groups, out):
     return out
 
 def ownvoice_groups(job, share, cat_shares):
-    """The own-voice dial: own voice at `share`, the whole calibration at the rest."""
+    """The own-voice dial: own voice at `share`, the whole calibration at the rest (as far as it was
+    measured; at share 1 the rest is not consulted, so an own-voice-only measurement suffices)."""
+    if share >= 1.0:
+        return [(1.0, {"self": 1.0})]
     cats = measured_categories(job)
+    if cats == ["self"]:
+        raise SystemExit("=== --ownvoice-share below 1 needs other categories measured (measure --rows) ===")
     return [(share, {"self": 1.0}), (1 - share, mix_weights(job, cats, cat_shares))]
 
 def plan_recipes(job, args, recipe_source, share, rfn):
@@ -2265,15 +2273,13 @@ def do_quantize(job, args):
     script = os.path.join(args.exllamav3dir, "convert.py")
     # Where each revision's bits come from: an explicit --measurement; else, if `measure` has run,
     # a blend at --ownvoice-share (default by the model's use: agent-first or not); else uniform
-    measured = "self" in measured_categories(job) and len(measured_categories(job)) > 1
+    measured = "self" in measured_categories(job)
     recipe_source = args.recipe and (args.measurement or measured)
-    agentic = (lambda w: w.get("swe", 0) > w.get("wild", 0))(composite_weights(job)[0])
-    share = args.ownvoice_share if args.ownvoice_share is not None else OWNVOICE_SHARE[agentic]
+    share = args.ownvoice_share if args.ownvoice_share is not None else OWNVOICE_SHARE
     rfn = args.rfn or (os.path.join(job.measure, "rfn.json") if os.path.isfile(os.path.join(job.measure, "rfn.json")) else None)
     if recipe_source:
         print(f"=== per-tensor recipe from " + (args.measurement if args.measurement else
-              f"the measurements, own-voice share {share} ({'agent-first' if agentic else 'chat-first'} default)"
-              if args.ownvoice_share is None else f"the measurements, own-voice share {share}") + " ===")
+              f"the measurements, own-voice share {share}" + (" (default)" if args.ownvoice_share is None else "")) + " ===")
     elif args.recipe and not measured:
         print("=== uniform bits: no measurements (run `measure` for a per-tensor recipe) ===")
     if args.plan:
@@ -2401,7 +2407,8 @@ def main():
                                          "on the whole calibration, for quantize's recipes (reused across shares)")
     cmd_measure.add_argument('-d', '--device', default='0', help='GPU for the measurement (the first listed; all with --gpu-split)')
     cmd_measure.add_argument('--rows', default=None,
-                             help="rows per category over the defaults, 'pattern=N,...' (fnmatch): e.g. 'ctx_*:code=10,self=40'. "
+                             help="rows per category over the defaults (own voice 20, the rest 0), 'pattern=N,...' (fnmatch): "
+                                  "e.g. 'self=40,ctx_*=10' to explore mixes. "
                                   "Categories: self, ctx_user:<kind>, ctx_tool:<kind>, loop, raw, random")
     cmd_measure.add_argument('--gpu-split', default=None,
                              help='GB per listed GPU to split the unquantized model across, e.g. 9,10 for a 9B on 2x16 GB')
@@ -2425,8 +2432,8 @@ def main():
     cmd_quantize.add_argument('--recipe', default=True, action=argparse.BooleanOptionalAction,
                               help='per-tensor recipe from `measure`\'s measurements when present (--no-recipe: uniform bits)')
     cmd_quantize.add_argument('--ownvoice-share', type=float, default=None,
-                              help='own-voice share of the recipe measurement, 0..1 (default: 0.4 for agent-first models by '
-                                   'their composite weights, else 0.75)')
+                              help='own-voice share of the recipe measurement, 0..1 (default 1: own voice only; below 1 '
+                                   'needs other categories measured, measure --rows)')
     cmd_quantize.add_argument('--category-shares', default=None,
                              help="scale recipe shares per category (0..1), 'pattern=N,...' (fnmatch): e.g. 'ctx_*:code=0.5,self=0'. "
                                   "Categories: self, ctx_user:<kind>, ctx_tool:<kind>, loop, raw, random "
