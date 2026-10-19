@@ -1786,7 +1786,7 @@ coding, agentic workflows, and office automation tasks". Weights are decided fro
 publisher's positioning before swe is scored, never chosen from results; 0.30 / 0.70 is a
 reasonable default for any similarly agent-first model. The card states the weighting.
 
-**Own-voice eval prompts collide with SC's calibration (2026-10-10).** The `self` eval slice
+**Fixed in code 2026-10-18:** `quantization/eval_self_prompts.json` is now 30 prompts written for evaluation (text, disjoint from `CONVERSATIONS`); each model's `eval_self.json` needs regenerating and its `self` slice rescoring before its card loses the warning. **Was:** **Own-voice eval prompts collide with SC's calibration (2026-10-10).** The `self` eval slice
 holds out 30 prompts from `sc_trace.py`'s `CONVERSATIONS`, and turboderp's SC calibration uses
 that whole list, so SC is scored in-sample there (all 30 found in his Qwen3.8-27B
 `cal_trace.json`). Cards now detect this (`main/contamination.json`), drop the slice from the

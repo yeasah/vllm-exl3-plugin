@@ -1,95 +1,155 @@
 {
- "note": "Own-voice prompts (indices into exllamav3 sc_trace.CONVERSATIONS) held out for evaluation: calibration excludes them (ctx_trace --exclude_self), the own-voice eval uses only them (--self_from). The same split as docs/calibration.md.",
+ "note": "Own-voice eval prompts (2026-10-18): written for evaluation and disjoint from exllamav3's sc_trace.CONVERSATIONS, which EXL3-SC's published calibration traces contain in full (the earlier set held out 30 of those, so SC was scored in-sample on this slice). Single-turn; the spread follows CONVERSATIONS': about a third outside English. Calibration's own-voice slice still draws on CONVERSATIONS; --exclude_self finds nothing to exclude here.",
  "rows": [
   {
-   "conversation": 8
+   "id": "eval-00",
+   "category": "reasoning",
+   "prompt": "Four people must cross a narrow bridge at night with one flashlight. The bridge holds two at a time, and a pair moves at the slower person's pace. Their crossing times are 2, 3, 8 and 9 minutes. What is the shortest total time, and why can't it be done faster?"
   },
   {
-   "conversation": 9
+   "id": "eval-01",
+   "category": "math",
+   "prompt": "Prove that the sum of the first n odd numbers is n squared, once by induction and once with a picture-style argument that a high-school student could follow."
   },
   {
-   "conversation": 10
+   "id": "eval-02",
+   "category": "math",
+   "prompt": "A bag holds 4 red and 6 blue marbles. You draw three without replacement. What is the probability that at least two are blue? Then explain how the answer changes if each marble is replaced before the next draw."
   },
   {
-   "conversation": 15
+   "id": "eval-03",
+   "category": "coding",
+   "prompt": "Write a Python function that merges overlapping time intervals given as (start, end) tuples, handling unsorted input and touching intervals like (1, 3) and (3, 5). Include a few test cases and state the complexity."
   },
   {
-   "conversation": 17
+   "id": "eval-04",
+   "category": "coding",
+   "prompt": "Explain the difference between a mutex and a semaphore with a concrete example where using the wrong one causes a bug, then show the fix in Go."
   },
   {
-   "conversation": 27
+   "id": "eval-05",
+   "category": "coding",
+   "prompt": "I have a SQL table loans(id, member_id, book_id, borrowed_on, returned_on), where returned_on is null for books still out. Write a query that returns, for each member, how many books they have borrowed, how many are currently overdue (out for more than 21 days), and their longest loan in days, but only for members with at least five loans. Explain any edge cases."
   },
   {
-   "conversation": 29
+   "id": "eval-06",
+   "category": "science",
+   "prompt": "Why do we have tides, and why are there usually two high tides a day rather than one? Explain the role of the Moon and the Sun, and why some places have much larger tides than others."
   },
   {
-   "conversation": 40
+   "id": "eval-07",
+   "category": "science",
+   "prompt": "Explain how a vaccine based on messenger RNA trains the immune system, step by step, and address the common worry that it could alter a person's DNA."
   },
   {
-   "conversation": 52
+   "id": "eval-08",
+   "category": "medicine",
+   "prompt": "What is the difference between a bacterial and a viral sore throat, how do doctors tell them apart, and why are antibiotics only useful for one of them?"
   },
   {
-   "conversation": 56
+   "id": "eval-09",
+   "category": "history",
+   "prompt": "Why did the Silk Road decline in importance after the fifteenth century? Weigh the role of maritime trade routes against political changes in Central Asia."
   },
   {
-   "conversation": 68
+   "id": "eval-10",
+   "category": "economics",
+   "prompt": "A small coffee shop is considering raising prices by 10 percent. Walk through how price elasticity of demand would determine whether revenue goes up or down, with a numerical example."
   },
   {
-   "conversation": 72
+   "id": "eval-11",
+   "category": "philosophy",
+   "prompt": "Is it ever ethical to break a promise? Lay out the strongest case on each side using at least two different ethical frameworks, then say which view you find more convincing and why."
   },
   {
-   "conversation": 75
+   "id": "eval-12",
+   "category": "creative",
+   "prompt": "Write a short story, about 300 words, in which a lighthouse keeper receives a letter that was posted fifty years ago. End it on a quiet, unresolved note."
   },
   {
-   "conversation": 77
+   "id": "eval-13",
+   "category": "creative",
+   "prompt": "Write a poem of four stanzas about the sound of a city at four in the morning, using at least one extended metaphor and no rhymes."
   },
   {
-   "conversation": 78
+   "id": "eval-14",
+   "category": "professional",
+   "prompt": "Draft a polite but firm email to a supplier whose deliveries have been late three times this quarter, asking for a corrective plan without damaging the relationship."
   },
   {
-   "conversation": 79
+   "id": "eval-15",
+   "category": "data",
+   "prompt": "Convert this description into a JSON object with sensible field names and types: a hiking trail called Ridge Loop, 12.4 kilometers long, rated moderate, open from May to October, with three water sources and no dogs allowed. Then suggest a JSON Schema for it."
   },
   {
-   "conversation": 84
+   "id": "eval-16",
+   "category": "casual",
+   "prompt": "I keep starting hobbies with enthusiasm and dropping them after two weeks. What might be going on, and what are a few practical ways to make one stick this time?"
   },
   {
-   "conversation": 96
+   "id": "eval-17",
+   "category": "technology",
+   "prompt": "Explain how a public-key handshake lets two computers that have never met agree on a secret key over an insecure network, without using any math beyond what a curious teenager would know."
   },
   {
-   "conversation": 100
+   "id": "eval-18",
+   "category": "zh",
+   "prompt": "请解释一下“温室效应”和“全球变暖”之间的区别与联系，并举例说明普通人可以采取哪些措施来减少碳排放。"
   },
   {
-   "conversation": 108
+   "id": "eval-19",
+   "category": "ja",
+   "prompt": "日本の四季が人々の生活や文化にどのような影響を与えてきたか、具体的な行事や食べ物の例を挙げて説明してください。"
   },
   {
-   "conversation": 112
+   "id": "eval-20",
+   "category": "ko",
+   "prompt": "재택근무의 장점과 단점을 직원과 회사의 입장에서 각각 정리하고, 두 입장을 모두 고려한 바람직한 근무 방식을 제안해 주세요."
   },
   {
-   "conversation": 116
+   "id": "eval-21",
+   "category": "es",
+   "prompt": "Explica por qué el agua de mar es salada mientras que la de los ríos no lo es, y qué papel juega la evaporación en ese proceso."
   },
   {
-   "conversation": 118
+   "id": "eval-22",
+   "category": "fr",
+   "prompt": "Quels sont les avantages et les inconvénients de la voiture électrique par rapport à la voiture à essence, en tenant compte de la fabrication des batteries ?"
   },
   {
-   "conversation": 121
+   "id": "eval-23",
+   "category": "de",
+   "prompt": "Erkläre den Unterschied zwischen Wetter und Klima und warum ein besonders kalter Winter nicht im Widerspruch zur globalen Erwärmung steht."
   },
   {
-   "conversation": 122
+   "id": "eval-24",
+   "category": "ru",
+   "prompt": "Объясни, почему в високосном году 366 дней, и как появилось правило о том, что годы, кратные 100, но не кратные 400, високосными не являются."
   },
   {
-   "conversation": 128
+   "id": "eval-25",
+   "category": "pt",
+   "prompt": "Quais hábitos de estudo são mais eficazes para aprender um novo idioma depois dos trinta anos? Dê sugestões práticas para uma rotina semanal."
   },
   {
-   "conversation": 136
+   "id": "eval-26",
+   "category": "ar",
+   "prompt": "اشرح لماذا نرى البرق قبل أن نسمع صوت الرعد، وكيف يمكن تقدير المسافة إلى العاصفة بناءً على ذلك."
   },
   {
-   "conversation": 138
+   "id": "eval-27",
+   "category": "hi",
+   "prompt": "पानी का चक्र क्या है? वाष्पीकरण, संघनन और वर्षा की प्रक्रियाओं को सरल भाषा में समझाइए।"
   },
   {
-   "conversation": 152
+   "id": "eval-28",
+   "category": "tr",
+   "prompt": "Tarihte matbaanın icadı bilginin yayılmasını nasıl değiştirdi? Avrupa ve Osmanlı İmparatorluğu örneklerini karşılaştırarak açıkla."
   },
   {
-   "conversation": 155
+   "id": "eval-29",
+   "category": "mixed",
+   "prompt": "I'm writing a bilingual menu for a café in Montreal. Translate these items into French and keep the English below each one: hot chocolate with whipped cream, toasted sesame bagel with cream cheese, and a seasonal soup of the day. Then explain any choice where a literal translation would sound unnatural."
   }
  ]
 }
