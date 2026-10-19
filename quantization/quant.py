@@ -529,7 +529,9 @@ def reference_section(job, qbench, floor, data):
                     # it, as they do for ours: a branch name carries a non-default head where its
                     # publisher put one, and TECHNICAL.md states what the body axis credits a big head
                     lab = f"{x['bits']:.2f}" if ours_trace else re.sub(r"(?i)bpw", "", str(x.get('branch') or x['label']))
-                    pts.append((x['body'], geo(x['excess'], b)[0], not bl <= x['body'] <= bh, lab))
+                    # extrapolated only past the baseline's ends by more than rounding (a recipe rung's
+                    # body can come out a hair under its uniform namesake's)
+                    pts.append((x['body'], geo(x['excess'], b)[0], not bl * 0.995 <= x['body'] <= bh * 1.005, lab))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
@@ -989,7 +991,7 @@ def plot_vs_reference(job, ref, path):
     any_ext = False
     labels = []     # (x, y, text, color, ours)
     others = iter(OTHERS)
-    for t in ref['traces']:
+    for ti, t in enumerate(ref['traces']):
         xs, ys, ext, labs = zip(*t['points']); ys_all += ys
         color = OURS if t['ours'] else next(others)
         mk = "D" if t['ours'] else "o"
@@ -999,7 +1001,7 @@ def plot_vs_reference(job, ref, path):
         ax.scatter([x for x, e in zip(xs, ext) if e], [y for y, e in zip(ys, ext) if e],
                    marker=mk, s=36, facecolor=SURF, edgecolor=color, linewidth=1.5, zorder=4)
         any_ext = any_ext or any(ext)
-        labels += [(x, y, f"{l}: {y:.2f}" if t['ours'] else l, INK if t['ours'] else color, t['ours'])
+        labels += [(x, y, f"{l}: {y:.2f}" if t['ours'] else l, INK if t['ours'] else color, t['ours'], ti)
                    for x, y, l in zip(xs, ys, labs)]
     lo, hi = min(ys_all), max(ys_all)
     pad = max(0.03, (hi - lo) * 0.14)
@@ -1016,38 +1018,65 @@ def plot_vs_reference(job, ref, path):
     fig.text(0.13, 0.97, "Against other quants of this model", fontsize=11, color=INK, va="top")
     fig.subplots_adjust(top=0.89, left=0.15, right=0.97, bottom=0.13)
 
-    # Greedy label placement: ours first, each label at the first of a few offsets around its
-    # point that overlaps no marker, no placed label, the legend, and stays inside the axes
+    # Greedy label placement, ours first. Each label goes on the side of its point away from the
+    # other traces there (so a trace's labels sit consistently on its outer side), at the first
+    # offset that overlaps no marker, line, placed label or the legend, stays in the axes, and sits
+    # nearer its own point than any other trace's (a label must not read as a neighbour's)
     fig.canvas.draw()
     rend = fig.canvas.get_renderer()
     box = ax.get_window_extent(rend)
     taken = [leg.get_window_extent(rend)]
-    for x, y, *_ in labels:
-        px, py = ax.transData.transform((x, y))
+    disp = [(ax.transData.transform((x, y)), ti) for x, y, *_, ti in labels]
+    for (px, py), _ in disp:
         taken.append(matplotlib.transforms.Bbox([[px - 5, py - 5], [px + 5, py + 5]]))
+    lines = []
     for t in ref['traces']:         # the lines too, sampled along each segment
         d = ax.transData.transform([(p[0], p[1]) for p in t['points']])
+        lines.append(d)
         for (x0, y0), (x1, y1) in zip(d[:-1], d[1:]):
             for f in np.linspace(0, 1, 12):
                 px, py = x0 + f * (x1 - x0), y0 + f * (y1 - y0)
                 taken.append(matplotlib.transforms.Bbox([[px - 1.5, py - 1.5], [px + 1.5, py + 1.5]]))
-    offsets = [(0, 7, "center", "bottom"), (0, -7, "center", "top"), (7, 0, "left", "center"),
-               (-7, 0, "right", "center"), (6, 6, "left", "bottom"), (-6, 6, "right", "bottom"),
-               (6, -6, "left", "top"), (-6, -6, "right", "top"), (0, 16, "center", "bottom"),
-               (0, -16, "center", "top")]
-    for x, y, text, color, ours in sorted(labels, key=lambda l: not l[4]):
+    ABOVE = [(0, 7, "center", "bottom"), (6, 6, "left", "bottom"), (-6, 6, "right", "bottom"), (0, 16, "center", "bottom")]
+    BELOW = [(0, -7, "center", "top"), (6, -6, "left", "top"), (-6, -6, "right", "top"), (0, -16, "center", "top")]
+    SIDES = [(7, 0, "left", "center"), (-7, 0, "right", "center")]
+    def side(px, py, ti):
+        """The side away from the other traces at this x: below a point every other trace runs above
+        (and vice versa); in between, whichever side has fewer traces within reach."""
+        up = down = near_up = near_down = 0
+        for tj, d in enumerate(lines):
+            if tj == ti or len(d) < 1 or not d[0][0] <= px <= d[-1][0]:
+                continue
+            oy = float(np.interp(px, d[:, 0], d[:, 1]))
+            up, down = up + (oy > py), down + (oy < py)
+            if abs(oy - py) < 60:
+                near_up, near_down = near_up + (oy > py), near_down + (oy < py)
+        if up and not down:
+            return "below"
+        if down and not up:
+            return "above"
+        return "below" if near_up > near_down else "above"
+    for x, y, text, color, ours, ti in sorted(labels, key=lambda l: not l[4]):
+        px, py = ax.transData.transform((x, y))
+        prefer = BELOW if side(px, py, ti) == "below" else ABOVE
+        offsets = prefer + SIDES + (ABOVE if prefer is BELOW else BELOW)
         best = None
         for dx, dy, ha, va in offsets:
             a = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, va=va,
                             fontsize=6.5 if ours else 6, color=color, zorder=5)
             bb = a.get_window_extent(rend).expanded(1.05, 1.1)
+            cx, cy = (bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2
+            own = np.hypot(cx - px, cy - py)
+            # points coinciding with this one (within a few pixels) share its spot: being near them is fine
+            nearest_other = min((np.hypot(cx - qx, cy - qy) for (qx, qy), tj in disp
+                                 if tj != ti and np.hypot(qx - px, qy - py) > 6), default=1e9)
             inside = box.x0 <= bb.x0 and bb.x1 <= box.x1 and box.y0 <= bb.y0 and bb.y1 <= box.y1
-            if inside and not any(bb.overlaps(t) for t in taken):
+            if inside and own < nearest_other and not any(bb.overlaps(t) for t in taken):
                 best = a
                 break
             a.remove()
-        if best is None:    # nothing clear: the first position, overlapping
-            dx, dy, ha, va = offsets[0]
+        if best is None:    # nothing clear: the preferred side, overlapping
+            dx, dy, ha, va = prefer[0]
             best = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha, va=va,
                                fontsize=6.5 if ours else 6, color=color, zorder=5)
         taken.append(best.get_window_extent(rend))
