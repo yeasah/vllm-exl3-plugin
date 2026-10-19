@@ -395,9 +395,13 @@ def reference_section(job, qbench, floor, data):
                  'body': (sz['total'] - sz['embed'] - sz['head'] - other) / 1024**3,
                  'bits': sz.get('bits'), 'head_bits': sz.get('head_bits'), 'gguf': path.endswith(".gguf") }
     def arm(label, path, need):
+        # The composite's slices are required (every comparison is built on them); any other slice
+        # counts where scored -- a reference scored on the eval slices but never on raw text still
+        # belongs in the comparison, and dropping it silently emptied the card's section 2
         rows = {sl: parse_qbench(qbench[sl], label) for sl in need}
-        if any(r is None for r in rows.values()):
+        if any(rows.get(sl) is None for sl in EVAL_SLICES if sl in need):
             return None
+        rows = {sl: r for sl, r in rows.items() if r is not None}
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
         return { **survey(path, label), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
@@ -483,7 +487,8 @@ def reference_section(job, qbench, floor, data):
         if same:
             (ratio, dropped, allnear), disp, best = max(same, key=lambda t: t[0][0])
             row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped] })
-            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices if sl not in tainted}
+            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices
+                   if sl not in tainted and sl in o['excess'] and sl in best['excess']}
             worst = max(rel, key=rel.get)
             d = o['total'] - best['total']
             row.update({ 'against': f"{disp}: {best['branch']}",
