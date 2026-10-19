@@ -881,10 +881,26 @@ def stage_main(job, fetched):
     reference.json it fetched, not the one fetch rewrote to point at its local stand-ins."""
     stage = os.path.join(job.dir, "_upload_main")
     shutil.rmtree(stage, ignore_errors=True)
-    shutil.copytree(job.main, stage, ignore=shutil.ignore_patterns("qbench-*.yaml", "_qbench_parts"))
+    # not published: qbench project files (local paths), part files, exploration rows kept for the
+    # record, and screening results on sampled slices (qb_<slice>.s<N>.json)
+    shutil.copytree(job.main, stage, ignore=shutil.ignore_patterns("qbench-*.yaml", "_qbench_parts", "_exploration_*",
+                                                                   "qb_*.s[0-9]*.json"))
     original = os.path.join(job.dir, FETCHED_REFERENCE)
     if fetched and os.path.isfile(original):
         shutil.copyfile(original, os.path.join(stage, "reference.json"))
+    # results rows for references the card does not compare against (dropped from reference.json,
+    # e.g. a superseded release of this repo) stay local; the published results match the card
+    ref_file = os.path.join(stage, "reference.json")
+    if os.path.isfile(ref_file):
+        with open(ref_file) as f:
+            repos = {r["repo"] for r in json.load(f).get("references", [])}
+        for qf in globmod.glob(os.path.join(stage, "qb_*.json")):
+            with open(qf) as f:
+                rows = json.load(f)
+            keep = [r for r in rows if not r["label"].startswith("ref:") or r["label"][4:].split("@")[0] in repos]
+            if len(keep) != len(rows):
+                with open(qf, "w") as f:
+                    json.dump(keep, f, indent=2)
     for f in [os.path.join(stage, "reference.json")] + globmod.glob(os.path.join(stage, "traces", "*.json")):
         if os.path.isfile(f):
             with open(f) as fh:
@@ -922,6 +938,9 @@ def do_upload(job, args):
                           repo_id=job.repo,
                           revision=rev,
                           commit_message=msg,
+                          # the branch becomes exactly this folder: files an earlier upload had that this
+                          # one does not are removed (the earlier revision stays in the branch history)
+                          delete_patterns="*",
                           # qbench project files hold local paths; their results are published
                           ignore_patterns=["qbench-*.yaml", "_qbench_parts/*"])
         if rev == "main":
@@ -1140,6 +1159,9 @@ def do_card(job, args):
     meta = collect_metadata(job, qbench)
     plot_quality_vs_size(job, meta, os.path.join(job.main, "quality_vs_size.png"))
     meta['traces_published'] = publish_traces(job)
+    note = os.path.join(job.dir, "card_note.md")      # per-job text under the card's intro, e.g. a superseded release
+    meta['card_note'] = open(note).read().strip() if os.path.isfile(note) else None
+    meta['recipe'] = any(os.path.isfile(os.path.join(job.revdir(r['name']), "recipe.yaml")) for r in meta['revisions'])
     if meta['reference'] and meta['reference']['traces']:
         plot_vs_reference(job, meta['reference'], os.path.join(job.main, "vs_reference.png"))
 
@@ -2259,6 +2281,27 @@ def ownvoice_groups(job, share, cat_shares):
         raise SystemExit("=== --ownvoice-share below 1 needs other categories measured (measure --rows) ===")
     return [(share, {"self": 1.0}), (1 - share, mix_weights(job, cats, cat_shares))]
 
+def publish_recipe(job, src, dst, what):
+    """recipe.yaml for a revision: sc_optimize's header names this machine's model path and the
+    measurement file by its working name; the published copy names the base model by Hub revision
+    and describes the measurement instead."""
+    import yaml
+    with open(src) as f:
+        r = yaml.safe_load(f)
+    model = HF_SNAPSHOT.search(str(r.get("model", "")).rstrip("/"))
+    r["model"] = f"hf:{model.group(1)}/{model.group(2)}@{model.group(3)}" if model else job.base_repo
+    r["measurement"] = what
+    with open(dst, "w") as f:
+        f.write("# Per-tensor bit recipe (sc_optimize), the allocation this revision was converted with\n")
+        yaml.safe_dump(r, f, sort_keys=False)
+
+def recipe_description(share, measurement=None):
+    if measurement:
+        return os.path.basename(measurement)
+    if share >= 1.0:
+        return "own-voice sensitivity (sc_measure on the calibration's own-voice rows)"
+    return f"blend of own-voice and calibration-mix sensitivities, own-voice share {share}"
+
 def plan_recipes(job, args, recipe_source, share, rfn):
     """quantize --plan: solve each revision's recipe as the real run would (seconds), convert
     nothing, and compare it with every recipe already solved here. Near the solver's decision
@@ -2382,9 +2425,8 @@ def do_quantize(job, args):
             # solver inputs behind a recipe's allocation: the recipe is published beside it
             rec = dict(calibration)
             if recipe:
-                shutil.copyfile(recipe, os.path.join(revdir, "recipe.yaml"))
-                rec["recipe"] = { "measurement": os.path.basename(args.measurement) if args.measurement else
-                                      f"blend of own-voice and calibration-mix sensitivities, own-voice share {share}",
+                publish_recipe(job, recipe, os.path.join(revdir, "recipe.yaml"), recipe_description(share, args.measurement))
+                rec["recipe"] = { "measurement": recipe_description(share, args.measurement),
                                   "rfn": rfn and os.path.basename(rfn), "alpha": args.alpha, "min_k": args.min_k,
                                   **({"alpha_low": args.alpha_low} if args.alpha_low else {}) }
             with open(os.path.join(revdir, "calibration.json"), "w") as f:

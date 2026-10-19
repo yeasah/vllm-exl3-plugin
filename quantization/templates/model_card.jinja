@@ -7,6 +7,10 @@
 These quantizations can be used with [exllamav3](https://github.com/turboderp-org/exllamav3) or vLLM via [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
 {% if composite %}
 They are calibrated broadly, on what models read and write while working (documents and tool output in conversations, code and diffs, the model's own replies) rather than on web text alone{% if agentic %}, and measured with agentic and coding work as the primary use case{% endif %}.
+{% endif %}{% if recipe %}
+Bits are allocated per tensor, from the model's measured sensitivity on its own replies, at the same total size as uniform bits.
+{% endif %}{% if card_note %}
+{{ card_note }}
 {% endif %}
 Actual consumed VRAM may be significantly lower than the total checkpoint size, depending on configuration: see the VRAM columns below.
 {% set mixed_cal = revisions | map(attribute='calibration') | unique | list | length > 1 %}
