@@ -204,6 +204,13 @@ def eval_generator(job, args):
     backend = ["--backend", "vllm", "--vllm", args.vllm_args] if args.eval_backend == "vllm" else []
     return path, backend
 
+def cal_generator(job, args):
+    """(backend args) for the calibration trace. Its generator is the uncalibrated 8bpw EXL3, which
+    vLLM serves through vllm-exl3-plugin; its engine arguments are its own (--cal-vllm-args), not
+    the eval generator's. EXL3 does not split every geometry over TP>1 (Qwen3-0.6B at TP=2 fails):
+    '{"tensor_parallel_size": 1}' runs it on one GPU."""
+    return ["--backend", "vllm", "--vllm", args.cal_vllm_args] if args.cal_backend == "vllm" else []
+
 def collect_metadata(job, qbench):
     """qbench: {slice: results list}. Excess KLD is each quant's KLD minus the slice's noise
     floor (bf16 rounding noise), so slices with different floors add up meaningfully."""
@@ -1863,13 +1870,14 @@ def do_traces(job, args):
         print("=== diagnostic eval traces FAILED ==="); return False
 
     # Calibration last: its agent slice must keep out every repository the eval swe slice uses
+    cal_backend = cal_generator(job, args)
     print(f"=== calibration trace -> {job.cal_data} ===")
     if not run_until(job.cal_data,
                      [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
                        "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
                        "--shares", json.dumps(CAL_SHARES), "--doc_kinds", CAL_DOC_KINDS,
                        "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
-                       "--exclude_self", EVAL_SELF_PROMPTS, "--exclude_swe_from", job.eval_trace("swe") ] + sampling,
+                       "--exclude_self", EVAL_SELF_PROMPTS, "--exclude_swe_from", job.eval_trace("swe") ] + sampling + cal_backend,
                      job.log("traces-cal"), tries, env=gen_gpus):
         print("=== calibration trace FAILED ==="); return False
     decontaminate_self(job)
@@ -2475,8 +2483,15 @@ def main():
                             help='repo or path that writes the eval traces\' answers (default: the base model). '
                                  'For models too large to generate from locally in bf16, the FP8 release with '
                                  '--eval-backend vllm. Never an EXL3 checkpoint')
-    cmd_traces.add_argument('--eval-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
-                            help='vllm: one engine per ctx_trace process, with --vllm-args')
+    # vLLM: substantially faster for the eval traces on TP>1 and never measurably slower
+    cmd_traces.add_argument('--eval-backend', default='vllm', choices=['exllamav3', 'vllm'],
+                            help='engine for the eval traces (default vllm: one engine per ctx_trace process, with --vllm-args)')
+    cmd_traces.add_argument('--cal-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
+                            help='engine for the calibration trace (its uncalibrated 8bpw EXL3 generator); vllm uses '
+                                 '--cal-vllm-args')
+    cmd_traces.add_argument('--cal-vllm-args', default='{}',
+                            help='vLLM engine arguments for the calibration generator, JSON; e.g. \'{"tensor_parallel_size": 1}\' '
+                                 'where EXL3 cannot split the model over the GPUs')
     cmd_traces.add_argument('--vllm-args', default='{}',
                             help='vLLM engine arguments, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
                                  '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')
