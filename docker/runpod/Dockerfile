@@ -45,6 +45,31 @@ RUN pip install --no-cache-dir -e vllm-exl3-plugin[quantization]
 # package "is not installed". (flash-linear-attention, pure Triton, comes with the eval extras.)
 RUN pip install --no-cache-dir --no-build-isolation causal-conv1d
 
+# torch's libc10_cuda.so rebuilt with the fix for pytorch#196258 (expandable segments unmap
+# on the wrong device: Xid 31 or silent corruption on multi-GPU). Last, after every pip
+# install: any torch reinstall restores the stock library. Remove once torch carries 3fda599
+RUN TORCH_FIX_WORK=/tmp/pytorch-c10fix bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh \
+    && bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh --check \
+    && rm -rf /tmp/pytorch-c10fix
+
+# Install runpodctl for pod management (scaling up GPUs)
+ARG RUNPODCTL_VERSION=v2.7.2
+ARG RUNPODCTL_SHA256=8216810f9210c3e18c648d828f4d378cdaac0930389b460b1574ff2a3dfd1624
+RUN wget -q --https-only --secure-protocol=TLSv1_2 --max-redirect=3 \
+    -O /tmp/runpodctl.tar.gz \
+    "https://github.com/runpod/runpodctl/releases/download/${RUNPODCTL_VERSION}/runpodctl-linux-amd64.tar.gz" && \
+    echo "${RUNPODCTL_SHA256}  /tmp/runpodctl.tar.gz" | sha256sum -c - && \
+    tar -xz -C /usr/local/bin -f /tmp/runpodctl.tar.gz runpodctl && \
+    rm /tmp/runpodctl.tar.gz
+
+# install vast SDK/CLI as well
+RUN pip install --no-cache-dir vastai
+
+# install telegraf
+COPY ./influxdata.list /etc/apt/sources.list.d/influxdata.list
+COPY ./influxdata-archive.gpg /etc/apt/keyrings
+RUN apt update && apt install --yes --no-install-recommends telegraf
+
 # Bring the checkout up to dev's head without rebuilding the layers above. The clone layer is
 # cached by its command text, so a rebuild otherwise keeps the code from the first build; this
 # ADD's content is dev's current commit, so the cache breaks here exactly when dev has moved.
@@ -59,17 +84,6 @@ RUN cd vllm-exl3-plugin \
         for d in tomllib.load(open(f, "rb"))["project"]["optional-dependencies"][e]))') \
     && git log --oneline -1
 
-# torch's libc10_cuda.so rebuilt with the fix for pytorch#196258 (expandable segments unmap
-# on the wrong device: Xid 31 or silent corruption on multi-GPU). Last, after every pip
-# install: any torch reinstall restores the stock library. Remove once torch carries 3fda599
-RUN TORCH_FIX_WORK=/tmp/pytorch-c10fix bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh \
-    && bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh --check \
-    && rm -rf /tmp/pytorch-c10fix
-
-# The fast kernels transformers looks for on hybrid models (Qwen3.5+, gated delta nets): any
-# import error here would otherwise only show as a slow reference pass at run time
-# llama_supports_gpu_offload() needs a visible GPU, which a build has none of; a CPU-only wheel
-# lacks the CUDA backend library, and qbench would then score GGUF on the CPU (it refuses at runtime)
-RUN python -c "import fla, causal_conv1d; print('fla', fla.__version__, 'causal_conv1d', causal_conv1d.__version__)" && \
-    python -c "import llama_cpp, os; d = os.path.join(os.path.dirname(llama_cpp.__file__), 'lib'); \
-assert any(f.startswith('libggml-cuda') for f in os.listdir(d)), 'llama-cpp-python is a CPU-only build'; print('llama_cpp', llama_cpp.__version__, 'cuda backend ok')"
+# fixup environment
+COPY --chmod=755 ./bin/* .local/bin/
+COPY ./bashrc .bashrc

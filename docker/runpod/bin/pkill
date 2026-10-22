@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# pkill that cannot signal the shell running it.
+#
+# Killing your own shell is useful in exactly zero situations, but `pkill -f`
+# invites it: the pattern is matched against full argv, and the shell running
+# the pkill has that pattern in *its* argv, so it matches itself. The command
+# dies partway through and the failure looks like whatever the caller was
+# actually doing, not like a pkill mistake.
+#
+# Claude Code ships a guard for this, but it protects only $CLAUDE_PID -- the
+# CLI process itself. Commands run in a `bash -c` *child* of that, and the
+# child is what carries the pattern, so the guard finds no match, passes, and
+# the child dies anyway.
+#
+# This protects the caller's ancestor chain and then does what was asked with
+# whatever is left. It is not a policy -- the intent of the command is
+# honoured, minus the part that could only ever have been an accident:
+#
+#   pkill -f pytest      # from a shell whose own argv says "pytest":
+#                        # kills the pytest processes, spares the shell
+#
+# Bypass with /usr/bin/pkill if you ever want the raw behaviour.
+
+PGREP=/usr/bin/pgrep
+PKILL=/usr/bin/pkill
+
+# Split argv into a signal and a pgrep-compatible probe. Options taking a
+# separate value are matched before the uppercase-signal rule, or `-P 1234`
+# would read as a signal named P.
+sig=""; want_sig=""; want_val=""; probe=()
+for a in ${1+"$@"}; do
+    if [ -n "$want_sig" ]; then sig="$a"; want_sig=""; continue; fi
+    if [ -n "$want_val" ]; then probe+=("$a"); want_val=""; continue; fi
+    case "$a" in
+        --signal)                  want_sig=1 ;;
+        --signal=*)                sig="${a#--signal=}" ;;
+        -e|--echo|-c|--count)      ;;
+        -P|-U|-u|-G|-g|-s|-t|-F|--ns|--nslist)
+                                   probe+=("$a"); want_val=1 ;;
+        -[0-9]*)                   sig="${a#-}" ;;
+        -[PUuGgstF]?*|--*)         probe+=("$a") ;;
+        -[A-Z]*)                   sig="${a#-}" ;;
+        *)                         probe+=("$a") ;;
+    esac
+done
+
+# Drop our own pid before anything else. This wrapper's argv necessarily
+# contains the pattern, so `-f` always matches it; real pkill excludes itself
+# silently and so must we, or every invocation reports a spurious "spared".
+matches=$("$PGREP" ${probe[@]+"${probe[@]}"} 2>/dev/null | grep -vx "$$")
+[ -z "$matches" ] && exec "$PKILL" ${1+"$@"}
+
+# What must survive: this shell, its ancestors, and the Claude CLI if we are
+# under one. Deliberately NOT the whole process group -- killing your own
+# children is a real idiom (`pkill -P $$`), and only ancestors are never a
+# legitimate target. A sibling subshell of the same pipeline can still match;
+# the shell surviving is what matters, because the command then reports
+# properly instead of dying halfway with an unrelated-looking status.
+protected=" ${CLAUDE_PID:-} "
+p=$PPID
+while [ -n "$p" ] && [ "$p" != "0" ] && [ "$p" != "1" ]; do
+    protected="$protected$p "
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+done
+
+spared=(); targets=()
+for m in $matches; do
+    case "$protected" in
+        *" $m "*) spared+=("$m") ;;
+        *)        targets+=("$m") ;;
+    esac
+done
+
+# Nothing protected matched: hand straight to the real pkill, so ordinary
+# invocations keep their exact semantics and exit status.
+[ ${#spared[@]} -eq 0 ] && exec "$PKILL" ${1+"$@"}
+
+printf 'pkill: sparing %s (this shell / its ancestors)\n' "${spared[*]}" >&2
+if [ ${#targets[@]} -eq 0 ]; then
+    printf 'pkill: nothing else matched; not signalling anything\n' >&2
+    exit 1
+fi
+kill -"${sig:-TERM}" "${targets[@]}" 2>/dev/null

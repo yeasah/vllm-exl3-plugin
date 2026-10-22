@@ -1,0 +1,48 @@
+#!/bin/sh
+
+runpod_command()
+{
+    case $1 in
+	stop)
+	    echo "runpod: stopping pod $2"
+	    runpodctl pod stop $2
+	    ;;
+	destroy)
+	    echo "runpod: destroying pod $2"
+	    runpodctl pod delete $2
+	    ;;
+	*)
+	    echo "runpod: unsupported command $1 (supported commands: stop, destroy)"
+	    ;;
+    esac
+}
+
+vast_command()
+{
+    case $1 in
+	stop)
+	    echo "vast: stopping instance $2"
+	    vastai stop instance $2
+	    ;;
+	destroy)
+	    echo "vast: destroying instance $2"
+	    vastai destroy instance -y $2
+	    ;;
+	*)
+	    echo "vast: unsupported command $1 (supported commands: stop, destroy)"
+	    ;;
+    esac
+}
+
+if [ -n "$1" ]; then
+    if [ -n "$RUNPOD_POD_ID" ]; then
+	runpod_command $1 $RUNPOD_POD_ID
+    elif [ -n "$VAST_CONTAINERLABEL" ]; then
+	id=`echo $VAST_CONTAINERLABEL | cut -d. -f2`
+	vast_command $1 $id
+    else
+	echo "unknown container environment"
+    fi
+else
+    echo "usage: $0 stop, destroy"
+fi
