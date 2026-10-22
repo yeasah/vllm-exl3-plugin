@@ -414,7 +414,11 @@ def reference_section(job, qbench, floor, data):
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
     def interp(ladder, x, sl=None, reach=1.02):
         """A ladder's composite (or one slice's excess) at body size x, log-interpolated. Within
-        `reach` of either end it extends the end segment's log-linear slope instead."""
+        `reach` of either end it extends the end segment's log-linear slope instead. Log, not linear,
+        though a rate between rungs is a per-tensor K mix: on the 27B, the 3.5 bpw rung sits 4% under
+        the log value of its 3 and 4 bpw neighbours for both the uncalibrated baseline and the recipe
+        ladder (21-22% under the linear mean); only turboderp's published half rungs sit near linear
+        (2.5: 9%, 3.5: 3.6% under it), with the same K map as the baseline's."""
         val = (lambda r: r['composite']) if sl is None else (lambda r: r['excess'][sl])
         pts = sorted((r['body'], val(r)) for r in ladder)
         if len(pts) < 2 or not pts[0][0] / reach <= x <= pts[-1][0] * reach or min(p[1] for p in pts) <= 0:
@@ -1573,10 +1577,11 @@ def do_qbench(job, args):
 
 def do_compare(job, args):
     """A table of scored revisions from main/qb_<slice>.json, for exploring variants: per slice,
-    excess KLD as a share of the uncalibrated baseline at the same rate (absolute excess where no
-    baseline rung matches); the model's composite (weighted geometric mean over its composite
+    excess KLD as a share of the uncalibrated baseline at the same rate (log-interpolated
+    between baseline rungs, absolute excess outside them); the model's composite (weighted geometric mean over its composite
     slices); with --base, every number as a ratio to that revision; the recipe's own-voice share."""
     import math
+    import numpy as np
     qb = {}
     samples = sample_spec(args.sample)
     for sl in list(EVAL_SLICES) + list(DIAG_SLICES):
@@ -1598,7 +1603,7 @@ def do_compare(job, args):
     if args.no_references:
         revs = [r for r in revs if not r.startswith("ref:")]
     base_revs = job.baseline_revisions()
-    unmatched = set()
+    unmatched, interpolated = set(), set()
     def baseline_of(rev):        # the uncalibrated rung at the same rate: the longest baseline name it starts with
         if rev.startswith("ref:"):  # a reference rung: by its nominal bit rate (heads may differ)
             hit = re.search(r"(\d+(?:\.\d+)?)bpw", rev.split("@", 1)[-1])
@@ -1613,8 +1618,15 @@ def do_compare(job, args):
         if r is None or fl is None:
             return None
         b = rows.get(baseline_label(baseline_of(rev))) if baseline_of(rev) else None
+        if b is None:               # no rung at its rate: log-interpolated at equal body bits, as on the card
+            pts = sorted((x["bpw_layer"], x["kld"] - fl) for lab, x in rows.items()
+                         if lab.startswith("baseline:") and x.get("bpw_layer"))
+            at = r.get("bpw_layer")
+            if at and len(pts) >= 2 and pts[0][0] <= at <= pts[-1][0] and min(p[1] for p in pts) > 0:
+                interpolated.add(rev)
+                return (r["kld"] - fl) / math.exp(np.interp(at, [p[0] for p in pts], np.log([p[1] for p in pts])))
         if b is None and base_revs and not args.base:
-            unmatched.add(rev)          # no baseline at its rate: absolute excess, marked, not a share
+            unmatched.add(rev)          # outside the baseline ladder: absolute excess, marked, not a share
         return (r["kld"] - fl) / (b["kld"] - fl) if b else r["kld"] - fl
     def share(rev):
         if rev.startswith("ref:"):
@@ -1629,7 +1641,8 @@ def do_compare(job, args):
     if not args.revisions:          # by rate, then references, uniform, then by share
         def key(rev):
             sh = share(rev)
-            return (baseline_of(rev) or rev, -2.0 if sh == "ref" else -1.0 if sh == "uniform" else
+            hit = re.search(r"(\d+(?:\.\d+)?)bpw", rev.split("@", 1)[-1])
+            return (float(hit.group(1)) if hit else 99.0, baseline_of(rev) or rev, -2.0 if sh == "ref" else -1.0 if sh == "uniform" else
                     float(sh) if sh[0].isdigit() else 2.0, rev)
         revs = sorted(revs, key=key)
     W = {sl: w for sl, w in composite_weights(job)[0].items() if sl in qb}
@@ -1654,9 +1667,11 @@ def do_compare(job, args):
     for rev in revs:
         v = shown[rev]
         c = comp(v)
-        mark = "^" if rev in unmatched else " "
+        mark = "^" if rev in unmatched else "*" if rev in interpolated else " "
         cells = " ".join(f"{v[sl]:7.3f}{mark}" if v[sl] is not None else f"{'-':>8s}" for sl in sls)
         print(f"{rev:{w0}s} {share(rev):>7s} {cells} {c:9.3f}" if c is not None else f"{rev:{w0}s} {share(rev):>7s} {cells} {'-':>9s}")
+    if interpolated:
+        print("* no uncalibrated baseline at this rate: a share of the baseline log-interpolated at equal body bits")
     if unmatched:
         print("^ no uncalibrated baseline at this rate: absolute excess KLD, not comparable with the shares above")
     return True
@@ -2134,11 +2149,26 @@ def category_chunks(job, cat):
             out.append((int(m.group(1)), int(m.group(2)), os.path.join(d, f)))
     return sorted(out)
 
+def rfn_at_k2(probe, k, out):
+    """The probe's body anchors restated at K=2, the rate sc_measure's noise levels (-rs 1.0,0.5)
+    and every recipe so far were calibrated at. The trellis error is a converter constant: one
+    probed rung is ~0.262 rfn at K=2 for every body tensor of a 9B and a 27B alike, and halves per
+    bit (1.973-1.984x from K=2 to K=3 on the 27B), so the lowest rung of any ladder anchors the
+    same levels. The head keeps its own K and rfn: it is quantized at its own rate on every rung."""
+    with open(probe) as f:
+        data = json.load(f)
+    for r in data["results"]:
+        if r["K"] == k and "lm_head" not in r["key"]:
+            r["rfn"], r["K"] = r["rfn"] * 2 ** (k - 2), 2
+    data["anchored_from_k"] = k
+    with open(out, "w") as f:
+        json.dump(data, f, indent=2)
+
 def do_measure(job, args):
     """Per-tensor sensitivity of the unquantized model per content category (see MEASURE_ROWS;
     --rows raises or lowers a category's count, e.g. 'ctx_*:code=10'). Reused by every later
     quantize; raising a count measures only the rows not yet measured. Needs `traces` and, for rfn
-    anchors, a 2 bpw `baseline` rung."""
+    anchors, an integer-rate `baseline` rung (the lowest one is probed)."""
     import torch
     from safetensors.torch import load_file, save_file
     if not os.path.isfile(job.cal_data):
@@ -2150,17 +2180,22 @@ def do_measure(job, args):
     cats = measure_categories(job, cal)
     want = measure_counts(cats, args.rows)
     rfn = os.path.join(job.measure, "rfn.json")
-    two = sorted(r for r in job.baseline_revisions() if r.startswith("2.00bpw"))
+    # The anchor rung: the lowest integer rate (a fractional rate mixes K per tensor)
+    whole = sorted((float(m.group(1)), r) for r in job.baseline_revisions()
+                   if (m := re.match(r"(\d+)\.00bpw", r)))
     gpus = device_slots(args.device)
     if not os.path.isfile(rfn):
-        if two:
-            rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_rfn_probe.py"), "-mq",
-                              os.path.join(job.baseline, two[0]), "-mr", path, "-d", "0", "-o", rfn ],
-                            job.log("measure-rfn"), gpu_env(gpus[0]))
-            if rc or not os.path.isfile(rfn):
-                print(f"=== rfn probe FAILED (log {job.log('measure-rfn')}) ==="); return False
+        if whole:
+            probe = os.path.join(job.measure, "rfn-probe.json")
+            if not os.path.isfile(probe):
+                rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_rfn_probe.py"), "-mq",
+                                  os.path.join(job.baseline, whole[0][1]), "-mr", path, "-d", "0", "-o", probe ],
+                                job.log("measure-rfn"), gpu_env(gpus[0]))
+                if rc or not os.path.isfile(probe):
+                    print(f"=== rfn probe FAILED (log {job.log('measure-rfn')}) ==="); return False
+            rfn_at_k2(probe, int(whole[0][0]), rfn)
         else:
-            print("!! no 2 bpw baseline rung for rfn anchors: measuring at sc_measure's global noise levels")
+            print("!! no integer-rate baseline rung for rfn anchors: measuring at sc_measure's global noise levels")
     plan = []
     for cat in sorted(cats):
         n = min(want.get(cat, 0), len(cats[cat]))
@@ -2456,7 +2491,7 @@ def main():
 
     cmd_baseline = subparsers.add_parser('baseline', help="uncalibrated conversions: the card's baseline ladder and "
                                          "the calibration generator (single-GPU jobs, spread over -d)")
-    cmd_baseline.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
+    cmd_baseline.add_argument('-b', '--bits', default='3:5,3.5:5,4,5,6')
     cmd_baseline.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
@@ -2515,7 +2550,7 @@ def main():
     cmd_measure.set_defaults(func=do_measure)
 
     cmd_quantize = subparsers.add_parser('quantize', help="the calibrated ladder")
-    cmd_quantize.add_argument('-b', '--bits', default='2:5,3:5,4,5,6')
+    cmd_quantize.add_argument('-b', '--bits', default='3:5,3.5:5,4,5,6')
     cmd_quantize.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_quantize.add_argument('--calibration', default='mix', choices=['mix', 'default'],

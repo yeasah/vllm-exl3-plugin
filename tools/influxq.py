@@ -2,7 +2,11 @@
 """SQL against the primary host's telemetry (InfluxDB 3, populated by telegraf). Connection details
 are read from ~/influx.creds (url:, database:, token: lines); the token is never printed.
 
-usage: influxq.py "SELECT ..." [--format pretty|json|csv|jsonl]
+usage: influxq.py "SELECT ..." [--format pretty|json|csv|jsonl] [--db metrics_cloud]
+
+--db picks another database on the same server: metrics_cloud holds the cloud instances' telegraf
+(tunnelled back over ssh), where nvidia_smi, cpu and net are meaningful and the container's
+diskio and mem are not.
 
 Filter by host: this VM is host = 'llm.home.schwide.net' in cpu, mem, diskio, nvidia_smi; the HF
 cache's dm-cache is reported by the hypervisor, host = 'gauss', as cumulative counters (difference
@@ -19,8 +23,9 @@ for line in open(os.path.expanduser("~/influx.creds")):
         creds[k.strip()] = v.strip()
 url = creds["url"].rstrip("/") + "/api/v3/query_sql"
 fmt = sys.argv[sys.argv.index("--format") + 1] if "--format" in sys.argv else "pretty"
+db = sys.argv[sys.argv.index("--db") + 1] if "--db" in sys.argv else creds["database"]
 q = sys.argv[1]
-req = urllib.request.Request(url, data=json.dumps({"db": creds["database"], "q": q, "format": fmt}).encode(),
+req = urllib.request.Request(url, data=json.dumps({"db": db, "q": q, "format": fmt}).encode(),
                              headers={"Authorization": f"Bearer {creds['token']}", "Content-Type": "application/json"})
 try:
     with urllib.request.urlopen(req, timeout=60) as r:
