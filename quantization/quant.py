@@ -265,10 +265,34 @@ def collect_metadata(job, qbench):
         revs.append(r)
     data['revisions'] = sorted(revs, key=lambda x: x['bits'])
     data['reference'] = reference_section(job, qbench, floor, data) if data['composite'] else None
+    data['thresholds'] = []
+    for t in load_thresholds(job):
+        qb = {sl: parse_qbench(res, threshold_label(t["repo"])) for sl, res in qbench.items()}
+        if any(v is None for v in qb.values()):
+            print(f"=== threshold {t['repo']} is not scored on every slice: left off the card ===")
+            continue
+        excess = {sl: qb[sl]['kld'] - floor[sl] for sl in qb}
+        sz = tensor_survey_local(snapshot_download(t['repo'], revision=t['revision']))
+        data['thresholds'].append({ 'repo': t['repo'], 'name': t['repo'].split("/")[-1], 'excess': excess,
+                                    # as the size plot's axis: without input embeddings and MTP
+                                    'size': (sz['total'] - sz['embed'] - sz.get('mtp', 0)) / 1024**3,
+                                    'composite': sum(W[sl] * excess[sl] for sl in composite) if data['composite'] else None,
+                                    'raw_excess': excess.get('raw') })
     return data
 
 def ref_label(repo, branch):
     return f"ref:{repo}@{branch}"
+
+def threshold_label(repo):
+    return f"thr:{repo}"
+
+def load_thresholds(job):
+    """main/thresholds.json: checkpoints qbench scored to draw as lines, [{repo, revision, engine}]"""
+    path = os.path.join(job.main, "thresholds.json")
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        return json.load(f)
 
 def baseline_label(rev):
     return f"baseline:{rev}"
@@ -610,6 +634,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
         out.append({ 'slice': sl, 'title': title, 'anchor': anchor, 'what': what, 'why': why, 'floor': floor[sl], 'tainted_by': tainted_by,
                      'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
                      'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png",
+                     'thresholds': [(t['name'], t['excess'].get(sl)) for t in data.get('thresholds', [])],
                      'body_axis': bool(ladders) })
     return out
 
@@ -641,9 +666,14 @@ def plot_slice(sc, path):
         ax.plot(xs, ys, color=color, lw=2, ls=(0, (2, 2)) if base else "-", zorder=3 if ours else 2,
                 marker="D" if ours else None if base else "o", markersize=5, markeredgecolor=SURF, label=name)
     ax.set_yscale("log")
+    thr = [(n, v) for n, v in sc.get('thresholds', []) if v and v > 0]
+    for name, v in thr:
+        ax.axhline(v, color=INK2, lw=1.0, ls=(0, (6, 3)), zorder=1)
+        ax.text(0.01, v, f"{name} {v:.5f}", transform=ax.get_yaxis_transform(), ha="left", va="bottom",
+                fontsize=7, color=INK2)
     if ys_all:
-        lo = min(min(ys_all), sc['floor']) / 1.5
-        ax.set_ylim(lo, max(ys_all) * 1.5)
+        lo = min(min(ys_all), sc['floor'], *[v for _, v in thr]) / 1.5
+        ax.set_ylim(lo, max(max(ys_all), *[v for _, v in thr]) * 1.5)
         ax.axhspan(lo, 2 * sc['floor'], color="#ffffff", alpha=0.07, lw=0, zorder=0)
         ax.axhline(2 * sc['floor'], color=INK2, lw=0.8, ls=":", zorder=1)
         ax.text(0.99, 2 * sc['floor'], "2x noise floor", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
@@ -957,6 +987,18 @@ def do_upload(job, args):
         if rev == "main":
             shutil.rmtree(folder, ignore_errors=True)
 
+def draw_thresholds(ax, lines, ys, color):
+    """Horizontal lines at known checkpoints' excess ([(name, value)]), labelled at the right
+    edge, with the y range widened to keep them in view. Call before any explicit ylim."""
+    lines = [(n, v) for n, v in lines if v and v > 0]
+    for name, v in lines:
+        ax.axhline(v, color=color, lw=1.0, ls=(0, (6, 3)), zorder=1)
+        ax.text(0.99, v, f"{name} {v:.4f}", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+                fontsize=7, color=color)
+    if lines and ys:
+        lo, hi = min(list(ys) + [v for _, v in lines]), max(list(ys) + [v for _, v in lines])
+        ax.set_ylim(lo / 1.5, hi * 1.5)
+
 def plot_quality_vs_size(job, meta, path):
     """Section 1 of the card: this card's own checkpoints, quality against size, no comparison."""
     import matplotlib
@@ -986,6 +1028,7 @@ def plot_quality_vs_size(job, meta, path):
                     fontsize=6, color=INK)
     ax.set_yscale("log")
     ax.margins(x=0.1)
+    draw_thresholds(ax, [(f"{t['name']} ({t['size']:.1f} GiB)", t[key]) for t in meta.get('thresholds', []) if t.get(key)], ys, INK2)
     ax.set_xlabel("weight size (GiB, excluding input embeddings and MTP)", color=INK2)
     ax.set_ylabel("excess KLD vs bf16 (log, lower is better)", color=INK2)
     fig.text(0.1, 0.97, f"{job.name}: quality vs size", fontsize=11.5, color=INK, va="top")
@@ -1208,7 +1251,7 @@ def do_card(job, args):
         f.write(env.get_template("technical.jinja").render(
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], **{k: meta[k] for k in
-            ('traces_published', 'eval_generator', 'multimodal') if k in meta}))
+            ('traces_published', 'eval_generator', 'multimodal', 'thresholds') if k in meta}))
 
 def fetch_uncalibrated(job, args):
     """Populate a working job dir with the uncalibrated conversions published in <repo>-uncalibrated
@@ -1317,7 +1360,9 @@ def qbench_project(job, args, slice_, arms, results=None):
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
                               "repo": job.base_repo, "options": { "streaming": True } } ] +
-                          [ { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
+                          [ { "label": label, "group": "threshold", "engine": "transformers", "source": os.path.abspath(path),
+                              "options": { "streaming": True } } if label.startswith("thr:") else
+                            { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
                                 "options": { "n_gpu_layers": 999 } } if path.endswith(".gguf") else
                             { "label": label, "group": "EXL3", "engine": "exllamav3",
                               "source": os.path.abspath(path) } for label, path in arms ],
@@ -1464,7 +1509,7 @@ def do_qbench(job, args):
         if unknown:
             print(f"=== no complete revision {', '.join(unknown)} ==="); return False
         revisions = [r for r in revisions if r in want]
-    if not revisions and not (args.revisions and (args.reference or args.reference_gguf or base_want)):
+    if not revisions and not (args.revisions and (args.reference or args.reference_gguf or args.threshold or base_want)):
         print("=== no revisions found ===")
         return False
     slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if os.path.isfile(job.eval_trace(sl))] + ["raw"]
@@ -1489,11 +1534,13 @@ def do_qbench(job, args):
     # Existing sets of this model's quants (each grouped into ladders by branch name), and the
     # uncalibrated baseline sweep from `baseline`: section 2 of the card
     references = []
-    for repo in args.reference or []:
+    for ref in args.reference or []:
+        (repo, *patterns) = ref.split(":")
         branches = [b.name for b in HfApi().list_repo_refs(repo).branches]
         # Rungs below --reference-min-bits are left out (turboderp's SC ladder runs down to 1.4)
         # Rungs above --reference-max-bits are left out (default 8.9 catches up to a hypothetical 8bpw + HQ)
-        keep = lambda b: args.reference_max_bits >= float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits
+        keep = lambda b: (args.reference_max_bits >= float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits 
+                          and (len(patterns) == 0 or sum(int(re.search(pattern, b) is not None) for pattern in patterns) > 0))
         ladders = {name: {b: snapshot_download(repo, revision=b) for b in bs if keep(b)}
                    for name, bs in ladders_of(branches).items()}
         ladders = {name: bs for name, bs in ladders.items() if bs}
@@ -1520,6 +1567,21 @@ def do_qbench(job, args):
             parity_arms.append((ref_label(repo, "bf16"), ref["parity"]))
         references.append(ref)
         arms += [(ref_label(repo, q), p) for q, p in rungs.items()]
+    # Thresholds: a line to read the ladder against where no other set of quants exists (the
+    # publisher's FP8), scored by the reference's engine, so its excess is the checkpoint's weights
+    # alone; kept out of reference.json, which is what turns on the card's comparison section
+    thresholds = []
+    for t in args.threshold or []:
+        repo, _, rev = t.partition("@")
+        path = snapshot_download(repo, revision=rev or None)
+        thresholds.append({"repo": repo, "revision": os.path.basename(path.rstrip("/")), "engine": "transformers"})
+        arms.append((threshold_label(repo), path))
+    if thresholds:
+        tfile = os.path.join(job.main, "thresholds.json")
+        prev = load_thresholds(job) if subset else []
+        mine = {t["repo"] for t in thresholds}
+        with open(tfile, "w") as f:
+            json.dump([t for t in prev if t["repo"] not in mine] + thresholds, f, indent=1)
     baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()
                 if not args.revisions or rev in base_want}
     if refuse_converter_mismatch(list(baseline.values()), args, "baseline"):
@@ -1631,6 +1693,8 @@ def do_compare(job, args):
     def share(rev):
         if rev.startswith("ref:"):
             return "ref"
+        if rev.startswith("thr:"):
+            return "thr"
         try:
             with open(os.path.join(job.revdir(rev), "calibration.json")) as f:
                 m = json.load(f).get("recipe", {}).get("measurement", "")
@@ -2622,6 +2686,10 @@ def main():
                             help='skip reference rungs below this bit rate (e.g. 2.0)')
     cmd_qbench.add_argument('--reference-max-bits', type=float, default=8.9,
                             help='skip reference rungs above this bit rate (e.g. 6.0)')
+    cmd_qbench.add_argument('--threshold', action='append',
+                            help="a checkpoint everybody knows, e.g. the publisher's FP8 (REPO[@REVISION], repeatable): "
+                                 "scored on every slice by the bf16 reference's own engine and drawn as a line on the "
+                                 "card's size plot and TECHNICAL.md's slice plots, not compared in section 2")
     cmd_qbench.add_argument('--reference', action='append',
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
