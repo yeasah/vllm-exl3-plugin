@@ -165,6 +165,34 @@ documents themselves, such as `ml_frac` or which languages they come from.
 Project files: `/home/bulk/ypell/quant_work/_orn9_mix/` (`ratios.py` computes both
 tables).
 
+## bf16 as the calibration generator (2026-10-23)
+
+The uncalibrated 8bpw generator was a stand-in for bf16 where bf16 cannot run (see *An
+uncalibrated reference* below). Where it can, `cal-traces --generator bf16` writes the
+calibration with the eval traces' own model and engine, which also takes the 8bpw quant out
+of the pipeline. A/B on Qwen3-0.6B: the same eval traces, constant rfn anchors, default
+recipe; U is the existing trace from the uncalibrated 8bpw (exllamav3), B is regenerated from
+bf16 through vLLM. Excess KLD, B as a share of U, and a second U at 4 bpw with a different
+rounding seed (`EXL3_SEED_IDX_OFFSET=5`) as the noise yardstick:
+
+| rung | wild | swe |
+|---|---|---|
+| 3.00 bpw | 0.983 | 0.923 |
+| 4.00 bpw | 0.992 | 0.937 |
+| 5.00 bpw | 1.009 | 0.969 |
+| *U reseeded / U, 4 bpw* | *1.018* | *0.970* |
+
+- **Wild: a tie.** Every ratio is inside the reseed's 2%.
+- **Swe: bf16 is better**, by 7.7% and 6.3% at 3 and 4 bpw against a 3% reseed spread, and
+  3.1% at 5 bpw, where it is noise-sized. Same direction at every rung, largest where
+  calibration matters most. A plausible mechanism: the agent slice regenerates each session's
+  turns, and bf16's turns are the text the swe eval scores against.
+- One model and one draw per arm, so the size is soft; the direction is what moved the default.
+
+**`--generator bf16` is the default**; `uncalibrated` stays for a model whose bf16 (or FP8
+release) does not fit where the calibration is made. Project files:
+`/home/bulk/ypell/quant_work/_calgen_ab/`.
+
 ## An uncalibrated reference (2026-09-29)
 
 `convert.py --uncalibrated` (fork) quantizes every layer through the identity-Hessian

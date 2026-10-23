@@ -1822,23 +1822,30 @@ def gpu_env(slot):
 
 def run_jobs(tasks, slots, what):
     """tasks: [(name, fn(slot, echo) -> ok)]. One slot: in order, the child's output echoed as
-    before. More: a worker per slot, children's output to their logs only (four interleaved
-    progress bars read as noise), a line per start and finish. Every task runs, whatever fails;
-    returns the names that failed."""
+    before. More: the tasks are dealt to GPUs up front in proportion to each GPU's slots (a device
+    listed twice runs two at a time), and each GPU works through its own share at its own
+    concurrency. Not a shared queue of free slots: with one, the last tasks go to whichever slots
+    free first, so six rungs on '0,1,0,1' could end with two on one card and the other idle (a
+    gemma-4-12b ladder, 2026-10-23); dealt up front, each card runs two then one. No stealing
+    either, which would bring the same tail back. Children's output goes to their logs only (four
+    interleaved progress bars read as noise), with a line per start and finish. Every task runs,
+    whatever fails; returns the names that failed."""
     if len(slots) == 1:
         return [name for name, fn in tasks if not fn(slots[0], True)]
-    import queue, threading, time
-    from concurrent.futures import ThreadPoolExecutor
-    free = queue.Queue()
-    for slot in slots:
-        free.put(slot)
+    import threading, time
+    from collections import Counter
+    width = Counter(slots)                       # concurrency per GPU
+    gpus = list(dict.fromkeys(slots))
+    share = {g: [] for g in gpus}
+    for task in tasks:                           # deal: the GPU with the fewest tasks per slot so far
+        g = min(gpus, key=lambda g: (len(share[g]) / width[g], gpus.index(g)))
+        share[g].append(task)
     failed, lock = [], threading.Lock()
     def say(line):                       # whole lines: print() writes text and newline separately
         with lock:
             sys.stdout.write(line + "\n"); sys.stdout.flush()
-    def worker(task):
+    def run(slot, task):
         name, fn = task
-        slot = free.get()
         t0 = time.time()
         say(f"=== [gpu {slot}] {what} {name} started ===")
         ok = False
@@ -1846,14 +1853,22 @@ def run_jobs(tasks, slots, what):
             ok = fn(slot, False)
         except Exception as e:
             say(f"=== [gpu {slot}] {what} {name}: {type(e).__name__}: {e} ===")
-        finally:
-            free.put(slot)
         say(f"=== [gpu {slot}] {what} {name} {'done' if ok else 'FAILED'} after {(time.time() - t0) / 60:.0f} min ===")
         if not ok:
             with lock:
                 failed.append(name)
-    with ThreadPoolExecutor(len(slots)) as ex:
-        list(ex.map(worker, tasks))
+    def lane(g, items):                          # one of this GPU's slots: take its next task in turn
+        while True:
+            with lock:
+                if not items:
+                    return
+                task = items.pop(0)
+            run(g, task)
+    threads = [threading.Thread(target=lane, args=(g, share[g])) for g in gpus for _ in range(width[g])]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     return failed
 
 def report_failures(failed, what, logs):
@@ -2647,9 +2662,12 @@ def main():
         # vLLM: substantially faster for the eval traces on TP>1 and never measurably slower
         p.add_argument('--eval-backend', default='vllm', choices=['exllamav3', 'vllm'],
                        help='engine for the eval traces (default vllm: one engine per ctx_trace process, with --vllm-args)')
-        p.add_argument('--generator', default='uncalibrated', choices=['uncalibrated', 'bf16'],
-                       help="what writes the calibration trace: the uncalibrated 8bpw EXL3 (built if missing), or "
-                            "the eval traces' own generator and engine where it fits (no quant of this job needed)")
+        # bf16 where it fits: on Qwen3-0.6B (2026-10-23, docs/calibration.md) it ties the uncalibrated
+        # generator on wild and beats it on swe by 6-8% at 3-4 bpw, against a 3% reseed spread
+        p.add_argument('--generator', default='bf16', choices=['bf16', 'uncalibrated'],
+                       help="what writes the calibration trace: the eval traces' own generator and engine (default; "
+                            "needs that model to fit), or the uncalibrated 8bpw EXL3 stand-in (built if missing) "
+                            "where it does not")
         p.add_argument('--cal-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
                        help='engine for an uncalibrated-generator calibration trace; vllm uses --cal-vllm-args')
         p.add_argument('--cal-vllm-args', default='{}',
