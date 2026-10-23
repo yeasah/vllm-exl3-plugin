@@ -1864,6 +1864,23 @@ serve, and the TP/MoE fixes that cloud runs otherwise find one crash at a time.
 survey (LM-head metadata, memory snapshots) before trusting a passing gate, and validate TP on a
 peer-access cloud box. Evidence: [docs/upstream.md](docs/upstream.md), *The 0.32 bump*.
 
+## `tp-vocab-alignment` — A quantized head whose vocabulary does not split into whole blocks
+
+**Outcome:** a quantized `lm_head` (and the tied embedding served from it) runs vocab-parallel
+at any TP degree. Today a rank's slice has to be a whole number of 128-wide Hadamard blocks, so
+the plugin refuses at load whenever it is not: no Qwen3-family checkpoint (151936 = 1187 blocks)
+runs at TP=2, and no Llama-3 one (128256 = 1002 blocks) at TP=4.
+
+**Unblocks:** TP for the Qwen3 family and Llama-3 at 4 GPUs, and the bench `tp` tier's Qwen3
+entries (dense eager and graphs, and the only mixed-width-in-a-shard checkpoint), which stand
+`known_broken` on this.
+
+**Candidate:** pad the vocabulary to a multiple of `128 x tp` (vLLM already pads it, to 64), and
+have the plugin fill the rows past the checkpoint's end with zero-valued blocks; those logits are
+discarded by vLLM's existing padding mask. The alternative, an uneven split at block boundaries,
+fights vLLM's equal-shard vocab layout. Evidence: [docs/tensor-parallel.md](docs/tensor-parallel.md),
+*Vocab-parallel `lm_head`* (the rule, and MiniCPM5 as the aligned case).
+
 ## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
 
 **Outcome:** under vLLM the allocator is a deliberate, visible choice per deployment, and the

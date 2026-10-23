@@ -384,6 +384,11 @@ ENTRIES: list[Entry] = [
     # here: NCCL only. That path, and TP=4/8, need a cloud box of their own.
     Entry(
         label="qwen3-0.6B 3.0bpw tp2 eager",
+        known_broken="Qwen3's vocabulary (151936 = 1187 Hadamard blocks of 128) "
+        "cannot split evenly into whole blocks across 2 ranks, so the plugin "
+        "refuses the vocab-parallel quantized head at load (EXL3FormatError, "
+        "lm_head vocab: 75968 channels per rank). A refusal, not wrong output. "
+        "Every Qwen3-family checkpoint shares it. See TODO `tp-vocab-alignment`",
         model="turboderp/Qwen3-0.6B-exl3",
         revision="3.0bpw",
         tier="tp",
@@ -395,6 +400,11 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="qwen3-0.6B 3.0bpw tp2 graphs",
+        known_broken="Qwen3's vocabulary (151936 = 1187 Hadamard blocks of 128) "
+        "cannot split evenly into whole blocks across 2 ranks, so the plugin "
+        "refuses the vocab-parallel quantized head at load (EXL3FormatError, "
+        "lm_head vocab: 75968 channels per rank). A refusal, not wrong output. "
+        "Every Qwen3-family checkpoint shares it. See TODO `tp-vocab-alignment`",
         model="turboderp/Qwen3-0.6B-exl3",
         revision="3.0bpw",
         tier="tp",
@@ -406,6 +416,11 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="qwen3-0.6B 3.5bpw mixed tp2",
+        known_broken="Qwen3's vocabulary (151936 = 1187 Hadamard blocks of 128) "
+        "cannot split evenly into whole blocks across 2 ranks, so the plugin "
+        "refuses the vocab-parallel quantized head at load (EXL3FormatError, "
+        "lm_head vocab: 75968 channels per rank). A refusal, not wrong output. "
+        "Every Qwen3-family checkpoint shares it. See TODO `tp-vocab-alignment`",
         model="turboderp/Qwen3-0.6B-exl3",
         revision="3.5bpw",
         tier="tp",
@@ -413,6 +428,31 @@ ENTRIES: list[Entry] = [
         tp_reference="qwen3-0.6B-3.5bpw-mixed",
         exercises="bit widths mixed inside a merged linear, then sharded: the "
         "shard boundaries have to fall per sub-tensor, not across the merge",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw mcg tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-mcg",
+        exercises="column/row-sharded EXL3 linears and the NCCL all-reduce on "
+        "a model whose vocabulary splits into whole Hadamard blocks (130560 = "
+        "510 per rank): the dense TP baseline, standing in for the Qwen3 "
+        "entries above until their head can be split",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw blockq graphs tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="blockq",
+        tier="tp",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        tp_reference="minicpm5-1B-3.0bpw-blockq-graphs",
+        exercises="sharded linears and the blockq embedding under torch.compile "
+        "and CUDA graph capture, where the collectives are captured into the "
+        "graph rather than issued eagerly",
     ),
     Entry(
         label="llama-3.2-1B 3.0bpw tied tp2",

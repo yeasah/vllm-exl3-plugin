@@ -888,7 +888,13 @@ def cmd_bless(args) -> int:
                 # Captured aside and installed only if it answers to its TP=1
                 # sibling: a TP baseline is exactly where a bug gets recorded
                 tmp_out = os.path.join(tmp, f"{e.name}.json")
-                fresh = run_entry(e, tmp_out, args.timeout, cache_root=root, warmup=warmup)
+                try:
+                    fresh = run_entry(e, tmp_out, args.timeout, cache_root=root, warmup=warmup)
+                except SystemExit:
+                    # one entry that cannot capture must not hide the rest of the tier
+                    print(f"     ! not blessed: capture failed (log printed above)")
+                    refused.append(e.name)
+                    continue
                 problems = check_sibling(e, fresh)
                 if problems:
                     print(f"     ! not blessed: diverges from TP=1 sibling")
