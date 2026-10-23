@@ -272,7 +272,7 @@ def collect_metadata(job, qbench):
             print(f"=== threshold {t['repo']} is not scored on every slice: left off the card ===")
             continue
         excess = {sl: qb[sl]['kld'] - floor[sl] for sl in qb}
-        sz = tensor_survey_local(snapshot_download(t['repo'], revision=t['revision']))
+        sz = tensor_survey_remote(t['repo'], t['revision'])
         data['thresholds'].append({ 'repo': t['repo'], 'name': t['repo'].split("/")[-1], 'excess': excess,
                                     # as the size plot's axis: without input embeddings and MTP
                                     'size': (sz['total'] - sz['embed'] - sz.get('mtp', 0)) / 1024**3,
@@ -745,6 +745,10 @@ def tensor_survey_local(path):
         with open(marker) as f:
             m = json.load(f)
         return tensor_survey_remote(m["repo"], m["revision"])
+    # a hub snapshot resolved for its configs only: the same survey from the Hub's headers
+    hf = HF_SNAPSHOT.search(path.rstrip("/"))
+    if hf and not hf.group(4) and not globmod.glob(os.path.join(path, "*.safetensors")):
+        return tensor_survey_remote(f"{hf.group(1)}/{hf.group(2)}", hf.group(3))
     # The shards the index lists, as the Hub's metadata counts them: a branch inherits main's
     # files, and turboderp's carry cal_trace.safetensors (4 MiB of calibration token ids), which a
     # bare glob counted as weights
@@ -886,6 +890,9 @@ def upload_uncalibrated(job, args):
 # Published JSON must not carry this machine's paths: they mean nothing elsewhere, and a re-card
 # from a fetched stub once published the stubs' paths in place of the real sources. On upload,
 # every absolute path becomes something resolvable anywhere.
+# What a reference or threshold needs on disk to be keyed and sized; weights come only on a miss
+CONFIGS_ONLY = ["*.json", "*.jinja", "*.txt", "*.model"]
+
 HF_SNAPSHOT = re.compile(r"/models--([^/]+?)--([^/]+)/snapshots/([0-9a-f]{7,})(?:/(.+))?$")
 
 def portable(path, job):
@@ -1541,7 +1548,9 @@ def do_qbench(job, args):
         # Rungs above --reference-max-bits are left out (default 8.9 catches up to a hypothetical 8bpw + HQ)
         keep = lambda b: (args.reference_max_bits >= float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits 
                           and (len(patterns) == 0 or sum(int(re.search(pattern, b) is not None) for pattern in patterns) > 0))
-        ladders = {name: {b: snapshot_download(repo, revision=b) for b in bs if keep(b)}
+        # configs only: qbench fetches a rung's weights itself if it has to run it (a cache miss);
+        # sizes come from the Hub's safetensors headers. A fully cached series downloads no weights
+        ladders = {name: {b: snapshot_download(repo, revision=b, allow_patterns=CONFIGS_ONLY) for b in bs if keep(b)}
                    for name, bs in ladders_of(branches).items()}
         ladders = {name: bs for name, bs in ladders.items() if bs}
         references.append({"repo": repo, "ladders": ladders})
@@ -1573,7 +1582,7 @@ def do_qbench(job, args):
     thresholds = []
     for t in args.threshold or []:
         repo, _, rev = t.partition("@")
-        path = snapshot_download(repo, revision=rev or None)
+        path = snapshot_download(repo, revision=rev or None, allow_patterns=CONFIGS_ONLY)
         thresholds.append({"repo": repo, "revision": os.path.basename(path.rstrip("/")), "engine": "transformers"})
         arms.append((threshold_label(repo), path))
     if thresholds:
