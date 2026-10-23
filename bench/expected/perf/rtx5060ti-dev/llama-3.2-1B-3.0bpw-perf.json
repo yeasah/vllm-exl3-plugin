@@ -1,0 +1,59 @@
+{
+ "entry": "llama-3.2-1B-3.0bpw-perf",
+ "label": "llama-3.2-1B 3.0bpw perf",
+ "reps": 5,
+ "platform": "rtx5060ti-dev",
+ "fixture": null,
+ "environment": {
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA GeForce RTX 5060 Ti",
+  "gpu_count": 2,
+  "capability": "12.0",
+  "vllm_reported": "0.29.1.dev15+g2f3e2a7db",
+  "pkg.digest": "c4789d30d1e1",
+  "pkg.count": 243,
+  "pkg.transformers": "5.15.0",
+  "pkg.compressed-tensors": "0.17.0",
+  "src.plugin": {
+   "describe": "5113b6c",
+   "head": "5113b6c703",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "src.vllm": {
+   "describe": "v0.29.0-18-g4307a53a3d",
+   "head": "4307a53a3d",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "src.exllamav3": {
+   "describe": "v1.4.9-84-ge02f2957",
+   "head": "e02f2957d1",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "driver": "610.57.04"
+ },
+ "decode": 1814.7,
+ "decode_spread_pct": 0.39,
+ "decode_samples": [
+  1816.2,
+  1815.5,
+  1810.0,
+  1809.2,
+  1814.7
+ ],
+ "prefill": 17439.3,
+ "prefill_spread_pct": 0.46,
+ "prefill_samples": [
+  17462.3,
+  17439.3,
+  17461.7,
+  17401.7,
+  17382.9
+ ]
+}
