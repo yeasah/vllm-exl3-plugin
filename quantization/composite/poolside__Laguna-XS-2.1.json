@@ -1,0 +1,9 @@
+{
+  "source": "https://huggingface.co/poolside/Laguna-XS-2.1",
+  "notes": "From model card as of 2026-10-22: Laguna XS 2.1 is a 33B total parameter Mixture-of-Experts model with 3B activated parameters per token designed for agentic coding and long-horizon work on a local machine.",
+  "summary": "weighted toward agent sessions, as the publisher positions this model for coding and agentic work",
+  "weights": {
+    "wild": 0.3,
+    "swe": 0.7
+  }
+}
