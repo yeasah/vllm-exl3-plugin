@@ -995,12 +995,13 @@ def do_upload(job, args):
             shutil.rmtree(folder, ignore_errors=True)
 
 def draw_thresholds(ax, lines, ys, color):
-    """Horizontal lines at known checkpoints' excess ([(name, value)]), labelled at the right
-    edge, with the y range widened to keep them in view. Call before any explicit ylim."""
+    """Horizontal lines at known checkpoints' excess ([(name, value)]), labelled at the left edge
+    (the line tends to cross the ladder between 4 and 5 bpw, where the right side has rung labels),
+    with the y range widened to keep them in view. Call before any explicit ylim."""
     lines = [(n, v) for n, v in lines if v and v > 0]
     for name, v in lines:
         ax.axhline(v, color=color, lw=1.0, ls=(0, (6, 3)), zorder=1)
-        ax.text(0.99, v, f"{name} {v:.4f}", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+        ax.text(0.01, v, f"{name} {v:.4f}", transform=ax.get_yaxis_transform(), ha="left", va="bottom",
                 fontsize=7, color=color)
     if lines and ys:
         lo, hi = min(list(ys) + [v for _, v in lines]), max(list(ys) + [v for _, v in lines])
