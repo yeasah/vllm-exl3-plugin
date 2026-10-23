@@ -2618,7 +2618,13 @@ def main():
                                   "e.g. 'self=40,ctx_*=10' to explore mixes. "
                                   "Categories: self, ctx_user:<kind>, ctx_tool:<kind>, loop, raw, random")
     cmd_measure.add_argument('--gpu-split', default=None,
-                             help='GB per listed GPU to split the unquantized model across, e.g. 9,10 for a 9B on 2x16 GB')
+                             help='GB per listed GPU to split the unquantized model across: load caps, filled in order '
+                                  'and lifted once loaded, so a card keeps (its VRAM - what it was given) for the '
+                                  'measurement. Cap every card but the last at VRAM minus its working set and ~1 GB of '
+                                  'CUDA context; the last takes the remainder, and with it the head and the logits, the '
+                                  'largest working set. The caps only need to add up to the model. '
+                                  'E.g. 9,10 for a 9B on 2x16 GB; 41,41 for a 35B-A3B (67 GB bf16, ~6 GB working set) on '
+                                  '2x48 GB')
     cmd_measure.add_argument('--boundary-cpu', default=True, action=argparse.BooleanOptionalAction,
                              help="keep sc_measure's per-module input cache in host memory (needed past ~10 rows of a 9B on 16 GB)")
     cmd_measure.set_defaults(func=do_measure)
