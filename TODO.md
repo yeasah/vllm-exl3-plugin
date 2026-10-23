@@ -1851,6 +1851,19 @@ parameters, not more GPU time.
 
 → [docs/tensor-parallel.md](docs/tensor-parallel.md)
 
+## `vllm-0.32` — Rebase the fork onto v0.32.0
+
+**Outcome:** `appliance/v0.32.0` carrying our 16 remaining commits, the plugin and `bench/` gate
+passing on it, and the submodule moved.
+
+**Unblocks:** the hybrid GDN prefix-cache correctness fixes for every Qwen3.5/3.6/3.8 model we
+serve, and the TP/MoE fixes that cloud runs otherwise find one crash at a time.
+
+**Candidate:** rebase in `patches.md` order, dropping `e37b903e8`; the memory commits and
+`81566217e`/`2778e4a20` are the conflicts. Then check the plugin assumptions listed in the
+survey (LM-head metadata, memory snapshots) before trusting a passing gate, and validate TP on a
+peer-access cloud box. Evidence: [docs/upstream.md](docs/upstream.md), *The 0.32 bump*.
+
 ## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
 
 **Outcome:** under vLLM the allocator is a deliberate, visible choice per deployment, and the

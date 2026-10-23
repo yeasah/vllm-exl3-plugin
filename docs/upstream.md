@@ -416,6 +416,63 @@ bf16xbf16->fp32 epilogue with no intermediate rounding. Deterministic, reproduci
 *more* accurate -- but it moves top-k selection often enough to flip 3 of 63 argmax positions
 on `qwen3.5-35B-A3B` at 2.00bpw.
 
+### The 0.32 bump: survey before rebasing (2026-10-23)
+
+Read-only, against `v0.32.0` (`5df63a7203`, 2026-10-17). Upstream cuts each release from `main`;
+`v0.29.0` and `v0.32.0` share a `main` point of 2026-08-31 (`f5c3cc240b`), so the gap is every
+`main` commit after that, not the 426 a shallow submodule first reported.
+
+**Our 17 commits.** Only `e37b903e8` (the per-rank FlashInfer autotune cache, upstream
+`3403e0f176`) is in `v0.32.0`; drop it. Nothing else was fixed upstream in its own way:
+`VocabParallelEmbedding` still gets no `quant_config` default, nothing declares fused-shard
+handling, `ReplicatedLinear` still has no v2 loader, the Transformers backend still reads only
+`logit_scale`, and nothing declares backend workspace or chunks the vision MLP. Expected
+conflicts, by how much upstream rewrote under each:
+
+- **heavy:** `881c7345b` (`gpu_model_runner.py` +-1176, `cudagraph_utils.py` 263, `workspace.py`
+  126); `6ac849972`/`f8f66be1b` (`gpu_worker.py` 494, `flashinfer.py` 738, `backend.py` 288);
+  `81566217e` (`kv_cache_utils.py` 754 -- the same file the 0.29 conflict was in);
+  `2778e4a20` (`arg_utils.py` 503, plus upstream's own skip-layers fixes `0fc0cefb4e`,
+  `4ff028d77e` in the parser our `boundary:N` extends); `2f3e2a7db` (`qwen3_vl.py` 438, `envs.py`).
+- **light:** `fe1cdc942` (`vocab_parallel_embedding.py` 80, see the LM-head change below);
+  `31b57b066`/`587400bd0`/`2261ea826` (`linear.py` 44, `parameter.py` 50); `93b36225a`
+  (`causal.py` 15); `e272b1784`. TurboQuant's own backend moved 2 lines.
+
+**The plugin's import surface** is 24 symbols; all still exist. The base classes it implements
+gained only optional members: `FusedMoEMethodBase.apply` may now return `UnfinalizedMoEOutput`
+(deferred finalize, opt-in), `QuantizationConfig.get_checkpoint_weight_mapper`,
+`QuantizeMethodBase.dequantize_weight`. `base_loader.process_weights_after_loading`, which the
+plugin wraps, keeps its signature.
+
+**Plugin assumptions to check, since 0.29 showed those are what fail silently:**
+
+- `4f72bd0152` gives `VocabParallelEmbedding`/`ParallelLMHead` linear-layer metadata
+  (`input_size`, `output_size`, `output_partition_sizes`, `prefix`, `has_bias`) before
+  `create_weights`, and passes those instead of the embedding's own sizes. The plugin
+  dispatches by `isinstance`, so its routing is safe, but `cpu_offload.py:133` names a layer by
+  `getattr(layer, "prefix", ...)`, which the head and embedding now have; and the quantized
+  head's `create_weights` receives the same numbers through different names.
+- `ef42b4385f` (reclaim cached GPU memory during weight loading) and `26a488ad93` (snapshot
+  memory after weights) move the numbers our memory commits and `docs/memory-accounting.md`
+  are calibrated against.
+- Router numerics moved last bump; anything similar is caught only by the bench gate's logits.
+
+**Upstream fixes we want, beyond the deadlock.** The hybrid (GDN/Mamba) prefix-cache and state
+fixes are the main reason to move, since every Qwen3.5/3.6/3.8 model we serve runs on that path
+with prefix caching in align mode, and several are wrong-output rather than crash bugs:
+`79468c20ef` (GDN stateless first-chunk classification), `d8fa463e2b` (inconsistent hybrid
+prefix-cache boundaries), `3d6853b32c` (state index on prefix-cache hits), `7e583e615c`
+(prefill checkpoint reservation and prompt-end eviction in align mode), `874df9373d` (state for
+padded prompt tails), `fadfe1c7d4` (retire states across null gaps), `10cc2f6ae2` (GDN
+speculative decode widths). Also MoE workspace and scratch sizing (`bdea2777ea`, `e3a29aa9b3`),
+FlashInfer all-reduce selection (`ce49174247`, `764413559a`), the Transformers backend's
+attention sinks (`414057a3d3`), and MoE decode autotune before graph capture (`7fa2c63796`).
+
+**Dependencies.** torch stays 2.13.0 (the patched `libc10_cuda.so` survives unless pip
+reinstalls it: run `tools/torch-c10cuda-fix.sh --check`). transformers 5.15 -> `>=5.16.1,<5.20`
+(qbench's reference engine and the exllamav3 tooling share it), FlashInfer 0.6.18 ->
+0.7.0.post1 (every cached JIT kernel recompiles: set `MAX_JOBS`), cutlass-dsl 4.6.2 -> 4.8.0.
+
 ---
 
 ## SINQ
