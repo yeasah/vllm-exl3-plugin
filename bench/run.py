@@ -387,6 +387,58 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
     return failures
 
 
+#: A TP entry against its TP=1 sibling's committed baseline. Not the per-entry
+#: tolerance: sharding changes the reduction order, so this is the regime of
+#: eager vs CUDA graphs on one card, not of a rerun. That floor, measured from
+#: the committed qwen3-0.6B 3.0bpw eager/graphs baselines: KL mean 0.0009 and
+#: 0.0014, KL max 0.0034 and 0.0226, 2 argmax flips in 61 positions, and the
+#: greedy continuation changed on the long prompt. So tokens cannot be required
+#: to match; the bound is on the distribution, at ~7-10x the floor's mean KL and
+#: ~4x its max. A real sharding bug (a wrong slice, a missing all-reduce, a
+#: mis-split vocabulary) lands orders of magnitude above either.
+SIBLING_TOLERANCE = {
+    "kl_mean": 1e-2,
+    "kl_max": 1e-1,
+    "argmax_fraction": 0.1,
+}
+
+
+def check_sibling(entry: suite.Entry, fresh: dict) -> list[str]:
+    """A TP entry against its TP=1 sibling's baseline. Returns failures."""
+    if not entry.tp_reference:
+        return []
+    path = os.path.join(EXPECTED, f"{entry.tp_reference}.json")
+    if not os.path.exists(path):
+        return [f"TP=1 sibling {entry.tp_reference} has no baseline to answer to"]
+    sib = json.load(open(path))
+    tol = {**SIBLING_TOLERANCE, **entry.tp_tolerance}
+    failures = []
+    for i, (pf, ps) in enumerate(zip(fresh["prompts"], sib["prompts"])):
+        m = core.compare_prompt(ps, pf)
+        if not m["comparable"]:
+            failures.append(f"prompt {i}: token ids differ from TP=1 sibling")
+            continue
+        frac = m["argmax_disagreements"] / max(1, m["positions"])
+        print(f"     vs TP=1 {entry.tp_reference}, prompt {i}: KL mean "
+              f"{m['kl_mean']:.2e}, max {m['kl_max']:.2e}, argmax "
+              f"{m['argmax_disagreements']}/{m['positions']}, greedy "
+              f"{'same' if m['generated_match'] else 'differs'}")
+        if m["kl_mean"] > tol["kl_mean"]:
+            failures.append(f"prompt {i}: KL mean vs TP=1 {m['kl_mean']:.3e} > {tol['kl_mean']:.1e}")
+        if m["kl_max"] > tol["kl_max"]:
+            failures.append(f"prompt {i}: KL max vs TP=1 {m['kl_max']:.3e} > {tol['kl_max']:.1e}")
+        if frac > tol["argmax_fraction"]:
+            failures.append(f"prompt {i}: {m['argmax_disagreements']}/{m['positions']} "
+                            f"argmax flips vs TP=1 > {tol['argmax_fraction']:.0%}")
+    # The weights are the same checkpoint split two ways: each rank should hold
+    # about half, which is what the per-rank figure vLLM reports measures.
+    if fresh.get("weight_gib") and sib.get("weight_gib"):
+        ratio = fresh["weight_gib"] * entry.tensor_parallel_size / sib["weight_gib"]
+        print(f"     weights per rank {fresh['weight_gib']} GiB vs TP=1 "
+              f"{sib['weight_gib']} GiB (x{entry.tensor_parallel_size} = {ratio:.2f} of it)")
+    return failures
+
+
 #: One-sided, and generous. Throughput is not deterministic the way logprobs
 #: are, but on the dev card it is far steadier than expected: repeated runs
 #: inside one process spread ~1%, and medians *across* processes spread ~0.5%
@@ -674,6 +726,21 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_deps(args) -> int:
+    """What a tier needs on disk: `repo@revision` per entry, and with --fetch the
+    downloads, so a short-lived box finds a missing checkpoint before a bless
+    does and not halfway through one."""
+    from huggingface_hub import snapshot_download
+    seen = {}
+    for e in list(suite.by_tier(args.tier)) + list(suite.perf_by_tier(args.tier)):
+        seen.setdefault((e.model, e.revision), []).append(e.name)
+    for (model, rev), names in sorted(seen.items()):
+        print(f"{model}@{rev}  ({len(names)} entr{'y' if len(names) == 1 else 'ies'})")
+        if args.fetch:
+            print(f"   -> {snapshot_download(model, revision=rev)}")
+    return 0
+
+
 def cmd_capture(args) -> int:
     run_entry(suite.by_name(args.entry), args.out, args.timeout)
     print(f"wrote {args.out}")
@@ -805,7 +872,7 @@ def cmd_bless(args) -> int:
     if refuse_if_dirty(getattr(args, "allow_dirty", False)):
         return 1
     os.makedirs(EXPECTED, exist_ok=True)
-    blessed = 0
+    blessed, refused = 0, []
     with tempfile.TemporaryDirectory() as tmp:
         # Always cold. A baseline is supposed to be reproducible somewhere other
         # than this machine, and a warm ambient cache is neither recorded by it nor
@@ -817,8 +884,22 @@ def cmd_bless(args) -> int:
                 print(f"  -- {e.label}\n     ! known broken, not blessed: "
                       f"{e.known_broken.splitlines()[0]}")
                 continue
-            run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout,
-                      cache_root=root, warmup=warmup)
+            if e.tp_reference:
+                # Captured aside and installed only if it answers to its TP=1
+                # sibling: a TP baseline is exactly where a bug gets recorded
+                tmp_out = os.path.join(tmp, f"{e.name}.json")
+                fresh = run_entry(e, tmp_out, args.timeout, cache_root=root, warmup=warmup)
+                problems = check_sibling(e, fresh)
+                if problems:
+                    print(f"     ! not blessed: diverges from TP=1 sibling")
+                    for p in problems:
+                        print(f"       - {p}")
+                    refused.append(e.name)
+                    continue
+                shutil.copyfile(tmp_out, os.path.join(EXPECTED, f"{e.name}.json"))
+            else:
+                run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout,
+                          cache_root=root, warmup=warmup)
             blessed += 1
     # The manifest behind `environment()`'s pkg.digest: a digest says something
     # moved, this says what. One per bless, since a bless is one snapshot.
@@ -829,9 +910,12 @@ def cmd_bless(args) -> int:
         print(f"     ! could not write environment manifest: {exc}")
 
     print(f"\nblessed {blessed} entries into {EXPECTED}")
+    if refused:
+        print(f"REFUSED {len(refused)}: {', '.join(refused)} -- no baseline written; "
+              f"a TP entry that leaves its TP=1 sibling is a bug until shown otherwise")
     print("review the diff before committing -- blessing a real regression "
           "is how a gate stops working")
-    return 0
+    return 1 if refused else 0
 
 
 def cmd_check(args) -> int:
@@ -880,7 +964,7 @@ def cmd_check(args) -> int:
                 continue
             fresh = run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
                               cache_root=root, warmup=warmup)
-            problems = check_entry(e, fresh, json.load(open(baseline)))
+            problems = check_entry(e, fresh, json.load(open(baseline))) + check_sibling(e, fresh)
             if problems:
                 failed[e.name] = problems
 
@@ -928,6 +1012,9 @@ def main() -> int:
                         "changes; the baselines will name a state no checkout "
                         "can return to")
     p.set_defaults(func=cmd_bless)
+    p = sub.add_parser("deps"); p.add_argument("--tier", default="all")
+    p.add_argument("--fetch", action="store_true", help="download what is listed")
+    p.set_defaults(func=cmd_deps)
     p = sub.add_parser("capture"); p.add_argument("entry"); p.add_argument("out")
     p.set_defaults(func=cmd_capture)
     for name, fn in (("perf-check", cmd_perf_check), ("perf-bless", cmd_perf_bless)):

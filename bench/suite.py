@@ -58,6 +58,14 @@ class Entry:
     #: failure instead of failing the gate. Clearing this field is how the fix
     #: gets verified.
     known_broken: str | None = None
+    #: The TP=1 entry this one shards. Its committed baseline is a second
+    #: reference: `bless` refuses and `check` fails when this capture leaves it
+    #: by more than the sibling tolerance in run.py. A TP entry's own baseline
+    #: only says it has not changed; without this, a first bless would record a
+    #: TP bug and the gate would then defend it.
+    tp_reference: str | None = None
+    #: Overrides for that sibling comparison, as `tolerance` is for the baseline.
+    tp_tolerance: dict = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -369,6 +377,90 @@ ENTRIES: list[Entry] = [
         "(8 trellis modules, 202.5 MiB). Nothing else in the matrix serves two "
         "models in one engine, and a plugin that mis-handles the second would "
         "fail nowhere else",
+    ),    # ---- tp tier: the same surfaces sharded across two GPUs. Baselines are
+    # per degree (these are TP=2, blessable on the local 2x5060 Ti); each entry
+    # also answers to its TP=1 sibling's baseline (`tp_reference`). The local
+    # cards have no peer access, so vLLM's custom all-reduce is never reached
+    # here: NCCL only. That path, and TP=4/8, need a cloud box of their own.
+    Entry(
+        label="qwen3-0.6B 3.0bpw tp2 eager",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.0bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="qwen3-0.6B-3.0bpw-eager",
+        exercises="column/row-sharded EXL3 linears and the NCCL all-reduce, on "
+        "the simplest target: the TP baseline every other tp entry differs "
+        "from by one variable",
+    ),
+    Entry(
+        label="qwen3-0.6B 3.0bpw tp2 graphs",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.0bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        tp_reference="qwen3-0.6B-3.0bpw-graphs",
+        exercises="the same under torch.compile and CUDA graph capture, where "
+        "the collectives are captured into the graph rather than issued eagerly",
+    ),
+    Entry(
+        label="qwen3-0.6B 3.5bpw mixed tp2",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.5bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="qwen3-0.6B-3.5bpw-mixed",
+        exercises="bit widths mixed inside a merged linear, then sharded: the "
+        "shard boundaries have to fall per sub-tensor, not across the merge",
+    ),
+    Entry(
+        label="llama-3.2-1B 3.0bpw tied tp2",
+        model="turboderp/Llama-3.2-1B-Instruct-exl3",
+        revision="3.0bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="llama-3.2-1B-3.0bpw-tied",
+        exercises="the tied embedding served from a vocab-parallel quantized "
+        "lm_head: each rank holds half the vocabulary, and the embedding "
+        "lookup has to find its rows on the right rank",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw blockq tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="blockq",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-blockq-eager",
+        exercises="the block-quantized embedding at TP>1, written and never run "
+        "on more than one GPU: all three of its tensors slice on dim 0, with "
+        "none of the trellis path's 128-row Hadamard rule",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw via transformers backend tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        model_impl="transformers",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-via-transformers-backend",
+        exercises="the Transformers backend under TP, which no run has ever "
+        "taken: its tensor-parallel plan comes from the model's HF config "
+        "rather than from a vLLM model file",
+    ),
+    Entry(
+        label="qwen3.5-35B-A3B 2.0bpw MoE tp2",
+        model="turboderp/Qwen3.5-35B-A3B-exl3",
+        revision="2.00bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.92,
+        tp_reference="qwen3.5-35B-A3B-2.0bpw-MoE",
+        exercises="MoE under TP: exl3_mgemm on each rank's expert shards, and "
+        "the unquantized router and shared-expert gate through ReplicatedLinear "
+        "-- the loader 2261ea826 fixed after it had crashed every bf16 model "
+        "with one at TP>=2 since 2026-09-04",
     ),
 ]
 
