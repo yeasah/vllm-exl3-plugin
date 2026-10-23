@@ -400,6 +400,11 @@ SIBLING_TOLERANCE = {
     "kl_mean": 1e-2,
     "kl_max": 1e-1,
     "argmax_fraction": 0.1,
+    # `weight_gib` is the sum over ranks, so a sharded model totals about what
+    # TP=1 holds; replicated pieces (norms, a blockq embedding's small tensors)
+    # add a little: 1.00-1.12 at TP=2 on the first bless. A rank that loads the
+    # whole model instead of its shard doubles it.
+    "weight_ratio": 1.25,
 }
 
 
@@ -430,12 +435,14 @@ def check_sibling(entry: suite.Entry, fresh: dict) -> list[str]:
         if frac > tol["argmax_fraction"]:
             failures.append(f"prompt {i}: {m['argmax_disagreements']}/{m['positions']} "
                             f"argmax flips vs TP=1 > {tol['argmax_fraction']:.0%}")
-    # The weights are the same checkpoint split two ways: each rank should hold
-    # about half, which is what the per-rank figure vLLM reports measures.
+    # The same checkpoint split across ranks: `weight_gib` already sums them.
     if fresh.get("weight_gib") and sib.get("weight_gib"):
-        ratio = fresh["weight_gib"] * entry.tensor_parallel_size / sib["weight_gib"]
-        print(f"     weights per rank {fresh['weight_gib']} GiB vs TP=1 "
-              f"{sib['weight_gib']} GiB (x{entry.tensor_parallel_size} = {ratio:.2f} of it)")
+        ratio = fresh["weight_gib"] / sib["weight_gib"]
+        print(f"     weights {fresh['weight_gib']} GiB over {entry.tensor_parallel_size} "
+              f"ranks vs TP=1 {sib['weight_gib']} GiB ({ratio:.2f}x)")
+        if ratio > tol["weight_ratio"]:
+            failures.append(f"weights total {ratio:.2f}x TP=1 > {tol['weight_ratio']}x: "
+                            f"ranks are holding more than their shard")
     return failures
 
 
