@@ -1902,35 +1902,30 @@ def resolve_sampling_profile(job, args, path):
                      f"generation_config.json with sampling values. Write a profile from its model card, "
                      f"or pass --sampling-profile exllamav3-default to use exllamav3's default ===")
 
-def do_traces(job, args):
-    """Per-model trace artifacts: the conversational calibration trace, written by the calibration
-    generator (an uncalibrated 8bpw from `baseline`, built here if missing), and the bf16-generated
-    eval traces the card's composite is scored on. Each step is skipped when its output exists."""
+def trace_setup(job, args):
+    """(base path, sampling args, tries) shared by both trace commands, or None to stop."""
     if not has_chat_template(job.base_repo):
         print(f"=== {job.base_repo} has no chat template: conversational traces do not apply; "
               f"quantize with --calibration default ===")
-        return False
+        return None
     path = snapshot_download(repo_id=job.base_repo)
     os.makedirs(job.traces, exist_ok=True)
-    # -d may list several GPUs for the calibration trace (a large generator autosplits over them);
-    # the generator's conversion is single-GPU and sees only the first
-    gen_gpus = gpu_env(",".join(device_slots(args.device)))
-    one_gpu = gpu_env(device_slots(args.device)[0])
     profile = resolve_sampling_profile(job, args, path)
-    sampling = ["--sampling_profile", profile] if profile else []
     print(f"=== sampling: {profile or 'exllamav3 default (explicitly requested)'} ===")
-    tries = args.retries + 1
+    return path, (["--sampling_profile", profile] if profile else []), args.retries + 1
 
-    gen = job.generator
-    if not os.path.isfile(os.path.join(gen, "quantization_config.json")):
-        # Normally made by `baseline` alongside the uncalibrated ladder (the same kind of job, so it
-        # spreads over GPUs with them); built here when traces are wanted without baselines
-        print("=== calibration generator missing (normally made by `baseline`): building it ===")
-        if not build_generator(job, args, path, one_gpu):
-            print("=== calibration generator FAILED ==="); return False
+def eval_env(args):
+    return None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}
 
+def do_eval_traces(job, args):
+    """The bf16-generated eval traces the card's composite is scored on. Holds the reference model
+    (bf16, or its FP8 release via vLLM) and nothing this job builds, so it can run on its own on a
+    box sized for that model. Each step is skipped when its output exists."""
+    setup = trace_setup(job, args)
+    if setup is None:
+        return False
+    path, sampling, tries = setup
     ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
-
     # bf16 may need every visible GPU; a layer split on stock torch <= 2.14.1 is exposed to
     # pytorch#196258 (docs/upstream.md "PyTorch"), which the local library rebuild fixes
     check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "torch-c10cuda-fix.sh")
@@ -1944,8 +1939,7 @@ def do_traces(job, args):
                          [ "python3", "-u", ctx_trace, "-m", eval_path, "-cs", "65536",
                            "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
                            "--slices", sl, "-n", str(n), "--seed", str(EVAL_SEED) ] + sampling + eval_backend,
-                         job.log(f"traces-eval-{sl}"), tries,
-                         env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
+                         job.log(f"traces-eval-{sl}"), tries, env=eval_env(args)):
             print(f"=== eval trace {sl} FAILED ==="); return False
 
     print(f"=== diagnostic eval traces ({', '.join(DIAG_SLICES)}, {DIAG_N} each, {eval_desc}) ===")
@@ -1954,23 +1948,70 @@ def do_traces(job, args):
                        "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
                        "--slices", ",".join(DIAG_SLICES), "-n", str(DIAG_N), "--seed", str(EVAL_SEED),
                        "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ] + sampling + eval_backend,
-                     job.log("traces-eval-diag"), tries,
-                     env=None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}):
+                     job.log("traces-eval-diag"), tries, env=eval_env(args)):
         print("=== diagnostic eval traces FAILED ==="); return False
+    return True
 
-    # Calibration last: its agent slice must keep out every repository the eval swe slice uses
-    cal_backend = cal_generator(job, args)
-    print(f"=== calibration trace -> {job.cal_data} ===")
+# Which generator wrote the calibration trace, as `quantize` records it per revision
+CAL_GENERATOR_FILE = "cal_generator.json"
+
+def cal_generator_named(job):
+    """How the calibration trace's generator is described in a revision's calibration.json. Traces
+    from before `cal-traces --generator` recorded nothing and were all the uncalibrated 8bpw."""
+    f = os.path.join(job.traces, CAL_GENERATOR_FILE)
+    if os.path.isfile(f):
+        with open(f) as fh:
+            return json.load(fh)["generator"]
+    return "uncalibrated 8bpw of the base model"
+
+def do_cal_traces(job, args):
+    """The conversational calibration trace. --generator uncalibrated writes it with the uncalibrated
+    8bpw EXL3 (built here if `baseline` has not), the stand-in for a bf16 that cannot run where the
+    ladder is built; --generator bf16 writes it with the eval traces' own generator and engine, where
+    that model fits, which needs no quant of this job at all. Needs the eval traces: its agent slice
+    keeps out every repository the eval swe slice uses."""
+    setup = trace_setup(job, args)
+    if setup is None:
+        return False
+    path, sampling, tries = setup
+    if not os.path.isfile(job.eval_trace("swe")):
+        print(f"=== no eval swe trace at {job.eval_trace('swe')}: run `eval-traces` first (the calibration "
+              f"keeps out its repositories) ==="); return False
+    ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
+    if args.generator == "bf16":
+        gen, cal_backend = eval_generator(job, args)
+        env = eval_env(args)
+        named = f"{args.eval_generator} (the eval traces' generator)" if args.eval_generator else "the base model (bf16)"
+    else:
+        # -d may list several GPUs for the calibration trace (a large generator autosplits over them);
+        # the generator's conversion is single-GPU and sees only the first
+        env = gpu_env(",".join(device_slots(args.device)))
+        gen = job.generator
+        if not os.path.isfile(os.path.join(gen, "quantization_config.json")):
+            # Normally made by `baseline` alongside the uncalibrated ladder (the same kind of job, so it
+            # spreads over GPUs with them); built here when traces are wanted without baselines
+            print("=== calibration generator missing (normally made by `baseline`): building it ===")
+            if not build_generator(job, args, path, gpu_env(device_slots(args.device)[0])):
+                print("=== calibration generator FAILED ==="); return False
+        cal_backend = cal_generator(job, args)
+        named = "uncalibrated 8bpw of the base model"
+    print(f"=== calibration trace ({named}) -> {job.cal_data} ===")
     if not run_until(job.cal_data,
                      [ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
                        "-o", os.path.join(job.traces, "cal"), "--docs", "cal", "--cal_out", job.cal_data,
                        "--shares", json.dumps(CAL_SHARES), "--doc_kinds", CAL_DOC_KINDS,
                        "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
                        "--exclude_self", EVAL_SELF_PROMPTS, "--exclude_swe_from", job.eval_trace("swe") ] + sampling + cal_backend,
-                     job.log("traces-cal"), tries, env=gen_gpus):
+                     job.log("traces-cal"), tries, env=env):
         print("=== calibration trace FAILED ==="); return False
+    with open(os.path.join(job.traces, CAL_GENERATOR_FILE), "w") as f:
+        json.dump({"generator": named}, f, indent=1)
     decontaminate_self(job)
     return True
+
+def do_traces(job, args):
+    """Both trace sets: `eval-traces`, then `cal-traces`."""
+    return do_eval_traces(job, args) and do_cal_traces(job, args)
 
 def decontaminate_self(job):
     """Drop own-voice eval rows whose prompt the calibration trace also used. Calibration excludes
@@ -2223,6 +2264,12 @@ def category_chunks(job, cat):
             out.append((int(m.group(1)), int(m.group(2)), os.path.join(d, f)))
     return sorted(out)
 
+# The trellis's weight-space error at K=2, a property of the converter rather than of the model:
+# 0.2617-0.2628 for every body tensor of a 9B and a 27B, probed on real rungs (2026-10-22, converter
+# 1.4.9); anchors written from it match the 27B's probe within 1% (head 1.2%). Re-probe after a
+# converter change before trusting it (`measure --rfn-anchor probe`).
+RFN_K2 = 0.2617
+
 def rfn_at_k2(probe, k, out):
     """The probe's body anchors restated at K=2, the rate sc_measure's noise levels (-rs 1.0,0.5)
     and every recipe so far were calibrated at. The trellis error is a converter constant: one
@@ -2241,8 +2288,9 @@ def rfn_at_k2(probe, k, out):
 def do_measure(job, args):
     """Per-tensor sensitivity of the unquantized model per content category (see MEASURE_ROWS;
     --rows raises or lowers a category's count, e.g. 'ctx_*:code=10'). Reused by every later
-    quantize; raising a count measures only the rows not yet measured. Needs `traces` and, for rfn
-    anchors, an integer-rate `baseline` rung (the lowest one is probed)."""
+    quantize; raising a count measures only the rows not yet measured. Needs the calibration trace.
+    The rfn anchors are the converter's constant by default (no quant of this job needed); --rfn-anchor
+    probe measures them on the lowest integer-rate `baseline` rung instead."""
     import torch
     from safetensors.torch import load_file, save_file
     if not os.path.isfile(job.cal_data):
@@ -2258,6 +2306,11 @@ def do_measure(job, args):
     whole = sorted((float(m.group(1)), r) for r in job.baseline_revisions()
                    if (m := re.match(r"(\d+)\.00bpw", r)))
     gpus = device_slots(args.device)
+    if not os.path.isfile(rfn) and args.rfn_anchor == "constant":
+        rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_rfn_probe.py"), "-mr", path,
+                          "--constant", str(RFN_K2), "-o", rfn ], job.log("measure-rfn"))
+        if rc or not os.path.isfile(rfn):
+            print(f"=== rfn anchors FAILED (log {job.log('measure-rfn')}) ==="); return False
     if not os.path.isfile(rfn):
         if whole:
             probe = os.path.join(job.measure, "rfn-probe.json")
@@ -2465,7 +2518,7 @@ def do_quantize(job, args):
         with open(os.path.splitext(job.cal_data)[0] + ".manifest.json") as f:
             manifest = json.load(f)
         calibration = { "calibration": "conversational mix",
-                        "generator": "uncalibrated 8bpw of the base model",
+                        "generator": cal_generator_named(job),
                         **{k: manifest[k] for k in ("shares", "doc_kinds", "ml_frac", "cal_rows", "cal_cols", "composition")
                            if k in manifest} }
     else:
@@ -2580,35 +2633,45 @@ def main():
     cmd_baseline.set_defaults(func=do_baseline)
 
 
-    cmd_traces = subparsers.add_parser('traces', help="eval traces, and the calibration trace from the generator "
-                                       "(built here if `baseline` has not)")
-    cmd_traces.add_argument('-d', '--device', default='0',
-                            help='GPUs for the calibration generator: its conversion uses the first, the '
-                                 'calibration trace all of them (a large generator autosplits), e.g. 0,1')
-    cmd_traces.add_argument('--eval-devices', default=None,
-                            help='CUDA_VISIBLE_DEVICES for the bf16 eval traces (default: all visible)')
-    cmd_traces.add_argument('--retries', type=int, default=2)
-    cmd_traces.add_argument('--eval-generator', default=None,
-                            help='repo or path that writes the eval traces\' answers (default: the base model). '
-                                 'For models too large to generate from locally in bf16, the FP8 release with '
-                                 '--eval-backend vllm. Never an EXL3 checkpoint')
-    # vLLM: substantially faster for the eval traces on TP>1 and never measurably slower
-    cmd_traces.add_argument('--eval-backend', default='vllm', choices=['exllamav3', 'vllm'],
-                            help='engine for the eval traces (default vllm: one engine per ctx_trace process, with --vllm-args)')
-    cmd_traces.add_argument('--cal-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
-                            help='engine for the calibration trace (its uncalibrated 8bpw EXL3 generator); vllm uses '
-                                 '--cal-vllm-args')
-    cmd_traces.add_argument('--cal-vllm-args', default='{}',
-                            help='vLLM engine arguments for the calibration generator, JSON; e.g. \'{"tensor_parallel_size": 1}\' '
-                                 'where EXL3 cannot split the model over the GPUs')
-    cmd_traces.add_argument('--vllm-args', default='{}',
-                            help='vLLM engine arguments, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
-                                 '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')
-    cmd_traces.add_argument('--sampling-profile', default=None,
-                            help='JSON of sampling modes and per-conversation rules (default: '
-                                 'quantization/sampling/<org>__<model>.json, else the base model\'s '
-                                 'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
-    cmd_traces.set_defaults(func=do_traces)
+    def trace_args(p):
+        p.add_argument('-d', '--device', default='0',
+                       help='GPUs for the calibration generator (uncalibrated): its conversion uses the first, the '
+                            'calibration trace all of them (a large generator autosplits), e.g. 0,1')
+        p.add_argument('--eval-devices', default=None,
+                       help='CUDA_VISIBLE_DEVICES for the bf16 eval traces, and for a bf16 calibration trace (default: all visible)')
+        p.add_argument('--retries', type=int, default=2)
+        p.add_argument('--eval-generator', default=None,
+                       help='repo or path that writes the eval traces\' answers (default: the base model). '
+                            'For models too large to generate from locally in bf16, the FP8 release with '
+                            '--eval-backend vllm. Never an EXL3 checkpoint')
+        # vLLM: substantially faster for the eval traces on TP>1 and never measurably slower
+        p.add_argument('--eval-backend', default='vllm', choices=['exllamav3', 'vllm'],
+                       help='engine for the eval traces (default vllm: one engine per ctx_trace process, with --vllm-args)')
+        p.add_argument('--generator', default='uncalibrated', choices=['uncalibrated', 'bf16'],
+                       help="what writes the calibration trace: the uncalibrated 8bpw EXL3 (built if missing), or "
+                            "the eval traces' own generator and engine where it fits (no quant of this job needed)")
+        p.add_argument('--cal-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
+                       help='engine for an uncalibrated-generator calibration trace; vllm uses --cal-vllm-args')
+        p.add_argument('--cal-vllm-args', default='{}',
+                       help='vLLM engine arguments for the uncalibrated generator, JSON; e.g. \'{"tensor_parallel_size": 1}\' '
+                            'where EXL3 cannot split the model over the GPUs')
+        p.add_argument('--vllm-args', default='{}',
+                       help='vLLM engine arguments for the eval generator (and a bf16 calibration trace), JSON. '
+                            'Qwen3.8-27B-FP8 on 2x16 GB: \'{"max_num_batched_tokens": 1024, "enforce_eager": true, '
+                            '"gpu_memory_utilization": 0.968}\'')
+        p.add_argument('--sampling-profile', default=None,
+                       help='JSON of sampling modes and per-conversation rules (default: '
+                            'quantization/sampling/<org>__<model>.json, else the base model\'s '
+                            'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
+    for name, fn, helptext in (
+            ("traces", do_traces, "eval traces, then the calibration trace (`eval-traces` and `cal-traces`)"),
+            ("eval-traces", do_eval_traces, "the bf16-generated eval traces; needs only the reference model, so it "
+                                            "can run alone on a box sized for it"),
+            ("cal-traces", do_cal_traces, "the calibration trace (after eval-traces), from the uncalibrated 8bpw "
+                                          "generator or, with --generator bf16, from the eval generator")):
+        p = subparsers.add_parser(name, help=helptext)
+        trace_args(p)
+        p.set_defaults(func=fn)
 
     cmd_measure = subparsers.add_parser('measure', help="per-tensor sensitivity on the calibration's own-voice rows and "
                                          "on the whole calibration, for quantize's recipes (reused across shares)")
@@ -2625,6 +2688,10 @@ def main():
                                   'largest working set. The caps only need to add up to the model. '
                                   'E.g. 9,10 for a 9B on 2x16 GB; 41,41 for a 35B-A3B (67 GB bf16, ~6 GB working set) on '
                                   '2x48 GB')
+    cmd_measure.add_argument('--rfn-anchor', default='constant', choices=['constant', 'probe'],
+                             help="noise anchors: the converter's constant (default; needs nothing but the model), or "
+                                  "probed on the lowest integer-rate baseline rung (re-check the constant after a "
+                                  "converter change)")
     cmd_measure.add_argument('--boundary-cpu', default=True, action=argparse.BooleanOptionalAction,
                              help="keep sc_measure's per-module input cache in host memory (needed past ~10 rows of a 9B on 16 GB)")
     cmd_measure.set_defaults(func=do_measure)
