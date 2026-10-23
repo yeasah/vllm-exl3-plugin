@@ -1912,6 +1912,27 @@ among them) touch the same file upstream restructured. Not `07b8a2e0` (fractiona
 files), which belongs to the rebase. Read `ba2feb28` (each row's `input_ids` to every forward)
 while there.
 
+## `gemma4-recipe` — Recipes wreck gemma-4: the measurement starves its late layers
+
+**Outcome:** a recipe ladder for gemma-4 that beats its uncalibrated baseline, or a guard that
+falls back to uniform bits where the measurement cannot be trusted. Parked 2026-10-23.
+
+**Unblocks:** gemma-4 31B and the 26B MoE, for which 12B is the proxy.
+
+**What is known** (cloud canary, record in `~/cloud/record/gemma-4-12B-it-exl3/`): the recipe
+ladder scored 0.95-2.45x the *uncalibrated* baseline's excess (wild 2.1-2.8x at 3-5 bpw; swe
+1.3-1.7x), nearly flat from 2.5 to 3.0 bpw. The allocation falls steadily with depth: at 4 bpw
+layers 0-19 get 5-7 bits and 30-47 get 2-3 (MLPs mostly 2), sliding and full-attention layers
+alike, and the recipe predicted 0.0147 KLD where wild measured 0.117. Ruled out: the constant
+rfn anchors (this run used the probe), KV sharing (`num_kv_shared_layers` 0), layer type.
+
+**Candidate next steps, cheapest first:** (1) a calibrated *uniform* 4 bpw from the same
+calibration: near 0.6x uncalibrated, as elsewhere, would clear the calibration and put it all on
+the recipe; (2) perturb one MLP near layer 40 and one near layer 5 by the same rfn and run
+gemma's full forward: if layer 40's KL is far above what `sc_measure` recorded, `sc_measure`
+mis-measures gemma (its final-logit softcap or per-layer scalars are the suspects when it reruns
+the tail from a perturbed layer).
+
 ## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
 
 **Outcome:** under vLLM the allocator is a deliberate, visible choice per deployment, and the
