@@ -1881,6 +1881,26 @@ discarded by vLLM's existing padding mask. The alternative, an uneven split at b
 fights vLLM's equal-shard vocab layout. Evidence: [docs/tensor-parallel.md](docs/tensor-parallel.md),
 *Vocab-parallel `lm_head`* (the rule, and MiniCPM5 as the aligned case).
 
+## `moe-recipe-grouping` — Measure a MoE layer's experts as one target
+
+**Outcome:** `quant.py measure` on a MoE model costs roughly what a dense model of the same depth
+does, and produces a recipe both engines can load. Today `sc_measure` perturbs every expert's
+projections separately: 768 targets per layer on Qwen3.6-35B-A3B, ~10 s each, over 4 h per layer
+and about a GPU-week per model (cloud, 2026-10-23). The result would be unloadable anyway: our
+`exl3_mgemm` path and exllamav3's `MultiLinear` both require one K across a layer's experts.
+
+**Unblocks:** recipe ladders for MoE models. Qwen3.6-35B-A3B is parked here with its traces and
+uncalibrated rungs recorded.
+
+**Candidate:** port upstream exllamav3's `1d641116` (target grouping: a layer's routed experts
+perturbed and quantized together, a gated MLP's projections as another group, `sc_optimize`
+applying the group's width to every member) and the `6f336da2` streaming it builds on, into our
+fork's `sc_measure.py`/`sc_optimize.py`, ahead of the full 1.6.4 rebase. Expect a real merge:
+our six `sc_measure` commits (`--gpu_split`, `--boundary_cpu`, `--row_klds`, `--dump_positions`
+among them) touch the same file upstream restructured. Not `07b8a2e0` (fractional trellis, 65
+files), which belongs to the rebase. Read `ba2feb28` (each row's `input_ids` to every forward)
+while there.
+
 ## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
 
 **Outcome:** under vLLM the allocator is a deliberate, visible choice per deployment, and the
