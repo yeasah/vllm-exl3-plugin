@@ -301,6 +301,17 @@ Also stale in the note below: *two* 27B entries were said to die at first infere
 `blockq-MTP-fp8` still does (it is `known_broken`); `blockq-tq4` runs to completion on
 both sides of the fix.
 
+**2026-10-23, the move to the 5060 Ti.** Every committed baseline was the 5070 Ti's, blessed
+there and never on this card, and all 9 fast entries plus the full-tier MoE failed `check`
+here. Cleared as code: with a fixture frozen for this card (`1a04b49`) and cold caches, the
+09-10 code (plugin `32b5622`, vLLM `1a736c073e`, exllamav3 `dc36e3b`) and today's capture 8 of
+10 entries bit-identically; the failures were the card plus live tuning. Re-blessed on this
+host. **What the fixture does not fix:** `minicpm5-1B blockq graphs` and the MoE entry are not
+bit-reproducible run to run even seeded and cold (1 of 3 and 1 of 6 runs of identical code
+differed on one prompt: KL max 0.009-0.018, 2-3 argmax flips, greedy unchanged). They carry
+`RUN_TO_RUN_FLIPS` in bench/suite.py until the source is found; torch.compile for the first
+and an order-dependent reduction in the MoE path are the suspects, neither traced.
+
 *Do not* re-bless anything against a build whose caches were re-tuned mid-run until this
 is at least recorded — that is how a cache artifact becomes the committed definition of
 correct.
