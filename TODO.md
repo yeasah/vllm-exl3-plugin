@@ -1851,6 +1851,24 @@ parameters, not more GPU time.
 
 → [docs/tensor-parallel.md](docs/tensor-parallel.md)
 
+## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
+
+**Outcome:** under vLLM the allocator is a deliberate, visible choice per deployment, and the
+crashing combination (expandable segments + custom all-reduce, on peer-access multi-GPU boxes)
+cannot occur. Today exllamav3's import turns expandable segments on behind vLLM's back.
+
+**Unblocks:** TP serving on peer-access boxes (workstation cards, NVLink pairs, most cloud
+multi-GPU) without a crash at CUDA-graph capture; memory numbers that mean the same allocator
+everywhere.
+
+**Candidate:** the plugin sets the allocator itself before importing exllamav3 and exports it in
+`PYTORCH_CUDA_ALLOC_CONF`, so vLLM's own guards see the truth; when expandable segments are on
+and TP > 1, it disables custom all-reduce. Expandable is the likely default where memory is
+tight (fragmentation has caused OOMs before); classic plus custom all-reduce where decode latency
+matters more. Open: how much NCCL all-reduce costs decode against custom all-reduce on a
+peer-access box, and whether the appliance picks per box from VRAM headroom. Evidence:
+[docs/tensor-parallel.md](docs/tensor-parallel.md), "Custom all-reduce and expandable segments".
+
 ## `cpu-offload` — CPU offload for EXL3 weights
 
 **Implemented, measured, and unit-tested; not gated, not committed.**

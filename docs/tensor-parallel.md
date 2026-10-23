@@ -430,6 +430,27 @@ architecture, vLLM version and checkpoint:
    regardless of TP degree (see "What blocks high TP degrees") -- a
    development gap, not something more hardware time closes.
 
+## Custom all-reduce and expandable segments
+
+exllamav3 switches PyTorch to `expandable_segments` when it is imported (upstream default since
+2026-09-06, turboderp `ef0d3d4`), through the allocator API rather than `PYTORCH_CUDA_ALLOC_CONF`.
+The plugin imports it into every vLLM worker, so every worker runs on expandable segments while
+vLLM, which reads only the environment variable, believes it runs on the classic allocator.
+
+The combination fails on any box whose GPUs can access each other's memory directly (where vLLM
+enables custom all-reduce): capturing CUDA graphs calls the legacy `cudaIpcGetMemHandle` on the
+graph buffers (`csrc/custom_all_reduce.cuh:164`), which cannot export the virtual-memory
+allocations expandable segments make. Seen 2026-10-23 on a 2x48 GB cloud box at TP=2
+(`Cuda error ... custom_all_reduce.cuh:164 'invalid argument'`); checked on one 5060 Ti:
+`cudaIpcGetMemHandle` on a torch allocation returns 0 under the classic allocator and 1 (invalid
+argument) under expandable segments, while torch's own `_share_cuda_` works under both (it uses a
+newer export path). Never seen locally: the 5060 Tis have no peer access, so vLLM never enables
+custom all-reduce here, and the FP8 27B traces run eager.
+
+Either half avoids it: `EXL3_EXPANDABLE_SEGMENTS=0` (classic allocator; custom all-reduce works)
+or `--disable-custom-all-reduce` (expandable kept; NCCL all-reduce). The quantization pipeline
+uses the first, for generation speed. For serving, the choice is open: TODO `allocator-policy`.
+
 ## Vocab-parallel `lm_head`
 
 Implemented during the same session, since the box was the only place it could
