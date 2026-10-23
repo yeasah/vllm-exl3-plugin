@@ -87,3 +87,4 @@ RUN cd vllm-exl3-plugin \
 # fixup environment
 COPY --chmod=755 ./bin/* .local/bin/
 COPY ./bashrc .bashrc
+RUN echo "StrictModes no" >> /etc/ssh/sshd_config
