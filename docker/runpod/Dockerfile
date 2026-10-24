@@ -109,7 +109,9 @@ COPY ./influxdata-archive.gpg /etc/apt/keyrings
 RUN apt update && apt install --yes --no-install-recommends telegraf
 
 # exllamav3's extension, in place (exllamav3/ext.py imports the in-tree .so, and git leaves it
-# alone: it is ignored). Cached until exl3-ext-key's content changes; then the checkout moves to
+# alone: it is ignored). Its key lives outside the checkout, in ~/.exl3-ext-key: an untracked
+# file in the submodule marks the tree dirty, and bootstrap.sh then refuses to pull on the pod.
+# Cached until exl3-ext-key's content changes; then the checkout moves to
 # dev's head and is rebuilt -- refusing if dev moved the extension again since the key was taken,
 # so the .so and its recorded key always describe the same sources. The refresh below checks the
 # key against whatever commit it pulls, so a stale extension fails the build rather than shipping
@@ -118,8 +120,8 @@ ARG EXL3_EXT_INPUTS="exllamav3/exllamav3_ext setup.py exllamav3/util/cuda_flags.
 RUN cd vllm-exl3-plugin \
     && git pull -q --ff-only && git submodule update -q --init --recursive \
     && cd deps/exllamav3 \
-    && for p in $EXL3_EXT_INPUTS; do echo "$(git rev-parse -q --verify "HEAD:$p" || echo none) $p"; done > .ext-key \
-    && { diff /tmp/exl3-ext-key .ext-key \
+    && for p in $EXL3_EXT_INPUTS; do echo "$(git rev-parse -q --verify "HEAD:$p" || echo none) $p"; done > $HOME/.exl3-ext-key \
+    && { diff /tmp/exl3-ext-key $HOME/.exl3-ext-key \
          || { echo "dev moved exllamav3's extension sources while building; rebuild"; exit 1; }; } \
     && MAX_JOBS=$(nproc) python setup.py -q build_ext --inplace \
     && rm -rf build \
@@ -136,7 +138,7 @@ RUN cd vllm-exl3-plugin \
     && git pull --ff-only --recurse-submodules \
     && git submodule update --init --recursive \
     && { (cd deps/exllamav3 && for p in $EXL3_EXT_INPUTS; do echo "$(git rev-parse -q --verify "HEAD:$p" || echo none) $p"; done \
-          | diff .ext-key -) || { echo "exllamav3's extension is stale for this commit; rebuild"; exit 1; }; } \
+          | diff $HOME/.exl3-ext-key -) || { echo "exllamav3's extension is stale for this commit; rebuild"; exit 1; }; } \
     && pip install --no-cache-dir $(python -c 'import tomllib; print(" ".join( \
         d for f, e in [("deps/exllamav3/pyproject.toml", "eval"), ("pyproject.toml", "quantization")] \
         for d in tomllib.load(open(f, "rb"))["project"]["optional-dependencies"][e]))') \
