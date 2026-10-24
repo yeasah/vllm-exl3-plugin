@@ -312,6 +312,16 @@ differed on one prompt: KL max 0.009-0.018, 2-3 argmax flips, greedy unchanged).
 `RUN_TO_RUN_FLIPS` in bench/suite.py until the source is found; torch.compile for the first
 and an order-dependent reduction in the MoE path are the suspects, neither traced.
 
+**MoE at TP=2 on vLLM 0.32 is bimodal, and blocks its entry.** `qwen3.5-35B-A3B 2.0bpw MoE tp2`
+lands in one of two *reproducible* states: one at KL max ~0.05 against TP=1 on the same
+build, the other with one position at 0.257-0.275 (|dlogprob| 0.283, greedy changed on prompt
+0), identical to every printed digit across runs; 2 of 3 runs on 0.32 took the second. The
+MoE's eager-vs-graphs floor at TP=1 is 0.157, so the spike is past it, and the entry has no
+0.32 baseline (the 0.29 one is kept). Two deterministic outcomes point at a per-process choice
+between computation paths; NCCL picking its all-reduce algorithm per run (changing the bf16
+summation order, which can flip a 2-bit model's expert routing) is the first suspect, testable
+by pinning `NCCL_ALGO=Ring` and capturing a few times.
+
 *Do not* re-bless anything against a build whose caches were re-tuned mid-run until this
 is at least recorded — that is how a cache artifact becomes the committed definition of
 correct.
