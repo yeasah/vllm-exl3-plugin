@@ -697,6 +697,47 @@ and it is only worth raising if there is appetite. Evidence in
 bar is higher: changes we make for ourselves do not need offering, only ones that are
 right for everyone.*
 
+### What the 1.6.4 merge cost (2026-10-23)
+
+v1.6.4 (460 commits) merged into the fork's `master`, wanted for upstream's MoE target grouping in
+`sc_measure` (`1d641116`, `6f336da2`). Conflicts: the GEMM kernel's barrier gate (ours stays,
+upstream's ROCm path beside it), the cooperative launch (our grid diagnostic kept, now reporting
+the per-device `smem_max`), `embedding.py` (blockq first), `sc_measure.py` (taken whole from
+upstream, our four flags ported onto its streaming structure), and qbench's `engines.py`
+(`token_embd` accounting stays ours, per the standing policy).
+
+**Three defaults changed under us, pinned in `quant.py` rather than adopted** (TODO
+`exl3-1.6.4-defaults`): `convert --out_scales` `always` -> `auto`; `sc_optimize -tie` adds
+`q_proj` to the k/v tie; `sc_measure` groups dense bundles and a MoE layer's experts as single
+targets. Ours groups experts per layer *and projection type* (`-g experts`), the coarsest our
+loader forces: one K per projection across a layer's experts, gate = up.
+
+**Two qbench regressions the merge brought, fixed in the merge commit:**
+
+- *The streamed HF reference went eager.* Upstream defaulted it to eager attention because remote
+  code's sdpa is not always causal (Ling 3.1). Eager materializes every head's L x L scores, which
+  the streaming budget does not count (5.8 GiB on a 0.6B's swe rows, OOM), and the attention
+  backend is not in the cache key, so fresh eager references would have mixed with cached sdpa
+  ones. Ours: eager only when the config carries remote code (`auto_map`).
+- *The streamed exl3 pass leaked every row's state.* Per-row params now persist across modules,
+  and a decoder block leaves `params["residual"]` pointing at its residual stream. With upstream's
+  new per-module `x.clone()` that doubles the states on the device, and our host offload freed
+  nothing. Dropping the key after each module fixes it; rebuilding params per module gave the same
+  scores on Qwen3, so nothing else rides across its modules. **Offer upstream**: their pass has
+  the clone and the persistent params, so it pays the doubling too.
+
+**What it cost in numbers** (Qwen3-0.6B unless noted):
+- qbench reference and noise floor bit-identical; quants' KL within 2e-5 of the old fork on wild
+  and swe.
+- The merged converter's 4 bpw recipe rung: KL -2% (wild 0.0322 -> 0.0316, swe 0.0314 -> 0.0307),
+  inside the 2-3% draw-to-draw spread, at identical size.
+- `sc_measure`: dense keys identical; KL median 2e-4 relative, unbiased, from slightly different
+  shaped-noise factors.
+- Bench gate: drift at noise-floor size on nearly every entry, from the rewritten GEMM/dequant
+  kernels (not the autotune fixture: its file and version are unchanged); MoE TP=2 weights
+  10.6 -> 10.42 GiB; the 27B tq4 entry needed autotune shapes the old fixture lacked, so the
+  fixture was re-frozen with the re-bless.
+
 **`sc_measure.py` reports a KLD with a constant additive floor** of ~6.1e-5, measured on
 phi-4-mini. Evidence it is a floor rather than curve shape: flat across sensitivity
 quintiles spanning 51x, log-log correlation with sensitivity 0.088, and it reproduces at

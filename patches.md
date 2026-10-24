@@ -20,7 +20,7 @@ the released v0.32.0 wheel are correct, and `VLLM_USE_PRECOMPILED=1` fetches
 them instead of spending half an hour compiling:
 
     git submodule update --init deps/vllm
-    git -C deps/vllm fetch --tags origin        # BEFORE installing -- see below
+    git -C deps/vllm fetch --no-tags https://github.com/vllm-project/vllm.git tag v0.32.0   # BEFORE installing -- see below
     VLLM_USE_PRECOMPILED=1 \
     VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/a5/0d/0b15fda9a56ac485ebb607e466f0e3386c8c115bafeced6514298bd325b5/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl \
     pip install --no-deps --no-build-isolation -e deps/vllm
