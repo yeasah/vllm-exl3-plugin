@@ -497,6 +497,20 @@ drop makes the sparse retention unreachable. That is what puts KV occupancy at 4
 for a one-line prompt on a 53,040-token context, and it is a large hidden cost of
 turning MTP on for this architecture regardless of whether acceptance is ever fixed.
 
+## `kv-nvfp4` — 4-bit KV without TurboQuant's costs
+
+**Outcome:** NVFP4 KV (`--kv-cache-dtype nvfp4`, FlashInfer with XQA decode on SM12x since vLLM
+0.32) measured against `turboquant_4bit_nc` on KL and on capacity, and against TurboQuant's
+limitations: the boundary-layer tax, sliding-window models, FA3, TP and spec decode.
+
+**Unblocks:** possibly ~4-bit KV at TurboQuant-like quality on the paths TurboQuant refuses or
+taxes. Upstream's own test case is Qwen3.8-27B at TP=2 (GQA 6, head_dim 256), our local config.
+
+**Candidate:** the existing TurboQuant comparison harness (docs/turboquant-kv.md) with one more
+arm, on the 0.6B and the 9B; then the 27B at TP=2. UltraQuant (`ultraquant_4bit`, FP4 with
+power-of-two group scales and rotated keys) is the ROCm-only sibling; its Triton paths are
+portable if NVFP4 disappoints.
+
 ## `turboquant-sliding-window` — TurboQuant KV cache for sliding-window models
 
 *Written up in [docs/turboquant-kv.md](docs/turboquant-kv.md), Part 1. What follows is
@@ -1023,6 +1037,11 @@ head-dim-512 misdiagnosis, corrected under `turboquant-sliding-window`.
 **Revisit if a tied model ever needs that last 5%**, or if fp8 emission turns out to be
 nearly free alongside other repair-tool work.
 
+**Upstream's trellis embedding (exllamav3 1.6.4: `convert.py -eb`, `convert_embedding`, a fused
+gather) is the candidate for tied models.** Not expected to beat blockq on quality per bit; the
+point is one trellis tensor that can serve both the head and the gather. Needs a plugin loader
+before it can be measured through vLLM.
+
 → [docs/embeddings.md](docs/embeddings.md)
 
 ## `transformers-backend` — Serving models vLLM does not implement
@@ -1531,6 +1550,21 @@ qbench as `head-bits` did, and watch the metric blind spots recorded there.
 → [docs/qbench.md](docs/qbench.md) "Head bitrate: 6 is defensible", and
 "Per-tensor bit allocation does not compose" for the null this tests the edge of.
 
+## `half-rate-tensors` — Native half-integer trellis rates in the pipeline
+
+**Outcome:** a measured answer on whether exllamav3 1.6.4's fractional trellis (1.5/2.5/3.5 bpw
+per tensor, `mul1` codebook) beats what we ship at the half rungs, and, if so, recipes allocated in
+half steps (`sc_optimize -ks 0.5`) and checkpoints the plugin serves.
+
+**Unblocks:** a finer allocation grain for every recipe, and possibly better 2.5/3.5 rungs than
+today's mix of whole-bit tensors at the same size.
+
+**Candidate:** plugin first, since nothing can be measured through vLLM until it loads:
+`format.bits_from_trellis_shape` assumes an integer K (`last // TILE`), and the merged kernels take
+`half_k`. Then one A/B on the 0.6B and the 9B: a uniform native 3.5 against today's 3.5 rung at
+equal size, and a `-ks 0.5` recipe against the integer recipe. Queued with `yaqa`'s output-only
+arm as the next pipeline block. Evidence so far is upstream's commit only (`07b8a2e0`).
+
 ## `yaqa` — YAQA-quality rounding in the quantizer
 
 Round with a second Hessian on the output channels, minimizing the full-model output KL
@@ -1567,6 +1601,16 @@ rather than absolute. Nothing to harvest.
 so the −19% is measured against a baseline up to 66% worse than what the converter ships
 (`--out_scales` defaults to `always`). Whether the gain survives on top of the heuristic
 is untested and is now the cheapest thing to check first.
+
+**Upstream shipped the missing half (exllamav3 1.6.4, now in the fork).** `util/yaqa_hessians.py`
+computes the Kronecker factors in Transformers (Fisher from the model's own sampled targets), and
+`convert.py -hess` consumes them for two-sided LDLQ, with `--out_scales yaqa` from the output
+diagonal. Its default collects only the output side -- one forward and one backward pass -- and
+upstream reports that on Qwen3.5-2B the output factor with the regular online input side beat the
+fully iterated pair. That is most of the cost problem above gone. **Next, queued with
+`half-rate-tensors` as the pipeline block:** the output-only arm against our pipeline's
+calibration at one rung on the 0.6B, then the 9B; memory of the Transformers backward pass is the
+thing to watch on anything larger.
 
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
 
@@ -2186,6 +2230,12 @@ Hold the window fixed, or the next comparison will misattribute the difference.
 routed MoE while honest on dense models across three quantization methods. Mechanism
 never established; the obvious name-matching explanation is wrong. Worth pinning down
 before relying on the claim, since MoE is where offload is most attractive.
+
+**Reference design, before picking this back up:** exllamav3 1.6.4's CPU-MoE offload (its own
+runtime, not vLLM's) -- a pinned arena for zero-copy streamed prefill (#341, ~2x long-context
+prefill), hot/cold expert rankings persisted across instances, immediate promotion of missed
+experts with spare GPU slots, split-K CPU GEMV with work stealing across L3 domains. Commits
+`893199c1`, `c48bb5f8`, `e4a928f9`, `82cebdf1`, `21cfd60f`.
 
 → [docs/cpu-offload.md](docs/cpu-offload.md), [docs/media-encoders.md](docs/media-encoders.md)
 
