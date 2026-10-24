@@ -41,6 +41,12 @@ logger = init_logger(__name__)
 _TP_WARNED = False
 
 
+def stored_dtype(name: str) -> torch.dtype | None:
+    """The dtype an EXL3 sub-tensor is stored in, or None for a name the format does not define."""
+    dtype = format.STORED_DTYPES.get(name)
+    return getattr(torch, dtype) if dtype else None
+
+
 class EXL3Parameter(BasevLLMParameter):
     """Placeholder that collects one EXL3 sub-tensor per output shard.
 
@@ -57,8 +63,11 @@ class EXL3Parameter(BasevLLMParameter):
     # than inherited so the intent survives a change to the base default.
     handles_fused_shards: bool = True
 
-    def __new__(cls, **kwargs):
-        return super().__new__(cls, data=None)
+    def __new__(cls, dtype: torch.dtype | None = None, **kwargs):
+        # An empty placeholder, but of the stored tensor's dtype: with data=None it would take the
+        # model dtype (bf16), and vLLM 0.32's loader warns about every trellis, scale and codebook
+        # marker loaded into it (nothing is cast; the store below keeps the loaded tensor)
+        return super().__new__(cls, data=torch.empty(0, dtype=dtype) if dtype else None)
 
     def __init__(
         self,
@@ -69,6 +78,7 @@ class EXL3Parameter(BasevLLMParameter):
         column_shard_size: int | None = None,
         row_shard_size: int | None = None,
         output_partition_sizes: list[int] | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__(data=None, weight_loader=weight_loader)
         self.num_shards = num_shards
@@ -208,6 +218,7 @@ class EXL3LinearMethod(LinearMethodBase):
 
         for name in self.quant_config.stored_tensor_names():
             param = EXL3Parameter(
+                dtype=stored_dtype(name),
                 num_shards=num_shards,
                 device=device,
                 weight_loader=weight_loader,

@@ -41,6 +41,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from .. import format, ops, tp
 from .. import cpu_offload
+from .linear import stored_dtype
 from ..log import init_logger
 
 logger = init_logger(__name__)
@@ -53,8 +54,9 @@ class EXL3MoEParameter(torch.nn.Parameter):
     """Collector for one EXL3 sub-tensor across every expert of a layer."""
 
     def __new__(cls, device: torch.device, name: str, tp_rank: int, tp_size: int):
+        # Of the stored tensor's dtype, for vLLM's load-time dtype check; see EXL3Parameter
         obj = torch.Tensor._make_subclass(
-            cls, torch.empty(0, device=device), False
+            cls, torch.empty(0, device=device, dtype=stored_dtype(name)), False
         )
         obj.exl3_device = device
         # Which EXL3 sub-tensor this collects, and where this rank sits: the

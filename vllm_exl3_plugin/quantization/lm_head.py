@@ -30,7 +30,7 @@ import torch
 from torch.nn import Parameter
 
 from .. import format, ops, tp
-from .linear import EXL3LinearMethod, EXL3Parameter
+from .linear import EXL3LinearMethod, EXL3Parameter, stored_dtype
 
 
 def _lm_head_weight_loader(param: EXL3Parameter, loaded_weight: torch.Tensor) -> None:
@@ -81,6 +81,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
             layer.register_parameter(
                 name,
                 EXL3Parameter(
+                    dtype=stored_dtype(name),
                     num_shards=1,
                     device=device,
                     weight_loader=_lm_head_weight_loader,

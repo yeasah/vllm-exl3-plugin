@@ -2220,16 +2220,21 @@ MEASURE_ROWS = {"self": 20, "ctx_user:*": 0, "ctx_tool:*": 0, "loop": 0, "raw": 
 MEASURE_CHUNK = 20         # rows per sc_measure run: its boundary cache grows with rows
 MEASURE_H_ROWS = 64        # Hessian-capture rows, the same in every run: the calibration's first
 OWNVOICE_SHARE = 1.0       # unconditional: see MEASURE_ROWS
-# exllamav3 1.6.4 changed four defaults that move every dense recipe or conversion; pinned to the
-# pre-1.6.4 behaviour until each is measured as its own arm (TODO exl3-1.6.4-defaults):
+# exllamav3 1.6.4 changed four defaults that move every dense recipe or conversion. Three stay pinned to
+# the pre-1.6.4 behaviour until each is measured as its own arm (TODO exl3-1.6.4-defaults); half steps
+# were measured and adopted (HALF_STEPS, RECIPE_K_STEP):
 MEASURE_GROUPS = "experts"   # sc_measure -g: a MoE layer's routed experts are one target (a per-expert
                              # measurement is impractical); dense tensors stay individually measured, so
                              # their keys and seeds match every earlier measurement chunk (upstream: all)
 RECIPE_TIES = "k_proj+v_proj,gate_proj+up_proj"   # sc_optimize -tie (upstream adds q_proj and GDN qkv+z)
 OUT_SCALES = "always"        # convert.py --out_scales (upstream: auto, off for some gate/up projections)
-HALF_STEPS = False           # convert.py's 1.5/2.5/3.5 steps below 4 bpw (upstream: on with mul1, so -b 3.5
-                             # is a native 3.5 and sub-4 baselines can hold half-integer tensors); off passes
-                             # --no_half_steps, the pre-1.6.4 whole-bit mix (TODO half-rate-tensors)
+HALF_STEPS = True            # convert.py's 1.5/2.5/3.5 steps below 4 bpw, as upstream: -b 3.5 is a native 3.5,
+                             # so the half-rung baselines are what a plain conversion now gives; False passes
+                             # --no_half_steps, the pre-1.6.4 whole-bit mix. Integer rungs unchanged (-b 3 -hq
+                             # on Qwen3-0.6B is byte-identical either way)
+RECIPE_K_STEP = 0.5          # sc_optimize -ks: half-bit steps below 4 bpw (whole above). At equal size, against
+                             # the integer recipe: Qwen3-0.6B 3.5 bpw -6..-8% wild, -10% swe (two seeds), 2.5 bpw
+                             # -8% / -12%; Ornith-1.5-9B 3.5 bpw -6% / -4% (docs/calibration.md)
 
 def row_labels(job, ids, k=32):
     """Each calibration row's content category, by matching its opening tokens against the
@@ -2518,13 +2523,13 @@ def plan_recipes(job, args, recipe_source, share, rfn):
                                                      os.path.join(pdir, f"{rev}.measurement.json"))
         out = os.path.join(pdir, f"{rev}.yaml")
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"), "-m", meas, "-b", bits, "-hb", headbits,
-                          "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
+                          "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, "-ks", str(RECIPE_K_STEP), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
                         job.log(f"plan-{rev}"), None, False)
         if rc or not os.path.isfile(out):
             print(f"=== {rev}: solve FAILED (log {job.log(f'plan-{rev}')}) ==="); return False
         with open(out) as fh:
             t = yaml.safe_load(fh)["tensors"]
-        k = int(float(bits))
+        k = float(bits)   # the target rate, which a half-step recipe can hit exactly (3.5)
         diffs = sorted((sum(t[x] != e.get(x) for x in t), name) for name, e in existing.items() if set(e) == set(t))
         same = [n for d, n in diffs if d == 0]
         hist = dict(sorted({b: list(t.values()).count(b) for b in set(t.values())}.items()))
@@ -2583,7 +2588,7 @@ def do_quantize(job, args):
                                                              os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
                                   "-m", meas, "-b", bits, "-hb", headbits,
-                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", recipe ] +
+                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, "-ks", str(RECIPE_K_STEP), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", recipe ] +
                                 ([ "-rr", rfn ] if rfn else []),
                                 job.log(f"{rev}-recipe"), None, echo)
                 if rc or not os.path.isfile(recipe):

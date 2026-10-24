@@ -1550,29 +1550,6 @@ qbench as `head-bits` did, and watch the metric blind spots recorded there.
 → [docs/qbench.md](docs/qbench.md) "Head bitrate: 6 is defensible", and
 "Per-tensor bit allocation does not compose" for the null this tests the edge of.
 
-## `half-rate-tensors` — Native half-integer trellis rates in the pipeline
-
-**Outcome:** a measured answer on whether exllamav3 1.6.4's fractional trellis (1.5/2.5/3.5 bpw
-per tensor, `mul1` codebook) beats what we ship at the half rungs, and, if so, recipes allocated in
-half steps (`sc_optimize -ks 0.5`) and checkpoints the plugin serves.
-
-**Unblocks:** a finer allocation grain for every recipe, and possibly better 2.5/3.5 rungs than
-today's mix of whole-bit tensors at the same size.
-
-**Done: the plugin serves them** (2026-10-24). `format` accepts 1.5/2.5/3.5 (mul1 only, refused
-otherwise), the MoE and embedding ops take a float width, and the reconstruct path no longer
-truncates K from the shape. `tests/test_half_widths.py` checks every path against exllamav3 from
-random tensors (seen to fail with the truncation put back). A native 3.5 Qwen3-0.6B through vLLM
-matches exllamav3 within the integer rung's own engine gap (wild KL 0.0708 exllamav3, 0.0712
-eager, 0.0713 graphs; 4.0: 0.0322 vs 0.0327).
-
-**Candidate, now:** the A/B on the 0.6B and the 9B. The control arm exists: `convert.py
---no_half_steps` (fork) restores the whole-bit mix (-b 3.5 gives 70 tensors at 3 and 126 at 4,
-against 196 at 3.5), and `quant.py` pins it (`HALF_STEPS = False`) until this decides. Arms: native
-3.5 against the whole-bit 3.5 at equal size, uniform and calibrated; then a `-ks 0.5` recipe
-against the integer recipe; the 2.5 rung the same way. TP=2 of a half-width checkpoint is not yet
-run.
-
 ## `yaqa` — YAQA-quality rounding in the quantizer
 
 Round with a second Hessian on the output channels, minimizing the full-model output KL
@@ -1615,8 +1592,7 @@ computes the Kronecker factors in Transformers (Fisher from the model's own samp
 `convert.py -hess` consumes them for two-sided LDLQ, with `--out_scales yaqa` from the output
 diagonal. Its default collects only the output side -- one forward and one backward pass -- and
 upstream reports that on Qwen3.5-2B the output factor with the regular online input side beat the
-fully iterated pair. That is most of the cost problem above gone. **Next, queued with
-`half-rate-tensors` as the pipeline block:** the output-only arm against our pipeline's
+fully iterated pair. That is most of the cost problem above gone. **Next pipeline item:** the output-only arm against our pipeline's
 calibration at one rung on the 0.6B, then the 9B; memory of the Transformers backward pass is the
 thing to watch on anything larger.
 
@@ -1992,8 +1968,7 @@ whose calibration statistics predict lower error without), `sc_optimize -tie` (`
 gate_proj+up_proj`; upstream adds `q_proj` to the k/v tie and GDN `in_proj_qkv+in_proj_z`), and
 `sc_measure -g` (`experts`; upstream groups dense q/k/v(/g), gate/up and GDN qkv/z as single
 measurement targets too, and a MoE layer's experts as one target where ours keeps three), and
-`convert.py --no_half_steps` (`HALF_STEPS = False`; upstream allocates in half-bit steps below 4
-bpw with mul1 -- measured under `half-rate-tensors`, not here).
+(half steps, the fourth, were measured and adopted: docs/calibration.md "Half-integer rates").
 
 **Unblocks:** whatever each is worth on our models. Upstream chose them for its own runtime (one K
 per fused kernel launch); our plugin runs mixed widths within a fused projection, so the kernel
@@ -2445,6 +2420,11 @@ divergence is deliberately all qbench measures),
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `half-rate-tensors` — closed 2026-10-24, see [docs/calibration.md](docs/calibration.md) "Half-integer
+  rates". The plugin serves 1.5/2.5/3.5 bpw (`tests/test_half_widths.py`); half-step recipes beat
+  integer ones at equal size on both models measured (0.6B -6..-12%, 9B -4..-6%), so `quant.py` solves
+  recipes with `-ks 0.5` and builds native half-rung baselines.
 
 - `turboquant-prefill-transient` — closed 2026-09-12, see
   [docs/memory-accounting.md](docs/memory-accounting.md). TurboQuant's continuation

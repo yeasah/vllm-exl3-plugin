@@ -43,6 +43,12 @@ PAD_TO = 128
 
 MIN_BITS = 1
 MAX_BITS = 8
+#: Storage dtype of each EXL3 sub-tensor as exllamav3 writes it, by name (torch-free here; see
+#: `quantization.linear.stored_dtype`). Placeholders take it so vLLM's load-time dtype check
+#: (AutoWeightsLoader, since 0.32) sees the tensor it is about to receive, not the model dtype
+STORED_DTYPES = {"trellis": "int16", "suh": "float16", "svh": "float16", "su": "int16", "sv": "int16",
+                 "mcg": "int32", "mul1": "int32"}
+
 #: Half-integer widths (exllamav3 >= 1.6.4): KA- and (KA + 1)-bit trellis steps alternate, so a
 #: tile is 16 * K = 16 * KA + 8 uint16 words. The kernels instantiate only these three, and only
 #: with the mul1 codebook.

@@ -646,6 +646,38 @@ that SC's recipe applied with **our** mix as calibration beats our mix alone on 
 (3-14%). Calibration and recipe are separable; the open part is which distribution the
 recipe should be measured on.
 
+## Half-integer rates: native 3.5 and half-step recipes (2026-10-24)
+
+exllamav3 1.6.4 added native 1.5 / 2.5 / 3.5 bpw tensors (mul1 codebook, 16 * K words per tile) and,
+with them, half-bit steps in convert.py's budgeted allocation below 4 bpw and `sc_optimize -ks 0.5`.
+Measured before adopting either, all arms calibrated with the job's own mix, `--out_scales always`,
+excess KLD (minus the noise floor) at identical size:
+
+| arm, vs its whole-bit control | Qwen3-0.6B wild | Qwen3-0.6B swe | Ornith-1.5-9B wild | Ornith-1.5-9B swe |
+|---|---|---|---|---|
+| 3.5 recipe, half steps vs integer | -6.1% / -7.7% (two seeds) | -10.1% / -10.1% | -6.2% | -3.6% |
+| 2.5 recipe, half steps vs integer | -8.4% | -12.4% | | |
+| 3.5 uniform, native vs whole-bit (`--no_half_steps`) | -5.1% / -2.0% | +5.6% / -4.8% | -13.9% | -9.5% |
+| 2.5 uniform, native vs whole-bit | -8.8% | -0.3% | | |
+
+**Recipes are the reliable win.** The half-step recipe gains on every cell and barely moves between
+seeds (0.6B swe excess 0.05833 vs 0.05825). Uniform native rates are noisier: the 0.6B's swe +5.6% was
+a draw (the native arm moved 10% between seeds, the whole-bit arm 0.2%); averaged, uniform native is
+about -3.5% wild and 0% swe there, and a large win on the 9B. The likely reason the uniform comparison
+is model-dependent: the whole-bit "3.5" is not a random 3/4 split but the converter's static priority
+allocation (all of attention to 4 bits, MLPs ~3.2 on the 0.6B), a crude recipe pointed the right way
+(tensors it promoted get 3.92 bits in the measured recipe, the ones it left at 3 get 3.31). A native
+uniform 3.5 avoids the per-tensor Jensen cost but gives that prior up; the recipe keeps both, and with
+half steps can hold a tensor between whole widths (0.6B gate/up at 3.38 vs 3.25).
+
+Adopted in `quant.py` (`HALF_STEPS`, `RECIPE_K_STEP`). Half-rung baselines are now native, which is
+what a plain conversion gives since 1.6.4; integer rungs are unaffected (`-b 3 -hq` on the 0.6B is
+byte-identical either way). Ladder numbers at half rungs before 2026-10-24 compare against a whole-bit
+baseline and should not be mixed with later ones. Fork fixes this needed: `sc_optimize -ks 0.5`
+stepped by halves past 4 bpw into rates convert refuses (4.5, 5.5), and the plugin decoded no
+half-integer widths at all (TODO `half-rate-tensors`, closed). The 9B's conversions also exposed
+1.6.4's scale refit running large-vocab heads out of memory on 16 GB, streamed in the fork.
+
 ## Each calibration protects the regime it contains
 
 The same comparison across the three calibrations measured, by the kind of input:
