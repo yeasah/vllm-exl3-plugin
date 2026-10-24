@@ -59,6 +59,9 @@ RUN git -C vllm-exl3-plugin/deps/vllm fetch -q --no-tags \
     pip install --no-cache-dir --no-deps --no-build-isolation \
     -e vllm-exl3-plugin/deps/vllm \
     && python -c 'import vllm; print(vllm.__version__); assert not vllm.__version__.startswith("0.1.dev")'
+# FlashInfer's precompiled kernels (flashinfer-cubin, which <= 0.29 installed as a requirement;
+# `vllm download-kernels` since) are left out on purpose despite vLLM's startup warning: 1.5 GB
+# of image on every fresh host, against a first-run JIT of the few ops we use (the sampler)
 
 # install llama-cpp-python precompiled
 RUN pip install --no-cache-dir llama-cpp-python \
@@ -94,8 +97,11 @@ RUN wget -q --https-only --secure-protocol=TLSv1_2 --max-redirect=3 \
     tar -xz -C /usr/local/bin -f /tmp/runpodctl.tar.gz runpodctl && \
     rm /tmp/runpodctl.tar.gz
 
-# install vast SDK/CLI as well
-RUN pip install --no-cache-dir vastai
+# vast.ai CLI in a venv of its own, only its entry point on PATH: it pins exact versions
+# (pillow 12.2) that, installed beside vLLM, downgrade its dependencies below their floors
+RUN python -m venv /opt/vastai \
+    && /opt/vastai/bin/pip install --no-cache-dir vastai \
+    && ln -s /opt/vastai/bin/vastai /usr/local/bin/vastai
 
 # install telegraf
 COPY ./influxdata.list /etc/apt/sources.list.d/influxdata.list

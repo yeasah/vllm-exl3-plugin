@@ -735,8 +735,10 @@ loader forces: one K per projection across a layer's experts, gate = up.
   shaped-noise factors.
 - Bench gate: drift at noise-floor size on nearly every entry, from the rewritten GEMM/dequant
   kernels (not the autotune fixture: its file and version are unchanged); MoE TP=2 weights
-  10.6 -> 10.42 GiB; the 27B tq4 entry needed autotune shapes the old fixture lacked, so the
-  fixture was re-frozen with the re-bless.
+  10.6 -> 10.42 GiB. The key now mixes in `half_k`, so every record of the old autotune fixture
+  went dead -- which exposed that `freeze-tune` had been seeding the old fixture over its own blob
+  at each entry (every re-freeze kept only the last entry's shapes; fixed in `29e0683`). Re-frozen
+  and re-blessed with no entry tuning live.
 
 **`sc_measure.py` reports a KLD with a constant additive floor** of ~6.1e-5, measured on
 phi-4-mini. Evidence it is a floor rather than curve shape: flat across sensitivity
