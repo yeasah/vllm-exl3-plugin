@@ -20,8 +20,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "d1703ed",
-   "head": "d1703eda71",
+   "describe": "3f20841",
+   "head": "3f208419f1",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -34,30 +34,30 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.4.9-84-ge02f2957",
-   "head": "e02f2957d1",
+   "describe": "v1.6.4-86-gf6c506ff",
+   "head": "f6c506ffd2",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "driver": "610.57.04"
  },
- "decode": 2496.1,
- "decode_spread_pct": 0.76,
+ "decode": 2417.1,
+ "decode_spread_pct": 0.77,
  "decode_samples": [
-  2505.7,
-  2486.9,
-  2491.5,
-  2496.1,
-  2500.5
+  2427.4,
+  2416.3,
+  2417.1,
+  2408.7,
+  2417.4
  ],
- "prefill": 21952.9,
- "prefill_spread_pct": 2.31,
+ "prefill": 21978.6,
+ "prefill_spread_pct": 2.15,
  "prefill_samples": [
-  22159.5,
-  22396.2,
-  21952.9,
-  21927.7,
-  21889.2
+  22441.3,
+  22001.1,
+  21968.9,
+  21978.6,
+  21973.4
  ]
 }
