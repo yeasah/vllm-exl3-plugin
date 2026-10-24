@@ -416,6 +416,39 @@ bf16xbf16->fp32 epilogue with no intermediate rounding. Deterministic, reproduci
 *more* accurate -- but it moves top-k selection often enough to flip 3 of 63 argmax positions
 on `qwen3.5-35B-A3B` at 2.00bpw.
 
+### What the 0.32 bump actually cost (2026-10-23)
+
+Done the day it was surveyed, on `appliance/v0.32.0` (16 commits on `v0.32.0`). The survey was
+right that nothing of ours was fixed upstream except the autotune backport (dropped), and that
+the conflicts would be in the memory and TurboQuant plumbing; it was wrong about where the
+breakage would land, again.
+
+**Conflicts, all resolved without changing our behavior:** the Transformers backend's import
+block; `boundary:N` (upstream reworked the same parser for UltraQuant and fixed the
+index/keyword sort itself, so ours dropped its sort key and now applies `boundary:N` to both
+packed-KV backends); the workspace floor (upstream added persistent per-lane resources beside
+our shrink, both kept); the vision-MLP chunking, whose conflict block carried code upstream had
+deleted (`FusedInputNorm`), so only our two functions were taken. The three `ReplicatedLinear`
+commits were squashed into the one correct state.
+
+**What failed, and it was not in the survey:** Muse Glimmer via the Transformers backend.
+transformers >= 5.17 needs the vision rope type "axial", which transformers' own config class
+supplies through `default_rope_type`; vLLM's vendored config class, which replaces it in
+`AutoConfig`, did not. Fixed in our `1f3b03290`; upstream deletes the vendored config in
+`19997aac51` (#60823), three days after v0.32.0. The lesson is the 0.29 one in another form:
+the breakage was a dependency's (transformers 5.15 -> 5.19) contract with code neither side
+of the survey looked at.
+
+**What the gate showed:** fast and TP tiers bit-identical on every dense entry, Gemma
+bit-identical, and the MoE, the 27B and Muse moved at noise-floor size (MoE TP=2 against TP=1
+on the same build stays inside its floor). Weights fell ~0.09 GiB per rank on Qwen3.5/3.8,
+from upstream's smaller M-RoPE cache (`a98247ab4d`; parameters identical, buffers 0.126 ->
+0.032 GiB). Throughput unchanged on all three perf entries (within 1%).
+
+**Environment:** the build now imports `setuptools_rust` even precompiled; FlashInfer 0.7
+refuses a leftover `flashinfer-cubin` 0.6.18; pillow >= 12.3 collides with the `vastai` CLI's
+exact pin (the CLI still runs).
+
 ### The 0.32 bump: survey before rebasing (2026-10-23)
 
 Read-only, against `v0.32.0` (`5df63a7203`, 2026-10-17). Upstream cuts each release from `main`;
