@@ -1872,6 +1872,80 @@ parameters, not more GPU time.
 
 → [docs/tensor-parallel.md](docs/tensor-parallel.md)
 
+## `tp-vocab-alignment` — A quantized head whose vocabulary does not split into whole blocks
+
+**Outcome:** a quantized `lm_head` (and the tied embedding served from it) runs vocab-parallel
+at any TP degree. Today a rank's slice has to be a whole number of 128-wide Hadamard blocks, so
+the plugin refuses at load whenever it is not: no Qwen3-family checkpoint (151936 = 1187 blocks)
+runs at TP=2, and no Llama-3 one (128256 = 1002 blocks) at TP=4.
+
+**Unblocks:** TP for the Qwen3 family and Llama-3 at 4 GPUs, and the bench `tp` tier's Qwen3
+entries (dense eager and graphs, and the only mixed-width-in-a-shard checkpoint), which stand
+`known_broken` on this.
+
+**Candidate:** pad the vocabulary to a multiple of `128 x tp` (vLLM already pads it, to 64), and
+have the plugin fill the rows past the checkpoint's end with zero-valued blocks; those logits are
+discarded by vLLM's existing padding mask. The alternative, an uneven split at block boundaries,
+fights vLLM's equal-shard vocab layout. Evidence: [docs/tensor-parallel.md](docs/tensor-parallel.md),
+*Vocab-parallel `lm_head`* (the rule, and MiniCPM5 as the aligned case).
+
+## `moe-recipe-grouping` — Measure a MoE layer's experts as one target
+
+**Outcome:** `quant.py measure` on a MoE model costs roughly what a dense model of the same depth
+does, and produces a recipe both engines can load. Per expert, `sc_measure` perturbs 768 targets
+per layer on Qwen3.6-35B-A3B, ~10 s each, over 4 h per layer and about a GPU-week per model
+(cloud, 2026-10-23), and the result would be unloadable anyway: our `exl3_mgemm` path and
+exllamav3's `MultiLinear` both require one K across a layer's experts.
+
+**Unblocks:** recipe ladders for MoE models. Qwen3.6-35B-A3B is parked here with its traces and
+uncalibrated rungs recorded.
+
+**Candidate:** arriving with the exllamav3 1.6.4 merge (`merge-1.6.4`): upstream's target grouping
+(`1d641116`) and streaming (`6f336da2`) with our four `sc_measure` flags ported on top, and a
+`--group {all,experts,none}` switch that `quant.py` pins to `experts` (`MEASURE_GROUPS`), so dense
+keys and seeds stay what every earlier chunk has. Closes when a grouped MoE measurement has run
+end to end into a recipe that loads; the 35B is the test.
+
+## `gemma4-recipe` — Recipes wreck gemma-4: the measurement starves its late layers
+
+**Outcome:** a recipe ladder for gemma-4 that beats its uncalibrated baseline, or a guard that
+falls back to uniform bits where the measurement cannot be trusted. Parked 2026-10-23.
+
+**Unblocks:** gemma-4 31B and the 26B MoE, for which 12B is the proxy.
+
+**What is known** (cloud canary, record in `~/cloud/record/gemma-4-12B-it-exl3/`): the recipe
+ladder scored 0.95-2.45x the *uncalibrated* baseline's excess (wild 2.1-2.8x at 3-5 bpw; swe
+1.3-1.7x), nearly flat from 2.5 to 3.0 bpw. The allocation falls steadily with depth: at 4 bpw
+layers 0-19 get 5-7 bits and 30-47 get 2-3 (MLPs mostly 2), sliding and full-attention layers
+alike, and the recipe predicted 0.0147 KLD where wild measured 0.117. Ruled out: the constant
+rfn anchors (this run used the probe), KV sharing (`num_kv_shared_layers` 0), layer type.
+
+**Candidate next steps, cheapest first:** (1) a calibrated *uniform* 4 bpw from the same
+calibration: near 0.6x uncalibrated, as elsewhere, would clear the calibration and put it all on
+the recipe; (2) perturb one MLP near layer 40 and one near layer 5 by the same rfn and run
+gemma's full forward: if layer 40's KL is far above what `sc_measure` recorded, `sc_measure`
+mis-measures gemma (its final-logit softcap or per-layer scalars are the suspects when it reruns
+the tail from a perturbed layer).
+
+## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
+
+**Outcome:** each of exllamav3 1.6.4's changed defaults either adopted or rejected on a
+measurement, and its pin in `quant.py` removed or given its reason. Pinned to pre-1.6.4 behaviour:
+`convert.py --out_scales` (`always`; upstream `auto` drops output scales on gate/up projections
+whose calibration statistics predict lower error without), `sc_optimize -tie` (`k_proj+v_proj,
+gate_proj+up_proj`; upstream adds `q_proj` to the k/v tie and GDN `in_proj_qkv+in_proj_z`), and
+`sc_measure -g` (`experts`; upstream groups dense q/k/v(/g), gate/up and GDN qkv/z as single
+measurement targets too).
+
+**Unblocks:** whatever each is worth on our models. Upstream chose them for its own runtime (one K
+per fused kernel launch); our plugin runs mixed widths within a fused projection, so the kernel
+argument does not transfer and only the quality argument is left to test.
+
+**Candidate:** `out_scales` first, as a uniform-bits qbench A/B on the 0.6B and the 9B (it moves
+every conversion, recipe or not); the two recipe-side ties together as one recipe arm, since `-g
+all` only changes keys if the ties change with it. Per-tensor allocation is settled as a
+preference, so the recipe arm is a quick rule-in/out, not a study.
+
 ## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
 
 **Outcome:** under vLLM the allocator is a deliberate, visible choice per deployment, and the
