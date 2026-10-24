@@ -1559,11 +1559,19 @@ half steps (`sc_optimize -ks 0.5`) and checkpoints the plugin serves.
 **Unblocks:** a finer allocation grain for every recipe, and possibly better 2.5/3.5 rungs than
 today's mix of whole-bit tensors at the same size.
 
-**Candidate:** plugin first, since nothing can be measured through vLLM until it loads:
-`format.bits_from_trellis_shape` assumes an integer K (`last // TILE`), and the merged kernels take
-`half_k`. Then one A/B on the 0.6B and the 9B: a uniform native 3.5 against today's 3.5 rung at
-equal size, and a `-ks 0.5` recipe against the integer recipe. Queued with `yaqa`'s output-only
-arm as the next pipeline block. Evidence so far is upstream's commit only (`07b8a2e0`).
+**Done: the plugin serves them** (2026-10-24). `format` accepts 1.5/2.5/3.5 (mul1 only, refused
+otherwise), the MoE and embedding ops take a float width, and the reconstruct path no longer
+truncates K from the shape. `tests/test_half_widths.py` checks every path against exllamav3 from
+random tensors (seen to fail with the truncation put back). A native 3.5 Qwen3-0.6B through vLLM
+matches exllamav3 within the integer rung's own engine gap (wild KL 0.0708 exllamav3, 0.0712
+eager, 0.0713 graphs; 4.0: 0.0322 vs 0.0327).
+
+**Candidate, now:** the A/B on the 0.6B and the 9B. The control arm exists: `convert.py
+--no_half_steps` (fork) restores the whole-bit mix (-b 3.5 gives 70 tensors at 3 and 126 at 4,
+against 196 at 3.5), and `quant.py` pins it (`HALF_STEPS = False`) until this decides. Arms: native
+3.5 against the whole-bit 3.5 at equal size, uniform and calibrated; then a `-ks 0.5` recipe
+against the integer recipe; the 2.5 rung the same way. TP=2 of a half-width checkpoint is not yet
+run.
 
 ## `yaqa` — YAQA-quality rounding in the quantizer
 
@@ -1983,7 +1991,9 @@ measurement, and its pin in `quant.py` removed or given its reason. Pinned to pr
 whose calibration statistics predict lower error without), `sc_optimize -tie` (`k_proj+v_proj,
 gate_proj+up_proj`; upstream adds `q_proj` to the k/v tie and GDN `in_proj_qkv+in_proj_z`), and
 `sc_measure -g` (`experts`; upstream groups dense q/k/v(/g), gate/up and GDN qkv/z as single
-measurement targets too, and a MoE layer's experts as one target where ours keeps three).
+measurement targets too, and a MoE layer's experts as one target where ours keeps three), and
+`convert.py --no_half_steps` (`HALF_STEPS = False`; upstream allocates in half-bit steps below 4
+bpw with mul1 -- measured under `half-rate-tensors`, not here).
 
 **Unblocks:** whatever each is worth on our models. Upstream chose them for its own runtime (one K
 per fused kernel launch); our plugin runs mixed widths within a fused projection, so the kernel

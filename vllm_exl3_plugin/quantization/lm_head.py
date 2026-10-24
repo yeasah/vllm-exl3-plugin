@@ -107,7 +107,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
         suh = self._shard(params, "suh", 0, layer)
         svh = self._shard(params, "svh", 0, layer)
 
-        bits = format.bits_from_trellis_shape(trellis.shape)
+        bits = format.bits_from_trellis_shape(trellis.shape, "mul1" in params)
         stored_in, stored_out = format.dims_from_trellis_shape(trellis.shape)
         # At TP=1 nothing was sliced and the checkpoint is sized against the
         # real vocabulary; at TP>1 the loader already cut this rank's slice.

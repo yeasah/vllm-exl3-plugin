@@ -56,6 +56,35 @@ class TestTrellisShapes(unittest.TestCase):
             format.trellis_shape(2048, 100, 4)
 
 
+class TestHalfIntegerWidths(unittest.TestCase):
+    """exllamav3 >= 1.6.4 stores 1.5 / 2.5 / 3.5 bpw tensors (mul1 only) as 16 * K words per tile."""
+
+    def test_roundtrip(self):
+        for bits in format.HALF_BITS:
+            with self.subTest(bits=bits):
+                shape = format.trellis_shape(4096, 1024, bits)
+                self.assertEqual(shape[2], int(16 * bits))
+                self.assertEqual(format.bits_from_trellis_shape(shape, mul1=True), bits)
+                self.assertEqual(format.bits_from_trellis_shape(shape), bits)  # codebook unknown
+
+    def test_refuses_without_mul1(self):
+        with self.assertRaises(format.EXL3FormatError):
+            format.bits_from_trellis_shape([256, 64, 56], mul1=False)
+
+    def test_refuses_other_fractions(self):
+        # 4.5 has no kernel instance; 1.25 is not a half step at all
+        for last in (72, 20, 8):
+            with self.subTest(last=last):
+                with self.assertRaises(format.EXL3FormatError):
+                    format.bits_from_trellis_shape([256, 64, last], mul1=True)
+        with self.assertRaises(format.EXL3FormatError):
+            format.trellis_shape(4096, 1024, 4.5)
+
+    def test_integer_widths_unchanged(self):
+        # An integer width needs no codebook, so mul1=False must not refuse it
+        self.assertEqual(format.bits_from_trellis_shape([256, 64, 48], mul1=False), 3)
+
+
 class TestMixedBitWidths(unittest.TestCase):
     """A merged linear cannot assume one bit width across its shards."""
 

@@ -43,6 +43,10 @@ PAD_TO = 128
 
 MIN_BITS = 1
 MAX_BITS = 8
+#: Half-integer widths (exllamav3 >= 1.6.4): KA- and (KA + 1)-bit trellis steps alternate, so a
+#: tile is 16 * K = 16 * KA + 8 uint16 words. The kernels instantiate only these three, and only
+#: with the mul1 codebook.
+HALF_BITS = (1.5, 2.5, 3.5)
 
 #: Block size and value width of the block-scaled embedding format (`blockq.py`).
 #: Duplicated there as torch-facing constants; these are the torch-free copies the
@@ -87,16 +91,27 @@ def pad_dim(n: int, pad_to: int = PAD_TO) -> int:
     return (n + pad_to - 1) // pad_to * pad_to
 
 
-def bits_from_trellis_shape(shape) -> int:
-    """Recover the per-tensor bit width K from a trellis tensor's shape."""
+def bits_from_trellis_shape(shape, mul1: bool | None = None) -> int | float:
+    """Recover the per-tensor bit width K from a trellis tensor's shape: an int, or one of
+    `HALF_BITS` as a float. A half-integer K needs the mul1 codebook, so a caller that knows the
+    tensor's codebook passes `mul1` and a half-integer width without it is refused here rather than
+    decoded by a kernel table that has no such entry."""
     if len(shape) != 3:
         raise EXL3FormatError(f"trellis must be 3-dimensional, got shape {list(shape)}")
     last = shape[2]
     if last % TILE != 0:
-        raise EXL3FormatError(
-            f"trellis last dim {last} is not a multiple of {TILE}; "
-            "cannot recover bit width"
-        )
+        half = last / TILE
+        if half not in HALF_BITS:
+            raise EXL3FormatError(
+                f"trellis last dim {last} gives bit width {half}, which is neither an integer "
+                f"nor one of the half-integer widths {HALF_BITS}; cannot recover bit width"
+            )
+        if mul1 is False:
+            raise EXL3FormatError(
+                f"half-integer bit width {half} (trellis shape {list(shape)}) without the mul1 "
+                "codebook; exllamav3 only defines half-integer widths for mul1"
+            )
+        return half
     bits = last // TILE
     if not MIN_BITS <= bits <= MAX_BITS:
         raise EXL3FormatError(f"implausible bit width {bits} from trellis shape {list(shape)}")
@@ -110,14 +125,16 @@ def dims_from_trellis_shape(shape) -> tuple[int, int]:
     return shape[0] * TILE, shape[1] * TILE
 
 
-def trellis_shape(in_features: int, out_features: int, bits: int) -> tuple[int, int, int]:
+def trellis_shape(in_features: int, out_features: int, bits: int | float) -> tuple[int, int, int]:
     """The trellis shape a tensor of these dimensions and bit width must have."""
     if in_features % TILE or out_features % TILE:
         raise EXL3FormatError(
             f"EXL3 dimensions must be multiples of {TILE}, "
             f"got in={in_features} out={out_features}"
         )
-    return in_features // TILE, out_features // TILE, TILE * bits
+    if not (MIN_BITS <= bits <= MAX_BITS and (float(bits).is_integer() or bits in HALF_BITS)):
+        raise EXL3FormatError(f"no EXL3 bit width {bits}")
+    return in_features // TILE, out_features // TILE, int(TILE * bits)
 
 
 def is_had_aligned(n: int) -> bool:

@@ -31,7 +31,7 @@ import torch
 from torch.library import Library
 
 from . import env
-from .format import HAD_BLOCK, TILE
+from .format import HAD_BLOCK, TILE, bits_from_trellis_shape
 
 _EXT = None
 
@@ -107,7 +107,7 @@ def had_right(x: torch.Tensor, block: int = HAD_BLOCK) -> torch.Tensor:
     return (x.view(k, -1, block) @ had).view(k, n).to(orig_dtype)
 
 
-def reconstruct(trellis: torch.Tensor, bits: int, mcg: bool, mul1: bool) -> torch.Tensor:
+def reconstruct(trellis: torch.Tensor, bits: int | float, mcg: bool, mul1: bool) -> torch.Tensor:
     """Decode a trellis into the dense *inner* weight, shape (in, out), fp16.
 
     This is the quantized matrix before regularization is undone -- the input and
@@ -127,7 +127,7 @@ def dense_weight(
     trellis: torch.Tensor,
     suh: torch.Tensor,
     svh: torch.Tensor,
-    bits: int,
+    bits: int | float,
     mcg: bool,
     mul1: bool,
 ) -> torch.Tensor:
@@ -177,7 +177,7 @@ def _embed_rows(
     trellis: torch.Tensor,
     suh: torch.Tensor,
     svh: torch.Tensor,
-    bits: int,
+    bits: float,
     mcg: bool,
     mul1: bool,
     token_ids: torch.Tensor,
@@ -291,7 +291,7 @@ def _embed_rows_static(
     trellis: torch.Tensor,
     suh: torch.Tensor,
     svh: torch.Tensor,
-    bits: int,
+    bits: int | float,
     mcg: bool,
     mul1: bool,
     token_ids: torch.Tensor,
@@ -348,7 +348,7 @@ def _embed_rows_fake(
     trellis: torch.Tensor,
     suh: torch.Tensor,
     svh: torch.Tensor,
-    bits: int,
+    bits: float,
     mcg: bool,
     mul1: bool,
     token_ids: torch.Tensor,
@@ -365,7 +365,7 @@ def embed_rows(
     trellis: torch.Tensor,
     suh: torch.Tensor,
     svh: torch.Tensor,
-    bits: int,
+    bits: int | float,
     mcg: bool,
     mul1: bool,
     token_ids: torch.Tensor,
@@ -563,7 +563,9 @@ def _reconstruct_mm(
     weight, then the output Hadamard with `svh` post-scaling.
     """
     e = ext()
-    bits = trellis.shape[2] // TILE
+    # Never `shape[2] // TILE`: a half-integer width (3.5 bpw is 56 words per tile) would truncate
+    # to the integer K below it and decode plausible garbage
+    bits = bits_from_trellis_shape(trellis.shape, mul1)
     k = trellis.shape[0] * TILE
     n = _out_features(trellis)
 
@@ -718,8 +720,8 @@ def _exl3_moe_mm(
     down_trellis: torch.Tensor,
     down_suh: torch.Tensor,
     down_svh: torch.Tensor,
-    gate_bits: int,
-    down_bits: int,
+    gate_bits: float,
+    down_bits: float,
     intermediate: int,
     num_experts: int,
     mcg: bool,
@@ -814,8 +816,8 @@ def _exl3_moe_mm_fake(
     down_trellis: torch.Tensor,
     down_suh: torch.Tensor,
     down_svh: torch.Tensor,
-    gate_bits: int,
-    down_bits: int,
+    gate_bits: float,
+    down_bits: float,
     intermediate: int,
     num_experts: int,
     mcg: bool,

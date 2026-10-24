@@ -82,7 +82,7 @@ class EXL3EmbeddingMethod(EXL3LMHeadMethod):
             layer.exl3_trellis_0,
             layer.exl3_suh_0,
             layer.exl3_svh_0,
-            format.bits_from_trellis_shape(layer.exl3_trellis_0.shape),
+            format.bits_from_trellis_shape(layer.exl3_trellis_0.shape, self.mul1),
             self.mcg,
             self.mul1,
             flat,

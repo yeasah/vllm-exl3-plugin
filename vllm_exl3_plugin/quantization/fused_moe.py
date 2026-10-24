@@ -243,7 +243,7 @@ class EXL3MoEMethod(FusedMoEMethodBase):
                 tensors = self._collect(layer, prefix, shard_id, name)
                 self._check_uniform(tensors, f"{prefix}{name}")
                 groups[name] = tensors
-            bits[label] = format.bits_from_trellis_shape(groups["trellis"][0].shape)
+            bits[label] = format.bits_from_trellis_shape(groups["trellis"][0].shape, self.mul1)
 
             for name, tensors in groups.items():
                 # Strong references, so the storage the pointer table addresses

@@ -282,7 +282,7 @@ class EXL3LinearMethod(LinearMethodBase):
             suh = self._shard(params, "suh", index, layer)
             svh = self._shard(params, "svh", index, layer)
 
-            bits = format.bits_from_trellis_shape(trellis.shape)
+            bits = format.bits_from_trellis_shape(trellis.shape, has_mul1)
             stored_in, stored_out = format.dims_from_trellis_shape(trellis.shape)
             self._check_shapes(
                 layer, index, stored_in, stored_out, out_size, suh, svh

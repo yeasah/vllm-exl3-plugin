@@ -2185,6 +2185,7 @@ def do_baseline(job, args):
             ok = run_until(os.path.join(out, "quantization_config.json"),
                            [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
                              "-hq", "-b", bits, "-hb", headbits, "-vb", "16", "--out_scales", OUT_SCALES,
+                             *([] if HALF_STEPS else ["--no_half_steps"]),
                              "-i", path, "-w", work, "-o", out, "-d", "0" ],
                            job.log(f"baseline-{rev}"), args.retries + 1, env=gpu_env(slot),
                            cleanup=lambda: shutil.rmtree(work, ignore_errors=True), echo=echo)
@@ -2219,13 +2220,16 @@ MEASURE_ROWS = {"self": 20, "ctx_user:*": 0, "ctx_tool:*": 0, "loop": 0, "raw": 
 MEASURE_CHUNK = 20         # rows per sc_measure run: its boundary cache grows with rows
 MEASURE_H_ROWS = 64        # Hessian-capture rows, the same in every run: the calibration's first
 OWNVOICE_SHARE = 1.0       # unconditional: see MEASURE_ROWS
-# exllamav3 1.6.4 changed three defaults that move every dense recipe or conversion; pinned to the
+# exllamav3 1.6.4 changed four defaults that move every dense recipe or conversion; pinned to the
 # pre-1.6.4 behaviour until each is measured as its own arm (TODO exl3-1.6.4-defaults):
 MEASURE_GROUPS = "experts"   # sc_measure -g: a MoE layer's routed experts are one target (a per-expert
                              # measurement is impractical); dense tensors stay individually measured, so
                              # their keys and seeds match every earlier measurement chunk (upstream: all)
 RECIPE_TIES = "k_proj+v_proj,gate_proj+up_proj"   # sc_optimize -tie (upstream adds q_proj and GDN qkv+z)
 OUT_SCALES = "always"        # convert.py --out_scales (upstream: auto, off for some gate/up projections)
+HALF_STEPS = False           # convert.py's 1.5/2.5/3.5 steps below 4 bpw (upstream: on with mul1, so -b 3.5
+                             # is a native 3.5 and sub-4 baselines can hold half-integer tensors); off passes
+                             # --no_half_steps, the pre-1.6.4 whole-bit mix (TODO half-rate-tensors)
 
 def row_labels(job, ids, k=32):
     """Each calibration row's content category, by matching its opening tokens against the
@@ -2605,7 +2609,8 @@ def do_quantize(job, args):
                                  "-w", workdir,
                                  "-o", revdir,
                                  "-d", "0" ] +
-                               ([ "-rcp", recipe ] if recipe else [ "-hq", "-b", bits, "-hb", headbits ]) +
+                               ([ "-rcp", recipe ] if recipe else [ "-hq", "-b", bits, "-hb", headbits ]
+                                + ([] if HALF_STEPS else ["--no_half_steps"])) +
                                ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []),
                                log_path, gpu_env(slot), echo)
             if not os.path.isfile(donefile):
