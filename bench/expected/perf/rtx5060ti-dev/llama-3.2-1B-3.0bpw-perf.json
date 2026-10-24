@@ -10,21 +10,21 @@
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "gpu_count": 2,
   "capability": "12.0",
-  "vllm_reported": "0.29.1.dev15+g2f3e2a7db",
-  "pkg.digest": "c4789d30d1e1",
-  "pkg.count": 243,
-  "pkg.transformers": "5.15.0",
+  "vllm_reported": "0.32.1.dev16+g1f3b03290",
+  "pkg.digest": "20150ba563de",
+  "pkg.count": 246,
+  "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "5113b6c",
-   "head": "5113b6c703",
+   "describe": "d1703ed",
+   "head": "d1703eda71",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
-   "describe": "v0.29.0-18-g4307a53a3d",
-   "head": "4307a53a3d",
+   "describe": "v0.32.0-16-g1f3b032909",
+   "head": "1f3b032909",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -38,22 +38,22 @@
   },
   "driver": "610.57.04"
  },
- "decode": 1814.7,
- "decode_spread_pct": 0.39,
+ "decode": 1814.9,
+ "decode_spread_pct": 0.47,
  "decode_samples": [
-  1816.2,
-  1815.5,
-  1810.0,
-  1809.2,
-  1814.7
+  1822.4,
+  1814.9,
+  1814.1,
+  1821.0,
+  1813.8
  ],
- "prefill": 17439.3,
- "prefill_spread_pct": 0.46,
+ "prefill": 17496.6,
+ "prefill_spread_pct": 0.3,
  "prefill_samples": [
-  17462.3,
-  17439.3,
-  17461.7,
-  17401.7,
-  17382.9
+  17518.3,
+  17500.1,
+  17466.1,
+  17496.6,
+  17486.9
  ]
 }

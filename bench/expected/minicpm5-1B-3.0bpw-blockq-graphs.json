@@ -12,35 +12,35 @@
  "enforce_eager": false,
  "tensor_parallel_size": 1,
  "k": 20,
- "platform": null,
+ "platform": "rtx5060ti-dev",
  "environment": {
   "torch": "2.13.0+cu130",
   "cuda": "13.0",
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "gpu_count": 2,
   "capability": "12.0",
-  "vllm_reported": "0.29.1.dev15+g2f3e2a7db",
-  "pkg.digest": "c4789d30d1e1",
-  "pkg.count": 243,
-  "pkg.transformers": "5.15.0",
+  "vllm_reported": "0.32.1.dev16+g1f3b03290",
+  "pkg.digest": "20150ba563de",
+  "pkg.count": 246,
+  "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "4752c83",
-   "head": "4752c837f8",
+   "describe": "d1703ed",
+   "head": "d1703eda71",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
-   "describe": "v0.29.0-18-g4307a53a3d",
-   "head": "4307a53a3d",
+   "describe": "v0.32.0-16-g1f3b032909",
+   "head": "1f3b032909",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.4.9-81-gf5c360e3",
-   "head": "f5c360e31b",
+   "describe": "v1.4.9-84-ge02f2957",
+   "head": "e02f2957d1",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -50,39 +50,39 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpy8r6rti8/caches/exllamav3_autotune",
+   "path": "/tmp/tmp9n04bd3b/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 4912,
-   "mtime": 1792774430
+   "mtime": 1792802109
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpy8r6rti8/caches/vllm",
+   "path": "/tmp/tmp9n04bd3b/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 7,
-   "bytes": 1952200,
-   "mtime": 1792774444
+   "bytes": 1953259,
+   "mtime": 1792802126
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpy8r6rti8/caches/triton",
+   "path": "/tmp/tmp9n04bd3b/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 433,
-   "bytes": 10174178,
-   "mtime": 1792774444
+   "files": 369,
+   "bytes": 8867650,
+   "mtime": 1792802132
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpy8r6rti8/caches/flashinfer",
+   "path": "/tmp/tmp9n04bd3b/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
-   "bytes": 6288841,
-   "mtime": 1792774478
+   "bytes": 6290521,
+   "mtime": 1792802160
   }
  },
  "hardware": {
@@ -91,7 +91,7 @@
     "temperature.gpu": "55",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "25.86 W",
+    "power.draw": "26.05 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -103,7 +103,7 @@
     "temperature.gpu": "39",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "10.16 W",
+    "power.draw": "10.08 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
