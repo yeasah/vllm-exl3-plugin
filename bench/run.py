@@ -184,6 +184,30 @@ def _blob_digest(path: str) -> str | None:
         return None
 
 
+def _blob_keys(path: str) -> set[int]:
+    """The record hashes in an exllamav3 autotune blob (coop_autotune_v1: a 16-byte
+    header carrying the record size, then fixed-size records led by a u64 hash).
+    A header embedded mid-file -- two processes' first appends racing, which the
+    reader skips -- is skipped here too."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            b = f.read()
+    except OSError:
+        return set()
+    if len(b) < 16:
+        return set()
+    magic, _, size = struct.unpack_from("<8sII", b, 0)
+    keys, off = set(), 16
+    while off + size <= len(b):
+        if b[off:off + 8] == magic:
+            off += 16
+            continue
+        keys.add(struct.unpack_from("<Q", b, off)[0])
+        off += size
+    return keys
+
+
 def install_tune_fixture(root: str | None) -> tuple[str | None, str | None]:
     """Seed the run's autotune cache from the committed fixture.
 
@@ -250,7 +274,7 @@ def cache_env(env: dict, root: str | None) -> dict:
 
 def run_entry(entry: suite.Entry, out_path: str, timeout: int,
               cache_root: str | None = None, warmup: bool = False,
-              report_drift: bool = True) -> dict:
+              report_drift: bool = True, seed_tune: bool = True) -> dict:
     """Capture one entry in its own process, returning the measurement.
 
     With `warmup`, the entry is run once and discarded before the run that counts.
@@ -261,7 +285,9 @@ def run_entry(entry: suite.Entry, out_path: str, timeout: int,
     cmd = [sys.executable, os.path.join(HERE, "capture.py"), entry.name,
            "--out", out_path]
     env = cache_env(_env_with_nvcc(), cache_root)
-    tune_dest, tune_before = install_tune_fixture(cache_root)
+    # seed_tune=False is for freeze-tune, which accumulates one blob over many entries:
+    # seeding there overwrote everything the earlier entries had tuned
+    tune_dest, tune_before = install_tune_fixture(cache_root) if seed_tune else (None, None)
     print(f"  -- {entry.label}", flush=True)
     if warmup:
         print("     warming caches (discarded run)", flush=True)
@@ -838,6 +864,7 @@ def cmd_freeze_tune(args) -> int:
     print("  every entry below tunes from empty; that is what is being captured\n")
     with tempfile.TemporaryDirectory() as tmp:
         root = os.path.join(tmp, "caches")
+        blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
         for e in suite.by_tier(args.tier):
             if e.known_broken:
                 print(f"  -- {e.label}\n     ! known broken, skipped")
@@ -858,8 +885,18 @@ def cmd_freeze_tune(args) -> int:
                 # Drift is not reported here: nothing is seeded during a freeze, so
                 # every entry tunes by construction. Saying so per entry would be an
                 # alarm that always fires, which is how one stops being read.
+                before = _blob_keys(blob)
                 run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
-                          cache_root=root, warmup=True, report_drift=False)
+                          cache_root=root, warmup=True, report_drift=False, seed_tune=False)
+                # The blob only ever grows: an entry that loses records an earlier one
+                # tuned means something rewrote it. Until this check existed, every
+                # re-freeze copied the committed fixture over the blob at each entry's
+                # start, so a "freeze" kept the old fixture plus the last entry's shapes
+                lost = before - _blob_keys(blob)
+                if lost:
+                    print(f"\n{len(lost)} autotune record(s) from earlier entries vanished during "
+                          f"{e.name}; the blob is being overwritten, refusing to freeze it")
+                    return 1
             except SystemExit as exc:
                 print(f"     ! capture failed, its shapes will be missing: {exc}")
         blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
