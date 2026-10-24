@@ -1902,9 +1902,13 @@ uncalibrated rungs recorded.
 
 **Candidate:** arriving with the exllamav3 1.6.4 merge (`merge-1.6.4`): upstream's target grouping
 (`1d641116`) and streaming (`6f336da2`) with our four `sc_measure` flags ported on top, and a
-`--group {all,experts,none}` switch that `quant.py` pins to `experts` (`MEASURE_GROUPS`), so dense
-keys and seeds stay what every earlier chunk has. Closes when a grouped MoE measurement has run
-end to end into a recipe that loads; the 35B is the test.
+`--group {all,experts,none}` switch that `quant.py` pins to `experts` (`MEASURE_GROUPS`): a layer's
+routed experts as three targets, one per projection type (upstream's `all` makes one), and dense
+keys and seeds unchanged from every earlier chunk. The existing `gate_proj+up_proj` tie gives the
+expert gate/up pair the one K the fused w13 GEMM needs; down stays free. On Qwen3.6-35B-A3B that
+is 371 targets instead of 30,971, and a synthetic measurement through `sc_optimize` gives a recipe
+uniform per (layer, projection) with gate = up everywhere. Closes when a real grouped measurement
+has run end to end into a recipe that loads; the 35B is the test.
 
 ## `gemma4-recipe` — Recipes wreck gemma-4: the measurement starves its late layers
 
@@ -1935,16 +1939,17 @@ measurement, and its pin in `quant.py` removed or given its reason. Pinned to pr
 whose calibration statistics predict lower error without), `sc_optimize -tie` (`k_proj+v_proj,
 gate_proj+up_proj`; upstream adds `q_proj` to the k/v tie and GDN `in_proj_qkv+in_proj_z`), and
 `sc_measure -g` (`experts`; upstream groups dense q/k/v(/g), gate/up and GDN qkv/z as single
-measurement targets too).
+measurement targets too, and a MoE layer's experts as one target where ours keeps three).
 
 **Unblocks:** whatever each is worth on our models. Upstream chose them for its own runtime (one K
 per fused kernel launch); our plugin runs mixed widths within a fused projection, so the kernel
 argument does not transfer and only the quality argument is left to test.
 
 **Candidate:** `out_scales` first, as a uniform-bits qbench A/B on the 0.6B and the 9B (it moves
-every conversion, recipe or not); the two recipe-side ties together as one recipe arm, since `-g
-all` only changes keys if the ties change with it. Per-tensor allocation is settled as a
-preference, so the recipe arm is a quick rule-in/out, not a study.
+every conversion, recipe or not). The recipe-side two are expected rejects -- both coarsen the
+allocation, and per-type sensitivity differences are what a recipe exploits -- so they get one
+quick rule-in/out arm together (`-g all` only changes keys if the ties change with it), not a
+study.
 
 ## `allocator-policy` — The plugin, not an import side effect, chooses the allocator under vLLM
 

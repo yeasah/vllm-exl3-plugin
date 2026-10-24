@@ -2184,7 +2184,7 @@ def do_baseline(job, args):
                 print(f"=== BASELINE {rev} (uncalibrated) ===")
             ok = run_until(os.path.join(out, "quantization_config.json"),
                            [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
-                             "-hq", "-b", bits, "-hb", headbits, "-vb", "16",
+                             "-hq", "-b", bits, "-hb", headbits, "-vb", "16", "--out_scales", OUT_SCALES,
                              "-i", path, "-w", work, "-o", out, "-d", "0" ],
                            job.log(f"baseline-{rev}"), args.retries + 1, env=gpu_env(slot),
                            cleanup=lambda: shutil.rmtree(work, ignore_errors=True), echo=echo)
@@ -2219,6 +2219,13 @@ MEASURE_ROWS = {"self": 20, "ctx_user:*": 0, "ctx_tool:*": 0, "loop": 0, "raw": 
 MEASURE_CHUNK = 20         # rows per sc_measure run: its boundary cache grows with rows
 MEASURE_H_ROWS = 64        # Hessian-capture rows, the same in every run: the calibration's first
 OWNVOICE_SHARE = 1.0       # unconditional: see MEASURE_ROWS
+# exllamav3 1.6.4 changed three defaults that move every dense recipe or conversion; pinned to the
+# pre-1.6.4 behaviour until each is measured as its own arm (TODO exl3-1.6.4-defaults):
+MEASURE_GROUPS = "experts"   # sc_measure -g: a MoE layer's routed experts are one target (a per-expert
+                             # measurement is impractical); dense tensors stay individually measured, so
+                             # their keys and seeds match every earlier measurement chunk (upstream: all)
+RECIPE_TIES = "k_proj+v_proj,gate_proj+up_proj"   # sc_optimize -tie (upstream adds q_proj and GDN qkv+z)
+OUT_SCALES = "always"        # convert.py --out_scales (upstream: auto, off for some gate/up projections)
 
 def row_labels(job, ids, k=32):
     """Each calibration row's content category, by matching its opening tokens against the
@@ -2356,7 +2363,8 @@ def do_measure(job, args):
         out = os.path.join(category_dir(job), name + ".json")
         dev = ["-gs", args.gpu_split] if args.gpu_split else ["-d", "0"]
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_measure.py"), "-m", path, *dev,
-                          "-r", str(b - a), "-hr", str(MEASURE_H_ROWS), "--shaped", "-rk", "-tr", rows_file, "-o", out + ".part" ] +
+                          "-r", str(b - a), "-hr", str(MEASURE_H_ROWS), "--shaped", "-rk", "-g", MEASURE_GROUPS,
+                          "-tr", rows_file, "-o", out + ".part" ] +
                         (["-bc"] if args.boundary_cpu else []) +
                         (["-rr", rfn, "-rs", "1.0,0.5"] if os.path.isfile(rfn) else []),
                         job.log(f"measure-{name}"), gpu_env(",".join(gpus)) if args.gpu_split else gpu_env(gpus[0]))
@@ -2506,7 +2514,7 @@ def plan_recipes(job, args, recipe_source, share, rfn):
                                                      os.path.join(pdir, f"{rev}.measurement.json"))
         out = os.path.join(pdir, f"{rev}.yaml")
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"), "-m", meas, "-b", bits, "-hb", headbits,
-                          "-al", str(args.alpha), "-mink", str(args.min_k), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
+                          "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
                         job.log(f"plan-{rev}"), None, False)
         if rc or not os.path.isfile(out):
             print(f"=== {rev}: solve FAILED (log {job.log(f'plan-{rev}')}) ==="); return False
@@ -2571,7 +2579,7 @@ def do_quantize(job, args):
                                                              os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
                                   "-m", meas, "-b", bits, "-hb", headbits,
-                                  "-al", str(args.alpha), "-mink", str(args.min_k), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", recipe ] +
+                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", recipe ] +
                                 ([ "-rr", rfn ] if rfn else []),
                                 job.log(f"{rev}-recipe"), None, echo)
                 if rc or not os.path.isfile(recipe):
@@ -2592,7 +2600,7 @@ def do_quantize(job, args):
                 else:
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
                     run_logged([ "python3", script,
-                                 "-vb", "16",
+                                 "-vb", "16", "--out_scales", OUT_SCALES,
                                  "-i", path,
                                  "-w", workdir,
                                  "-o", revdir,
