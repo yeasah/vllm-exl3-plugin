@@ -673,7 +673,7 @@ def plot_slice(sc, path):
                 fontsize=7, color=INK2)
     if ys_all:
         lo = min(min(ys_all), sc['floor'], *[v for _, v in thr]) / 1.5
-        ax.set_ylim(lo, max(max(ys_all), *[v for _, v in thr]) * 1.5)
+        ax.set_ylim(lo, max([*ys_all, *[v for _, v in thr]]) * 1.5)
         ax.axhspan(lo, 2 * sc['floor'], color="#ffffff", alpha=0.07, lw=0, zorder=0)
         ax.axhline(2 * sc['floor'], color=INK2, lw=0.8, ls=":", zorder=1)
         ax.text(0.99, 2 * sc['floor'], "2x noise floor", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
