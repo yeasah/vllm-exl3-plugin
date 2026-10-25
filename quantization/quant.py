@@ -222,6 +222,7 @@ def collect_metadata(job, qbench):
     data['multimodal'] = base_sizes['encoder'] > 0
 
     data['eval_generator'] = eval_generator_named(job)
+    data['generation_config'] = published_generation_config(job)[1]
 
     floor = {sl: parse_qbench(res, 'Noise floor')['kld'] for sl, res in qbench.items()}
     data['floor'] = floor
@@ -970,12 +971,19 @@ def do_upload(job, args):
                     exist_ok=True)
 
     fetched = os.path.isfile(os.path.join(job.dir, "FETCHED.json"))
+    gen_config, gen_record = published_generation_config(job)
+    if gen_record and gen_record["action"] != "unchanged":
+        print(f"=== generation_config.json {gen_record['action']} in each revision: the base model card's "
+              f"{gen_record['mode']} sampling {gen_record['values']} ===")
     if fetched:
         print("=== fetched job dir: uploading main only (its revisions are weightless stand-ins) ===")
     for rev in ['main'] + ([] if fetched else job.revisions()):
         if not job.is_complete(rev):
             continue
         folder = stage_main(job, fetched) if rev == "main" else job.revdir(rev)
+        if rev != "main" and gen_config is not None:
+            with open(os.path.join(folder, "generation_config.json"), "w") as f:
+                json.dump(gen_config, f, indent=2)
         msg = args.message or (f"{job.name}: model card, results and traces" if rev == "main"
                                else f"{job.name} {rev}")
         print(f"=== UPLOADING {job.revdir(rev)}: {msg} ===")
@@ -1886,6 +1894,39 @@ def report_failures(failed, what, logs):
     return not failed
 
 SAMPLING_DIR = os.path.join(HERE, "sampling")
+
+#: Sampling keys a published generation_config.json carries (all of them read by vLLM's server defaults)
+GC_SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "frequency_penalty",
+                    "repetition_penalty")
+
+def published_generation_config(job):
+    """(generation_config.json to publish with each revision, record for the card), or (None, None).
+    From the checked-in sampling profile's catch-all mode (its rule without a slice): the base model card's
+    stated recommendation for general use, which several models give only in prose -- shipping no
+    generation_config.json, so servers fall back to temperature 1.0 untruncated, or one holding the
+    benchmark-reproduction settings instead. Only the sampling keys are set; the base model's other keys
+    (token ids, ...) are kept. The card states what was added or changed and from where."""
+    prof = os.path.join(SAMPLING_DIR, job.base_repo.replace("/", "__") + ".json")
+    if not os.path.isfile(prof):
+        return None, None
+    with open(prof) as f:
+        p = json.load(f)
+    mode_name = next((r["mode"] for r in p.get("rules", []) if set(r) == {"mode"}), None)
+    if mode_name is None:
+        return None, None
+    mode = {k: v for k, v in p["modes"][mode_name].items() if k in GC_SAMPLING_KEYS}
+    base = None
+    if HfApi().file_exists(job.base_repo, "generation_config.json"):
+        with open(hf_hub_download(job.base_repo, "generation_config.json")) as f:
+            base = json.load(f)
+    if base is None:
+        action, prior, gc = "added", {}, {**mode, "do_sample": True}
+    else:
+        changed = [k for k in mode if base.get(k) != mode[k]]
+        if not changed:
+            return base, {"action": "unchanged", "mode": mode_name, "source": p["source"], "values": mode, "prior": {}}
+        action, prior, gc = "modified", {k: base.get(k) for k in changed}, {**base, **mode, "do_sample": True}
+    return gc, {"action": action, "mode": mode_name, "source": p["source"], "values": mode, "prior": prior}
 
 def resolve_sampling_profile(job, args, path):
     """The sampling profile every trace is generated with, written to _traces/sampling.json:

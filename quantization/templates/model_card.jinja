@@ -13,7 +13,9 @@ Bits are allocated per tensor, from the model's measured sensitivity on its own 
 {{ card_note }}
 {% endif %}
 Actual consumed VRAM may be significantly lower than the total checkpoint size, depending on configuration: see the VRAM column below.
-{% set mixed_cal = revisions | map(attribute='calibration') | unique | list | length > 1 %}
+{% if generation_config and generation_config.action != 'unchanged' %}{% set gc = generation_config %}
+**Sampling defaults: `generation_config.json` {{ 'added' if gc.action == 'added' else 'changed from the base model' }}.** The base model's card recommends {% for k, v in gc['values'].items() %}`{{ k }}={{ v }}`{% if not loop.last %}, {% endif %}{% endfor %} for {{ gc.mode }} use, but its repository {% if gc.action == 'added' %}ships no `generation_config.json`, so servers fall back to their own defaults (vLLM: temperature 1.0, no truncation){% else %}ships a `generation_config.json` with {% for k, v in gc.prior.items() %}`{{ k }}={{ v }}`{% if not loop.last %}, {% endif %}{% endfor %} instead{% endif %}. Each revision here carries the card's values in that file, so servers that honor it (vLLM, TabbyAPI) default to the model's documented sampling. That is the only metadata change: the chat template and every other setting are the base model's, and clients that send their own sampling parameters are unaffected. Source: {{ gc.source }}.
+{% endif %}{% set mixed_cal = revisions | map(attribute='calibration') | unique | list | length > 1 %}
 ---
 
 # Which size?
