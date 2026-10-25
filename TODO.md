@@ -1974,16 +1974,21 @@ non-monotone even along one fixed error direction. On qbench's wild responses th
 and 0.0011 -- the chaos floor, which matches qbench's own bf16-rounding noise floor that its "excess"
 already subtracts. The measurement rows amplify it ~30x (positions 1-3 after BOS take 0.5-2 nats from
 rfn 0.001 noise; positions 64-255 still ~0.1). The recipe spends bits on a bitrate-independent cost.
+**The trigger is the window start:** the same rows realigned to begin at BOS + a conversation opening
+(`poscheck2.py`) drop to 0.0012 (rfn 0.0009 noise) and 0.0013 (real 4 bpw) -- layer 1's real cost is
+~0.0001 above the floor -- and stay calm past position 16, where packed rows are still at 0.032. Long
+pasted user content (code, foreign-language documents) is the other trigger: wild's prompt region runs
+0.03-0.08 per row; responses are calm, which is why qbench never saw it.
 Probes: `quant_work/_gemma/realscale.py`, `poscheck.py`. Side result: real error rescaled from 4 bpw
 predicts the real 3 bpw KL within 7-25% on all four layers tried; iid misses by 0.3-2.9x.
 
-**Candidate next steps:** (1) measure the floor: a third, tiny `sc_measure` level (rfn ~0.001) per
-tensor, subtracted before fitting -- an amend mode can add it to existing 2-level measurements; first
-confirm `sc_measure`'s fp16 path shows the same chaos. (2) Find what in the packed calibration rows
-excites it and measure on rows that don't (qbench's chat-formatted rows don't). (3) The guard: a tensor
-whose tiny-rfn KL is near its working-rfn KL has no measurable slope and stays at the uniform rate;
-the MoE early-layer routing floor may be the same thing -- decide after the Qwen3.6-35B-A3B floor-fit
-vs `-hq` A/B. Work dir: `quant_work/_gemma`; old run in `~/cloud/record/old-gemma-no-bos`.
+**Candidate next steps:** (1) `pack_rows` packs whole conversations: every row starts at BOS + a
+conversation start, the tail cuts anywhere; re-measure gemma and re-run the recipe A/B. (2) Score
+assistant tokens only in `sc_measure` (a mask through to the KL), as qbench does. (3) The remaining
+~0.001 floor (bf16 harness; fp16 `sc_measure` unchecked) rivals real late-layer costs, so a tiny-rfn
+third level or the floor fit still has a job. (4) Qwen3.6-35B-A3B's rows were packed the same way; its
+early-layer routing floor may be partly this -- check before building the guard. Work dir:
+`quant_work/_gemma`; old run in `~/cloud/record/old-gemma-no-bos`.
 
 ## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
 
