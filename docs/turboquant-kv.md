@@ -417,6 +417,35 @@ served by 4bit_nc with less boundary protection — which their own flag cannot 
 the ask is not to relax a guard they have just published evidence for; it is to make
 reachable the configuration that dominates the branch they are recommending against.
 
+### Not TurboQuant: CJK tokens spliced into long sessions (2026-10-24)
+
+A 135k-token agent session on Ornith-1.5-9B (4.00bpw, `turboquant_4bit_nc`, an RTX 3060) degraded late
+into foreign-script tokens spliced mid-word ("the修罗", "are我吗", "ex多7B-exl3") and, at worst, runs of
+garbage. Its first regenerations pointed at TurboQuant: fp8 and NVFP4 responses came out clean. They were
+one or two samples each. Replaying the server's logged request exactly (`--enable-log-requests` at debug
+level gives the JSON body), n=8 per arm, on this host:
+
+| KV cache, exact request | spliced tokens per 1k chars |
+|---|---|
+| bf16 (no quantization) | 0.19 |
+| nvfp4 | 0.18 |
+| fp8 | 0.15 |
+| turboquant_4bit_nc (two seeds) | 0.13, 0.13 |
+| turboquant_4bit_nc, `top_k=20` | 0 |
+
+Independent of the cache; it reproduces on stock vLLM 0.32.0 with the bf16 weights at TP=2, so neither
+EXL3 nor our patches either. The cause is sampling: the harness sent no parameters, and the model ships no
+`generation_config.json`, so the server sampled at temperature 1.0 with no truncation, which reaches a
+tail holding ~0.9% of the mass per step outside the top 20. Ornith's tail is ~25-30% heavier than its
+parent Qwen3.5-9B's at both 135k and 1k context (bf16 KV) and splices more often, but Qwen3.5 does it
+too; context length moves the tail only ~30%. The card's recommended sampling (`top_k=20`) removes it,
+and `quant.py upload` now publishes that as each revision's `generation_config.json`.
+
+**What is TurboQuant's here:** decode speed. At 135k context the session decoded at 15 tok/s under
+`turboquant_4bit_nc` against 38 (fp8) and 36 (nvfp4) on the same card, falling steadily from 28 tok/s at
+45k. A splice rate is also the wrong instrument for a KV cache: n=1-2 responses per arm cannot separate
+0.13 from 0.19 per 1k chars. The record is in `~/tq-conv` and `quant_work/_tqconv`.
+
 ## Reproducing
 
 The harness is [tools/gsm8k_kv.py](../tools/gsm8k_kv.py); per-item results for
