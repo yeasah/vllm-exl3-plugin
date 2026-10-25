@@ -1966,21 +1966,25 @@ ahead of turboderp's default-corpus ladder (0.60x) -- so gemma quants ship witho
 the old recipe was 4.9x worse; BOS-opened measurement rows (packer fix, `aa2c6ce`) took it to 2.3x, and
 `sc_optimize --floor_fit` to 1.76x (swe 2.8x -> 1.6x -> 1.3x). Ruled out: calibration itself (uniform
 on our mix matches turboderp's), `sc_measure`'s machinery and fp16 (iid matches a bf16 Transformers
-ground truth), the constant rfn anchors (the probe is 0.1320 for every tensor), low-bit regimes (6 bpw
-was bad too). **The cause left standing:** gemma's early layers (1-4) pay a KL floor of ~0.04 under
-*any* random weight perturbation, iid or shaped, from rfn 0.26 down to 0.033 -- real in bf16, not an
-artifact -- while real 4-bit quantization of every tensor at once costs the whole model only 0.023.
-Real quantization error avoids whatever random noise trips (it does reach it at 3 bits: layer 4's
-`down_proj` alone, real 3 bpw, 0.042). The measurement therefore prices early layers far above their
-real cost and the optimizer starves the rest.
+ground truth), the constant rfn anchors, low-bit regimes. **The cause:** the early-layer "floor" is
+numerical chaos, not sensitivity. In a bf16 Transformers ground truth on the measurement rows, layer 1
+`down_proj` costs 0.036 KL under iid noise at rfn 0.0009 and 0.050 at its real 4 bpw error (rfn 0.077);
+real 3 bpw only 0.059. Any change to the weights scrambles the downstream result, so KL is jagged and
+non-monotone even along one fixed error direction. On qbench's wild responses the same arms cost 0.0011
+and 0.0011 -- the chaos floor, which matches qbench's own bf16-rounding noise floor that its "excess"
+already subtracts. The measurement rows amplify it ~30x (positions 1-3 after BOS take 0.5-2 nats from
+rfn 0.001 noise; positions 64-255 still ~0.1). The recipe spends bits on a bitrate-independent cost.
+Probes: `quant_work/_gemma/realscale.py`, `poscheck.py`. Side result: real error rescaled from 4 bpw
+predicts the real 3 bpw KL within 7-25% on all four layers tried; iid misses by 0.3-2.9x.
 
-**Candidate next steps:** (1) a guard: `sc_optimize` leaves floor-dominated tensors (effective
-exponent well below 2) at the uniform rate and reallocates only among measurable ones -- the same rule
-would cover the MoE routing floor; decide after the Qwen3.6-35B-A3B floor-fit vs `-hq` A/B. (2) The
-mechanism, only if gemma recipes matter: per-channel activation magnitude at the BOS position in
-layers 1-4, then noise on the weights reading the largest channel alone vs the rest. Hypothesis: a
-massive-activation (attention-sink) channel whose weights real Hessian-aware rounding protects and
-random noise does not. Work dir: `quant_work/_gemma`; old run in `~/cloud/record/old-gemma-no-bos`.
+**Candidate next steps:** (1) measure the floor: a third, tiny `sc_measure` level (rfn ~0.001) per
+tensor, subtracted before fitting -- an amend mode can add it to existing 2-level measurements; first
+confirm `sc_measure`'s fp16 path shows the same chaos. (2) Find what in the packed calibration rows
+excites it and measure on rows that don't (qbench's chat-formatted rows don't). (3) The guard: a tensor
+whose tiny-rfn KL is near its working-rfn KL has no measurable slope and stays at the uniform rate;
+the MoE early-layer routing floor may be the same thing -- decide after the Qwen3.6-35B-A3B floor-fit
+vs `-hq` A/B. Work dir: `quant_work/_gemma`; old run in `~/cloud/record/old-gemma-no-bos`.
+
 ## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
 
 **Outcome:** each of exllamav3 1.6.4's changed defaults either adopted or rejected on a
