@@ -1953,27 +1953,34 @@ is 371 targets instead of 30,971, and a synthetic measurement through `sc_optimi
 uniform per (layer, projection) with gate = up everywhere. Closes when a real grouped measurement
 has run end to end into a recipe that loads; the 35B is the test.
 
-## `gemma4-recipe` — Recipes wreck gemma-4: the measurement starves its late layers
+## `gemma4-recipe` — Recipes wreck gemma-4: random-noise measurement misses its early layers
 
-**Outcome:** a recipe ladder for gemma-4 that beats its uncalibrated baseline, or a guard that
-falls back to uniform bits where the measurement cannot be trusted. Parked 2026-10-23.
+**Outcome:** a recipe ladder for gemma-4 that beats a uniform ladder at equal size, or a guard that
+keeps the recipe away from tensors the measurement cannot see. **Fallback in hand:** uniform bits with
+our calibration (BOS-fixed) score 0.55x the uncalibrated baseline at 4 bpw on wild and 0.51x on swe,
+ahead of turboderp's default-corpus ladder (0.60x) -- so gemma quants ship without a recipe.
 
-**Unblocks:** gemma-4 31B and the 26B MoE, for which 12B is the proxy.
+**Unblocks:** recipe ladders for gemma-4 31B and the 26B MoE, for which 12B is the proxy.
 
-**What is known** (cloud canary, record in `~/cloud/record/gemma-4-12B-it-exl3/`): the recipe
-ladder scored 0.95-2.45x the *uncalibrated* baseline's excess (wild 2.1-2.8x at 3-5 bpw; swe
-1.3-1.7x), nearly flat from 2.5 to 3.0 bpw. The allocation falls steadily with depth: at 4 bpw
-layers 0-19 get 5-7 bits and 30-47 get 2-3 (MLPs mostly 2), sliding and full-attention layers
-alike, and the recipe predicted 0.0147 KLD where wild measured 0.117. Ruled out: the constant
-rfn anchors (this run used the probe), KV sharing (`num_kv_shared_layers` 0), layer type.
+**What is known** (2026-10-25, 12B at 4 bpw, wild excess vs a uniform rung on the same calibration):
+the old recipe was 4.9x worse; BOS-opened measurement rows (packer fix, `aa2c6ce`) took it to 2.3x, and
+`sc_optimize --floor_fit` to 1.76x (swe 2.8x -> 1.6x -> 1.3x). Ruled out: calibration itself (uniform
+on our mix matches turboderp's), `sc_measure`'s machinery and fp16 (iid matches a bf16 Transformers
+ground truth), the constant rfn anchors (the probe is 0.1320 for every tensor), low-bit regimes (6 bpw
+was bad too). **The cause left standing:** gemma's early layers (1-4) pay a KL floor of ~0.04 under
+*any* random weight perturbation, iid or shaped, from rfn 0.26 down to 0.033 -- real in bf16, not an
+artifact -- while real 4-bit quantization of every tensor at once costs the whole model only 0.023.
+Real quantization error avoids whatever random noise trips (it does reach it at 3 bits: layer 4's
+`down_proj` alone, real 3 bpw, 0.042). The measurement therefore prices early layers far above their
+real cost and the optimizer starves the rest.
 
-**Candidate next steps, cheapest first:** (1) a calibrated *uniform* 4 bpw from the same
-calibration: near 0.6x uncalibrated, as elsewhere, would clear the calibration and put it all on
-the recipe; (2) perturb one MLP near layer 40 and one near layer 5 by the same rfn and run
-gemma's full forward: if layer 40's KL is far above what `sc_measure` recorded, `sc_measure`
-mis-measures gemma (its final-logit softcap or per-layer scalars are the suspects when it reruns
-the tail from a perturbed layer).
-
+**Candidate next steps:** (1) a guard: `sc_optimize` leaves floor-dominated tensors (effective
+exponent well below 2) at the uniform rate and reallocates only among measurable ones -- the same rule
+would cover the MoE routing floor; decide after the Qwen3.6-35B-A3B floor-fit vs `-hq` A/B. (2) The
+mechanism, only if gemma recipes matter: per-channel activation magnitude at the BOS position in
+layers 1-4, then noise on the weights reading the largest channel alone vs the rest. Hypothesis: a
+massive-activation (attention-sink) channel whose weights real Hessian-aware rounding protects and
+random noise does not. Work dir: `quant_work/_gemma`; old run in `~/cloud/record/old-gemma-no-bos`.
 ## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
 
 **Outcome:** each of exllamav3 1.6.4's changed defaults either adopted or rejected on a
