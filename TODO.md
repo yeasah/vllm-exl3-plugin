@@ -511,6 +511,21 @@ arm, on the 0.6B and the 9B; then the 27B at TP=2. UltraQuant (`ultraquant_4bit`
 power-of-two group scales and rotated keys) is the ROCm-only sibling; its Triton paths are
 portable if NVFP4 disappoints.
 
+## `tq-decode-slowdown` — TurboQuant decode at long context: upstream's cost or our slabbing?
+
+**Outcome:** know whether `turboquant_4bit_nc`'s long-context decode slowdown is TurboQuant's own or
+ours. In a 135k-token session on Ornith-1.5-9B it decoded at 15 tok/s against fp8's 38 and NVFP4's 36
+on the same RTX 3060, falling steadily from 28 tok/s at 45k (docs/turboquant-kv.md, "Not TurboQuant").
+
+**Unblocks:** TurboQuant as a long-context option, and whether our continuation-prefill slabbing
+(`4e6e94c5a0`, `b5e5eb4be3`) owes a fix.
+
+**Candidate:** decode tok/s at 50k/100k/135k on the stock vLLM 0.32.0 venv
+(`/home/bulk/ypell/venv-vllm-stock`) against the fork, same bf16 model at TP=2 and same request. First
+suspect on our side: `b5e5eb4be3` makes `_tq_full_dequant_kv`'s slab offset a `tl.constexpr`, so Triton
+compiles a variant per distinct offset (the "JIT compilation during inference" warning seen in these
+runs) -- a cost that grows with context, though on the prefill side.
+
 ## `turboquant-sliding-window` — TurboQuant KV cache for sliding-window models
 
 *Written up in [docs/turboquant-kv.md](docs/turboquant-kv.md), Part 1. What follows is
