@@ -1,0 +1,9 @@
+{
+ "source": "IQuestLab/IQuest-Coder-V1-40B-Thinking README, For the IQuest-Coder-V1-Thinking: We suggest using Temperature=1.0, TopP=0.95, TopK=20. read 2026-10-25",
+ "modes": {
+  "general": {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
+ },
+ "rules": [
+  {"mode": "general"}
+ ]
+}
