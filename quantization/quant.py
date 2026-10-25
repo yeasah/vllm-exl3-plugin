@@ -1928,6 +1928,15 @@ def published_generation_config(job):
         action, prior, gc = "modified", {k: base.get(k) for k in changed}, {**base, **mode, "do_sample": True}
     return gc, {"action": action, "mode": mode_name, "source": p["source"], "values": mode, "prior": prior}
 
+def recipe_floor_args(meas):
+    """sc_optimize --floor_fit for a MoE measurement (grouped expert targets carry "members"): routing
+    flips put a KL floor under every perturbation, which on Qwen3.6-35B-A3B was ~70% of the top level's
+    KL, nearly equal for every tensor, so unfitted sensitivities come out flat. Dense models keep the
+    plain fit; their floor is ~0.1% and the fit would only reshuffle on two-point noise."""
+    with open(meas) as f:
+        moe = any("members" in r for r in json.load(f)["results"])
+    return ["-ff"] if moe else []
+
 def resolve_sampling_profile(job, args, path):
     """The sampling profile every trace is generated with, written to _traces/sampling.json:
     an explicit --sampling-profile; else a checked-in quantization/sampling/<org>__<model>.json
@@ -2583,7 +2592,7 @@ def plan_recipes(job, args, recipe_source, share, rfn):
                                                      os.path.join(pdir, f"{rev}.measurement.json"))
         out = os.path.join(pdir, f"{rev}.yaml")
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"), "-m", meas, "-b", bits, "-hb", headbits,
-                          "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, "-ks", str(RECIPE_K_STEP), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
+                          "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, "-ks", str(RECIPE_K_STEP), *(["-all", str(args.alpha_low)] if args.alpha_low else []), *recipe_floor_args(meas), "-o", out ] + ([ "-rr", rfn ] if rfn else []),
                         job.log(f"plan-{rev}"), None, False)
         if rc or not os.path.isfile(out):
             print(f"=== {rev}: solve FAILED (log {job.log(f'plan-{rev}')}) ==="); return False
@@ -2648,7 +2657,7 @@ def do_quantize(job, args):
                                                              os.path.join(job.dir, "_recipes", f"{rev}.measurement.json"))
                 rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_optimize.py"),
                                   "-m", meas, "-b", bits, "-hb", headbits,
-                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, "-ks", str(RECIPE_K_STEP), *(["-all", str(args.alpha_low)] if args.alpha_low else []), "-o", recipe ] +
+                                  "-al", str(args.alpha), "-mink", str(args.min_k), "-tie", RECIPE_TIES, "-ks", str(RECIPE_K_STEP), *(["-all", str(args.alpha_low)] if args.alpha_low else []), *recipe_floor_args(meas), "-o", recipe ] +
                                 ([ "-rr", rfn ] if rfn else []),
                                 job.log(f"{rev}-recipe"), None, echo)
                 if rc or not os.path.isfile(recipe):
