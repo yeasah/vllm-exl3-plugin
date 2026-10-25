@@ -2293,19 +2293,38 @@ def row_labels(job, ids, k=32):
         out.append("/".join(sorted(hit)) if hit else ("random" if row.float().std() > 0.25 * row.max() else "raw"))
     return out
 
-def measure_categories(job, cal):
+def exl3_calibration_data(args):
+    """exllamav3's conversion/calibration_data.py, loaded by path: the row packer the calibration file was
+    made with, without importing the exllamav3 package (which loads its CUDA extension)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "exl3_calibration_data", os.path.join(args.exllamav3dir, "exllamav3", "conversion", "calibration_data.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+def trace_bos_id(path, rows):
+    """The BOS id to open every packed row with, or None: the tokenizer's BOS when the chat template
+    starts every trace conversation with it (gemma), none when it emits none (Qwen)."""
+    from transformers import AutoTokenizer
+    bos = AutoTokenizer.from_pretrained(path).bos_token_id
+    return bos if bos is not None and rows and all(r["input_ids"][:1] == [bos] for r in rows) else None
+
+def measure_categories(job, cal, args, path):
     """{category: [rows of token ids]}: trace conversations packed per category as the calibration
-    packs a slice (concatenated, cut to full width), kind-pure; raw and random rows from the
-    calibration file past its Hessian rows."""
+    packs a slice (concatenated, cut to full width, each row opened with BOS on a model that uses one),
+    kind-pure; raw and random rows from the calibration file past its Hessian rows."""
     cols = cal.shape[1]
     with open(os.path.join(job.traces, "cal_cal.json")) as f:
         rows = json.load(f)["rows"]
+    pack_rows = exl3_calibration_data(args).pack_rows
+    bos_id = trace_bos_id(path, rows)
     streams = {}
     for r in rows:
         sl = r.get("slice")
         cat = f"{sl}:{r.get('kind')}" if sl in ("ctx_user", "ctx_tool") else sl
         streams.setdefault(cat, []).extend(r["input_ids"] + r["response_ids"])
-    out = {c: [st[i * cols:(i + 1) * cols] for i in range(len(st) // cols)] for c, st in streams.items()}
+    out = {c: pack_rows(st, cols, bos_id) for c, st in streams.items()}
     rest = cal[MEASURE_H_ROWS:]
     for i, lab in enumerate(row_labels(job, rest)):
         if lab in ("raw", "random"):
@@ -2371,7 +2390,7 @@ def do_measure(job, args):
     os.makedirs(category_dir(job), exist_ok=True)
     cal = load_file(job.cal_data)["input_ids"]
     hess = cal[:MEASURE_H_ROWS]
-    cats = measure_categories(job, cal)
+    cats = measure_categories(job, cal, args, path)
     want = measure_counts(cats, args.rows)
     rfn = os.path.join(job.measure, "rfn.json")
     # The anchor rung: the lowest integer rate (a fractional rate mixes K per tensor)
