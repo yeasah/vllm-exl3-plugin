@@ -1932,27 +1932,6 @@ discarded by vLLM's existing padding mask. The alternative, an uneven split at b
 fights vLLM's equal-shard vocab layout. Evidence: [docs/tensor-parallel.md](docs/tensor-parallel.md),
 *Vocab-parallel `lm_head`* (the rule, and MiniCPM5 as the aligned case).
 
-## `moe-recipe-grouping` — Measure a MoE layer's experts as one target
-
-**Outcome:** `quant.py measure` on a MoE model costs roughly what a dense model of the same depth
-does, and produces a recipe both engines can load. Per expert, `sc_measure` perturbs 768 targets
-per layer on Qwen3.6-35B-A3B, ~10 s each, over 4 h per layer and about a GPU-week per model
-(cloud, 2026-10-23), and the result would be unloadable anyway: our `exl3_mgemm` path and
-exllamav3's `MultiLinear` both require one K across a layer's experts.
-
-**Unblocks:** recipe ladders for MoE models. Qwen3.6-35B-A3B is parked here with its traces and
-uncalibrated rungs recorded.
-
-**Candidate:** arriving with the exllamav3 1.6.4 merge (`merge-1.6.4`): upstream's target grouping
-(`1d641116`) and streaming (`6f336da2`) with our four `sc_measure` flags ported on top, and a
-`--group {all,experts,none}` switch that `quant.py` pins to `experts` (`MEASURE_GROUPS`): a layer's
-routed experts as three targets, one per projection type (upstream's `all` makes one), and dense
-keys and seeds unchanged from every earlier chunk. The existing `gate_proj+up_proj` tie gives the
-expert gate/up pair the one K the fused w13 GEMM needs; down stays free. On Qwen3.6-35B-A3B that
-is 371 targets instead of 30,971, and a synthetic measurement through `sc_optimize` gives a recipe
-uniform per (layer, projection) with gate = up everywhere. Closes when a real grouped measurement
-has run end to end into a recipe that loads; the 35B is the test.
-
 ## `gemma4-recipe` — Recipes wreck gemma-4: random-noise measurement misses its early layers
 
 **Outcome:** a recipe ladder for gemma-4 that beats a uniform ladder at equal size, or a guard that
@@ -1962,33 +1941,32 @@ ahead of turboderp's default-corpus ladder (0.60x) -- so gemma quants ship witho
 
 **Unblocks:** recipe ladders for gemma-4 31B and the 26B MoE, for which 12B is the proxy.
 
-**What is known** (2026-10-25, 12B at 4 bpw, wild excess vs a uniform rung on the same calibration):
-the old recipe was 4.9x worse; BOS-opened measurement rows (packer fix, `aa2c6ce`) took it to 2.3x, and
-`sc_optimize --floor_fit` to 1.76x (swe 2.8x -> 1.6x -> 1.3x). Ruled out: calibration itself (uniform
-on our mix matches turboderp's), `sc_measure`'s machinery and fp16 (iid matches a bf16 Transformers
-ground truth), the constant rfn anchors, low-bit regimes. **The cause:** the early-layer "floor" is
-numerical chaos, not sensitivity. In a bf16 Transformers ground truth on the measurement rows, layer 1
-`down_proj` costs 0.036 KL under iid noise at rfn 0.0009 and 0.050 at its real 4 bpw error (rfn 0.077);
-real 3 bpw only 0.059. Any change to the weights scrambles the downstream result, so KL is jagged and
-non-monotone even along one fixed error direction. On qbench's wild responses the same arms cost 0.0011
-and 0.0011 -- the chaos floor, which matches qbench's own bf16-rounding noise floor that its "excess"
-already subtracts. The measurement rows amplify it ~30x (positions 1-3 after BOS take 0.5-2 nats from
-rfn 0.001 noise; positions 64-255 still ~0.1). The recipe spends bits on a bitrate-independent cost.
-**The trigger is the window start:** the same rows realigned to begin at BOS + a conversation opening
-(`poscheck2.py`) drop to 0.0012 (rfn 0.0009 noise) and 0.0013 (real 4 bpw) -- layer 1's real cost is
-~0.0001 above the floor -- and stay calm past position 16, where packed rows are still at 0.032. Long
-pasted user content (code, foreign-language documents) is the other trigger: wild's prompt region runs
-0.03-0.08 per row; responses are calm, which is why qbench never saw it.
-Probes: `quant_work/_gemma/realscale.py`, `poscheck.py`. Side result: real error rescaled from 4 bpw
-predicts the real 3 bpw KL within 7-25% on all four layers tried; iid misses by 0.3-2.9x.
+**What is known** (2026-10-25/26, 12B at 4 bpw; the full account is in
+[docs/qbench.md](docs/qbench.md) "KL floors, flat scaling, and where recipes stop paying"): the
+early-layer cost the measurement sees is numerical chaos, not sensitivity. It comes from measurement
+windows cut mid-conversation after BOS. Rows realigned to a turn opening fall to the bf16 floor, and
+layer 1's real 4 bpw cost is ~0.0001 above it. BOS-opened rows (`aa2c6ce`) and `--floor_fit` had cut
+the recipe's deficit from 4.9x a uniform rung to 1.76x (wild). The calibration is unaffected by the
+same framing ([docs/calibration.md](docs/calibration.md) "Row framing does not reach the quantizer").
 
-**Candidate next steps:** (1) `pack_rows` packs whole conversations: every row starts at BOS + a
-conversation start, the tail cuts anywhere; re-measure gemma and re-run the recipe A/B. (2) Score
-assistant tokens only in `sc_measure` (a mask through to the KL), as qbench does. (3) The remaining
-~0.001 floor (bf16 harness; fp16 `sc_measure` unchecked) rivals real late-layer costs, so a tiny-rfn
-third level or the floor fit still has a job. (4) Qwen3.6-35B-A3B's rows were packed the same way; its
-early-layer routing floor may be partly this -- check before building the guard. Work dir:
-`quant_work/_gemma`; old run in `~/cloud/record/old-gemma-no-bos`.
+**Candidate next steps:** (1) turn-aligned measurement rows for BOS models: `pack_rows` with windows
+opening at a turn, as `quant_work/_calpack/build_cal.py --mode turn` does for calibration. Re-measure
+the 12B, then re-run the recipe A/B against uniform, with `sc_optimize --floor` from a tiny-rfn pass
+for whatever floor remains. (2) If it still loses, gemma ships uniform. Work dir: `quant_work/_gemma`.
+
+## `recipe-value` — When is a measurement worth its cost?
+
+**Outcome:** a rule for which models get a measured recipe and which get uniform bits (`-hq` on a
+MoE), so the hours of measurement are spent only where they pay. Known so far: recipes win on dense
+Qwen-family models (27B -11.5% composite, Ornith-9B, Qwen3-0.6B), lose on gemma-4 (`gemma4-recipe`),
+and trade slices on Qwen3.6-35B-A3B. The models where they win scale near rfn^2 on their measurement
+rows (Ornith: 1.9 at every depth; 27B: 1.45-1.9). The others don't: the MoE at 0.44-1.45, and gemma
+before its chaos was explained.
+
+**Candidates:** (1) the exponent profile as a cheap predictor: a 20-row own-voice measurement, or a few
+tensors per depth band, before committing to the full one. (2) Per-tensor or per-family exponents in
+`sc_optimize` instead of the pinned `-al 2.0`, tested on the 35B. The near-linear regime there (and
+under loud content on the 27B) is what the quadratic law misprices.
 
 ## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
 
@@ -2451,6 +2429,11 @@ divergence is deliberately all qbench measures),
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending.*
+
+- `moe-recipe-grouping` — closed 2026-10-26, see [docs/qbench.md](docs/qbench.md) "KL floors, flat
+  scaling, and where recipes stop paying". `sc_measure -g experts` measured Qwen3.6-35B-A3B in ~5 h
+  (371 targets, not a GPU-week), and the recipe loaded and converted. It did not beat uniform `-hq`:
+  floor-fit +14%/-2% and measured-floor +26%/-12% (wild/swe excess). `-hq` stays the MoE default.
 
 - `half-rate-tensors` — closed 2026-10-24, see [docs/calibration.md](docs/calibration.md) "Half-integer
   rates". The plugin serves 1.5/2.5/3.5 bpw (`tests/test_half_widths.py`); half-step recipes beat

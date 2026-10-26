@@ -1442,6 +1442,54 @@ on that model (the tools for it stay: `measure --rows` for other categories,
 not generalized. `quant.py measure` now measures own voice only by default (20 rows) and `quantize`
 uses share 1.
 
+## KL floors, flat scaling, and where recipes stop paying (2026-10-25 to -26)
+
+**A KL floor is often chaos, not sensitivity: test it with a tiny perturbation first.** On gemma-4-12B
+the recipe lost to uniform bits at every rate. Its early layers measured far too expensive, and the
+cause was the instrument. Noise at rfn 0.0009 on layer 1 `down_proj` cost 0.036 KL on the measurement
+rows, against 0.050 for its real 4 bpw error (rfn 0.077) and 0.059 at real 3 bpw. In that state any
+change to the weights scrambles the downstream result, and KL is jagged even along one fixed error
+direction (layer 24: 0.0023, 0.0068, 0.0036, 0.0080 at rfn 0.033 to 0.153). The measurement rows
+amplified it ~30x because the packer cut windows mid-conversation: the same rows realigned to start at
+a turn fell to the bf16 floor (0.0012), and layer 1's real 4 bpw cost turned out to be ~0.0001 above
+it. qbench's responses never saw any of this. Its noise floor (~0.0012 here) is this same chaos, which
+is why it reports excess. The probe is `sc_measure --rfn 0.001` (with `--only` for a few tensors);
+`sc_optimize --floor FILE` subtracts the result. Scripts: `quant_work/_gemma/{realscale,poscheck,poscheck2}.py`.
+
+**What triggers it differs by model.** Gemma (BOS as an attention sink): BOS followed by a fragment.
+Qwen-family (no BOS; Ornith-1.5-9B): window starts do nothing, but documents in tool and user turns do.
+On Ornith, layer 1 under rfn 0.001 noise costs 0.016-0.048 on `ctx_tool:*` rows and 0.0007 on own
+voice. Own voice is calm on every model checked, which is one reason it worked as the default
+measurement when nothing else did. The chaos is also partly a bf16 effect: `sc_measure` runs in fp16
+and sees a floor share of ~1% (median) on Ornith's loud rows, where the bf16 probe saw half.
+
+**It does not explain the 27B's loud rows.** Loud categories on Qwen3.8-27B (`ctx_tool:code`, `loop`)
+do carry floors, but only in layers 0-7 (27-47 tensors, 20-81% each, 10-18% of the category's KL), and
+subtracting them moves the rank correlation with own voice from 0.00-0.01 to 0.05-0.09. Even in the
+floor-free second half of the stack, loud rows rank tensors 0.50-0.52 alike against 0.76-0.80 for quiet
+rows, and they move weight from MLPs to linear attention (20% to 37-39%). The mix collapse in the
+section above is real sensitivity on other content, not an artifact. What remains of the early-layer
+difference is a low scaling exponent (rfn^0.6-1.3 under loud content) rather than a floor.
+
+**On a MoE the floor is real and the law is flat; neither fix beat `-hq`.** Qwen3.6-35B-A3B on its own
+voice: layers 0-3 pay 65-80% of their rfn 0.131 KL at rfn 0.001, and the same again at 0.0005 (`k_proj`'s
+injected error does not shrink with the noise: something switches, most likely routing near-ties).
+Floor share across all 371 targets: median 19%, max 77%. Subtracting it still leaves exponents of 0.94
+(layers 0-9) to 1.58 (30-39), so most of the flatness is a near-linear law, plausibly routing flips
+whose count grows with the error. `-al 2.0` overstates what bits buy those tensors. Three arms at 4 bpw,
+excess KL:
+
+| arm | size | wild | swe |
+|---|---|---|---|
+| uniform `-hq` | 20.11 GB | **0.00548** | 0.02639 |
+| recipe, `--floor_fit` | 19.76 GB | 0.00624 (+14%) | 0.02580 (-2%) |
+| recipe, `--floor` measured | 19.76 GB | 0.00693 (+26%) | **0.02320 (-12%)** |
+
+The recipes trade slices instead of improving on `-hq`. The measured floor shifts bits toward early
+experts and shared experts, which hurts chat and helps long-context agent work, and the own-voice
+measurement cannot see that tradeoff. `-hq` is the MoE default; whether per-tensor exponents change
+this is in TODO `recipe-value`. Work: `quant_work/_moe_chaos`, `/home/archive/ypell/moe-allocation-test`.
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)

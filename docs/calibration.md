@@ -768,6 +768,30 @@ rounding and therefore a different draw — not a worse one. Scoring is as stabl
 610.57.04 -> 615.71.09, and CUDA toolkit 13.4.1 -> 13.4.2 with the extension rebuilt,
 left every qbench KL vector bit-identical, the bf16 reference included (2026-10-01).
 
+## Row framing does not reach the quantizer (2026-10-26)
+
+The windows the measurement cuts mid-conversation put gemma into a numerically chaotic state
+([qbench.md](qbench.md) "KL floors, flat scaling, and where recipes stop paying"). The calibration
+packs its rows the same way, so we checked whether framing reaches the Hessians too. Gemma-4-12B,
+uniform 4 bpw (no recipe), raw and random rows identical in every arm, excess KLD:
+
+| calibration packing | wild | swe |
+|---|---|---|
+| pipeline (`pack_rows`, BOS-opened windows) | 0.02353 | 0.01105 |
+| same, conversations reshuffled (`seed 1`) | 0.02394 (+1.7%) | 0.01015 (-8.1%) |
+| every window opening at a turn | 0.02349 (-0.2%) | 0.00987 (-10.7%; -2.8% vs the reshuffle) |
+
+- **Calibration draw noise is about 2% on wild and 8% on swe.** Reshuffling which conversations fill
+  the row budget does that much, and turn-aligned windows land inside the band. The quantizer sees
+  second moments of activations, and a mid-turn window start does not distort them. The chaos matters
+  to the KL measurement, not to calibration.
+- **BOS presence is a different matter.** Missing or mid-row BOS moved wild 9% (0.0253 -> 0.0231),
+  outside that band: on gemma BOS is an attention sink, so its absence changes the activations
+  themselves. The fixed `pack_rows` covers it.
+- Raw rows stay untemplated. Being off template is their purpose: they are the coverage behind the
+  raw-text guard, which the mix already dilutes to a 3-7% cost (above). The builder is
+  `quant_work/_calpack/build_cal.py`.
+
 ## What is open
 
 In `calibration-mix` (TODO.md): tuning the shares on the Ornith proxy, then confirming the
