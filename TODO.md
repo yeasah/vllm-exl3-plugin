@@ -1611,6 +1611,20 @@ fully iterated pair. That is most of the cost problem above gone. **Next pipelin
 calibration at one rung on the 0.6B, then the 9B; memory of the Transformers backward pass is the
 thing to watch on anything larger.
 
+**Measured on Qwen3-0.6B (2026-10-26): two-sided LDLQ is a large, robust win; the YAQA scales are
+not.** The pipeline's own calibration and recipe were used throughout, at 3 and 4 bpw. Hout came from
+`util/yaqa_hessians.py` at its defaults (output side, weighted, 250 rows, ~4.5 min, 11.9 GB). Against the
+pipeline's quant, `-hess` with `--out_scales always` cut excess KL by 17-26% on wild and swe at both
+rates, and a second Hout seed landed at -17% to -20%. `--out_scales yaqa` cost +0.5-3% alone and gave
+back about half the LDLQ gain together (-2% to -10%). That matches the August result that `always`
+sits at the optimum, and it settles the caveat above: the gain survives the out-scales heuristic.
+Plumbing control: `-hess -h1` with `always` is byte-identical to the pipeline quant across all 902
+tensors. **Next:** the 9B. Its collection does not fit 2x16 GB (Transformers backward through the
+whole stack runs out of memory even with `--diag` at 1024 tokens), so Hout is collected on one cloud
+card of 48 GB or more, about 4 `-l` ranges, then converted and qbenched here: R0 vs `-hess` at 3.5 and
+4 bpw, plus a second seed. Then `quant.py` gets a YAQA step beside traces and measurement. Work:
+`quant_work/_yaqa`.
+
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
 
 ## `calibration-mix` — Make the conversational calibration the pipeline default
