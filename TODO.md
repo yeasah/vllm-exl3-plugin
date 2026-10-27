@@ -1619,11 +1619,18 @@ rates, and a second Hout seed landed at -17% to -20%. `--out_scales yaqa` cost +
 back about half the LDLQ gain together (-2% to -10%). That matches the August result that `always`
 sits at the optimum, and it settles the caveat above: the gain survives the out-scales heuristic.
 Plumbing control: `-hess -h1` with `always` is byte-identical to the pipeline quant across all 902
-tensors. **Next:** the 9B. Its collection does not fit 2x16 GB (Transformers backward through the
-whole stack runs out of memory even with `--diag` at 1024 tokens), so Hout is collected on one cloud
-card of 48 GB or more, about 4 `-l` ranges, then converted and qbenched here: R0 vs `-hess` at 3.5 and
-4 bpw, plus a second seed. Then `quant.py` gets a YAQA step beside traces and measurement. Work:
-`quant_work/_yaqa`.
+tensors. **On Ornith-1.5-9B (2026-10-27) the Hout's rows decide it.** Collected from the full calibration,
+two-sided LDLQ gained nothing: wild +0.5% to +4%, swe -1% to -8.5% (inside its draw noise), with two
+seeds agreeing. Rounding against it inflated early-layer weight error by 12-14%, tapering to none by
+the last layer. Collected from 240 bf16-generated own-voice rows (`ctx_trace` self-only, three seeds),
+the same conversion gives **wild -11.1% to -11.6%** at 3.5 and 4 bpw (two Hout seeds), and swe -5% to
+-8% on three of four arms. Re-solving the recipe from a two-sided measurement (`sc_measure --hout`,
+`89f9cd3d`) does not add to it: wild -8% to -10% with the own-voice Hout and worse with the full one,
+swe mixed. So the step is own-voice rows -> Hout (cloud, ~45 min per seed for a 9B on 48-96 GB) ->
+`convert -hess` (1.7x the conversion time); measurement and recipe unchanged. **Open:** whether own
+voice is the rule or a 9B fix. The 0.6B gained -17% to -26% with the full-calibration Hout; re-run it
+with an own-voice Hout locally, then confirm on the 27B. Work: `quant_work/_yaqa9`, Hout and
+measurements in the `yeasah/yaqa-9b-hess` bucket.
 
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
 
