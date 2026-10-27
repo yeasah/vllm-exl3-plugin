@@ -1627,9 +1627,14 @@ the same conversion gives **wild -11.1% to -11.6%** at 3.5 and 4 bpw (two Hout s
 -8% on three of four arms. Re-solving the recipe from a two-sided measurement (`sc_measure --hout`,
 `89f9cd3d`) does not add to it: wild -8% to -10% with the own-voice Hout and worse with the full one,
 swe mixed. So the step is own-voice rows -> Hout (cloud, ~45 min per seed for a 9B on 48-96 GB) ->
-`convert -hess` (1.7x the conversion time); measurement and recipe unchanged. **Open:** whether own
-voice is the rule or a 9B fix. The 0.6B gained -17% to -26% with the full-calibration Hout; re-run it
-with an own-voice Hout locally, then confirm on the 27B. Work: `quant_work/_yaqa9`, Hout and
+`convert -hess` (1.7x the conversion time); measurement and recipe unchanged. **Blended Hout is the default** (2026-10-27): per tensor, the own-voice and full-calibration factors,
+each normalized to unit trace, averaged 50/50 (`quant_work/_yaqa9/blend.py`). On the 9B it keeps
+own voice's chat gain and adds swe: wild -8.0% / -10.7% and swe -4.2% / -11.2% at 3.5 / 4 bpw, the best
+single arm at 4. On Qwen3-0.6B, where the full-calibration Hout already worked (-17% to -26%), own voice
+adds 1-3 points and the blend is best or tied on every cell: wild -19.5% / -22.0%, swe -21.8% / -27.9%
+at 3 / 4 bpw. **Next: `quant.py` integration**, a cloud-phase step for own-voice rows (bf16, three
+seeds, raw fill rows dropped), Hout on them and on the calibration, and the blend, with `quantize`
+passing `-hess`; then real runs, starting with the 27B. Work: `quant_work/_yaqa9`, Hout and
 measurements in the `yeasah/yaqa-9b-hess` bucket.
 
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
