@@ -2668,6 +2668,24 @@ def ownvoice_rows(job, args, path, env):
     save_file({"input_ids": torch.stack(keep).contiguous()}, job.ownvoice)
     return True
 
+def range_logged_ok(log_path, a, b, ranged):
+    """Whether this range's last attempt, as run_logged recorded it, ran the factor tool on exactly
+    layers a:b and exited 0: resume evidence for a run that predates the per-range markers. Tensor
+    files alone are not, as a run killed mid-write leaves a partial range."""
+    if not os.path.isfile(log_path):
+        return False
+    with open(log_path, "rb") as f:
+        lines = [l.decode(errors="ignore") for l in f.read().splitlines() if l.startswith(b"=== ")]
+    starts = [i for i, l in enumerate(lines) if "yaqa_hessians.py" in l]
+    if not starts:
+        return False
+    cmd = lines[starts[-1]]
+    has = re.search(rf" -l {a}:{b}(\s|$)", cmd) is not None
+    if (ranged and not has) or (not ranged and " -l " in cmd):
+        return False
+    after = lines[starts[-1] + 1:starts[-1] + 2]
+    return bool(after) and re.search(r" exit 0 after ", after[0]) is not None
+
 def collect_hout(job, args, path, rows, out, name):
     """util/yaqa_hessians.py at its defaults (output side, weighted, seed 0) over `rows` into `out`,
     --layers-per-run decoder layers at a time when the factors do not fit beside the model."""
@@ -2679,12 +2697,17 @@ def collect_hout(job, args, path, rows, out, name):
     tool = os.path.join(args.exllamav3dir, "util", "yaqa_hessians.py")
     for a in range(0, n_layers, step):
         b = min(a + step, n_layers)
+        mark = os.path.join(out, f".range-{a}-{b}.done")
+        if os.path.isfile(mark) or range_logged_ok(job.log(f"yaqa-{name}-{a}"), a, b, step < n_layers):
+            print(f"=== Hout {name} layers {a}:{b}: already collected ===")
+            continue
         rc = run_logged([ "python3", tool, "-m", path, "-c", rows, "-o", out, "-d", args.device, "--tf32" ] +
                         ([ "-l", f"{a}:{b}" ] if step < n_layers else []) +
                         ([ "-rv", args.reserve_vram ] if args.reserve_vram else []),
                         job.log(f"yaqa-{name}-{a}"), {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
         if rc:
             print(f"=== Hout {name} layers {a}:{b} FAILED (log {job.log(f'yaqa-{name}-{a}')}) ==="); return False
+        open(mark, "w").close()
     files = [f for f in os.listdir(out) if f.endswith(".safetensors")]
     with open(os.path.join(out, YAQA_DONE), "w") as f:
         json.dump({"rows": os.path.basename(rows), "tensors": len(files), "seed": 0, "written": stamp()}, f, indent=1)
