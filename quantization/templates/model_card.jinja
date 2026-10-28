@@ -9,6 +9,8 @@ These quantizations can be used with [exllamav3](https://github.com/turboderp-or
 They are calibrated broadly, on what models read and write while working (documents and tool output in conversations, code and diffs, the model's own replies) rather than on web text alone{% if agentic %}, and measured with agentic and coding work as the primary use case{% endif %}.
 {% endif %}{% if recipe %}
 Bits are allocated per tensor, from the model's measured sensitivity on its own replies, at the same total size as uniform bits.
+{% endif %}{% if yaqa %}
+Values are rounded against how much each output matters to the model's predictions (two-sided LDLQ with an output-side Fisher factor, after YAQA), which changes only how they are rounded: the size and format are the same.
 {% endif %}{% if card_note %}
 {{ card_note }}
 {% endif %}

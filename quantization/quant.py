@@ -42,6 +42,10 @@ class Job:
         # Per-tensor sensitivity measurements from `measure`: two ends of the recipe's measurement
         # mix, blended at quantize time (--ownvoice-share), so a new share needs no remeasuring
         self.measure = os.path.join(self.dir, "_measure")
+        # YAQA output-side Fisher factors from `yaqa` (two-sided LDLQ in `quantize`): on the own-voice
+        # rows, on the calibration, and their blend, which is what conversions use
+        self.hess = os.path.join(self.dir, "_hess")
+        self.ownvoice = os.path.join(self.traces, "ownvoice.safetensors")
 
     def revdir(self, rev):
         return os.path.join(self.dir, rev)
@@ -1232,6 +1236,9 @@ def do_card(job, args):
     note = os.path.join(job.dir, "card_note.md")      # per-job text under the card's intro, e.g. a superseded release
     meta['card_note'] = open(note).read().strip() if os.path.isfile(note) else None
     meta['recipe'] = any(os.path.isfile(os.path.join(job.revdir(r['name']), "recipe.yaml")) for r in meta['revisions'])
+    # Two-sided rounding (`yaqa`): recorded per revision in calibration.json
+    meta['yaqa'] = any("rounding" in json.load(open(os.path.join(job.revdir(r['name']), "calibration.json")))
+                       for r in meta['revisions'] if os.path.isfile(os.path.join(job.revdir(r['name']), "calibration.json")))
     if meta['reference'] and meta['reference']['traces']:
         plot_vs_reference(job, meta['reference'], os.path.join(job.main, "vs_reference.png"))
 
@@ -2609,6 +2616,130 @@ def plan_recipes(job, args, recipe_source, share, rfn):
             print("    nearest: " + ", ".join(f"{n} ({d} tensors differ)" for d, n in diffs[:4]) if diffs else "    nothing to compare with")
     return True
 
+# YAQA (docs/yaqa.md "Blended Hout"): two-sided LDLQ against an output-side Fisher factor. The factor
+# from the calibration alone gained nothing on Ornith-1.5-9B (its documents and tool turns put the
+# gradients through states own voice avoids); from own-voice rows it gave chat -11%; the 50/50 blend
+# kept that and added agent work, and was best or tied on every cell of Qwen3-0.6B (-19% to -28%).
+YAQA_SEEDS = 3              # own-voice passes: one pass over the 157-prompt pool packs ~70-80 rows
+YAQA_OWNVOICE_ROWS = 85     # rows asked of each pass; ctx_trace fills a shortfall with raw rows, dropped after
+YAQA_BLEND = 0.5            # own-voice share of the blended factor, each side normalized to unit trace
+YAQA_DONE = "DONE.json"     # provenance, written last: a factor directory without it is incomplete
+
+def yaqa_ready(job):
+    """The blended factor directory if `yaqa` finished it, else None."""
+    d = os.path.join(job.hess, "blend")
+    return d if os.path.isfile(os.path.join(d, YAQA_DONE)) else None
+
+def ownvoice_rows(job, args, path, env):
+    """Own-voice rows for the output factor: YAQA_SEEDS self-only calibration passes through the eval
+    generator, the raw rows ctx_trace pads a short pass with dropped (matched against the bundled
+    corpus exactly). The held-out own-voice eval prompts are a separate pool, never generated from."""
+    if os.path.isfile(job.ownvoice):
+        return True
+    import torch
+    from safetensors.torch import load_file, save_file
+    ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
+    gen, backend = eval_generator(job, args)
+    sampling = (["--sampling_profile", resolve_sampling_profile(job, args, path)]
+                if resolve_sampling_profile(job, args, path) else [])
+    parts = []
+    for s in range(YAQA_SEEDS):
+        out = os.path.join(job.traces, f"ownvoice_s{s}.safetensors")
+        parts.append(out)
+        if os.path.isfile(out):
+            continue
+        rc = run_logged([ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
+                          "-o", os.path.join(job.traces, f"ownvoice_s{s}"), "--docs", "cal", "--cal_out", out,
+                          "--cal_rows", str(YAQA_OWNVOICE_ROWS), "--cal_cols", "2048",
+                          "--shares", json.dumps({"raw": 0, "ctx": 0, "loop": 0, "self": 1.0, "random": 0}),
+                          "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
+                          "--exclude_self", EVAL_SELF_PROMPTS, "--seed", str(s) ] + sampling + backend,
+                        job.log(f"yaqa-ownvoice-s{s}"), env)
+        if rc or not os.path.isfile(out):
+            print(f"=== own-voice pass {s} FAILED (log {job.log(f'yaqa-ownvoice-s{s}')}) ==="); return False
+    sys.path.insert(0, os.path.abspath(args.exllamav3dir))
+    from exllamav3 import Config, Tokenizer
+    from exllamav3.conversion.calibration_data import get_default_calibration
+    tok = Tokenizer.from_config(Config.from_directory(path))
+    default = {tuple(r.view(-1).tolist()) for r in get_default_calibration({"cal_rows": 250, "cal_cols": 2048}, tok)}
+    rows = torch.cat([load_file(p)["input_ids"] for p in parts], 0)
+    keep = [r for r in rows if tuple(r.tolist()) not in default]
+    print(f"=== own-voice rows: {len(keep)} of {rows.shape[0]} ({rows.shape[0] - len(keep)} raw fill rows dropped) ===")
+    save_file({"input_ids": torch.stack(keep).contiguous()}, job.ownvoice)
+    return True
+
+def collect_hout(job, args, path, rows, out, name):
+    """util/yaqa_hessians.py at its defaults (output side, weighted, seed 0) over `rows` into `out`,
+    --layers-per-run decoder layers at a time when the factors do not fit beside the model."""
+    if os.path.isfile(os.path.join(out, YAQA_DONE)):
+        return True
+    cfg = json.load(open(os.path.join(path, "config.json")))
+    n_layers = (cfg.get("text_config") or cfg)["num_hidden_layers"]
+    step = args.layers_per_run or n_layers
+    tool = os.path.join(args.exllamav3dir, "util", "yaqa_hessians.py")
+    for a in range(0, n_layers, step):
+        b = min(a + step, n_layers)
+        rc = run_logged([ "python3", tool, "-m", path, "-c", rows, "-o", out, "-d", args.device, "--tf32" ] +
+                        ([ "-l", f"{a}:{b}" ] if step < n_layers else []) +
+                        ([ "-rv", args.reserve_vram ] if args.reserve_vram else []),
+                        job.log(f"yaqa-{name}-{a}"), {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        if rc:
+            print(f"=== Hout {name} layers {a}:{b} FAILED (log {job.log(f'yaqa-{name}-{a}')}) ==="); return False
+    files = [f for f in os.listdir(out) if f.endswith(".safetensors")]
+    with open(os.path.join(out, YAQA_DONE), "w") as f:
+        json.dump({"rows": os.path.basename(rows), "tensors": len(files), "seed": 0, "written": stamp()}, f, indent=1)
+    print(f"=== Hout {name}: {len(files)} tensors ===")
+    return True
+
+def blend_hout(a, b, out, wa):
+    """Per tensor: each output factor normalized to unit trace, then wa * a + (1 - wa) * b, packed upper
+    triangles throughout (the converter rescales by the mean diagonal, so only the shape matters)."""
+    import torch
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    os.makedirs(out, exist_ok=True)
+    names = sorted(f for f in os.listdir(a) if f.endswith(".safetensors"))
+    if names != sorted(f for f in os.listdir(b) if f.endswith(".safetensors")):
+        raise SystemExit(f"=== Hout blend: {a} and {b} cover different tensors ===")
+    for f in names:
+        t = {}
+        for src in (a, b):
+            with safe_open(os.path.join(src, f), "pt") as h:
+                t[src] = (h.get_tensor("hout").double(), h.get_tensor("hout_diag").numel())
+        (ha, n), (hb, _) = t[a], t[b]
+        i = torch.arange(n, dtype=torch.long)
+        di = i * n - i * (i - 1) // 2                  # the diagonal of a row-major packed upper triangle
+        hout = (wa * ha / ha[di].sum() + (1 - wa) * hb / hb[di].sum()).float()
+        save_file({"hout": hout, "hout_diag": hout[di].contiguous()}, os.path.join(out, f))
+    return len(names)
+
+def do_yaqa(job, args):
+    """Output-side Fisher factors for two-sided LDLQ: own-voice rows (eval generator), the factor on
+    them and on the calibration, and the blend `quantize` converts with. Holds the unquantized model
+    and its full backward pass (a 9B needs ~44 GB at 4 layers per run), so it runs with the traces
+    and the measurement, on a box sized for them. Each part is skipped when its output exists."""
+    if not os.path.isfile(job.cal_data):
+        print(f"=== no calibration trace at {job.cal_data}: run `traces` first ==="); return False
+    setup = trace_setup(job, args)
+    if setup is None:
+        return False
+    path, _, _ = setup
+    if not ownvoice_rows(job, args, path, eval_env(args)):
+        return False
+    for name, rows in (("ownvoice", job.ownvoice), ("cal", job.cal_data)):
+        if not collect_hout(job, args, path, rows, os.path.join(job.hess, name), name):
+            return False
+    out = os.path.join(job.hess, "blend")
+    if not os.path.isfile(os.path.join(out, YAQA_DONE)):
+        from safetensors.torch import load_file
+        n = blend_hout(os.path.join(job.hess, "ownvoice"), os.path.join(job.hess, "cal"), out, YAQA_BLEND)
+        with open(os.path.join(out, YAQA_DONE), "w") as f:
+            json.dump({"blend": {"ownvoice": YAQA_BLEND, "calibration": 1 - YAQA_BLEND}, "normalization": "unit trace per tensor",
+                       "ownvoice_rows": int(load_file(job.ownvoice)["input_ids"].shape[0]),
+                       "tensors": n, "written": stamp()}, f, indent=1)
+        print(f"=== Hout blend: {n} tensors -> {out} ===")
+    return True
+
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
     if args.calibration == "mix" and not os.path.isfile(job.cal_data):
@@ -2636,6 +2767,14 @@ def do_quantize(job, args):
               f"the measurements, own-voice share {share}" + (" (default)" if args.ownvoice_share is None else "")) + " ===")
     elif args.recipe and not measured:
         print("=== uniform bits: no measurements (run `measure` for a per-tensor recipe) ===")
+    hess = yaqa_ready(job) if args.yaqa else None
+    if hess:
+        with open(os.path.join(hess, YAQA_DONE)) as f:
+            rounding = {"method": "two-sided LDLQ (YAQA output-side factor, convert.py -hess)", **json.load(f)}
+        rounding.pop("written", None)
+        print(f"=== two-sided LDLQ: output factor from {hess} ===")
+    elif args.yaqa:
+        print("=== one-sided LDLQ: no `yaqa` output factor (run `yaqa` for two-sided rounding) ===")
     if args.plan:
         return plan_recipes(job, args, recipe_source, share, rfn)
 
@@ -2685,7 +2824,8 @@ def do_quantize(job, args):
                                  "-d", "0" ] +
                                ([ "-rcp", recipe ] if recipe else [ "-hq", "-b", bits, "-hb", headbits ]
                                 + ([] if HALF_STEPS else ["--no_half_steps"])) +
-                               ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []),
+                               ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []) +
+                               ([ "-hess", hess ] if hess else []),
                                log_path, gpu_env(slot), echo)
             if not os.path.isfile(donefile):
                 say(f"=== QUANTIZATION OF {revdir} FAILED after {attempt} attempt(s) ===")
@@ -2701,6 +2841,8 @@ def do_quantize(job, args):
                 rec["recipe"] = { "measurement": recipe_description(share, args.measurement),
                                   "rfn": rfn and os.path.basename(rfn), "alpha": args.alpha, "min_k": args.min_k,
                                   **({"alpha_low": args.alpha_low} if args.alpha_low else {}) }
+            if hess:
+                rec["rounding"] = rounding
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
                 json.dump(rec, f, indent=1)
             return True
@@ -2801,6 +2943,17 @@ def main():
                              help="keep sc_measure's per-module input cache in host memory (needed past ~10 rows of a 9B on 16 GB)")
     cmd_measure.set_defaults(func=do_measure)
 
+    cmd_yaqa = subparsers.add_parser('yaqa', help="output-side Fisher factors for two-sided LDLQ (after traces): own-voice "
+                                      "rows, the factor on them and on the calibration, and their blend for `quantize`")
+    trace_args(cmd_yaqa)
+    # -d/--device (from trace_args): the factor pass's GPU(s), comma-separated to split the model; --eval-devices: own-voice generation
+    cmd_yaqa.add_argument('--layers-per-run', type=int, default=None,
+                          help='decoder layers per factor pass, when every layer\'s factors do not fit beside the model and '
+                               'its backward pass (default: all at once). A 9B on 48 GB: 4')
+    cmd_yaqa.add_argument('--reserve-vram', default=None,
+                          help='with several devices: GB per device kept free of weights (util/yaqa_hessians.py -rv)')
+    cmd_yaqa.set_defaults(func=do_yaqa)
+
     cmd_quantize = subparsers.add_parser('quantize', help="the calibrated ladder")
     cmd_quantize.add_argument('-b', '--bits', default='3:5,3.5:5,4,5,6')
     cmd_quantize.add_argument('-d', '--device', default='0',
@@ -2814,6 +2967,9 @@ def main():
                                    'the conversion would duplicate a variant); convert nothing')
     cmd_quantize.add_argument('--suffix', default=None,
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
+    cmd_quantize.add_argument('--yaqa', default=True, action=argparse.BooleanOptionalAction,
+                              help="two-sided LDLQ with `yaqa`'s blended output factor when it exists (default); "
+                                   "--no-yaqa converts one-sided as before")
     cmd_quantize.add_argument('--recipe', default=True, action=argparse.BooleanOptionalAction,
                               help='per-tensor recipe from `measure`\'s measurements when present (--no-recipe: uniform bits)')
     cmd_quantize.add_argument('--ownvoice-share', type=float, default=None,
