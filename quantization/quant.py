@@ -1835,6 +1835,15 @@ def gpu_env(slot):
     the indices are nvidia-smi's."""
     return {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": slot}
 
+# A failed job in a scheduled batch (quantize, baseline, qbench parts) does not stop the batch: the rest
+# run, and the exit code reports the failures at the end. This line goes out the moment one fails, in a
+# fixed form nothing else prints, so a driver polling the output can tell its user straight away.
+JOB_FAILED = "!!! JOB FAILED:"
+
+def job_failed_line(what, name, slot, t0):
+    import time
+    return f"{JOB_FAILED} {what} {name} on gpu {slot} after {(time.time() - t0) / 60:.0f} min; the remaining jobs continue"
+
 def run_jobs(tasks, slots, what):
     """tasks: [(name, fn(slot, echo) -> ok)]. One slot: in order, the child's output echoed as
     before. More: the tasks are dealt to GPUs up front in proportion to each GPU's slots (a device
@@ -1844,10 +1853,16 @@ def run_jobs(tasks, slots, what):
     gemma-4-12b ladder, 2026-10-23); dealt up front, each card runs two then one. No stealing
     either, which would bring the same tail back. Children's output goes to their logs only (four
     interleaved progress bars read as noise), with a line per start and finish. Every task runs,
-    whatever fails; returns the names that failed."""
-    if len(slots) == 1:
-        return [name for name, fn in tasks if not fn(slots[0], True)]
+    whatever fails (each failure announced at once with JOB_FAILED); returns the names that failed."""
     import threading, time
+    if len(slots) == 1:
+        failed = []
+        for name, fn in tasks:
+            t0 = time.time()
+            if not fn(slots[0], True):
+                failed.append(name)
+                print(job_failed_line(what, name, slots[0], t0), flush=True)
+        return failed
     from collections import Counter
     width = Counter(slots)                       # concurrency per GPU
     gpus = list(dict.fromkeys(slots))
@@ -1870,6 +1885,7 @@ def run_jobs(tasks, slots, what):
             say(f"=== [gpu {slot}] {what} {name}: {type(e).__name__}: {e} ===")
         say(f"=== [gpu {slot}] {what} {name} {'done' if ok else 'FAILED'} after {(time.time() - t0) / 60:.0f} min ===")
         if not ok:
+            say(job_failed_line(what, name, slot, t0))
             with lock:
                 failed.append(name)
     def lane(g, items):                          # one of this GPU's slots: take its next task in turn
