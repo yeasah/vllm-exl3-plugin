@@ -2710,7 +2710,10 @@ def collect_hout(job, args, path, rows, out, name):
         open(mark, "w").close()
     files = [f for f in os.listdir(out) if f.endswith(".safetensors")]
     with open(os.path.join(out, YAQA_DONE), "w") as f:
-        json.dump({"rows": os.path.basename(rows), "tensors": len(files), "seed": 0, "written": stamp()}, f, indent=1)
+        from safetensors import safe_open
+        with safe_open(rows, "pt") as r:
+            n_rows = r.get_slice("input_ids").get_shape()[0]
+        json.dump({"rows": os.path.basename(rows), "row_count": n_rows, "tensors": len(files), "seed": 0, "written": stamp()}, f, indent=1)
     print(f"=== Hout {name}: {len(files)} tensors ===")
     return True
 
@@ -2736,6 +2739,15 @@ def blend_hout(a, b, out, wa):
         save_file({"hout": hout, "hout_diag": hout[di].contiguous()}, os.path.join(out, f))
     return len(names)
 
+def ownvoice_row_count(job):
+    """Rows behind the own-voice factor: from its provenance (row_count), else the rows file if present."""
+    rc = json.load(open(os.path.join(job.hess, "ownvoice", YAQA_DONE))).get("row_count")
+    if rc is None and os.path.isfile(job.ownvoice):
+        from safetensors import safe_open
+        with safe_open(job.ownvoice, "pt") as r:
+            rc = r.get_slice("input_ids").get_shape()[0]
+    return rc
+
 def do_yaqa(job, args):
     """Output-side Fisher factors for two-sided LDLQ: own-voice rows (eval generator), the factor on
     them and on the calibration, and the blend `quantize` converts with. Holds the unquantized model
@@ -2747,18 +2759,19 @@ def do_yaqa(job, args):
     if setup is None:
         return False
     path, _, _ = setup
-    if not ownvoice_rows(job, args, path, eval_env(args)):
+    # The rows only feed the own-voice factor: with that done (e.g. restored from a bucket without
+    # its rows), regenerating them would take minutes and leave rows the factor was not built from
+    if not os.path.isfile(os.path.join(job.hess, "ownvoice", YAQA_DONE)) and not ownvoice_rows(job, args, path, eval_env(args)):
         return False
     for name, rows in (("ownvoice", job.ownvoice), ("cal", job.cal_data)):
         if not collect_hout(job, args, path, rows, os.path.join(job.hess, name), name):
             return False
     out = os.path.join(job.hess, "blend")
     if not os.path.isfile(os.path.join(out, YAQA_DONE)):
-        from safetensors.torch import load_file
         n = blend_hout(os.path.join(job.hess, "ownvoice"), os.path.join(job.hess, "cal"), out, YAQA_BLEND)
         with open(os.path.join(out, YAQA_DONE), "w") as f:
             json.dump({"blend": {"ownvoice": YAQA_BLEND, "calibration": 1 - YAQA_BLEND}, "normalization": "unit trace per tensor",
-                       "ownvoice_rows": int(load_file(job.ownvoice)["input_ids"].shape[0]),
+                       "ownvoice_rows": ownvoice_row_count(job),
                        "tensors": n, "written": stamp()}, f, indent=1)
         print(f"=== Hout blend: {n} tensors -> {out} ===")
     return True
