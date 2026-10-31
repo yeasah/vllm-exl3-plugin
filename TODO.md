@@ -1640,6 +1640,27 @@ measurements in the `yeasah/yaqa-9b-hess` bucket.
 
 → [docs/yaqa.md](docs/yaqa.md), [tools/yaqa/](tools/yaqa/)
 
+## `recall-slice` — A hallucination detector: does a quant keep what the reference knows?
+
+**Outcome:** decide whether recall joins the pipeline's eval and the card, and whether YAQA's cost on it
+can be removed. `eval/recall_trace.py` (PopQA, MIT: closed-book questions with subject page views) gives
+qbench per-row answer log-prob and argmax hit under teacher forcing; analysis takes each question's
+reference-preferred alias, conditioned on the reference producing it (`quant_work/_recall/analyze.py`).
+About 5 minutes per arm on a 0.6B. The all-questions variant is tail noise: stay conditioned on known.
+
+**Known (Qwen3.8-27B, 1830 known of 7678, floor 99.2% retained):** retention 67.6 / 88.1 / 92.3 / 94.0 /
+97.0 / 98.5% at 2 / 3 / 3.5 / 4 / 5 / 6 bpw, with a slump in the middle popularity quintiles that the
+baselines share; 2 bpw is a cliff (66.2% uncalibrated too), which backs retiring it. Recipe and calibration
+cost no recall: at 4 bpw one-sided holds 95.7% against the baseline's 95.1%, while halving KL. **YAQA does
+cost it:** the 4 bpw blend retains 94.0%, dlp -0.092 against -0.034 ([-0.075, -0.041] paired), for only -2.6%
+wild and -7% swe KL. The damage is confident same-category substitution (a director for a director), at
+2 bpw pulling toward famous names. A few "losses" are valid variants or engine near-ties; retention slightly
+overstates real loss, and the floor absorbs that.
+
+**Next:** the 9B ladder's table (running on `cuda`). If it echoes the 27B, a third Fisher term from
+recall-style rows in the `yaqa` blend, on the 9B. Speculative: it depends on whether recall's dependencies
+show up in an averaged factor at all. Then a policy question: a retention floor for published rungs.
+
 ## `calibration-mix` — Make the conversational calibration the pipeline default
 
 **Outcome wanted:** `quant.py` converts with a conversational calibration mix by default,
