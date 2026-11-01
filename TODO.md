@@ -2064,6 +2064,10 @@ parameter selectors. Background, the cost model, backend choice and the measured
 numbers are in [docs/cpu-offload.md](docs/cpu-offload.md) — this item is open work
 only.
 
+**Plan as of 2026-11-01: [docs/expert-cache.md](docs/expert-cache.md)**, phases and gates there,
+work on branch `cpu-offload`. It settles the layout, staging and load path below in one design,
+and supersedes the routing-uniformity reasoning further down this item.
+
 **Design these together, not one at a time.** There are now five open levers, and
 each one changes the premises of the others:
 

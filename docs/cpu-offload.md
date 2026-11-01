@@ -10,6 +10,11 @@ registers finished EXL3 tensors with vLLM's UVA offloader from
 `process_weights_after_loading`. It works, it saturates the link it runs on, and it
 has no tests and no bench presence. Open work is under TODO `cpu-offload`.
 
+**Superseded in part, 2026-11-01; see [expert-cache.md](expert-cache.md).** Routing was measured
+and is strongly bursty, so "dynamic paging buys nothing" and index-invariance below no longer hold.
+exllamav3 now has CPU kernels for mul1 experts, and bigger-than-VRAM loads that appear to work on
+WSL2 are WDDM oversubscription, not a fix.
+
 **What offload is for, and it is not capacity.** It trades PCIe bandwidth for bits
 per weight, so it is a quality lever rather than a fallback. The ordering against
 block-quantized embeddings is settled and offload loses: per byte freed, blockq costs
