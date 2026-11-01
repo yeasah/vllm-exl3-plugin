@@ -280,6 +280,91 @@ class RoundTripTest(CacheDirTest):
         self.assertEqual(os.listdir(self.tmp.name), [])
 
 
+class EvictionTest(CacheDirTest):
+    """The pile stays under its ceiling, oldest use first."""
+
+    def fill(self, seed):
+        e = blockq_cache.entry(f"m{seed}@c", "embed_tokens", VOCAB, HIDDEN)
+        return e, embed_mod._encode_on_load(dense(seed))
+
+    def age(self, e, when):
+        os.utime(e.path, (when, when))
+
+    def limit(self, n):
+        """A ceiling that holds `n` entries, from the size of a real one."""
+        e, tensors = self.fill(99)
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_CACHE_MAX_GB": "0"}):
+            self.assertTrue(blockq_cache.write(e, tensors))
+        size = os.path.getsize(e.path)
+        os.unlink(e.path)
+        return mock.patch.dict(
+            os.environ, {"EXL3_BLOCKQ_CACHE_MAX_GB": str((n + 0.5) * size / 10**9)}
+        )
+
+    def written(self, seed, when):
+        e, tensors = self.fill(seed)
+        self.assertTrue(blockq_cache.write(e, tensors))
+        self.age(e, when)
+        return e
+
+    def read(self, e):
+        return blockq_cache.read(
+            e, rows=VOCAB, hidden=HIDDEN, row_start=0, row_stop=VOCAB
+        )
+
+    def test_the_oldest_goes_first(self):
+        with self.limit(2):
+            a = self.written(0, 1000)
+            b = self.written(1, 2000)
+            c = self.written(2, 3000)
+        self.assertFalse(os.path.exists(a.path))
+        self.assertTrue(os.path.exists(b.path))
+        self.assertTrue(os.path.exists(c.path))
+
+    def test_a_hit_counts_as_use(self):
+        """Without the touch on read this evicts `a`: the mechanism would be FIFO."""
+        with self.limit(2):
+            a = self.written(0, 1000)
+            b = self.written(1, 2000)
+            self.assertIsNotNone(self.read(a))
+            self.written(2, 3000)
+        self.assertTrue(os.path.exists(a.path))
+        self.assertFalse(os.path.exists(b.path))
+
+    def test_the_entry_just_written_survives_a_ceiling_it_exceeds(self):
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_CACHE_MAX_GB": "0.000000001"}):
+            a = self.written(0, 1000)
+            b, tensors = self.fill(1)
+            self.assertTrue(blockq_cache.write(b, tensors))
+        self.assertFalse(os.path.exists(a.path))
+        self.assertTrue(os.path.exists(b.path))
+
+    def test_zero_never_evicts(self):
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_CACHE_MAX_GB": "0"}):
+            for seed in range(3):
+                self.written(seed, 1000 + seed)
+        self.assertEqual(len(self.entries()), 3)
+
+    def test_a_bad_ceiling_is_the_default(self):
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_CACHE_MAX_GB": "lots"}):
+            self.assertEqual(
+                blockq_cache.max_bytes(),
+                int(float(blockq_cache.DEFAULT_MAX_GB) * 10**9),
+            )
+
+    def test_another_writers_temporary_is_left_alone(self):
+        tmp = os.path.join(self.tmp.name, "x.safetensors.123.tmp")
+        open(tmp, "wb").close()
+        with self.limit(1):
+            self.written(0, 1000)
+            self.written(1, 2000)
+        self.assertTrue(os.path.exists(tmp))
+
+    def test_a_vanished_pile_is_survivable(self):
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_CACHE_DIR": self.tmp.name + "/gone"}):
+            blockq_cache.evict(keep="x")
+
+
 class LoaderTest(CacheDirTest):
     """The loader itself, which is where a cache bug would actually land."""
 

@@ -22,8 +22,11 @@ Two regressions are pinned here, both silent in the field:
 
 import os
 import sys
+import types
 import unittest
 from unittest import mock
+
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -215,6 +218,13 @@ class BlockQOnLoadTest(unittest.TestCase):
             cfg._blockq_modules = {GEMMA_PREFIX}
         return cfg
 
+    def test_on_load_is_the_default_and_zero_opts_out(self):
+        env = {k: v for k, v in os.environ.items() if not k.endswith("BLOCKQ_ON_LOAD")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(EXL3Config(bits=3.0, head_bits=6)._blockq_on_load)
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_ON_LOAD": "0"}):
+            self.assertFalse(EXL3Config(bits=3.0, head_bits=6)._blockq_on_load)
+
     def test_flag_off_leaves_a_stock_checkpoint_dense(self):
         cfg = self._cfg(on_load=False)
         self.assertFalse(cfg.embedding_is_blockq())
@@ -264,6 +274,97 @@ class BlockQOnLoadTest(unittest.TestCase):
         cfg = self._cfg(on_load=True, stored=True)
         mapper = cfg.get_cache_scale_mapper()
         self.assertIsNone(mapper._map_name("model.embed_tokens.weight"))
+
+
+class RebasedEmbeddingTest(unittest.TestCase):
+    """A class vLLM rebased keeps the dense `weight` its constructor made.
+
+    Muse-Glimmer's normed embedding, under the Transformers backend, held the
+    dense table and `bq_*` together: 2.5 GiB resident that nothing reads.
+    """
+
+    def _layer(self):
+        layer = torch.nn.Module()
+        layer.register_parameter("weight", torch.nn.Parameter(torch.empty(64, 128)))
+        layer.shard_indices = types.SimpleNamespace(
+            padded_org_vocab_start_index=0, padded_org_vocab_end_index=64,
+            org_vocab_start_index=0, org_vocab_end_index=64,
+        )
+        return layer
+
+    def _create(self, *, on_load):
+        from vllm_exl3_plugin.quantization.embedding import EXL3BlockQEmbeddingMethod
+
+        cfg = mock.Mock()
+        cfg.blockq_is_on_load.return_value = on_load
+        layer = self._layer()
+        with mock.patch(
+            "vllm_exl3_plugin.quantization.embedding.EXL3Parameter",
+            side_effect=lambda **_: torch.nn.Parameter(torch.empty(0)),
+        ):
+            EXL3BlockQEmbeddingMethod(cfg, "model.embed_tokens").create_weights(
+                layer, 128, [64], 128, 64, params_dtype=torch.bfloat16
+            )
+        return layer
+
+    def test_on_load_leaves_no_dense_weight(self):
+        self.assertNotIn("weight", dict(self._create(on_load=True).named_parameters()))
+
+    def test_stored_blockq_leaves_no_dense_weight(self):
+        self.assertNotIn("weight", dict(self._create(on_load=False).named_parameters()))
+
+
+class TrellisEmbeddingTest(unittest.TestCase):
+    """A checkpoint from `convert.py -eb` has no dense table to encode.
+
+    Its `embed_tokens.trellis` would pass as a quantized module, so with on-load
+    set the layer would be built for `bq_*` that nothing can fill.
+    """
+
+    TENSORS = {
+        "model.language_model.embed_tokens.trellis": "a.safetensors",
+        "model.language_model.embed_tokens.signs": "a.safetensors",
+        "model.language_model.layers.0.mlp.up_proj.trellis": "a.safetensors",
+    }
+
+    def _load(self, tensors):
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg._blockq_on_load = True
+        with mock.patch(
+            "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
+            return_value={"weight_map": tensors},
+        ):
+            cfg._load_index_modules("org/x-exl3", "3.0bpw")
+        return cfg
+
+    def test_an_indexed_checkpoint_is_refused_by_name(self):
+        from vllm_exl3_plugin import format
+
+        with self.assertRaisesRegex(format.EXL3FormatError, "embed_tokens.*--embed_bits"):
+            self._load(self.TENSORS)
+
+    def test_a_single_file_checkpoint_is_refused_too(self):
+        from vllm_exl3_plugin import format
+
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        with (
+            mock.patch(
+                "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
+                return_value=None,
+            ),
+            mock.patch.object(
+                EXL3Config, "_single_file_tensor_names", return_value=set(self.TENSORS)
+            ),
+            self.assertRaises(format.EXL3FormatError),
+        ):
+            cfg._load_index_modules("org/x-exl3", "3.0bpw")
+
+    def test_a_trellis_head_is_not_an_embedding(self):
+        cfg = self._load({
+            "lm_head.trellis": "a.safetensors",
+            "model.embed_tokens.weight": "a.safetensors",
+        })
+        self.assertIn("lm_head", cfg.quantized_modules)
 
 
 class CompileKeyTest(unittest.TestCase):

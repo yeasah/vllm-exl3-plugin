@@ -37,6 +37,15 @@ sweeping TP is a thing the profiling this exists for does. The cost is that a
 1/N. That is once per checkpoint, and it is why the uncached path in
 `embedding.py` still encodes only the local rows.
 
+**The pile has a ceiling, and the cache owns it.** A default-on cache writes files
+nobody asked for, so something has to delete them. Each write evicts the least
+recently used entries until the pile fits `EXL3_BLOCKQ_CACHE_MAX_GB`, and a hit
+refreshes its entry's mtime, which is the recency: `atime` is usually disabled or
+relaxed. Eviction costs at most one re-encode, seconds on a real vocabulary. The
+entry just written is never evicted, so the ceiling is exceeded rather than a model
+left unable to keep its own encoding, and an entry another process is reading stays
+readable through its open descriptor.
+
 **Nothing here is allowed to be fatal.** A read-only or full `~/.cache`, a
 truncated entry, a version of this file that wrote a layout this one does not
 understand -- each is a cache miss and a log line, never a failure to serve.
@@ -62,6 +71,11 @@ CACHE_VERSION = 1
 #: Warn once per failing directory rather than once per tensor per rank.
 _WARNED: set[str] = set()
 
+#: `EXL3_BLOCKQ_CACHE_MAX_GB` when unset. A large-vocabulary entry is about 0.5 GB,
+#: and a rung of a bit-rate ladder is its own commit, so its own entry: this holds
+#: about thirty, which is several ladders.
+DEFAULT_MAX_GB = "16"
+
 
 def enabled() -> bool:
     """`EXL3_BLOCKQ_CACHE=0` turns the cache off; on-load encoding still works."""
@@ -80,6 +94,22 @@ def root() -> str:
             "blockq-embeddings",
         ),
     )
+
+
+def max_bytes() -> int | None:
+    """The pile's ceiling; `None` for none. `EXL3_BLOCKQ_CACHE_MAX_GB=0` opts out of
+    eviction, and a value that does not parse falls back to the default, since a
+    typo in a knob is not worth failing to serve over."""
+    value = env.get("BLOCKQ_CACHE_MAX_GB", DEFAULT_MAX_GB)
+    try:
+        gb = float(value)
+    except ValueError:
+        logger.warning(
+            "Ignoring EXL3_BLOCKQ_CACHE_MAX_GB=%r: not a number. Using %s.",
+            value, DEFAULT_MAX_GB,
+        )
+        gb = float(DEFAULT_MAX_GB)
+    return int(gb * 10**9) if gb > 0 else None
 
 
 def checkpoint_identity(model_name: str | None, commit_hash: str | None) -> str | None:
@@ -209,6 +239,7 @@ def read(
                     )
                     return None
                 out[name] = sliced[row_start:row_stop]
+        _touch(entry.path)
         return out
     except Exception as exc:
         logger.warning(
@@ -216,6 +247,53 @@ def read(
             "encoding instead.", entry.path, exc,
         )
         return None
+
+
+def _touch(path: str) -> None:
+    """Mark an entry recently used. A read-only pile keeps serving hits, and just
+    loses its recency."""
+    try:
+        os.utime(path)
+    except OSError:
+        pass
+
+
+def evict(keep: str) -> None:
+    """Delete the least recently used entries until the pile fits `max_bytes()`.
+
+    Sizes are read fresh and every delete tolerates losing a race: two ranks, or
+    two engines, can evict at once, and a file already gone is the outcome wanted.
+    Temporaries are left alone, since one may be another writer's live output.
+    """
+    limit = max_bytes()
+    if limit is None:
+        return
+    directory = root()
+    try:
+        found = []
+        for name in os.listdir(directory):
+            if not name.endswith(".safetensors"):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            found.append((st.st_mtime_ns, st.st_size, path))
+    except OSError:
+        return
+    total = sum(size for _, size, _ in found)
+    for _, size, path in sorted(found):
+        if total <= limit:
+            return
+        if path == keep:
+            continue
+        try:
+            os.unlink(path)
+            logger.info("Evicted block-quantized embedding cache entry %s.", path)
+        except OSError:
+            pass
+        total -= size
 
 
 def write(entry: Entry, tensors: dict[str, torch.Tensor]) -> bool:
@@ -234,6 +312,7 @@ def write(entry: Entry, tensors: dict[str, torch.Tensor]) -> bool:
         os.makedirs(directory, exist_ok=True)
         save_file(tensors, tmp, metadata=entry.meta)
         os.replace(tmp, entry.path)
+        evict(keep = entry.path)
         return True
     except Exception as exc:
         if directory not in _WARNED:

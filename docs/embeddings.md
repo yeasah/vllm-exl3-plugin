@@ -1439,20 +1439,37 @@ decoder — the reason to keep two implementations of a format that must agree.
 
 *Added 2026-09-08, at the request of the appliance project (`vllm-untwisted`).*
 
-`EXL3_BLOCKQ_ON_LOAD=1` gets the saving above on a checkpoint nobody has repaired:
+On-load encoding, the default since 2026-11-01 (`EXL3_BLOCKQ_ON_LOAD=0` opts out), gets the saving above on a checkpoint nobody has repaired:
 the dense `embed_tokens.weight` is encoded into `bq_*` while it loads, and the fp16
 matrix is never resident. That removes the derived-artifact step entirely — no
 `tools/quantize_embedding.py` run, no second copy of the checkpoint on disk, no
 sidecar to keep in sync with the original — which is what makes it the right default
 for a system that serves whatever HF checkpoints happen to exist.
 
-It is opt-in, and the reasons are in TODO.md under `blockq-on-load`. Two constraints
-shape everything below. The encode runs **on CPU**, because `blockq.encode` does not
+Its cache is capped by `EXL3_BLOCKQ_CACHE_MAX_GB`, least recently used out, so a default-on
+cache has an owner. Two constraints shape everything below. The encode runs **on CPU**, because `blockq.encode` does not
 reproduce across devices — a GPU encode is equally accurate and produces a *different*
 model from the same weights, which would mean a model served this way disagreed with
 the same model quantized offline. And it runs **per engine start**, which is the cost
 this section is about: about 0.6–1.6 s for MiniCPM5-1B's 130560x1536, and
 proportionally more for a real vocabulary.
+
+### What the default costs
+
+"Under the noise floor" does not generalize. Simulated `blockq:32` 4-bit on the scored slices, as a
+multiple of excess KL, against what the saved bytes would buy in body bits:
+
+| model | wild 4.00 | swe 4.00 | wild 5.00 | swe 5.00 | saved | same bytes in body bits |
+|---|---|---|---|---|---|---|
+| Ornith-1.5-9B | 1.05 | 1.08 | 1.26 | 1.44 | 1.46 GB | ~6-9x lower |
+| Qwen3.8-27B | 1.01 | 1.00 | 1.04 | 1.05 | 1.83 GB | ~2.3x lower |
+
+The 9B's tax is about the size of its noise floor and 4-10x the +0.000225 measured on Qwen3.5-9B above;
+why is open. It grows with the rung because a fixed embedding error weighs more against a cleaner body.
+Text-answer recall is unchanged within CIs on both models (-0.64 to +0.05 points). So the case for the
+default is economic: the bytes are worth far more in the body than the embedding error costs.
+
+Served through vLLM, on-load matches a pre-quantized checkpoint exactly, |dlogprob| 0, at TP=1 and TP=2.
 
 ### Why that cost needed removing rather than reducing
 

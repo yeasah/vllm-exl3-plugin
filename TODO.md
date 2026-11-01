@@ -1053,9 +1053,12 @@ head-dim-512 misdiagnosis, corrected under `turboquant-sliding-window`.
 nearly free alongside other repair-tool work.
 
 **Upstream's trellis embedding (exllamav3 1.6.4: `convert.py -eb`, `convert_embedding`, a fused
-gather) is the candidate for tied models.** Not expected to beat blockq on quality per bit; the
-point is one trellis tensor that can serve both the head and the gather. Needs a plugin loader
-before it can be measured through vLLM.
+gather) needs a plugin loader whether or not we adopt it for tied models.** If upstream-direction
+quants move to it, they stop carrying a dense table, so on-load blockq has nothing to encode, and
+fetching a reference embedding is no clean swap: the rest of such a model was calibrated against the
+quantized table. It stores `<key>.trellis` and `<key>.signs`. Separately it is the candidate for tied
+models: not expected to beat blockq on quality per bit, the point is one trellis tensor serving both
+the head and the gather.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
@@ -1657,9 +1660,33 @@ wild and -7% swe KL. The damage is confident same-category substitution (a direc
 2 bpw pulling toward famous names. A few "losses" are valid variants or engine near-ties; retention slightly
 overstates real loss, and the floor absorbs that.
 
-**Next:** the 9B ladder's table (running on `cuda`). If it echoes the 27B, a third Fisher term from
-recall-style rows in the `yaqa` blend, on the 9B. Speculative: it depends on whether recall's dependencies
-show up in an averaged factor at all. Then a policy question: a retention floor for published rungs.
+**The question set decides the sign.** PopQA alone misleads, so `eval/recall_wikidata.py` adds 12,006
+Wikidata facts across 12 domains (`recall_trace.py --facts`). On MiniCPM5-2B the own-voice recipe is -4.0
+points on PopQA and +3.0 on the facts, and a recipe measured with PopQA rows gains +4.4 on PopQA but +0.9 on
+the facts: it protects PopQA, not recall in general. Report numeric answers (years, chromosomes) as their
+own slice and keep them out of the headline: on Ornith-9B, `gene_chromosome` alone moves 36.9 to 85.8 with
+the recipe. History has no non-numeric relation yet.
+
+**Known (Ornith-1.5-9B facts, text answers, 1706 known):** calibration +10.7 points at 3 bpw but +1.1 at 4
+(not significant). Recipe +2.8 and +1.2. YAQA adds retention alone but not on top of a recipe. Calibration
+is the strong lever only at low rates.
+
+**K-quants are the target for recall, not KL.** A same-size K-quant gives an achievable retention and a
+warning light. Compare served text bytes: the 27B EXL3 checkpoint carries 0.91 GB of vision tower that a
+GGUF keeps in `mmproj`, and its 2.55 GB BF16 embedding serves at about 0.72 GB under blockq. The bit target
+covers the body alone (4.00 is 4.01 bpw over the layers; head at 6), so this is a size-axis correction, not
+an allocation one. GGUFs stay off the KLD comparison plot, where they aren't competitive, and go in any
+recall comparison. UD files are per-tensor mixes, not plain K-quants.
+
+**Before publishing the 27B or Ornith-9B,** at one bitrate/calibration/recipe config first, on recall, wild
+and swe:
+- YAQA blends: measure the impact of different mixes. Unblended (no YAQA) is the current 27B pick.
+- Recall content in calibration: measure it the same way.
+- Make recall metrics as well behaved as they can be, and decide whether the card can present them clearly
+  without overstating what they are.
+- A UD 3.0 GGUF arm in the recall comparison only.
+
+Then a policy question: a retention floor for published rungs.
 
 ## `calibration-mix` — Make the conversational calibration the pipeline default
 
@@ -2338,7 +2365,34 @@ implementations. The engine is branch `experiment/kvarn` in our vLLM fork.
 
 → [docs/kvarn.md](docs/kvarn.md)
 
-## `blockq-on-load` — Default-on, once the opt-in has soaked
+## `blockq-on-load` — Default-on since 2026-11-01; baselines still to re-bless
+
+**Decided 2026-11-01: on-load blockq becomes the default, with an LRU cap on its cache** (done:
+`EXL3_BLOCKQ_CACHE_MAX_GB`, 16 by default). The cap answers the old blocker, that nothing owned eviction.
+Not emitting `bq_*` at conversion: without the dense table a quant is unusable by exllamav3, and with it the
+quant is much larger. A checkpoint with a trellis embedding is refused by name
+(`format.check_embedding_storage`). **Flipped 2026-11-01** after the served-path soak on `bench/`: flag off
+matches every baseline; on-load equals the pre-quantized fixture exactly at TP=1 and TP=2; MoE's TP spread is
+no wider than dense. The soak found one bug, fixed: a backend-rebased embedding kept its dense `weight` beside
+`bq_*` (Muse-Glimmer, +0.71 GiB where it now saves 1.80). **Still to do: re-bless the untied baselines**, which
+needs a committed tree. The cost table below is simulation.
+
+**Judge embedding damage by economics, not an absolute threshold:** weigh it against what the same bytes buy
+elsewhere (body bits, trellis embeddings, deeper blockq). BF16 is the reference, not a candidate default: it is
+unlikely to be right for any configuration that wants EXL3.
+
+| excess KL multiple, simulated 4-bit blockq | wild 4.00 | swe 4.00 | wild 5.00 | swe 5.00 |
+|---|---|---|---|---|
+| Ornith-1.5-9B (saves 1.46 GB, worth ~6-9x in body bits) | 1.05 | 1.08 | 1.26 | 1.44 |
+| Qwen3.8-27B (saves 1.83 GB, worth ~2.3x in body bits) | 1.01 | 1.00 | 1.04 | 1.05 |
+
+Body-bit worth is log-interpolated over 4.00 to 5.00. Text-answer recall is unchanged within CIs on both models
+(-0.64 to +0.05 points). The 9B's tax is 4-10x the docs' +0.000225 for Qwen3.5-9B on the older eval, not yet
+explained. Deeper blockq at 9B 5.00: 5-bit takes wild 1.26x to 1.07x and swe 1.44x to 1.08x for 0.127 GB, which
+ties body bits on wild and beats them on swe; 6-bit adds 1.01-1.02x, which body bits beat. At 4.00 they beat a
+5th bit outright. Smaller models at 5+ bpw are a real use case, since they fit small cards, and whether this
+9B's sensitivity is general to them is open. Even so, measure a trellis embedding before any 5-bit blockq work:
+4-bit packing is easy to understand and trust, and a second depth would complicate that.
 
 The mechanism is built and opt-in behind `EXL3_BLOCKQ_ON_LOAD=1`: a stock EXL3
 checkpoint's dense embedding is encoded during weight loading, so the memory

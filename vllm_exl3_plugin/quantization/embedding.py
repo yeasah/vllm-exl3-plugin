@@ -332,6 +332,12 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
 
         # The layer's own loader cannot drive this layout; dropped as elsewhere.
         extra_weight_attrs.pop("weight_loader", None)
+        # An embedding class vLLM rebased rather than built (MuseGlimmer's normed
+        # embedding, under the Transformers backend) still owns the `weight` its
+        # own constructor made. Nothing fills it, since the dense tensor goes to
+        # the encoder or is dropped, and left alone it is materialized anyway:
+        # the whole dense table's bytes, resident and unread.
+        layer._parameters.pop("weight", None)
 
         device = torch.empty(0).device
         for name in format.BLOCKQ_SUFFIXES:

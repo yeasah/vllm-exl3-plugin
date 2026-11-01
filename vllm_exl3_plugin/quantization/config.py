@@ -118,7 +118,7 @@ class EXL3Config(QuantizationConfig):
         # Escape hatch for the quantized-embedding path; see
         # `embedding_is_quantized`.
         self._dense_embed = env.flag("DENSE_EMBED")
-        self._blockq_on_load = env.flag("BLOCKQ_ON_LOAD")
+        self._blockq_on_load = env.get("BLOCKQ_ON_LOAD", "1") != "0"
         self._hidden_size: int | None = None
         # Where the token embedding lives in vLLM's module tree. Multimodal
         # wrappers nest it (`model.language_model.embed_tokens`), so this is
@@ -340,6 +340,7 @@ class EXL3Config(QuantizationConfig):
             # `quantization_config.json` and no `head_bits` has *no* signal at
             # all and its quantized `lm_head` is invisible.
             names = self._single_file_tensor_names(model_name, revision)
+            format.check_embedding_storage(names)
             quantized = format.quantized_module_keys(names)
             blockq = format.blockq_module_keys(names)
             if not quantized and not blockq:
@@ -351,6 +352,7 @@ class EXL3Config(QuantizationConfig):
             self.quantized_modules = quantized
             self._blockq_modules = blockq
             return
+        format.check_embedding_storage(weight_map)
         self.quantized_modules = format.quantized_module_keys(weight_map)
         self._blockq_modules = format.blockq_module_keys(weight_map)
 
@@ -569,8 +571,8 @@ class EXL3Config(QuantizationConfig):
     def _on_load_is_possible(self) -> bool:
         """Whether `EXL3_BLOCKQ_ON_LOAD` can be honoured for this model.
 
-        The flag asks for a quantized embedding on a checkpoint that ships a
-        dense one, encoding it during weight loading instead of reading `bq_*`
+        On by default, this serves a quantized embedding from a checkpoint that
+        ships a dense one, encoding it during weight loading instead of reading `bq_*`
         that a tool wrote. Two things can refuse it, and both have to refuse
         *here* -- picking the method -- rather than at load time, where the
         alternative is a half-built layer and an exception a long way from the
@@ -588,29 +590,28 @@ class EXL3Config(QuantizationConfig):
             # save -- and encoding one anyway would store a second copy of the
             # same matrix in a worse format than the trellis it already has.
             logger.info(
-                "EXL3_BLOCKQ_ON_LOAD is set, but this model is tied and its "
-                "embedding is already served from the quantized lm_head. "
-                "Nothing to encode."
+                "This model is tied and its embedding is already served from the "
+                "quantized lm_head, so there is nothing to encode on load."
             )
             return False
         if self._hidden_size is None:
             logger.warning(
-                "EXL3_BLOCKQ_ON_LOAD is set but this model's config reports no "
-                "hidden size, so the embedding cannot be encoded at load. "
-                "Serving it dense."
+                "This model's config reports no hidden size, so the embedding "
+                "cannot be encoded on load. Serving it dense."
             )
             return False
         try:
             format.check_blockq_hidden(self._hidden_size)
         except format.EXL3FormatError as exc:
             logger.warning(
-                "EXL3_BLOCKQ_ON_LOAD is set but this model cannot use the "
-                "format: %s. Serving the embedding dense.", exc
+                "This model cannot use the block-quantized embedding format: "
+                "%s. Serving the embedding dense.", exc
             )
             return False
         logger.info(
-            "EXL3_BLOCKQ_ON_LOAD: encoding the dense embedding into %d-bit "
-            "block-scaled storage during load; no bq_* in the checkpoint.",
+            "Encoding the dense embedding into %d-bit block-scaled storage "
+            "during load; no bq_* in the checkpoint. EXL3_BLOCKQ_ON_LOAD=0 "
+            "serves it dense.",
             format.BLOCKQ_BITS,
         )
         return True
