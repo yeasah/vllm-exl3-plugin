@@ -129,11 +129,14 @@ ENTRIES: list[Entry] = [
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
         model_impl="auto",
+        env={"EXL3_BLOCKQ_ON_LOAD": "0"},
         exercises="the mcg codebook, an untied model, and a separately "
         "quantized 6-bit head -- none of which the Qwen3/Llama entries reach. "
-        "Paired with the transformers-backend entry below: together the two "
-        "are the claim that the backend is token-for-token identical to the "
-        "native implementation",
+        "Pinned dense since on-load became the default: unpinned this entry "
+        "equals the blockq fixture exactly, and nothing would gate an untied "
+        "model's dense embedding, which is both the opt-out and the fallback "
+        "for a hidden size blockq cannot divide. The default path is the tq4 "
+        "and transformers-backend entries, which also exercise the encoder",
     ),
     Entry(
         label="minicpm5-1B 3.0bpw via transformers backend",
@@ -186,9 +189,9 @@ ENTRIES: list[Entry] = [
         kv_cache_dtype="turboquant_4bit_nc",
         exercises="a quantized KV cache under EXL3 weights, which nothing else "
         "in the matrix touches -- every other entry runs the default `auto` "
-        "dtype. Differs from `minicpm5-1B-3.0bpw-mcg` by the KV dtype alone, so "
-        "a divergence is attributable to turboquant rather than to the "
-        "checkpoint.\n\n"
+        "dtype. Its embedding is encoded on load, which equals the fixture of "
+        "`minicpm5-1B-3.0bpw-blockq-eager`, so a divergence from that entry is "
+        "attributable to turboquant rather than to the checkpoint.\n\n"
         "It earns fast-tier placement because turboquant is the linchpin of "
         "this project's low end -- it is what makes a long context fit beside a "
         "2-3bpw model on 16 GiB -- and because this model can host it at all: "
@@ -447,6 +450,7 @@ ENTRIES: list[Entry] = [
         revision="3.00bpw",
         tier="tp",
         tensor_parallel_size=2,
+        env={"EXL3_BLOCKQ_ON_LOAD": "0"},
         tp_reference="minicpm5-1B-3.0bpw-mcg",
         exercises="column/row-sharded EXL3 linears and the NCCL all-reduce on "
         "a model whose vocabulary splits into whole Hadamard blocks (130560 = "
