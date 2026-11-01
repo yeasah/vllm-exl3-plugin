@@ -16,13 +16,13 @@
   "gpu_count": 2,
   "capability": "12.0",
   "vllm_reported": "0.32.1.dev16+g1f3b03290",
-  "pkg.digest": "20150ba563de",
-  "pkg.count": 246,
+  "pkg.digest": "d9596027572a",
+  "pkg.count": 247,
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "3f20841",
-   "head": "3f208419f1",
+   "describe": "a8c0065",
+   "head": "a8c006504a",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -35,8 +35,8 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-86-gf6c506ff",
-   "head": "f6c506ffd2",
+   "describe": "v1.6.4-97-g546ad120",
+   "head": "546ad1203f",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,60 +46,60 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpdz47k3ym/caches/exllamav3_autotune",
+   "path": "/tmp/tmp1_0xw5ka/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8144,
-   "mtime": 1792850295
+   "mtime": 1793559980
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpdz47k3ym/caches/vllm",
+   "path": "/tmp/tmp1_0xw5ka/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 2,
    "bytes": 1866,
-   "mtime": 1792850304
+   "mtime": 1793559989
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpdz47k3ym/caches/triton",
+   "path": "/tmp/tmp1_0xw5ka/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 409,
    "bytes": 11634092,
-   "mtime": 1792850355
+   "mtime": 1793560039
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpdz47k3ym/caches/flashinfer",
+   "path": "/tmp/tmp1_0xw5ka/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 872,
-   "mtime": 1792850409
+   "mtime": 1793560092
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "43",
+    "temperature.gpu": "48",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "24.19 W",
+    "power.draw": "24.71 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
     "clocks_throttle_reasons.active": "0x0000000000000000",
     "persistence_mode": "Enabled",
-    "fan.speed": "33 %"
+    "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "35",
+    "temperature.gpu": "29",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.86 W",
+    "power.draw": "9.52 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",

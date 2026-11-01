@@ -139,6 +139,7 @@ nvtx==0.2.15
 openai-harmony==0.0.8
 openai==3.14.1
 opencv-python-headless==5.0.0.93
+openrgb-python==0.3.8
 opentelemetry-api==1.44.0
 opentelemetry-exporter-otlp-proto-common==1.44.0
 opentelemetry-exporter-otlp-proto-grpc==1.44.0
