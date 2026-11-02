@@ -89,6 +89,7 @@ class EXL3Config(QuantizationConfig):
         # Module keys carrying a block-quantized embedding, from the safetensors
         # index when there is one.
         self._blockq_modules: set[str] = set()
+        self._trellis_embed_modules: set[str] = set()
         self._dense_embed_present: bool = False
         self._warned_dense_embed: bool = False
         # Modules the *checkpoint* quantizes, from the safetensors index. Takes
@@ -340,9 +341,9 @@ class EXL3Config(QuantizationConfig):
             # `quantization_config.json` and no `head_bits` has *no* signal at
             # all and its quantized `lm_head` is invisible.
             names = self._single_file_tensor_names(model_name, revision)
-            format.check_embedding_storage(names)
             quantized = format.quantized_module_keys(names)
             blockq = format.blockq_module_keys(names)
+            self._trellis_embed_modules = format.trellis_embedding_keys(names)
             if not quantized and not blockq:
                 # No header, or a header with no EXL3 storage in it. Neither is
                 # licence to declare the checkpoint dense: `tensor_storage` may
@@ -352,7 +353,7 @@ class EXL3Config(QuantizationConfig):
             self.quantized_modules = quantized
             self._blockq_modules = blockq
             return
-        format.check_embedding_storage(weight_map)
+        self._trellis_embed_modules = format.trellis_embedding_keys(weight_map)
         self.quantized_modules = format.quantized_module_keys(weight_map)
         self._blockq_modules = format.blockq_module_keys(weight_map)
 
@@ -616,6 +617,24 @@ class EXL3Config(QuantizationConfig):
         )
         return True
 
+    def embedding_is_trellis(self) -> bool:
+        """Whether the checkpoint stores exllamav3's trellis embedding.
+
+        There is no dense copy and no fallback, so nothing here can be declined:
+        `EXL3_DENSE_EMBED` and on-load encoding both have nothing to act on.
+        Conversion unties a model that quantizes its embedding, because the
+        format has no GEMM path, so a tied config here is a checkpoint this
+        method cannot serve correctly.
+        """
+        if not self._trellis_embed_modules:
+            return False
+        if self.tie_word_embeddings:
+            raise format.EXL3FormatError(
+                "this checkpoint stores a trellis-quantized embedding but its "
+                "config ties the head to it, and that format cannot serve a head"
+            )
+        return True
+
     def embedding_is_blockq(self) -> bool:
         """Whether the checkpoint carries a block-quantized `embed_tokens`.
 
@@ -632,6 +651,8 @@ class EXL3Config(QuantizationConfig):
         there is when neither can be read.
         """
         stored, dense_present = self._blockq_evidence()
+        if self._trellis_embed_modules:
+            return False
         if not stored and self._blockq_on_load and not self._dense_embed:
             return self._on_load_is_possible()
         if stored and self._dense_embed:
@@ -709,6 +730,16 @@ class EXL3Config(QuantizationConfig):
         # tensors still arrive and the embedding module has only a dense
         # `weight` to put them in, so they have to go the same way the dense
         # copy normally does.
+        if self.embedding_is_trellis():
+            # Renamed because `trellis` on an embedding module is not a name the
+            # linear methods should ever see, and both tensors are this method's.
+            return mapper | WeightsMapper(
+                orig_to_new_suffix={
+                    format.EMBED_TRELLIS_SUFFIX: ".embed_tokens.et_table",
+                    format.EMBED_SIGNS_SUFFIX: ".embed_tokens.et_signs",
+                }
+            )
+
         stored_blockq, dense_present = self._blockq_evidence()
         if stored_blockq and dense_present and not blockq_embed:
             return mapper | WeightsMapper(
@@ -905,6 +936,11 @@ class EXL3Config(QuantizationConfig):
             # all, so this arrives empty and would otherwise overwrite the
             # default with a name that renames `lm_head.*` onto nothing.
             self.embed_prefix = prefix or self.embed_prefix
+
+            if self.embedding_is_trellis():
+                from .embedding import EXL3TrellisEmbeddingMethod
+
+                return EXL3TrellisEmbeddingMethod(self)
 
             blockq_embed = self.embedding_is_blockq()
             # `embedding_is_quantized` answers a question about the *head's*

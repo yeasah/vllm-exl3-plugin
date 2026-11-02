@@ -2300,6 +2300,8 @@ MEASURE_GROUPS = "experts"   # sc_measure -g: a MoE layer's routed experts are o
                              # measurement is impractical); dense tensors stay individually measured, so
                              # their keys and seeds match every earlier measurement chunk (upstream: all)
 RECIPE_TIES = "k_proj+v_proj,gate_proj+up_proj"   # sc_optimize -tie (upstream adds q_proj and GDN qkv+z)
+EMBED_BITS_AT_5 = 5, 5.0     # convert.py --embed_bits: a trellis embedding at this depth from this body rate up,
+EMBED_BITS_BASE = 4          # and at this one below it; the 9B's table costs excess KL 1.26x at 5.00 at K=4, 1.03x at K=5
 OUT_SCALES = "always"        # convert.py --out_scales (upstream: auto, off for some gate/up projections)
 HALF_STEPS = True            # convert.py's 1.5/2.5/3.5 steps below 4 bpw, as upstream: -b 3.5 is a native 3.5,
                              # so the half-rung baselines are what a plain conversion now gives; False passes
@@ -2792,6 +2794,13 @@ def do_yaqa(job, args):
         print(f"=== Hout blend: {n} tensors -> {out} ===")
     return True
 
+def embed_bits_for(bits, choice):
+    """The embedding's depth at a body rate: the ladder, or a fixed --embed-bits (16 keeps it dense)."""
+    if choice != "auto":
+        return int(choice)
+    return EMBED_BITS_AT_5[0] if float(bits) >= EMBED_BITS_AT_5[1] else EMBED_BITS_BASE
+
+
 def do_quantize(job, args):
     path = snapshot_download(repo_id=job.base_repo)
     if args.calibration == "mix" and not os.path.isfile(job.cal_data):
@@ -2870,6 +2879,7 @@ def do_quantize(job, args):
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
                     run_logged([ "python3", script,
                                  "-vb", "16", "--out_scales", OUT_SCALES,
+                                 "-eb", str(embed_bits_for(bits, args.embed_bits)),
                                  "-i", path,
                                  "-w", workdir,
                                  "-o", revdir,
@@ -2895,6 +2905,7 @@ def do_quantize(job, args):
                                   **({"alpha_low": args.alpha_low} if args.alpha_low else {}) }
             if hess:
                 rec["rounding"] = rounding
+            rec["embedding"] = { "embed_bits": embed_bits_for(bits, args.embed_bits) }
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
                 json.dump(rec, f, indent=1)
             return True
@@ -3017,6 +3028,9 @@ def main():
     cmd_quantize.add_argument('--plan', action='store_true',
                               help='solve the recipes and compare them with every recipe already solved (identical = '
                                    'the conversion would duplicate a variant); convert nothing')
+    cmd_quantize.add_argument('--embed-bits', default='auto',
+                              help="token embedding: 'auto' is a trellis ladder (K=4, K=5 from 5 bpw up); a number "
+                                   "is that K at every rate, and 16 keeps it dense")
     cmd_quantize.add_argument('--suffix', default=None,
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
     cmd_quantize.add_argument('--yaqa', default=True, action=argparse.BooleanOptionalAction,

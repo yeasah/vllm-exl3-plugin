@@ -315,11 +315,7 @@ class RebasedEmbeddingTest(unittest.TestCase):
 
 
 class TrellisEmbeddingTest(unittest.TestCase):
-    """A checkpoint from `convert.py -eb` has no dense table to encode.
-
-    Its `embed_tokens.trellis` would pass as a quantized module, so with on-load
-    set the layer would be built for `bq_*` that nothing can fill.
-    """
+    """A checkpoint from `convert.py -eb`: no dense table, and no choice of method."""
 
     TENSORS = {
         "model.language_model.embed_tokens.trellis": "a.safetensors",
@@ -327,9 +323,11 @@ class TrellisEmbeddingTest(unittest.TestCase):
         "model.language_model.layers.0.mlp.up_proj.trellis": "a.safetensors",
     }
 
-    def _load(self, tensors):
+    def _load(self, tensors, *, tied=False, on_load=True):
         cfg = EXL3Config(bits=3.0, head_bits=6)
-        cfg._blockq_on_load = True
+        cfg._blockq_on_load = on_load
+        cfg._hidden_size = 1536
+        cfg.tie_word_embeddings = tied
         with mock.patch(
             "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
             return_value={"weight_map": tensors},
@@ -337,16 +335,21 @@ class TrellisEmbeddingTest(unittest.TestCase):
             cfg._load_index_modules("org/x-exl3", "3.0bpw")
         return cfg
 
-    def test_an_indexed_checkpoint_is_refused_by_name(self):
-        from vllm_exl3_plugin import format
+    def test_it_is_trellis_and_on_load_has_nothing_to_encode(self):
+        cfg = self._load(self.TENSORS)
+        self.assertTrue(cfg.embedding_is_trellis())
+        self.assertFalse(cfg.embedding_is_blockq())
+        self.assertFalse(cfg.blockq_is_on_load())
 
-        with self.assertRaisesRegex(format.EXL3FormatError, "embed_tokens.*--embed_bits"):
-            self._load(self.TENSORS)
+    def test_the_embedding_is_not_a_quantized_linear(self):
+        cfg = self._load(self.TENSORS)
+        self.assertEqual(
+            cfg.quantized_modules, {"model.language_model.layers.0.mlp.up_proj"}
+        )
 
-    def test_a_single_file_checkpoint_is_refused_too(self):
-        from vllm_exl3_plugin import format
-
+    def test_a_single_file_checkpoint_is_seen_too(self):
         cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg.tie_word_embeddings = False
         with (
             mock.patch(
                 "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
@@ -355,15 +358,23 @@ class TrellisEmbeddingTest(unittest.TestCase):
             mock.patch.object(
                 EXL3Config, "_single_file_tensor_names", return_value=set(self.TENSORS)
             ),
-            self.assertRaises(format.EXL3FormatError),
         ):
             cfg._load_index_modules("org/x-exl3", "3.0bpw")
+        self.assertTrue(cfg.embedding_is_trellis())
+
+    def test_a_tied_config_is_refused_by_name(self):
+        from vllm_exl3_plugin import format
+
+        cfg = self._load(self.TENSORS, tied=True)
+        with self.assertRaisesRegex(format.EXL3FormatError, "cannot serve a head"):
+            cfg.embedding_is_trellis()
 
     def test_a_trellis_head_is_not_an_embedding(self):
         cfg = self._load({
             "lm_head.trellis": "a.safetensors",
             "model.embed_tokens.weight": "a.safetensors",
         })
+        self.assertFalse(cfg.embedding_is_trellis())
         self.assertIn("lm_head", cfg.quantized_modules)
 
 

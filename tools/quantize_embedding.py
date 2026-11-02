@@ -47,6 +47,12 @@ stand alone, because it is larger in total and depends on the source.
 A sidecar checkpoint carries both encodings, which is also the only way to
 compare them on one set of weights: `EXL3_DENSE_EMBED=1` serves the dense
 embedding and ignores `bq_*`.
+
+`--trellis K` writes exllamav3's trellis embedding instead, through its own encoder
+(`conversion/ngram.py`), which is what `convert.py --embed_bits` calls. It needs a
+GPU. An exllamav3 conversion also calibrates the later layers against the
+quantized table and this cannot, so prefer that for anything published; this is
+how an existing checkpoint gets the format, and how the bench builds its fixture.
 """
 
 from __future__ import annotations
@@ -99,6 +105,17 @@ def encode_embedding(path, key, chunk):
         name: torch.cat([p[name] for p in parts], dim=0)
         for name in ("bq_q", "bq_s", "bq_r")
     }
+
+
+def encode_trellis(path, key, prefix, k, device):
+    """exllamav3's encoder, imported here so that nothing else in this file needs it."""
+    from exllamav3.conversion.ngram import quantize_embedding
+
+    with safe_open(path, framework="pt") as h:
+        weight = h.get_tensor(key)
+    tensors, rfn = quantize_embedding(prefix, weight, k, device, verbose=False)
+    print(f" -- K={k}: relative error {rfn:.6f}")
+    return {name: tensors[f"{prefix}.{name}"] for name in ("trellis", "signs")}
 
 
 #: safetensors spells dtypes its own way in headers ("BF16", not "torch.bfloat16").
@@ -195,9 +212,16 @@ def main() -> None:
              "output, so this is for keeping the original alongside rather "
              "than replacing it.",
     )
+    ap.add_argument(
+        "--trellis", type=int, metavar="K",
+        help="write exllamav3's K-bit trellis embedding instead of bq_*. Needs "
+             "a GPU, and --device must name it (default cuda in this mode).",
+    )
     args = ap.parse_args()
 
     src, dst = args.checkpoint, args.output
+    if args.trellis is not None and args.sidecar:
+        raise SystemExit("--sidecar is for bq_*: a trellis embedding replaces the dense one")
 
     # Said out loud because the resulting checkpoint is a durable artifact and
     # the requirement it carries is invisible in the file: served by a plugin
@@ -205,6 +229,11 @@ def main() -> None:
     # clean and emits garbage. Nothing downstream can warn about that, so this
     # is the only place it gets said.
     tied = is_tied(src)
+    if args.trellis is not None and tied is not False:
+        raise SystemExit(
+            "a trellis embedding cannot serve a tied head, and conversion unties "
+            "a model that quantizes its embedding; this tool does not"
+        )
     if tied is not False:
         which = "is tied" if tied else "has no config.json, so may be tied"
         print(f" -- {os.path.basename(os.path.normpath(src))} {which}: the "
@@ -230,8 +259,12 @@ def main() -> None:
     print(f" -- {embed_key}: {list(shape)} {dtype} in "
           f"{os.path.basename(embed_file)}")
 
-    stored = encode_embedding(embed_file, embed_key, args.chunk)
-    if args.device != "cpu":
+    if args.trellis is not None:
+        device = "cuda" if args.device == "cpu" else args.device
+        stored = encode_trellis(embed_file, embed_key, prefix, args.trellis, device)
+    else:
+        stored = encode_embedding(embed_file, embed_key, args.chunk)
+    if args.device != "cpu" and args.trellis is None:
         stored = {k: v.to(args.device) for k, v in stored.items()}
 
     bq_named = {f"{prefix}.{n}": t for n, t in stored.items()}
@@ -292,6 +325,16 @@ def main() -> None:
             continue
         if args.sidecar and name == INDEX_NAME:
             continue  # regenerated above, against the new shard names
+        if args.trellis is not None and name == INDEX_NAME:
+            # The config tells this format apart by tensor name, so the index
+            # has to name what the shard now holds.
+            with open(srcf) as f:
+                index = json.load(f)
+            shard = index["weight_map"].pop(embed_key)
+            index["weight_map"].update({k: shard for k in bq_named})
+            with open(os.path.join(dst, name), "w") as f:
+                json.dump(index, f, indent=2)
+            continue
         link_or_copy(srcf, os.path.join(dst, name))
 
     # Describe the new tensors the way the rest of the checkpoint describes its
@@ -309,9 +352,15 @@ def main() -> None:
             }
             for n, t in stored.items()
         },
-        "quant_format": "exl3_blockq",
-        "bits_per_weight": format.BLOCKQ_BITS,
-        "block_size": format.BLOCKQ_BLOCK,
+        **(
+            {"quant_format": "exl3_trellis_embedding", "bits_per_weight": args.trellis}
+            if args.trellis is not None
+            else {
+                "quant_format": "exl3_blockq",
+                "bits_per_weight": format.BLOCKQ_BITS,
+                "block_size": format.BLOCKQ_BLOCK,
+            }
+        ),
         # Sidecar output keeps the dense embedding, so both encodings ship and
         # EXL3_DENSE_EMBED can choose between them. Recorded here rather than
         # inferred from the safetensors index, because a single-file checkpoint
@@ -323,8 +372,9 @@ def main() -> None:
 
     was = vocab * hidden * _DTYPE_BYTES.get(dtype, 2)
     now = sum(t.numel() * t.element_size() for t in stored.values())
+    bpw = now * 8 / (vocab * hidden)
     print(f" -- embedding {was / 2**30:.3f} GiB -> {now / 2**30:.3f} GiB "
-          f"({format.blockq_bpw(hidden):.4f} bpw), saved {(was - now) / 2**30:.3f} GiB")
+          f"({bpw:.4f} bpw), saved {(was - now) / 2**30:.3f} GiB")
     print(f" -- wrote {dst}")
 
 

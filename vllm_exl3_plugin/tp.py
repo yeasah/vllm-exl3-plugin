@@ -52,7 +52,7 @@ ROLE_SCALAR = "scalar"  # mcg / mul1, replicated everywhere
 ROLE_VOCAB = "vocab"
 
 #: Storage suffixes that carry `ROLE_VOCAB`.
-_VOCAB_TENSORS = ("bq_q", "bq_s", "bq_r")
+_VOCAB_TENSORS = ("bq_q", "bq_s", "bq_r", "et_table")
 
 
 def role_of(name: str) -> str:

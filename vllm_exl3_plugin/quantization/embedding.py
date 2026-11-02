@@ -46,7 +46,7 @@ import torch
 from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
-from .. import blockq, blockq_cache, env, format, ops, tp
+from .. import blockq, blockq_cache, env, format, ops, tp, trellis_embed
 from ..log import init_logger
 from .linear import EXL3Parameter
 from .lm_head import EXL3LMHeadMethod
@@ -278,6 +278,121 @@ def _make_on_load_loader(layer: torch.nn.Module, method):
             getattr(layer, name).store(tensor)
 
     return load
+
+
+def _replicated_weight_loader(param, loaded_weight: torch.Tensor) -> None:
+    """A tensor no vocabulary split touches: every rank keeps all of it."""
+    param.store(loaded_weight)
+
+
+class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
+    """Token embedding served from exllamav3's trellis table (`trellis_embed.py`).
+
+    Each row is independent of every other, so a vocabulary split is a row slice,
+    as for `bq_*`. The sign vectors and the codebook belong to no row and stay
+    whole on every rank.
+    """
+
+    def __init__(self, quant_config):
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size
+        indices = layer.shard_indices
+        rows_per_rank = (
+            indices.padded_org_vocab_end_index - indices.padded_org_vocab_start_index
+        )
+        extra_weight_attrs.pop("weight_loader", None)
+        # As in `EXL3BlockQEmbeddingMethod`: a rebased embedding still owns the
+        # `weight` its constructor made, and nothing would ever fill it.
+        layer._parameters.pop("weight", None)
+
+        device = torch.empty(0).device
+        layer.register_parameter(
+            "et_table",
+            EXL3Parameter(
+                num_shards=1,
+                device=device,
+                weight_loader=_blockq_weight_loader,
+                role=tp.role_of("et_table"),
+                row_shard_size=rows_per_rank,
+            ),
+        )
+        layer.register_parameter(
+            "et_signs",
+            EXL3Parameter(
+                num_shards=1,
+                device=device,
+                weight_loader=_replicated_weight_loader,
+                role=tp.role_of("et_signs"),
+            ),
+        )
+        layer.exl3_hidden_size = input_size_per_partition
+        layer.exl3_params_dtype = params_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        params = {n: getattr(layer, n) for n in ("et_table", "et_signs")}
+        for name, param in params.items():
+            if 0 not in param.shards:
+                raise format.EXL3FormatError(
+                    f"{getattr(layer, 'prefix', '<embedding>')}: no '{name}' "
+                    "tensor was loaded for the trellis embedding"
+                )
+        table, signs = params["et_table"].shards[0], params["et_signs"].shards[0]
+
+        hidden = layer.exl3_hidden_size
+        groups = (hidden + trellis_embed.GROUP_DIM - 1) // trellis_embed.GROUP_DIM
+        if signs.shape != (groups, trellis_embed.GROUP_DIM):
+            raise format.EXL3FormatError(
+                f"trellis embedding signs have shape {list(signs.shape)}, but a "
+                f"hidden size of {hidden} needs "
+                f"{[groups, trellis_embed.GROUP_DIM]}"
+            )
+        trellis_embed.depth_from_shape(table.shape[1], groups)
+
+        # vLLM pads the vocabulary partition past the stored rows. An all-zero
+        # row has scale 0 and decodes to zeros, which is what those ids want.
+        target = layer.num_embeddings_per_partition
+        if table.shape[0] > target:
+            raise format.EXL3FormatError(
+                f"trellis embedding has {table.shape[0]} rows but vLLM allocated "
+                f"only {target}"
+            )
+        table = torch.nn.functional.pad(table, (0, 0, 0, target - table.shape[0]))
+
+        layer.register_parameter("et_table", Parameter(table, requires_grad=False))
+        layer.register_parameter("et_signs", Parameter(signs, requires_grad=False))
+        layer.register_buffer(
+            "et_book", trellis_embed.codebook(table.device), persistent=False
+        )
+        for param in params.values():
+            param.release()
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        """Row gather, replacing `F.embedding(input_, layer.weight)`."""
+        return trellis_embed.gather(
+            input_,
+            layer.et_table,
+            layer.et_signs,
+            layer.et_book,
+            layer.exl3_hidden_size,
+            layer.exl3_params_dtype,
+        )
+
+    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+        raise format.EXL3FormatError(
+            "the trellis embedding has no matmul path: its rows are rotated for "
+            "accuracy as vectors, not stored for a GEMM"
+        )
 
 
 class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):

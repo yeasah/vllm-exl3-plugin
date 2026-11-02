@@ -67,6 +67,7 @@ BLOCKQ_BITS = 4
 #: still carries a dense copy beside its `bq_*` ones.
 EMBED_WEIGHT_SUFFIX = ".embed_tokens.weight"
 EMBED_TRELLIS_SUFFIX = ".embed_tokens.trellis"
+EMBED_SIGNS_SUFFIX = ".embed_tokens.signs"
 
 BLOCKQ_SUFFIXES = (".bq_q", ".bq_s", ".bq_r")
 
@@ -357,25 +358,17 @@ def blockq_bpw(hidden: int, block: int = BLOCKQ_BLOCK) -> float:
     return BLOCKQ_BITS + 2 * 8 / block + 4 * 32 / hidden
 
 
-def check_embedding_storage(tensor_names) -> None:
-    """Refuse an embedding stored as exllamav3's trellis (`convert.py -eb`).
+def trellis_embedding_keys(tensor_names) -> set[str]:
+    """Module keys carrying exllamav3's trellis embedding (`convert.py --embed_bits`).
 
-    Such a checkpoint has no dense table to encode and no `bq_*`, and no method
-    here reads `.trellis` + `.signs` on an embedding. Its name would still count
-    it as a quantized module, so it has to stop here, at the checkpoint, rather
-    than as parameters nothing fills.
+    Told apart by name: `.trellis` alone means a quantized linear, and an embedding
+    has no `suh`/`svh` beside it, so it must not count as one.
     """
-    keys = sorted(
+    return {
         name.removesuffix(".trellis")
         for name in tensor_names
         if name.endswith(EMBED_TRELLIS_SUFFIX)
-    )
-    if keys:
-        raise EXL3FormatError(
-            f"{keys[0]} stores a trellis-quantized embedding "
-            "(exllamav3 convert.py --embed_bits), which this plugin cannot serve "
-            "yet. Use a checkpoint converted with a dense embedding."
-        )
+    }
 
 
 def blockq_module_keys(tensor_names) -> set[str]:
@@ -407,6 +400,6 @@ def quantized_module_keys(tensor_names) -> set[str]:
     keys: set[str] = set()
     for name in tensor_names:
         for suffix in REQUIRED_SUFFIXES:
-            if name.endswith(suffix):
+            if name.endswith(suffix) and not name.endswith(EMBED_TRELLIS_SUFFIX):
                 keys.add(name[: -len(suffix)])
     return keys

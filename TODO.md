@@ -1056,9 +1056,47 @@ nearly free alongside other repair-tool work.
 gather) needs a plugin loader whether or not we adopt it for tied models.** If upstream-direction
 quants move to it, they stop carrying a dense table, so on-load blockq has nothing to encode, and
 fetching a reference embedding is no clean swap: the rest of such a model was calibrated against the
-quantized table. It stores `<key>.trellis` and `<key>.signs`. Separately it is the candidate for tied
-models: not expected to beat blockq on quality per bit, the point is one trellis tensor serving both
-the head and the gather.
+quantized table. It stores `<key>.trellis` and `<key>.signs`.
+
+**It beats blockq on quality per bit** (simulated on Ornith-1.5-9B: real encode and `dequant_rows`, swapped
+into existing quants by qbench's `embed_file`, so later layers are not calibrated against it). K=4 is 4.06 bpw
+with table error 0.066 against blockq's 4.52 and 0.078. Excess KL multiples, wild/swe: at 4.00, K=4 1.03/1.07
+against blockq 1.05/1.08; at 5.00, K=4 1.17/1.35, K=5 1.03/1.10, K=6 1.01/1.01, against blockq 1.26/1.44.
+Text-answer recall is within CIs of dense at K=4 on 4.00 and K=5 on 5.00. K=4 on 5.00 is the exception at -1.70
+points [-2.64, -0.88], worse than blockq's -0.64 despite better KL, unexplained. Depth is a free parameter
+of the format, so this needs no 5-bit blockq. Encoding is about 45 s on a GPU for 248320x4096, and reproduces
+bit for bit across runs, chunk sizes, and a 5060 Ti against a 5070 Ti. Gather ties blockq at chunk sizes on a
+synthetic table, uncompiled. Still unmeasured: the 27B, a true `-eb` conversion, the served path. The reproducibility result is GPU against
+GPU only: blockq's own problem was CPU against GPU, so the two are not compared like for like.
+
+**Decided 2026-11-01: the pipeline adopts trellis by default; on-load stays blockq.** Start the ladder like the
+head's: K=4 base, K=5 at 5 bpw body and above. exllamav3 reads the format natively, so a published quant needs
+no dense copy, which is what ruled out emitting `bq_*`. On-load does not move to trellis without a much larger
+difference than this: it would tie the serving arm to the encoder and add about 45 s of GPU to a first load,
+and blockq remains a high-quality format that is easy to produce on the fly.
+
+**The plugin loader is in** (`vllm_exl3_plugin/trellis_embed.py`, `EXL3TrellisEmbeddingMethod`): plain torch,
+bit-exact against `ngram_dequant` at K=1..8. Served against a dense twin holding the same decoded table, eager
+is identical at TP=1 and TP=2. Under CUDA graphs it differs by up to 0.72 on tail logprobs, repeatably:
+compiled `gather` differs from the kernel in about 6% of elements by 1-2 fp16 ULPs, with rows following ids, and
+blockq's own eager-to-graphs gap is the same size. Compiled it is about 25x slower than blockq at 8192 tokens
+(6.5 ms against 0.26), unmeasured on the served path. Four `trellis` bench entries are in; `quant.py` passes
+the ladder by default (`--embed-bits`, 16 keeps it dense).
+
+**A true conversion matches the simulation** (shipping recipe, YAQA and calibration mix; conversion does calibrate
+through the quantized table). Ornith-1.5-9B: 7.31 to 5.79 GB at 4.00, 8.17 to 6.78 GB at 5.00. Excess KL 1.05/1.04
+and 1.05/1.11 wild/swe, against 1.03/1.07 and 1.03/1.10 simulated. Text-answer recall -1.06 points [-2.70, +0.47]
+and +0.06 [-1.17, +1.35]. MiniCPM5-2B: 1.73 to 1.33 GB and 1.98 to 1.61 GB. Both serve through the plugin.
+
+**Reconverting a rung can move recall by 4 points, with no embedding involved.** MiniCPM5-2B 5.00 dense, from the
+same measurement, reconverted here: text facts 91.5 to 87.4, -4.16 [-6.93, -1.39], against that control `-eb` is
++0.46 [-2.47, +3.24], and a K=5 table on the original body is +0.00. The original came from another host (godel)
+and an older converter, so host, converter and chance are not separated. Recall comparisons need arms from one host
+and converter, and a same-host repeat to size the noise before any further headroom hunting.
+
+**It does not serve a tied head.** The earlier hope here, one tensor for head and gather, does not match the
+format: rows are rotated by random signs and a Hadamard, built for row accuracy, with no GEMM path. A tied
+model would carry it beside the head's trellis, the same trade as `EXL3BlockQTiedEmbeddingMethod`.
 
 → [docs/embeddings.md](docs/embeddings.md)
 

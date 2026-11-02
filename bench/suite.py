@@ -183,6 +183,31 @@ ENTRIES: list[Entry] = [
         "same claim through vLLM's own graph handling",
     ),
     Entry(
+        label="minicpm5-1B 3.0bpw trellis eager",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        exercises="exllamav3's trellis embedding end to end: "
+        "EXL3TrellisEmbeddingMethod decoding rows that have no dense copy "
+        "anywhere and no fallback. What the pipeline publishes from now on, so "
+        "a loader that stopped recognizing the format fails here. The "
+        "weight-bytes gate catches a table left resident beside a dense one, "
+        "the shape of the Muse bug that on-load blockq had",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis graphs",
+        tolerance=RUN_TO_RUN_FLIPS,
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        enforce_eager=False,
+        exercises="the same table under torch.compile and CUDA graph replay. "
+        "The decode is plain torch and fuses, so the compiled path differs from "
+        "the kernel by 1-2 fp16 ULPs on about 6% of elements, and a gather with "
+        "baked-in indices would return the previous batch's rows while failing "
+        "nothing else",
+    ),
+    Entry(
         label="minicpm5-1B 3.0bpw tq4",
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
@@ -456,6 +481,29 @@ ENTRIES: list[Entry] = [
         "a model whose vocabulary splits into whole Hadamard blocks (130560 = "
         "510 per rank): the dense TP baseline, standing in for the Qwen3 "
         "entries above until their head can be split",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-trellis-eager",
+        exercises="the trellis table sliced by rows across ranks, with its sign "
+        "vectors and codebook replicated",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis graphs tp2",
+        tolerance=RUN_TO_RUN_FLIPS,
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        tier="tp",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        tp_reference="minicpm5-1B-3.0bpw-trellis-graphs",
+        exercises="the sliced table under torch.compile and CUDA graph replay",
     ),
     Entry(
         label="minicpm5-1B 3.0bpw blockq graphs tp2",
