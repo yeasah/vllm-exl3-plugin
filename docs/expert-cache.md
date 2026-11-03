@@ -10,8 +10,8 @@ Tools are in [tools/offload/](../tools/offload/). Background and older measureme
 Ultra 9 285, 23 GiB RAM. Routing traced on three models; see [Phase 0 results](#phase-0-results).
 Routing tables below are from the corrected replay.*
 
-**Status: phase 0 complete, phase 1 built and gated (2026-11-03); see
-[Phase 1 results](#phase-1-results).** The recommendation is one mechanism that replaces
+**Status: phases 0–2 complete and gated (2026-11-03); see
+[Phase 1 results](#phase-1-results) and [Phase 2 results](#phase-2-results).** The recommendation is one mechanism that replaces
 `register_offload`: a pinned host copy of every expert written at load time, a fixed VRAM
 slot arena managed as an LRU between steps, and a whole-layer staging copy for prefill.
 
@@ -315,6 +315,84 @@ memory is stranded, and outputs are identical across all three. **Hit-aware plac
 +44% decode at 4.10bpw on this card, from phase 1 alone.** Prefill stays at ~30 t/s whatever
 the placement, which is phase 2's job. Load takes ~90 s here against 15–25 s on `cuda`.
 
+**Correction, found in phase 2:** the identity check above compared completions of prompts in
+gemma-3's chat format, which gemma-4 ends at once, so the 160 compared tokens were template
+loops, and every prompt was under 32 tokens. `measure.py` now compares chat completions through
+the server's template plus prompt logprobs over a 2350-token, three-chunk prefill. Re-run on
+`cuda` and the 3060, every placement still matches resident exactly on both.
+
+### Phase 2 results
+
+**Built:** `cpu_offload.build_staging` runs at the end of load. It allocates one VRAM window the
+size of the largest layer's offloaded trellis and gives each hosted layer a second set of pointer
+tables into it. In `apply`, a batch over `EXL3_STAGE_MIN_TOKENS` (32) copies the layer's host
+blocks into the window in stream and runs on those tables. One window serves all layers because
+stream order serializes them. The copy is async and graph-capturable from driver-pinned memory,
+checked on both hosts.
+
+**`cuda`, gemma 2.10bpw, 3 GiB off, 1024 batched tokens:**
+
+| placement | prefill (~2350 tok) | decode |
+|---|---|---|
+| resident | 671 t/s | 126.3 |
+| spread, staged | **634** | 86.5–89.0 |
+| spread, UVA (staging off) | 158 | 88.8 |
+| cold set, staged | 639 | 113.7 |
+| greedy 16 layers, staged | 639 | 81.8 |
+
+94% of resident, 4x over UVA. Outputs identical to resident in every row. TTFT over resident
+steps with chunks, not tokens:
+
+| prompt tokens | 126 | 507 | 1022 | 1094 | 2045 | 2088 | 3064 | 3986 |
+|---|---|---|---|---|---|---|---|---|
+| chunks | 1 | 1 | 1 | 2 | 2 | 3 | 3 | 4 |
+| added ms | 56 | 69 | 69 | 142 | 128 | 206 | 223 | 275 |
+
+**3060 (WSL):** staging works as designed, and prefill is bound by the MoE kernel.
+
+- **Profiled at 2.10bpw spread:** `exl3_moe_mm` is 90% of GPU time, about 138 ms per layer for
+  1016 tokens, the same as resident. Staging copies run at ~20 GB/s and cost ~4% of prefill.
+  TTFT then matched resident, 4.58 s against 4.46 s.
+- **Noise:** an earlier sweep of the same configuration measured 7.2 s, and greedy and spread
+  each measured 45 s then 77 s for consecutive prompts. On WSL, prefill timings need a profile
+  or a repeat before they count.
+- **4.10bpw cold:** TTFT grows with tokens, at 14.5 s per 1016 (~70 t/s, against 30 over UVA).
+  The profile shows `exl3_moe_mm` at 468 ms per layer and staging at 0.35 s per prompt, under 3%.
+
+**The 4.10bpw kernel is slow because the checkpoint is mcg.** `stage_bench.py`, synthetic
+gemma-shaped experts at K=4 and 1024 tokens on the 3060:
+
+| codebook | resident | staged | UVA |
+|---|---|---|---|
+| mcg | 450 ms/layer | 456 | — |
+| mul1 | 122 | 135 | 947 |
+
+**Confirmed served, on a mul1 checkpoint:** Laguna-XS 4.00bpw (256 experts, 40 layers) on the
+3060, with experts 128–255 of every layer off (7.31 GiB):
+
+| prompt tokens | 127 | 1022 | 1095 | 2089 | 2884 |
+|---|---|---|---|---|---|
+| TTFT | 0.84 s | 3.04 s | 3.75 s | 6.77 s | 8.71 s |
+
+That is **~335 t/s, against ~70 for gemma 4.10bpw mcg and 29 over UVA**. Profiled per 1022-token
+prefill: MoE kernel 2.3 s (59 ms/layer), staging copies 0.53 s (14.7 GB/s, constant per chunk),
+the rest 0.28 s. Staged runs at ~84% of resident-equivalent; the copy is the whole difference.
+
+So the projection's ~150–190 t/s at 4.10bpw holds, and is beaten, for a mul1 quant, not for the
+mcg gemma checkpoint.
+Resident 2.10bpw prefill on the 3060 is 4.4 ms/token, ~225 t/s, and is kernel-bound in the same
+way. `exl3_moe_mm` runs one row per (token, expert) slot, re-decoding each expert ~64 times per
+chunk. exllamav3's own large-batch tiers avoid that, and are now the larger prefill lever. See
+TODO `cpu-offload`.
+
+**Gates.**
+
+- **TTFT steps with chunks, not tokens:** passes. On `cuda` it adds ~65 ms per chunk; on the 3060
+  the copy is 0.35 s per chunk at 4.10bpw.
+- **At least 50% of resident at ~4bpw:** passes against what resident would be, ~84% on Laguna
+  4.00bpw mul1 with 7.3 GiB off. A resident run does not fit this card, so no direct comparison
+  exists. Gemma 4.10bpw's absolute rate, ~70 t/s, is the mcg kernel's.
+
 ### Cost arithmetic for 4.10bpw
 
 One expert is 3 × 1.03 MiB ≈ 3.24 MB. Full routing reads 8 × 30 × 3.24 = 778 MB/token. Greedy
@@ -447,7 +525,8 @@ Replace `register_offload`; residents chosen statically.
 residual under both allocators; the 4.10bpw spread and hot comparison re-run clean, closing the table
 above. This phase alone is worth having and unblocks the rest.
 
-**Phase 2: prefill staging.** Top priority as an outcome; needs phase 1's host blocks.
+**Phase 2: prefill staging.** *Done, gates pass; see [Phase 2 results](#phase-2-results). Prefill is
+now bound by the MoE kernel.* Top priority as an outcome; needs phase 1's host blocks.
 *Gate:* TTFT overhead scales with steps not tokens, measured as `first_token_ts - scheduled_ts`;
 at least 50% of resident rate at 4.10bpw.
 
@@ -480,7 +559,9 @@ python tools/offload/hot_selector.py t 66              # writes cold.txt for --c
 python tools/offload/measure.py                        # decode/prefill against a server on :8123
 python tools/offload/graph_spike.py                    # pointer flips, ring copy, side-stream overlap
 python tools/offload/pin_probe.py                      # pin 30 x 415 MiB host blocks, DMA, readback
-tools/offload/phase1_check.sh REPO [ballast]           # phase 1 gates: identity, speed, tight loads
+tools/offload/phase1_check.sh REPO [ballast|main]      # placement gates: identity, speed, tight loads
+python tools/offload/prefill_sweep.py [TOKENS ...]     # TTFT across prompt lengths, against :8123
+CODEBOOK=mcg python tools/offload/stage_bench.py 4 1024 # MoE prefill: resident, UVA, staged, copy
 ```
 
 These are research scripts. The trace's prompts are gemma-formatted, and calibration text comes

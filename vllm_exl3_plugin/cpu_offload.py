@@ -29,6 +29,12 @@ Routed experts go into one pinned block per layer, projection and component, so 
 layer's offloaded experts are one contiguous range for a staging copy, and a load
 pins tens of blocks instead of thousands of tensors.
 
+Prefill stages them: a batch over ``STAGE_MIN_TOKENS`` copies the layer's blocks
+into one shared VRAM window and runs on a second set of pointer tables into it
+(`build_staging`, `expert_tables`). Read over UVA instead, a 1024-token chunk
+fetches each offloaded expert ~60 times, since exl3_moe_mm runs one row per
+(token, expert) slot; staged, it is fetched once.
+
 UVA only (``uva_offloading`` on); ``NoopOffloader`` means offload was not requested.
 The ``EXL3_DEQUANTIZE=1`` reference path still offloads after load, through
 ``register_offload``, since the tensor it would offload only exists then.
@@ -42,6 +48,7 @@ from __future__ import annotations
 import ctypes
 import functools
 import math
+import os
 import re
 
 import numpy
@@ -292,6 +299,96 @@ def place_expert(param, t: torch.Tensor, label: str, expert_id: int) -> torch.Te
         )
     block.host[row].copy_(t)
     return block.view[row]
+
+
+#: Batches of more than this many tokens stage a layer's offloaded experts into
+#: VRAM before its GEMM, rather than reading them over UVA. exl3_moe_mm runs one
+#: row per (token, expert) slot, so UVA traffic grows with tokens x top_k while
+#: the staging copy is one layer's offloaded bytes whatever the batch.
+STAGE_MIN_TOKENS = int(os.environ.get("EXL3_STAGE_MIN_TOKENS", "32"))
+
+#: MoE layers with host blocks, waiting for `build_staging` at the end of load.
+_HOSTED: list = []
+
+#: Offsets within the staging window, to keep each block's rows aligned.
+_ALIGN = 256
+
+
+def register_experts(layer, blocks: dict) -> None:
+    """Note a MoE layer's trellis host blocks, by projection label, for staging."""
+    layer.exl3_stage = None
+    blocks = {label: b for label, b in blocks.items() if b is not None}
+    if blocks:
+        layer.exl3_host_blocks = blocks
+        _HOSTED.append(layer)
+
+
+def build_staging() -> None:
+    """Allocate one VRAM staging window, sized to the largest layer's offloaded
+    experts, and give each hosted layer a second set of trellis pointer tables
+    into it.
+
+    One window serves every layer: a layer's copy is issued in stream after the
+    previous layer's GEMM, so stream order alone keeps them from overlapping.
+    Called at the end of load, before vLLM sizes the KV cache, so the window is
+    counted as model memory. Tables are static, since the window never moves, so
+    a captured graph can hold them.
+    """
+    if not _HOSTED:
+        return
+    plans, size = [], 0
+    for layer in _HOSTED:
+        offsets, off = {}, 0
+        for label, block in layer.exl3_host_blocks.items():
+            offsets[label] = off
+            off += -(-block.host.numel() * block.host.element_size() // _ALIGN) * _ALIGN
+        plans.append((layer, offsets))
+        size = max(size, off)
+    device = next(iter(_HOSTED[0].exl3_host_blocks.values())).view.device
+    window = torch.empty(size, dtype=torch.uint8, device=device)
+    base = window.data_ptr()
+
+    for layer, offsets in plans:
+        copies, tables = [], []
+        for label in ("gate", "up", "down"):
+            table = getattr(layer, f"exl3_{label}_trellis_ptrs")
+            block = layer.exl3_host_blocks.get(label)
+            if block is not None:
+                nbytes = block.host.numel() * block.host.element_size()
+                row_bytes = nbytes // block.host.shape[0]
+                dst = window[offsets[label]:offsets[label] + nbytes]
+                copies.append((dst, block.host.view(-1).view(torch.uint8)))
+                table = table.cpu()
+                for e, row in block.rows.items():
+                    table[e] = base + offsets[label] + row * row_bytes
+                table = table.to(device)
+            tables.append(table)
+        layer.exl3_stage = (copies, tuple(tables))
+    # Strong reference: the staged tables hold raw addresses into it
+    _STATS["window"] = window
+    logger.info(
+        "cpu-offload: %.0f MiB prefill staging window; batches over %d tokens "
+        "copy a layer's offloaded experts in rather than reading them over UVA",
+        size / (1 << 20), STAGE_MIN_TOKENS,
+    )
+    _HOSTED.clear()
+
+
+def expert_tables(layer, tokens: int):
+    """The gate, up and down trellis pointer tables for a batch of `tokens`.
+
+    Over the threshold, issues this layer's staging copies on the current stream
+    and returns the tables into the window; the GEMM that follows in the same
+    stream reads them after they land. No sync, and the decision is on the
+    batch's shape, so it holds for a whole captured graph.
+    """
+    if layer.exl3_stage is None or tokens <= STAGE_MIN_TOKENS:
+        return (layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs,
+                layer.exl3_down_trellis_ptrs)
+    copies, tables = layer.exl3_stage
+    for dst, src in copies:
+        dst.copy_(src, non_blocking=True)
+    return tables
 
 
 def register_offload(layer) -> int:

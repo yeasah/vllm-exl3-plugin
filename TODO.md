@@ -2067,7 +2067,21 @@ only.
 **Plan as of 2026-11-01: [docs/expert-cache.md](docs/expert-cache.md)**, phases and gates there,
 work on branch `cpu-offload`. It settles the layout, staging and load path below in one design,
 and supersedes the routing-uniformity reasoning further down this item. **Phase 1, pin at
-store, is done (2026-11-03)**; next is phase 2, prefill staging.
+store, and phase 2, prefill staging, are done (2026-11-03)**; next is phase 3, slots and the
+controller.
+
+**Prefill is now bound by the MoE kernel, not the link.** `exl3_moe_mm` runs one row per
+(token, expert) slot at every batch size, so a 1024-token chunk decodes each expert's trellis
+~64 times. That is 90% of prefill time resident or staged. Two levers, both outside the cache:
+
+- **mul1 checkpoints.** The turboderp gemma quants are mcg, whose prefill kernel is 3.7x
+  mul1's at K=4 (450 against 122 ms per layer at 1024 tokens, `stage_bench.py`). Staged on the
+  3060, gemma 4.10bpw mcg prefills at ~70 t/s, and Laguna-XS 4.00bpw mul1 at ~335 t/s. A mul1
+  gemma quant is only needed for same-model comparisons; cuda can make one.
+- **exllamav3's large-batch tiers** (`block_sparse_mlp.py` `forward`): sort slots by expert,
+  fused kernel for light experts, reconstruct-and-GEMM for heavy ones, one count readback per
+  layer. Prefill is eager, so the sync is affordable. Reconstructing reads each expert once,
+  so it could also read offloaded experts over UVA with no staging window.
 
 **Startup headroom on small cards.** Two allocations after weight load are missing from vLLM's
 memory profile, and on a tight card they, not the weights, decide whether a model serves:

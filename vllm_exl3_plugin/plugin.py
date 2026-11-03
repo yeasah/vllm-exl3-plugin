@@ -106,8 +106,9 @@ def _patch_offload_summary() -> None:
     @wraps(original)
     def process_weights_after_loading(*args, **kwargs):
         result = original(*args, **kwargs)
-        from .cpu_offload import report_once
+        from .cpu_offload import build_staging, report_once
 
+        build_staging()
         report_once()
         return result
 

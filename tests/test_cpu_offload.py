@@ -220,6 +220,48 @@ def test_mismatched_expert_shape_is_refused(offload):
         cpu_offload.place_expert(param, torch.zeros((4, 2, 48), dtype=torch.int16), "gate", 1)
 
 
+def test_staged_tables_address_each_offloaded_expert_in_the_window(offload):
+    import types
+
+    import torch
+
+    offload(_Loader({r"re:experts\.[135]\.gate", "down_proj"}))
+    params = {"gate": _Collector(), "down": _Collector()}
+    placed = {label: [cpu_offload.place_expert(p, _expert_tensor(e), label, e)
+                      for e in range(8)] for label, p in params.items()}
+    layer = types.SimpleNamespace(exl3_up_trellis_ptrs=torch.arange(8))
+    for label, tensors in placed.items():
+        setattr(layer, f"exl3_{label}_trellis_ptrs",
+                torch.tensor([t.data_ptr() for t in tensors]))
+    cpu_offload.register_experts(layer, {"gate": params["gate"].exl3_blocks["gate"],
+                                         "up": None,
+                                         "down": params["down"].exl3_blocks["down"]})
+    cpu_offload.build_staging()
+    window = cpu_offload._STATS["window"]
+    assert window.numel() == 3 * 512 + 8 * 512
+    window.zero_()
+
+    small = cpu_offload.expert_tables(layer, cpu_offload.STAGE_MIN_TOKENS)
+    assert all(a is b for a, b in zip(
+        small, (layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs,
+                layer.exl3_down_trellis_ptrs))), "small batches must read in place"
+    assert not window.any(), "a small batch staged"
+
+    gate, up, down = cpu_offload.expert_tables(layer, cpu_offload.STAGE_MIN_TOKENS + 1)
+    assert up is layer.exl3_up_trellis_ptrs, "a projection with no host block changed"
+    for label, table in (("gate", gate), ("down", down)):
+        resident = getattr(layer, f"exl3_{label}_trellis_ptrs")
+        rows = params[label].exl3_blocks[label].rows
+        for e in range(8):
+            off = int(table[e]) - window.data_ptr()
+            if e not in rows:
+                assert table[e] == resident[e], f"resident {label} {e} was redirected"
+                continue
+            assert 0 <= off and off % 256 == 0 and off + 512 <= window.numel()
+            assert bool((window[off:off + 512].view(torch.int16) == e).all()), \
+                f"staged {label} {e} points at the wrong rows"
+
+
 def test_dense_place_respects_opt_in_component_and_budget(offload):
     import torch
 

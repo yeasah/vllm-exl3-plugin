@@ -2,7 +2,7 @@
 # Phase 1 gates on a bare-Linux host: output identity and speed across placements, then
 # loads that need more VRAM than a ballast leaves. Writes into the current directory.
 # usage: phase1_check.sh REPO [ballast]   REPO is the plugin checkout for PYTHONPATH;
-#        "ballast" runs only the tight-memory loads
+#        "ballast" runs only the tight-memory loads, "main" only the others
 set -f  # selector regexes contain globs
 R=$1; export PYTHONPATH=$R; T=$R/tools/offload
 G="turboderp/gemma-4-26B-A4B-it-exl3 --revision 2.10bpw"
@@ -30,13 +30,16 @@ serve() { name=$1; port=$2; model=$3; shift 3; echo "=== $name"
 if [ "$2" != ballast ]; then
 S="--max-model-len 4096 --max-num-batched-tokens 1024 --gpu-memory-utilization 0.90"
 serve base 8123 "$G" $S
-serve spread 8123 "$G" $S --cpu-offload-gb 99 --cpu-offload-params 're:experts\.(6[2-9]|[7-9][0-9]|1[0-9][0-9])\.'
+SPREAD='re:experts\.(6[2-9]|[7-9][0-9]|1[0-9][0-9])\.'
+serve spread 8123 "$G" $S --cpu-offload-gb 99 --cpu-offload-params "$SPREAD"
+EXL3_STAGE_MIN_TOKENS=1000000 serve spread_uva 8123 "$G" $S --cpu-offload-gb 99 --cpu-offload-params "$SPREAD"
 serve cold 8123 "$G" $S --cpu-offload-gb 99 --cpu-offload-params $(cat cold.txt)
 serve greedy 8123 "$G" $S --cpu-offload-gb 3 --cpu-offload-params experts
-for n in spread cold greedy; do
-  python -c "import json,sys; a,b=(json.load(open(f)) for f in sys.argv[1:]); print('$n output identical to base:', a==b)" out_base.json out_$n.json
+for n in spread spread_uva cold greedy; do
+  python -c "import json,sys; a,b=(json.load(open(f)) for f in sys.argv[1:]); print('$n vs base: chat identical', a['chat']==b['chat'], '| prompt logprobs identical', a['prompt_logprobs']==b['prompt_logprobs'])" out_base.json out_$n.json
 done
 fi
+[ "$2" = main ] && exit
 
 # ballast: hold device memory so loads must fit in what is left. Settings leave headroom for
 # startup steps that allocate past vLLM's profile: flashinfer autotune runs a dummy batch after

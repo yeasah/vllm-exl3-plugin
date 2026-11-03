@@ -292,6 +292,11 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             layer._exl3_gate_trellis[0].shape[1] * format.TILE
         )
 
+        # Offloaded trellis rows, for prefill staging; the scale vectors stay resident
+        cpu_offload.register_experts(layer, {
+            label: getattr(layer, prefix + "trellis").exl3_blocks.get(label)
+            for label, (prefix, _) in projections.items()
+        })
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
                 getattr(layer, prefix + name).release()
@@ -333,17 +338,18 @@ class EXL3MoEMethod(FusedMoEMethodBase):
 
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
+        gate, up, down = cpu_offload.expert_tables(layer, flat.shape[0])
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,
             topk_weights,
-            layer.exl3_gate_trellis_ptrs,
+            gate,
             layer.exl3_gate_suh_ptrs,
             layer.exl3_gate_svh_ptrs,
-            layer.exl3_up_trellis_ptrs,
+            up,
             layer.exl3_up_suh_ptrs,
             layer.exl3_up_svh_ptrs,
-            layer.exl3_down_trellis_ptrs,
+            down,
             layer.exl3_down_suh_ptrs,
             layer.exl3_down_svh_ptrs,
             layer.exl3_gate_bits,
