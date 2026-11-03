@@ -1,8 +1,11 @@
-"""Record every (layer, token) -> topk_ids in a served-style workload. No repo changes."""
+"""Record every (layer, token) -> topk_ids in a served-style workload.
+
+usage: routing_trace.py MODEL REVISION OUT
+"""
 import os, sys, json, time, random
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 import numpy as np, torch
-rev = sys.argv[1]; out = sys.argv[2]
+model, rev, out = sys.argv[1:4]
 from vllm_exl3_plugin.quantization import fused_moe
 LOG = []; LAYERS = {}; TAG = ["none"]
 orig = fused_moe.EXL3MoEMethod.apply
@@ -13,11 +16,12 @@ def apply(self, layer, x, topk_weights, topk_ids, *a, **k):
     return orig(self, layer, x, topk_weights, topk_ids, *a, **k)
 fused_moe.EXL3MoEMethod.apply = apply
 from vllm import LLM, SamplingParams
-kw = dict(max_model_len=3000, max_num_seqs=1, enforce_eager=True, gpu_memory_utilization=0.9,
+kw = dict(max_model_len=6000, max_num_seqs=1, enforce_eager=True, gpu_memory_utilization=0.9,
           max_num_batched_tokens=2048, language_model_only=True, enable_prefix_caching=False)
-llm = LLM("turboderp/gemma-4-26B-A4B-it-exl3", revision=rev, **kw)
+llm = LLM(model, revision=rev, **kw)
 tok = llm.get_tokenizer()
-D = "/home/yeasah/git/vllm-exl3-plugin/deps/exllamav3/exllamav3/conversion/standard_cal_data/"
+import exllamav3
+D = os.path.dirname(exllamav3.__file__) + "/conversion/standard_cal_data/"
 def chunks(name, n, size):
     t = open(D + name, encoding="utf8").read(); r = random.Random(7)
     return [t[p:p + size] for p in (r.randrange(0, max(1, len(t) - size)) for _ in range(n))]
@@ -43,7 +47,7 @@ Q = {
   "Compute the eigenvalues of [[2,1],[1,2]] and explain what they mean.",
   "Solve x^2 - 5x + 6 = 0 by three methods.",
   "Derive the formula for the sum of a geometric series."]}
-def cut(s, n=2600): return tok.decode(tok.encode(s, add_special_tokens=False)[:n])
+def cut(s, n=4800): return tok.decode(tok.encode(s, add_special_tokens=False)[:n])
 def chat(s): return tok.apply_chat_template([{"role": "user", "content": s}], tokenize=False, add_generation_prompt=True)
 jobs = [(k, chat(q), 300) for k, qs in Q.items() for q in qs]
 Q2 = {"lang": ["Explique en français comment fonctionne un moteur à combustion interne, en détail.",

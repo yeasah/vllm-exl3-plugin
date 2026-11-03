@@ -6,6 +6,10 @@ shared with a desktop, WSL2, i5-12400F, 23 GiB RAM. All served measurements are
 Tools are in [tools/offload/](../tools/offload/). Background and older measurements are in
 [cpu-offload.md](cpu-offload.md); where the two disagree, this note is newer.*
 
+*Phase 0 follow-up, 2026-11-02, on `cuda`: RTX 5070 Ti 16 GiB (Gen5 x16), bare Linux 6.12,
+Ultra 9 285, 23 GiB RAM. Routing traced on three models; see [Phase 0 results](#phase-0-results).
+Routing tables below are from the corrected replay.*
+
 **Status: designed, not built.** The recommendation is one mechanism that replaces
 `register_offload`: a pinned host copy of every expert written at load time, a fixed VRAM
 slot arena managed as an LRU between steps, and a whole-layer staging copy for prefill.
@@ -56,8 +60,10 @@ not for this.
 
 ### The link
 
-`link_bench.py`, best of three. `sum()` itself saturates near 18.6 GB/s here, so the UVA
-column at large sizes is partly the benchmark's ceiling.
+`link_bench.py`, best of three. **The UVA column is understated.** That version summed `uint8`,
+whose narrow loads measure PCIe transaction size rather than the link. With `int32` loads the
+5070 Ti reads 36 GB/s at 1 MiB, against 4–9 before, and served decode agrees (see
+[Phase 0 results](#phase-0-results)). These rows have not been re-measured.
 
 | transfer | pinned DMA | UVA kernel read |
 |---|---|---|
@@ -82,13 +88,17 @@ capacity C, as a fraction of experts:
 | static hot set, odd/even cross-validated | 22% | 38% | 51% | 63% | 73% | 80% | 90% |
 | static, held-out: languages (worst domain) | 17% | 30% | 42% | 50% | 58% | 64% | 74% |
 | updated between requests only | — | 37% | 50% | 62% | 71% | 79% | 89% |
-| **LRU, lag 2, 32 promotions/token** | 18% | 64% | 82% | **90%** | 95% | 97% | 99% |
-| LRU, lag 2, 16 promotions/token | 9% | 39% | 70% | 86% | 93% | 96% | 98% |
-| LRU, lag 2, 6 promotions/token | 3% | 11% | 27% | 58% | 81% | 90% | 96% |
-| same (32/token), first 32 tokens of a request | 13% | 43% | 63% | 76% | 84% | 89% | 95% |
+| **LRU, lag 2, 32 promotions/token** | 43% | 70% | 83% | **90%** | 95% | 97% | 99% |
+| LRU, lag 2, 16 promotions/token | 42% | 68% | 81% | 89% | 94% | 96% | 98% |
+| LRU, lag 2, 6 promotions/token | 45% | 66% | 77% | 85% | 90% | 94% | 97% |
+| same (32/token), first 32 tokens of a request | 33% | 55% | 68% | 77% | 85% | 90% | 95% |
 
-Figures for the between-request row come from an earlier 27-job trace at matching scale; the
-rest are from the 41-job trace.
+Figures for the between-request row come from an earlier 27-job trace at matching scale. The
+static rows are from the 41-job trace. The LRU rows are from the same 41 jobs re-traced on `cuda`
+with longer documents (4.8K tokens instead of 2.6K), replayed with the corrected promotion order.
+The first replay kept the first misses in layer order when the budget ran out, which starved late
+layers. That understated small budgets and small capacities, and made the 6/token row look like a
+collapse.
 
 - **The structure is mostly temporal.** Token-to-token overlap of the routed set is 45.7%,
   against ~6% for independent draws. The hot set follows the text, so a static ranking gets
@@ -98,9 +108,9 @@ rest are from the 41-job trace.
   below the mean. Strata's PR #38 reports the same failure at 25–35%.
 - **A miss does not stall.** Lag means a miss is served by UVA for that token and promoted
   for a later one, so the policy needs no host sync inside the forward pass.
-- **Too small a copy budget collapses.** 6/token, the exllamav3 default budget for a
-  different purpose, loses a third of the hit rate. 32 is the working number at 40% C, and
-  steady-state need is ~15/token.
+- **The copy budget degrades gently.** At 40% C, 6/token (the exllamav3 default) costs 5
+  points against 32/token, provided promotions go to the most-wanted misses across all layers
+  rather than first-come. Steady-state need on gemma is ~15/token.
 - **Prefill touches nearly everything:** 87% of experts in a 2048-token chunk, 75% at 1024.
 
 ### Served, graphs on
@@ -131,6 +141,119 @@ free"), so WDDM was paging. They show one thing: **post-load offload cannot expr
 spread placement on this checkpoint**, because 2.16 GiB of the freed memory never came back.
 The stranding did not appear at 2.10bpw; 1.03 MiB trellises against 540 KiB is the obvious
 difference, and the mechanism was not established.
+
+### Phase 0 results
+
+**Routing on three models.** Same 41-job workload, decode hit rate at 40% per-layer capacity,
+LRU with lag 2:
+
+| model | experts × layers | token overlap | static, odd/even | LRU, 32/token | LRU, 6/token | first 32 tokens | promotions/token, unlimited |
+|---|---|---|---|---|---|---|---|
+| gemma-4-26B-A4B 2.10bpw | 128 × 30 | 45.5% | 61% | **90.5%** | 84.6% | 77% | 23 |
+| Qwen3.6-35B-A3B 2.00bpw-H5 | 256 × 40 | 37.2% | 63% | **85.3%** | 76.6% | 68% | 46 |
+| Laguna-XS-2.1 2.00bpw | 256 × 39 | 36.0% | 52% | **81.1%** | 67.8% | 60% | 61 |
+
+**The LRU result generalizes, a little weaker on 256-expert models.** At 50% capacity the three are
+95, 91 and 87%. Those models want two to three times more promotions per token, so their budget
+matters more: Qwen at 64/token is 87.4%. Laguna's static placement is weakest of the three
+(math held out: 32%), so its gain from the LRU is the largest.
+
+**Concurrency degrades gently, not catastrophically.** Here n decode streams share one cache and
+a step merges their routing; promotions are capped per step. At 40% capacity, 32 per step:
+
+| concurrent | gemma | Qwen3.6 | Laguna |
+|---|---|---|---|
+| 1 | 90.3% | 85.1% | 80.8% |
+| 2 | 84.4% | 81.1% | 74.4% |
+| 4 | 77.3% | 76.7% | 68.9% |
+| 8 | 73.6% | 72.8% | 64.8% |
+
+Scaling the budget with n buys 1–3 points at 40% and more at 60–75% capacity. At 8 streams the
+LRU is still at or above single-stream static placement. This workload has no shared-prefix
+traffic, so it is close to the worst case.
+
+**Bare Linux OOMs, as inferred.** With an 11 GiB ballast on the 16 GiB card,
+Ornith-1.5-9B-exl3 6.00bpw plus `--cpu-offload-gb 6` dies in `EXL3Parameter.store`
+(`linear.py:100`). `oversub_probe.py` hard-OOMs at 15 GiB; there is no oversubscription.
+
+**Pinning and DMA pass.** 30 blocks × 415 MiB (12.2 GiB, the 4.10bpw expert set) pinned in
+4.3 s under `ulimit -l 8192`; the limit does not apply to CUDA host registration. Whole-block DMA
+runs at 53.5 GB/s, 8.1 ms per layer, and UVA readback of the pinned blocks is correct.
+
+**Served on the 5070 Ti,** gemma 2.10bpw, 3 GiB of experts off, graphs on, 1024-token chunks.
+Reads/token are the offloaded expert reads predicted from the trace, out of 240:
+
+| placement | reads/token off | decode | prefill (~2350 tok) | effective link |
+|---|---|---|---|---|
+| resident | 0 | 124.7 t/s | 670 t/s | — |
+| spread by index, all layers | 122.5 | 86.4 | 156 | ~53 GB/s |
+| cold set off (`hot_selector.py`) | 52.9 | **98.0** | 156 | ~38 GB/s |
+| greedy `experts`, 16 whole layers | 128 | 79.3 | 120 | ~42 GB/s |
+
+The effective link figure is offloaded bytes over added time, with the VRAM read they replace
+credited back. **UVA inside the real GEMM runs at 40–55 GB/s**, close to DMA, which settles the
+microbenchmark anomaly. The cold set is 13% faster than spread on 2.3× fewer link reads; decode
+cost tracks link bytes. This was the first clean placement comparison at 4.10-like proportions,
+and it agrees with the 3060's 2.10bpw table.
+
+**Prefill over UVA re-reads each expert about 60 times per chunk.** Spread adds 11.5 s over
+3 chunks. At ~50 GB/s that is ~190 GB, against 3.2 GB offloaded, so the kernel fetches weights
+once per row tile and not once per chunk. Staging the same 3.2 GB once per chunk costs ~60 ms.
+Projected prefill with staging is **~600+ t/s against 156**, with no overlap needed. This makes
+phase 2 a larger win than projected, and the `rows > T` threshold more important: a few routed
+rows already multiply link traffic.
+
+**Projection at 2.10bpw on this card,** 48% slots: LRU hit ~94%, so ~13 reads/token of misses,
+about 0.4 ms, plus ~15 promotions/token on the side stream. That gives **~115 t/s decode against
+98 cold-static and 86 spread**, and prefill near resident.
+
+**Graph spikes pass** (`graph_spike.py`). The test uses the real `exl3_mgemm`, synthetic 4-bit
+mul1 experts (2816 × 1408, 128 per layer, 5.67 MiB each) and the decode shape.
+
+- **(b) Pointer flips are followed under a captured graph, with no recapture.** Replays are
+  bit-identical to eager in five cases: all slots in VRAM; routed entries flipped to the host copy
+  of the same bytes; flipped to different weights; flipped back; half flipped. They also match
+  eager when `topk_ids` change between replays. **A UVA read is bit-identical to a VRAM read**, so
+  a miss changes timing and never output.
+- **(c) A captured per-layer `topk_ids` copy to a pinned ring** costs 148 µs on a 30-layer graph,
+  +4.1% of a 3.6 ms replay of MoE alone. That is roughly 2% of a real step. All 30 layers' IDs are
+  correct after replay. If it matters, one device-side ring plus a single D2H per step would cut
+  it.
+- **(d) Side-stream promotions barely touch the replay while they fit inside it:**
+
+  | experts/step | MiB | replay | landed by end of replay |
+  |---|---|---|---|
+  | 6 | 34 | +0.6% | 50/50 |
+  | 15 | 85 | +1.4% | 50/50 |
+  | 32 | 182 | +2.7% | 49/50 |
+  | 64 | 363 | copy-bound, 2× | 0/50 |
+
+  **So the promotion budget is time, not count:** about replay time × DMA rate per step, here
+  ~180 MiB in 3.6 ms. A copy that has not landed is simply flipped one boundary later. The
+  controller should check its event rather than assume completion.
+
+**On the 3060 under WSL, 2026-11-03, everything passes too.**
+
+- **(a) Pinning:** 30 × 415 MiB (12.2 GiB) pinned in 8.6–11.9 s (`pin_probe.py`), with DMA and UVA
+  readback correct. Strata's ~1 GB WSL pin limit does not apply here.
+- **Link speed varies by day on this host.** Whole-block DMA ran at 14–15 GB/s, `link_bench.py`
+  DMA at 17–18 GB/s, and fixed-width UVA reads at ~10 GB/s, all with both machines idle at Gen4
+  x16. That is below the first day's 23–24 GB/s DMA, so plan for 15 GB/s here.
+- **(b) Pointer flips:** all identity checks pass.
+- **(c) Ring copy:** +132 µs, +1.4% of a 9.7 ms replay.
+- **(d) Side-stream promotions:**
+
+  | experts/step | MiB | replay | landed by end of replay |
+  |---|---|---|---|
+  | 6 | 34 | +0.6% | 50/50 |
+  | 15 | 85 | +3.6% | 50/50 |
+  | 32 | 182 | +3.1% | 50/50 |
+  | 64 | 363 | copy-bound | 0/50 |
+
+  The slower card's longer step makes room for the slower link, so ~180 MiB per step fits here
+  too.
+
+**Phase 0 is complete. Nothing found changes the design.**
 
 ### Cost arithmetic for 4.10bpw
 
@@ -231,14 +354,15 @@ First-32-token hit rate of 76% costs ~6 extra ms per token for those tokens.
 
 ### Risks
 
-- **One model.** All routing data is gemma. 256-expert Qwen models should be traced before the
-  numbers are quoted; that is an ~11 GB download not yet on this host.
-- **Pin limits on WSL.** Strata reports the driver pins only about 1 GB under WSL. This host pinned
-  6 GiB fine per-tensor, but 12 GiB in 30 big blocks is unproven.
+- **256-expert models hit lower.** 81–85% at 40% against gemma's 90%; size their slots nearer
+  50% and give them a larger promotion budget.
+- **Pin limits on WSL.** Strata reports the driver pins only about 1 GB under WSL. 12.2 GiB in 30
+  blocks passes on this host; other WSL setups may differ, so phase 1 should fail clearly if
+  pinning fails.
 - **Reference quality.** A cache changes when weights arrive, never which weights. Output must be
   bit-identical to resident; that is a gate, not an assumption.
-- **Decode under load.** Replay assumed single stream and one conversation at a time. Concurrent
-  requests share slots and should thrash more, though they also touch more unique experts.
+- **Decode under load.** Measured in replay: 8 streams lose 13–17 points at 40% capacity. Real
+  serving has not been measured.
 - **Copy interference.** Copies overlapping a replay may cost more than the model assumes;
   Strata's `ADAPT_OVERLAP` "helped on some cards and hurt on others", and the RFC measured 0.94x
   from staging during attention on GB10.
@@ -254,7 +378,8 @@ Each phase is independently shippable and has a gate that can fail it.
 (a) Pin 12 GiB in 30 blocks on WSL. (b) Flip a table entry between replays of a captured graph and
 confirm the replay follows it. (c) Cost of the captured `topk_ids` copy. (d) Side-stream copy
 overlapping a replay, on this card. (e) Confirm the bare-Linux OOM on a Linux host.
-(f) Trace one Qwen model.
+(f) Trace one Qwen model. *All done and passed, on both hosts; see
+[Phase 0 results](#phase-0-results).*
 
 **Phase 1: load-time host blocks.** Replace `register_offload`; residents chosen statically.
 *Gate:* a bigger-than-VRAM checkpoint loads on bare Linux; `reserved - allocated` at the no-offload
@@ -288,12 +413,16 @@ residency ([kv-pager.md](kv-pager.md) stands, and Strata disables its equivalent
 ```
 python tools/offload/oversub_probe.py                  # does this host oversubscribe?
 python tools/offload/link_bench.py
-python tools/offload/routing_trace.py 2.10bpw t        # records t.npz
-python tools/offload/routing_replay.py t               # the policy tables
+python tools/offload/routing_trace.py MODEL REV t      # records t.npz
+python tools/offload/routing_replay.py t               # the policy and concurrency tables
 python tools/offload/hot_selector.py t 66              # writes cold.txt for --cpu-offload-params
+python tools/offload/measure.py                        # decode/prefill against a server on :8123
+python tools/offload/graph_spike.py                    # pointer flips, ring copy, side-stream overlap
+python tools/offload/pin_probe.py                      # pin 30 x 415 MiB host blocks, DMA, readback
 ```
 
-These are research scripts: the trace hard-codes gemma paths and prompts.
+These are research scripts. The trace's prompts are gemma-formatted, and calibration text comes
+from the installed exllamav3.
 
 **Sources:** [Strata](https://github.com/Niko1221/Strata), its
 [DETAILS.md](https://raw.githubusercontent.com/Niko1221/Strata/main/docs/DETAILS.md) and

@@ -2,7 +2,7 @@
 import sys, numpy as np, collections
 Z = np.load(sys.argv[1] + ".npz", allow_pickle=True)
 tags, layers, topk = Z["tags"], Z["layers"], Z["topk"]
-E = int(max(t.max() for t in topk)) + 1; E = 128 if E <= 128 else E
+E = 1 << int(np.ceil(np.log2(int(max(t.max() for t in topk)) + 1)))
 L = int(layers.max()) + 1
 ev = []  # (job, kind, phase, layer, ids[rows,k])
 for tag, l, t in zip(tags, layers, topk):
@@ -55,17 +55,40 @@ for l, s in seq.items():
         if j1 == j2: ov.append(len(set(a.tolist()) & set(b.tolist())) / len(a))
 print(f"\ntoken-to-token routed-set overlap (decode, same layer): {np.mean(ov):.1%}")
 
-def run(frac, lag=1, budget=None, prefill_touch=True, policy="lru", first=None):
+def batched_steps(n):
+    """Decode only: n requests at a time share each forward step, a new one joining as one ends."""
+    jobs = collections.defaultdict(list); cur = {}
+    for e in ev:
+        if e[2] != "decode": continue
+        c = cur.get(e[0])
+        if c is None or e[3] <= c[-1][3]:
+            c = cur[e[0]] = []; jobs[e[0]].append(c)
+        c.append(e)
+    queue = collections.deque(sorted(jobs)); active = []; steps = []
+    while queue or active:
+        while queue and len(active) < n:
+            active.append(collections.deque(jobs[queue.popleft()]))
+        merged = {}
+        for a in active:
+            for e in a.popleft():
+                merged.setdefault(e[3], []).append(e[4])
+        active = [a for a in active if a]
+        steps.append([(0, "mix", "decode", l, np.vstack(v)) for l, v in sorted(merged.items())])
+    return steps
+
+def run(frac, lag=1, budget=None, prefill_touch=True, policy="lru", first=None, steps=None):
     """Decode hits. A miss is served over the link this token; its promotion lands `lag` tokens later,
     at most `budget` promotions per token summed over all layers. Pointer flip only at token boundary."""
     C = int(frac * E); hit = tot = 0; fh = ft = 0; moved = 0
     state = [dict() for _ in range(L)]; clock = 0; pending = collections.deque()
     # group into forward steps
-    steps = []; cur = None
-    for e in ev:
-        if cur is None or e[3] <= cur[-1][3] or e[0] != cur[-1][0]:
-            cur = []; steps.append(cur)
-        cur.append(e)
+    cur = None
+    if steps is None:
+        steps = []
+        for e in ev:
+            if cur is None or e[3] <= cur[-1][3] or e[0] != cur[-1][0]:
+                cur = []; steps.append(cur)
+            cur.append(e)
     seen_job = {}
     for st in steps:
         clock += 1
@@ -89,7 +112,11 @@ def run(frac, lag=1, budget=None, prefill_touch=True, policy="lru", first=None):
                     if first and n <= first: ft += 1; fh += h
                 if h: s[i] = clock
                 elif ph == "decode" or prefill_touch: want.append((l, i))
-        if budget is not None: want = want[:budget] if ph == "decode" else []
+        if budget is not None and ph == "decode":
+            # most-wanted first, ties spread over layers by a rotating start, so no layer starves
+            cnt = collections.Counter(want)
+            want = sorted(cnt, key=lambda k: (-cnt[k], (k[0] - clock) % L))[:budget]
+        elif budget is not None: want = []
         elif ph != "decode": want = want if prefill_touch else []
         for l, i in want: pending.append((clock + lag, l, i))
     return (hit / tot, moved, (fh / ft if ft else 0))
@@ -104,3 +131,10 @@ for name, kw in (("lag1 unlimited", dict()), ("lag2 unlimited", dict(lag=2)), ("
     print(f"{name:34s}" + " ".join(f"{r[0]:6.1%}" for r in rs), f" promos/tok @40%: {rs[3][1]/dt:.1f}", flush=True)
 rs = [run(f, lag=2, budget=32, first=32) for f in FR]
 print(f"{'first 32 tokens of each request':34s}" + " ".join(f"{r[2]:6.1%}" for r in rs))
+
+print("\n-- n concurrent requests sharing one cache, lag 2, promotion budget per step --")
+print(f"{'concurrent':34s}" + " ".join(f"{f:>6.0%}" for f in FR))
+for n in (1, 2, 4, 8):
+    st = batched_steps(n)
+    for b in sorted({32, 32 * n}):
+        print(f"{f'{n} (budget {b})':34s}" + " ".join(f"{run(f, lag=2, budget=b, steps=st)[0]:6.1%}" for f in FR), flush=True)

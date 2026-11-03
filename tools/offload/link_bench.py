@@ -26,8 +26,9 @@ def bench(fn,size,total=1<<30,rep=3):
     return best
 dma=lambda o,s: dst[o:o+s].copy_(host[o:o+s],non_blocking=True)
 acc=[]
-def read(o,s): acc.append(uva[o:o+s].sum(dtype=torch.long))
-vram=lambda o,s: acc.append(dst[o:o+s].sum(dtype=torch.long))
+# int32 loads: a uint8 reduction issues narrow reads, which over UVA measure transaction size, not the link
+def read(o,s): acc.append(uva[o:o+s].view(torch.int32).sum(dtype=torch.long))
+vram=lambda o,s: acc.append(dst[o:o+s].view(torch.int32).sum(dtype=torch.long))
 print(f"{'size':>9} {'DMA GB/s':>9} {'UVAread':>9} {'VRAMread':>9}")
 for size in [64<<10,256<<10,512<<10,1<<20,4<<20,16<<20,256<<20]:
     d=bench(dma,size); acc.clear(); u=bench(read,size); acc.clear(); v=bench(vram,size); acc.clear()

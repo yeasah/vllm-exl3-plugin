@@ -2,7 +2,7 @@
 import sys, numpy as np, collections
 Z = np.load(sys.argv[1] + ".npz", allow_pickle=True)
 tags, layers, topk = Z["tags"], Z["layers"], Z["topk"]
-E = int(max(t.max() for t in topk)) + 1; E = 128 if E <= 128 else E
+E = 1 << int(np.ceil(np.log2(int(max(t.max() for t in topk)) + 1)))
 L = int(layers.max()) + 1
 ev = []  # (job, kind, phase, layer, ids[rows,k])
 for tag, l, t in zip(tags, layers, topk):
