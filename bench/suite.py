@@ -622,6 +622,16 @@ PERF_ENTRIES: list[Entry] = [
         "for this path to break, blockq being ours to change",
     ),
     Entry(
+        label="minicpm5-1B 3.0bpw trellis perf",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        enforce_eager=False,
+        exercises="the same claim as the blockq entry above for the trellis "
+        "gather, which is about 25x slower than blockq's at 8192 tokens "
+        "compiled. Whether that reaches a served prefill is what this measures",
+    ),
+    Entry(
         label="qwen3.5-35B-A3B 2.0bpw MoE perf",
         model="turboderp/Qwen3.5-35B-A3B-exl3",
         revision="2.00bpw",

@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "a8c0065",
-   "head": "a8c006504a",
+   "describe": "1b2d883",
+   "head": "1b2d8834f2",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,60 +46,60 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpvgl07psb/caches/exllamav3_autotune",
+   "path": "/tmp/tmp4wr2otgq/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8144,
-   "mtime": 1793559065
+   "mtime": 1793624191
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpvgl07psb/caches/vllm",
+   "path": "/tmp/tmp4wr2otgq/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 3,
    "bytes": 1100324,
-   "mtime": 1793558986
+   "mtime": 1793624112
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpvgl07psb/caches/triton",
+   "path": "/tmp/tmp4wr2otgq/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 265,
    "bytes": 5382224,
-   "mtime": 1793559027
+   "mtime": 1793624153
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpvgl07psb/caches/flashinfer",
+   "path": "/tmp/tmp4wr2otgq/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
-   "bytes": 6288340,
-   "mtime": 1793559098
+   "bytes": 6288341,
+   "mtime": 1793624225
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "41",
+    "temperature.gpu": "39",
     "clocks.sm": "2595 MHz",
-    "clocks.mem": "14001 MHz",
-    "power.draw": "24.22 W",
+    "clocks.mem": "7001 MHz",
+    "power.draw": "23.96 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
-    "pstate": "P0",
+    "pstate": "P3",
     "clocks_throttle_reasons.active": "0x0000000000000000",
     "persistence_mode": "Enabled",
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "30",
+    "temperature.gpu": "28",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.52 W",
+    "power.draw": "9.63 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",

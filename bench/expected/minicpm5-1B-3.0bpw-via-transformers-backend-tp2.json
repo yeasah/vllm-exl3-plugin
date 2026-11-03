@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "a8c0065",
-   "head": "a8c006504a",
+   "describe": "1b2d883",
+   "head": "1b2d8834f2",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,48 +46,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpn_knt00_/caches/exllamav3_autotune",
+   "path": "/tmp/tmp7cgvgoq9/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8144,
-   "mtime": 1793560803
+   "mtime": 1793625208
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpn_knt00_/caches/vllm",
+   "path": "/tmp/tmp7cgvgoq9/caches/vllm",
    "from_env": true,
    "exists": true,
-   "files": 6,
-   "bytes": 1741274,
-   "mtime": 1793560812
+   "files": 10,
+   "bytes": 3508007,
+   "mtime": 1793625217
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpn_knt00_/caches/triton",
+   "path": "/tmp/tmp7cgvgoq9/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 345,
-   "bytes": 5974069,
-   "mtime": 1793560833
+   "files": 465,
+   "bytes": 8689496,
+   "mtime": 1793625238
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpn_knt00_/caches/flashinfer",
+   "path": "/tmp/tmp7cgvgoq9/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
-   "bytes": 6291393,
-   "mtime": 1793560862
+   "bytes": 6293137,
+   "mtime": 1793625267
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "41",
-    "clocks.sm": "675 MHz",
+    "temperature.gpu": "42",
+    "clocks.sm": "2220 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "18.17 W",
+    "power.draw": "21.98 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -96,10 +96,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "36",
-    "clocks.sm": "510 MHz",
+    "temperature.gpu": "37",
+    "clocks.sm": "547 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "14.22 W",
+    "power.draw": "16.61 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",

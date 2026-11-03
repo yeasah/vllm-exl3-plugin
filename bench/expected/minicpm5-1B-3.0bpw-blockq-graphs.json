@@ -25,8 +25,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "a8c0065",
-   "head": "a8c006504a",
+   "describe": "1b2d883",
+   "head": "1b2d8834f2",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -50,48 +50,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpvgl07psb/caches/exllamav3_autotune",
+   "path": "/tmp/tmp4wr2otgq/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8144,
-   "mtime": 1793559261
+   "mtime": 1793624389
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpvgl07psb/caches/vllm",
+   "path": "/tmp/tmp4wr2otgq/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 7,
    "bytes": 1953307,
-   "mtime": 1793559276
+   "mtime": 1793624404
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpvgl07psb/caches/triton",
+   "path": "/tmp/tmp4wr2otgq/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 369,
    "bytes": 8867650,
-   "mtime": 1793559281
+   "mtime": 1793624409
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpvgl07psb/caches/flashinfer",
+   "path": "/tmp/tmp4wr2otgq/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
-   "bytes": 6290520,
-   "mtime": 1793559309
+   "bytes": 6290521,
+   "mtime": 1793624437
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "47",
+    "temperature.gpu": "45",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "25.57 W",
+    "power.draw": "24.80 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -100,10 +100,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "30",
+    "temperature.gpu": "28",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.70 W",
+    "power.draw": "9.62 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
