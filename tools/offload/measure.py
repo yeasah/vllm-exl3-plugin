@@ -1,4 +1,5 @@
-"""Client: decode tok/s and prefill via a running server, max_tokens=1 for prefill."""
+"""Client: decode tok/s and prefill via a running server, max_tokens=1 for prefill.
+usage: measure.py [OUT]   OUT gets greedy completions, to diff across placements."""
 import json, sys, time, random, urllib.request
 base = "http://127.0.0.1:8123/v1"; model = "m"
 def post(p, n, **kw):
@@ -9,6 +10,10 @@ Ps = ["<start_of_turn>user\nExplain how a skip list works, with code in Python.<
       "<start_of_turn>user\nWrite a detailed account of the Peloponnesian War.<end_of_turn>\n<start_of_turn>model\n",
       "<start_of_turn>user\nDescribe how to design a Kalman filter for a drone.<end_of_turn>\n<start_of_turn>model\n"]
 post(Ps[0], 8)
+if len(sys.argv) > 1:
+    # placement changes when weights arrive, never which, so these must match resident exactly
+    json.dump([post(p, 160, temperature=0, ignore_eos=True)[1]["choices"][0]["text"] for p in Ps],
+              open(sys.argv[1], "w"), indent=1)
 for rep in range(2):
     tt = gen = 0
     for p in Ps:

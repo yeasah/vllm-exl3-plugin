@@ -10,7 +10,8 @@ Tools are in [tools/offload/](../tools/offload/). Background and older measureme
 Ultra 9 285, 23 GiB RAM. Routing traced on three models; see [Phase 0 results](#phase-0-results).
 Routing tables below are from the corrected replay.*
 
-**Status: designed, not built.** The recommendation is one mechanism that replaces
+**Status: phase 0 complete, phase 1 built and gated (2026-11-03); see
+[Phase 1 results](#phase-1-results).** The recommendation is one mechanism that replaces
 `register_offload`: a pinned host copy of every expert written at load time, a fixed VRAM
 slot arena managed as an LRU between steps, and a whole-layer staging copy for prefill.
 
@@ -255,6 +256,65 @@ mul1 experts (2816 × 1408, 128 per layer, 5.67 MiB each) and the decode shape.
 
 **Phase 0 is complete. Nothing found changes the design.**
 
+### Phase 1 results
+
+**Built:** placement is decided at store time in `cpu_offload.place` (dense linears) and
+`place_expert` (routed experts). An offloaded tensor is copied from the mmapped checkpoint
+straight into pinned host memory and never touches the device. Each layer's offloaded experts
+sit in one pinned block per projection and component. Which experts go is planned at the first
+arrival, over expert ids in order, so the result does not depend on load order. Selectors and
+budget are unchanged. `register_offload` remains only for the `EXL3_DEQUANTIZE=1` path.
+
+**Pinned memory comes from the driver** (`cuMemHostAlloc`), at exact size:
+
+- `pin_memory=True` rounds every allocation up to a power of two. That held 9.07 GiB of engine
+  RSS for 2.99 GiB offloaded, against 6.39 GiB at exact size. The old per-tensor path paid the
+  same rounding: a 1.03 MiB 4.10bpw trellis took 2 MiB.
+- `cudaHostRegister` on a plain allocation is exact but read slowly inside a serving process:
+  decode −8%, prefill −31%, in two interleaved rounds. A fresh process showed no difference,
+  so page backing in a long-lived process is the likely cause; this was not established.
+
+**Gates, gemma 2.10bpw on the 5070 Ti, final code:**
+
+| placement | decode | prefill | device peak in load | engine RSS | output vs resident |
+|---|---|---|---|---|---|
+| resident | 124.6 t/s | 670 t/s | 11.0 GiB | 3.3 GiB | — |
+| spread | 85.7 | 154 | 6.9 GiB | 6.4 GiB | identical |
+| cold set off | 96.6 | 152 | 6.9 GiB | 6.4 GiB | identical |
+| greedy, 16 layers | 77.0 | 115 | 6.9 GiB | 6.4 GiB | identical |
+
+Speed is within the old path's run-to-run spread (77–86 t/s on spread, interleaved).
+
+**More than the free VRAM loads on bare Linux.**
+
+- **MoE:** with a ballast leaving 7.2 GiB free, gemma 2.10bpw (9.6 GB) with 5 GiB of experts
+  off serves at 61 t/s.
+- **Dense:** with 4.6 GiB free, Ornith-9B 6.00bpw with 4.8 GiB off serves and answers
+  correctly. Yesterday this exact setup OOM'd in `store`.
+
+Two startup steps outside the load needed headroom on those tight settings:
+
+- flashinfer autotune runs a dummy batch after KV sizing, and the plugin's embedding op
+  allocates 352 MiB in it that the profile did not reserve;
+- inductor compiling the dense model makes a ~1.9 GiB transient, about one vocab × hidden
+  matrix.
+
+Neither involves offload, but both decide how small a card can serve a given model. They are
+worth an item of their own.
+
+**4.10bpw on the 3060 (WSL), ~6 GiB of experts off, closing the table above:**
+
+| placement | KV available | decode | prefill | device peak in load |
+|---|---|---|---|---|
+| greedy `experts`, 16 layers | 2.51 GiB | 19.2 t/s | 29 t/s | 10.6 GiB |
+| spread by index | **2.52 GiB** (was −0.43) | 20.7 | 30 | 9.9 GiB |
+| **cold set off** | **2.52 GiB** (was −0.43) | **27.8** | 30 | 9.8 GiB |
+
+Peaks include the desktop's 1.4 GiB and stay under the card's 12 GiB, so WDDM never pages. No
+memory is stranded, and outputs are identical across all three. **Hit-aware placement is worth
++44% decode at 4.10bpw on this card, from phase 1 alone.** Prefill stays at ~30 t/s whatever
+the placement, which is phase 2's job. Load takes ~90 s here against 15–25 s on `cuda`.
+
 ### Cost arithmetic for 4.10bpw
 
 One expert is 3 × 1.03 MiB ≈ 3.24 MB. Full routing reads 8 × 30 × 3.24 = 778 MB/token. Greedy
@@ -381,7 +441,8 @@ overlapping a replay, on this card. (e) Confirm the bare-Linux OOM on a Linux ho
 (f) Trace one Qwen model. *All done and passed, on both hosts; see
 [Phase 0 results](#phase-0-results).*
 
-**Phase 1: load-time host blocks.** Replace `register_offload`; residents chosen statically.
+**Phase 1: load-time host blocks.** *Done, all gates pass; see [Phase 1 results](#phase-1-results).*
+Replace `register_offload`; residents chosen statically.
 *Gate:* a bigger-than-VRAM checkpoint loads on bare Linux; `reserved - allocated` at the no-offload
 residual under both allocators; the 4.10bpw spread and hot comparison re-run clean, closing the table
 above. This phase alone is worth having and unblocks the rest.
@@ -419,6 +480,7 @@ python tools/offload/hot_selector.py t 66              # writes cold.txt for --c
 python tools/offload/measure.py                        # decode/prefill against a server on :8123
 python tools/offload/graph_spike.py                    # pointer flips, ring copy, side-stream overlap
 python tools/offload/pin_probe.py                      # pin 30 x 415 MiB host blocks, DMA, readback
+tools/offload/phase1_check.sh REPO [ballast]           # phase 1 gates: identity, speed, tight loads
 ```
 
 These are research scripts. The trace's prompts are gemma-formatted, and calibration text comes

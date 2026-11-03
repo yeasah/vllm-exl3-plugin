@@ -48,12 +48,15 @@ logger = init_logger(__name__)
 
 #: vLLM's shard ids: w1 = gate, w3 = up (both land in w13_*), w2 = down.
 _GATE, _UP, _DOWN = "w1", "w3", "w2"
+#: The checkpoint's projection names, which offload selectors match on.
+_LABELS = {_GATE: "gate", _UP: "up", _DOWN: "down"}
 
 
 class EXL3MoEParameter(torch.nn.Parameter):
     """Collector for one EXL3 sub-tensor across every expert of a layer."""
 
-    def __new__(cls, device: torch.device, name: str, tp_rank: int, tp_size: int):
+    def __new__(cls, device: torch.device, name: str, tp_rank: int, tp_size: int,
+                prefix: str, num_experts: int):
         # Of the stored tensor's dtype, for vLLM's load-time dtype check; see EXL3Parameter
         obj = torch.Tensor._make_subclass(
             cls, torch.empty(0, device=device, dtype=stored_dtype(name)), False
@@ -65,10 +68,17 @@ class EXL3MoEParameter(torch.nn.Parameter):
         obj.exl3_tp_rank = tp_rank
         obj.exl3_tp_size = tp_size
         obj.shards: dict[tuple[str, int], torch.Tensor] = {}
+        # For `cpu_offload.place_expert`: selectors match on the layer's path,
+        # and each projection's host block is planned once, over every expert.
+        obj.exl3_prefix = prefix
+        obj.exl3_num_experts = num_experts
+        obj.exl3_blocks: dict[str, cpu_offload.HostBlock | None] = {}
         return obj
 
     def release(self) -> None:
+        # The blocks stay alive through the per-expert row views the layer keeps
         self.shards.clear()
+        self.exl3_blocks.clear()
 
 
 def _tp_shard(
@@ -124,9 +134,11 @@ def _moe_weight_loader(
         param.exl3_name, loaded_weight, shard_id, param.exl3_tp_rank,
         param.exl3_tp_size,
     )
-    param.shards[(shard_id, int(expert_id))] = loaded_weight.to(
-        param.exl3_device
-    ).contiguous()
+    # Offloaded experts go from the mmapped checkpoint straight to pinned host
+    # memory and never touch the device.
+    param.shards[(shard_id, int(expert_id))] = cpu_offload.place_expert(
+        param, loaded_weight, _LABELS[shard_id], int(expert_id)
+    )
     return True if return_success else None
 
 
@@ -160,10 +172,12 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             )
         extra_weight_attrs.pop("weight_loader", None)
         device = torch.empty(0).device
+        layer_prefix = cpu_offload.layer_prefix(layer)
 
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
-                param = EXL3MoEParameter(device, name, tp_rank, tp_size)
+                param = EXL3MoEParameter(device, name, tp_rank, tp_size,
+                                         layer_prefix, num_experts)
                 set_weight_attrs(param, {"weight_loader": _moe_weight_loader})
                 set_weight_attrs(param, extra_weight_attrs)
                 layer.register_parameter(prefix + name, param)
@@ -281,12 +295,6 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
                 getattr(layer, prefix + name).release()
-
-        # Sibling of the stores above: hand the finished expert tensors to the
-        # weight offloader. A routed-expert layer is a distinct method from the
-        # dense linear path, so this is the only moment EXL3's finished tensors
-        # are visible to the offloader here.
-        cpu_offload.register_offload(layer)
 
     # ----------------------------------------------------------------- apply
 

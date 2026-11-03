@@ -15,6 +15,12 @@ and is strongly bursty, so "dynamic paging buys nothing" and index-invariance be
 exllamav3 now has CPU kernels for mul1 experts, and bigger-than-VRAM loads that appear to work on
 WSL2 are WDDM oversubscription, not a fix.
 
+**Mechanism replaced, 2026-11-03.** Placement is now decided at store time (phase 1 of
+expert-cache.md): offloaded tensors go from the checkpoint straight to pinned host memory, and
+routed experts into one pinned block per layer and projection. `register_offload` survives only
+for the `EXL3_DEQUANTIZE=1` reference path. What follows about registration from
+`process_weights_after_loading` describes the old mechanism; the cost measurements still hold.
+
 **What offload is for, and it is not capacity.** It trades PCIe bandwidth for bits
 per weight, so it is a quality lever rather than a fallback. The ordering against
 block-quantized embeddings is settled and offload loses: per byte freed, blockq costs

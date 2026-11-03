@@ -15,26 +15,41 @@ skipped before any real weight exists, and the trellis/suh/svh tensors the layer
 end up holding are never registered with the offloader. So ``--cpu-offload-gb``
 reports ``0.01 GiB`` for an EXL3 checkpoint that offloads ``3.63 GiB`` as AWQ.
 
-This module works around both problems by re-offloading at the moment the finished
-tensors exist. ``register_offload`` is a sibling of the dense / quantized stores in
-``process_weights_after_loading`` -- it reaches vLLM's offloader singleton and hands
-it the real tensor as ``_maybe_offload_to_cpu`` would: pin, accelerator-view, count.
-No vLLM change.
+So placement is decided here, at the moment each tensor is stored: ``place`` for
+dense linears and ``place_expert`` for routed experts copy an offloaded tensor
+straight from the mmapped checkpoint into pinned host memory, and only resident
+tensors go to the device. A checkpoint larger than VRAM therefore loads: peak
+device use during load is the resident set, not the whole checkpoint. Offloading
+after load instead (the earlier design) needed the whole checkpoint on the device
+first, which bare Linux refuses, and stranded the freed pages in the caching
+allocator. The budget and selectors are still vLLM's (``--cpu-offload-gb``,
+``--cpu-offload-params``), read from its offloader singleton. No vLLM change.
 
-Stage 1 is UVA only (``uva_offloading`` on). Prefetch is Stage 2; ``NoopOffloader``
-means offload was not requested at all.
+Routed experts go into one pinned block per layer, projection and component, so a
+layer's offloaded experts are one contiguous range for a staging copy, and a load
+pins tens of blocks instead of thousands of tensors.
 
-See docs/cpu-offload.md for what offload costs and how to choose what to give it.
+UVA only (``uva_offloading`` on); ``NoopOffloader`` means offload was not requested.
+The ``EXL3_DEQUANTIZE=1`` reference path still offloads after load, through
+``register_offload``, since the tensor it would offload only exists then.
+
+See docs/expert-cache.md for the design this is phase 1 of, and docs/cpu-offload.md
+for what offload costs and how to choose what to give it.
 """
 
 from __future__ import annotations
 
+import ctypes
+import functools
+import math
 import re
 
+import numpy
 import torch
 from vllm.model_executor.offloader import get_offloader
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
+from . import format
 from .log import init_logger
 
 logger = init_logger(__name__)
@@ -67,7 +82,7 @@ _STATS: dict[str, int | bool] = {}
 
 def _reset_stats() -> None:
     _STATS.clear()
-    _STATS.update(requested=False, selective=False, bytes=0, tensors=0, layers=0)
+    _STATS.update(requested=False, selective=False, bytes=0, tensors=0, layers=set())
 
 
 _reset_stats()
@@ -100,52 +115,196 @@ def _matches(params, full: str) -> bool:
     return False
 
 
-def register_offload(layer) -> int:
-    """Offload this layer's finished EXL3 tensors to the active backend.
+def layer_prefix(layer) -> str:
+    """The module path selectors match against; routed experts carry it as `layer_name`."""
+    return getattr(layer, "prefix", None) or getattr(layer, "layer_name", "")
 
-    Returns the number of bytes handed to the host. No-op unless the active
-    backend is UVA with UVA acceleration available; every other backend leaves
-    the layer untouched.
-    """
+
+def _uva_loader():
+    """vLLM's offloader if it is UVA with acceleration available, else None."""
     try:
         loader = get_offloader()
     except Exception:  # pragma: no cover - defensive; offloader is normally set
-        return 0
+        return None
 
     name = loader.__class__.__name__
     if name == "NoopOffloader":
         # No --cpu-offload-gb / --offload-group-size: offload was not requested.
-        return 0
+        return None
     if name != "UVAOffloader":
         logger.debug_once("cpu-offload: %s backend unsupported, ignoring", name)
-        return 0
+        return None
     if not getattr(loader, "uva_offloading", False):
         # UVA is configured but UVA acceleration is unavailable; vLLM's own
         # functional_call fallback hits the same construction-time gap EXL3 does,
         # so there is nothing for us to do.
-        return 0
+        return None
 
     _STATS["requested"] = True
     if getattr(loader, "cpu_offload_params", None):
         _STATS["selective"] = True
+    return loader
 
-    # routed experts don't have prefix, but do have layer_name
-    prefix = getattr(layer, "prefix", getattr(layer, "layer_name", ""))
 
-    total = 0
-    total += _offload_quantized(layer, prefix, loader)
-    total += _offload_dequantize(layer, prefix, loader)
-    total += _offload_moe(layer, prefix, loader)
+def _count(loader, prefix: str, nbytes: int, tensors: int = 1) -> None:
+    loader.cpu_offload_bytes += nbytes
+    _STATS["bytes"] += nbytes
+    _STATS["tensors"] += tensors
+    _STATS["layers"].add(prefix)
 
-    if total:
-        _STATS["layers"] += 1
-        # Per-layer detail is debug: a 40-layer MoE emits one line per layer and
-        # the number anybody wants is the total. report_once() carries that.
-        logger.debug(
-            "cpu-offload: %d KiB of EXL3 tensors offloaded from layer %s",
-            total >> 10, prefix or "<layer>",
+
+def _pinned(shape, dtype) -> torch.Tensor:
+    """Page-locked host memory of exactly this size, for the life of the process.
+
+    Not ``pin_memory=True``: PyTorch's caching host allocator rounds every
+    allocation up to a power of two, so a 33 MiB block holds 64 MiB of locked RAM
+    and a 1.03 MiB trellis holds 2 MiB -- up to twice the offloaded bytes, on the
+    hosts that have least to spare (gemma-4-26B 2.10bpw, 2.99 GiB offloaded:
+    9.07 GiB engine RSS against 6.50).
+
+    Not ``cudaHostRegister`` on a plain allocation either, though it pins exactly
+    what it uses. In a serving process the GPU reads registered memory slowly:
+    measured on a 5070 Ti, the same placement decoded 8% and prefilled 31% slower
+    than from driver-allocated memory, while a fresh process showed no
+    difference. The likely cause is page backing -- a long-running process with
+    the checkpoint in page cache hands out scattered 4 KiB pages, and the
+    kernel's scattered tile reads pay for each translation.
+
+    So the driver allocates it, at exactly this size. Never freed: weights live
+    as long as the process, and `_PINNED` keeps the tensors that address it.
+    """
+    nbytes = math.prod(shape) * torch.empty(0, dtype=dtype).element_size()
+    if not nbytes:
+        return torch.empty(shape, dtype=dtype, device="cpu")
+    # The driver API acts on the calling thread's current context; cudaSetDevice
+    # makes the primary context current, which the loader thread may not yet have.
+    torch.cuda.set_device(torch.cuda.current_device())
+    ptr = ctypes.c_void_p()
+    rc = _libcuda().cuMemHostAlloc(ctypes.byref(ptr), ctypes.c_size_t(nbytes), 0)
+    if rc != 0:
+        raise RuntimeError(
+            f"cpu-offload: could not allocate {nbytes >> 20} MiB of page-locked host "
+            f"memory (CUresult {rc}). Lower --cpu-offload-gb or free host RAM."
         )
-    return total
+    raw = (ctypes.c_uint8 * nbytes).from_address(ptr.value)
+    t = torch.from_numpy(numpy.ctypeslib.as_array(raw)).view(dtype).view(shape)
+    _PINNED.append(t)
+    return t
+
+
+_PINNED: list[torch.Tensor] = []
+
+
+@functools.cache
+def _libcuda():
+    # The driver library, which every CUDA host has under this name; the runtime's
+    # file name depends on how torch was installed.
+    return ctypes.CDLL("libcuda.so.1")
+
+
+def place(param, t: torch.Tensor) -> torch.Tensor:
+    """Where one dense-linear sub-tensor lives: pinned host memory behind a UVA
+    view if the selectors and budget take it, otherwise the device.
+
+    `param` carries `exl3_prefix`, `exl3_name`, `exl3_device` and
+    `exl3_offloadable` (False on the dequantize path). Mirrors
+    ``UVAOffloader._maybe_offload_to_cpu`` for one tensor: the budget is checked
+    *before* the tensor, as ``uva.py`` does, so the whole budget is spent.
+    """
+    loader = (
+        _uva_loader()
+        if param.exl3_offloadable and param.exl3_name in _OFFLOADABLE_COMPONENTS
+        else None
+    )
+    if (
+        loader is None
+        or not _matches(loader.cpu_offload_params, f".{param.exl3_prefix}.{param.exl3_name}.")
+        or loader.cpu_offload_bytes >= loader.cpu_offload_max_bytes
+    ):
+        return t.to(param.exl3_device).contiguous()
+
+    host = _pinned(t.shape, t.dtype)
+    host.copy_(t)
+    _count(loader, param.exl3_prefix, host.numel() * host.element_size())
+    return get_accelerator_view_from_cpu_tensor(host)
+
+
+class HostBlock:
+    """Pinned host rows for one MoE layer's offloaded experts, for one projection
+    and one component. `rows` maps expert id to row; `view` is the UVA view the
+    pointer tables address, `host` the CPU side the loader writes."""
+
+    def __init__(self, rows: dict[int, int], shape, dtype):
+        self.rows = rows
+        self.host = _pinned((len(rows), *shape), dtype)
+        self.view = get_accelerator_view_from_cpu_tensor(self.host)
+
+
+def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
+    """Which of this layer's experts go to the host, for one projection.
+
+    Decided once, at the first expert to arrive, over every expert id in
+    ascending order, so the outcome does not depend on the order the checkpoint
+    delivers them. Experts whose names match the selectors are taken while the
+    budget lasts, each checked before it is taken, as for dense tensors.
+    """
+    if param.exl3_name not in _OFFLOADABLE_COMPONENTS:
+        return None
+    loader = _uva_loader()
+    if loader is None:
+        return None
+    nbytes = t.numel() * t.element_size()
+    taken = []
+    for e in range(param.exl3_num_experts):
+        if loader.cpu_offload_bytes >= loader.cpu_offload_max_bytes:
+            break
+        name = f".{param.exl3_prefix}.{e}.{label}_proj.{param.exl3_name}."
+        if _matches(loader.cpu_offload_params, name):
+            taken.append(e)
+            _count(loader, param.exl3_prefix, nbytes)
+    if not taken:
+        return None
+    return HostBlock({e: row for row, e in enumerate(taken)}, t.shape, t.dtype)
+
+
+_UNPLANNED = object()
+
+
+def place_expert(param, t: torch.Tensor, label: str, expert_id: int) -> torch.Tensor:
+    """Where one routed expert's sub-tensor lives: a row of this projection's
+    host block if it was chosen for offload, otherwise the device.
+
+    `param` is the layer's collector; it carries `exl3_prefix`,
+    `exl3_num_experts`, `exl3_device`, and `exl3_blocks`, keyed by projection
+    label, holding each projection's plan once made.
+    """
+    block = param.exl3_blocks.get(label, _UNPLANNED)
+    if block is _UNPLANNED:
+        block = param.exl3_blocks[label] = _plan_block(param, t, label)
+    row = block.rows.get(expert_id) if block is not None else None
+    if row is None:
+        return t.to(param.exl3_device).contiguous()
+    if t.shape != block.host.shape[1:]:
+        raise format.EXL3FormatError(
+            f"{param.exl3_prefix}: expert {expert_id} {label} {param.exl3_name} has "
+            f"shape {list(t.shape)}, others {list(block.host.shape[1:])}; exl3_mgemm "
+            "takes one shape per call"
+        )
+    block.host[row].copy_(t)
+    return block.view[row]
+
+
+def register_offload(layer) -> int:
+    """Offload a dequantize-path layer's finished `exl3_weight`.
+
+    Only the ``EXL3_DEQUANTIZE=1`` reference path needs this: everywhere else
+    `place` and `place_expert` decided placement at load. Returns the bytes
+    handed to the host.
+    """
+    loader = _uva_loader()
+    if loader is None:
+        return 0
+    return _offload_dequantize(layer, layer_prefix(layer), loader)
 
 
 def report_once() -> None:
@@ -189,115 +348,26 @@ def report_once() -> None:
     logger.info(
         "cpu-offload: %.2f GiB of EXL3 weights in %d tensors across %d layers "
         "offloaded to host memory",
-        _STATS["bytes"] / (1 << 30), _STATS["tensors"], _STATS["layers"],
+        _STATS["bytes"] / (1 << 30), _STATS["tensors"], len(_STATS["layers"]),
     )
 
 
-def _offload_one(param, name, prefix, loader) -> int:
-    """Offload one on-device tensor to UVA host memory, or 0 if ineligible.
-
-    Mirrors ``UVAOffloader._maybe_offload_to_cpu`` for a single parameter:
-    select by the offload params, pin (UVA requires pinned memory and CUDA-graph
-    capture refuses unpinned H2D), accelerate-view, and count. Leaves the original
-    Parameter object in place and only swaps ``param.data``; the accelerator view
-    keeps the same object identity so ``apply()`` still reads it.
-    """
-    if not _matches(getattr(loader, "cpu_offload_params", None), f".{prefix}.{name}."):
+def _offload_dequantize(layer, prefix, loader) -> int:
+    """The dequantize path (``EXL3_DEQUANTIZE=1``): a single ``exl3_weight``,
+    which exists only after load, so it is moved there. Leaves the Parameter in
+    place and swaps ``param.data``, so ``apply()`` still reads it."""
+    param = getattr(layer, "exl3_weight", None)
+    if param is None or "weight" not in _OFFLOADABLE_COMPONENTS:
         return 0
-
-    # Idempotent: a tensor the context already reoffloaded (or a prior call) is
-    # skipped rather than moved twice.
+    if not _matches(loader.cpu_offload_params, f".{prefix}.weight."):
+        return 0
     if getattr(param, "_vllm_is_uva_offloaded", False):
         return 0
-
-    # Honor the byte budget the offloader was sized with at construction.
-    # UVA checks this *before* each parameter (uva.py:88); match that so we
-    # spend the whole budget rather than leaving it.
     if loader.cpu_offload_bytes >= loader.cpu_offload_max_bytes:
         return 0
 
     nbytes = param.data.numel() * param.data.element_size()
-
-    if not param.data.is_pinned():
-        param.data = param.data.to(device="cpu").pin_memory()
-    param.data = get_accelerator_view_from_cpu_tensor(param.data)
+    param.data = get_accelerator_view_from_cpu_tensor(param.data.to("cpu").pin_memory())
     param._vllm_is_uva_offloaded = True
-    loader.cpu_offload_bytes += nbytes
-    _STATS["bytes"] += nbytes
-    _STATS["tensors"] += 1
+    _count(loader, prefix, nbytes)
     return nbytes
-
-
-def _offload_quantized(layer, prefix, loader) -> int:
-    """The quantized path: ``exl3_trellis_N`` / ``exl3_suh_N`` / ``exl3_svh_N``."""
-    total = 0
-    for index in range(len(getattr(layer, "exl3_output_sizes", []))):
-        for attr, component in (
-            ("exl3_trellis", "trellis"),
-            ("exl3_suh", "suh"),
-            ("exl3_svh", "svh"),
-        ):
-            if component not in _OFFLOADABLE_COMPONENTS:
-                continue
-            param = getattr(layer, f"{attr}_{index}", None)
-            if param is None:
-                continue
-            total += _offload_one(param, component, prefix, loader)
-    return total
-
-
-def _offload_dequantize(layer, prefix, loader) -> int:
-    """The dequantize path (``EXL3_DEQUANTIZE=1``): a single ``exl3_weight``."""
-    param = getattr(layer, "exl3_weight", None)
-    if param is None:
-        return 0
-    return _offload_one(param, "weight", prefix, loader)
-
-
-def _offload_moe(layer, prefix, loader) -> int:
-    """Routed experts: offload each expert's trellis and rebuild the pointer
-    table, since ``exl3_mgemm`` dereferences device addresses, not the
-    per-expert tensors themselves.
-
-    Reconstruct tensor name for matching by enumerating the tensors.
-    """
-    total = 0
-    for label in ("gate", "up", "down"):
-        for component in ("trellis", "suh", "svh"):
-            if component not in _OFFLOADABLE_COMPONENTS:
-                continue
-            tensors = getattr(layer, f"_exl3_{label}_{component}", None)
-            if not tensors:
-                continue
-
-            # Capture the device *before* offloading. Afterwards these are UVA
-            # accelerator views, and the pointer table is only correct because
-            # such a view reports the accelerator rather than the host -- an
-            # invariant of vLLM's, not ours, and not one to depend on silently.
-            device = tensors[0].device
-
-            moved = 0
-            for i, param in enumerate(tensors):
-                moved += _offload_one(
-                    param, f"{i}.{label}_proj.{component}", prefix, loader
-                )
-            total += moved
-            if not moved:
-                # Nothing left the card, so the addresses are unchanged. Skip the
-                # rebuild: it would be ~360 needless small H2D syncs over a load.
-                continue
-
-            ptrs = getattr(layer, f"exl3_{label}_{component}_ptrs", None)
-            if ptrs is not None:
-                # The kernel reads device addresses; the offloaded accelerator
-                # views expose the (host-mapped) device address via data_ptr.
-                setattr(
-                    layer,
-                    f"exl3_{label}_{component}_ptrs",
-                    torch.tensor(
-                        [t.data_ptr() for t in tensors],
-                        dtype=torch.long,
-                        device=device,
-                    ),
-                )
-    return total

@@ -2066,7 +2066,18 @@ only.
 
 **Plan as of 2026-11-01: [docs/expert-cache.md](docs/expert-cache.md)**, phases and gates there,
 work on branch `cpu-offload`. It settles the layout, staging and load path below in one design,
-and supersedes the routing-uniformity reasoning further down this item.
+and supersedes the routing-uniformity reasoning further down this item. **Phase 1, pin at
+store, is done (2026-11-03)**; next is phase 2, prefill staging.
+
+**Startup headroom on small cards.** Two allocations after weight load are missing from vLLM's
+memory profile, and on a tight card they, not the weights, decide whether a model serves:
+
+- flashinfer autotune's dummy batch after KV sizing, where the EXL3 embedding op's `had_left`
+  allocated 352 MiB (gemma-4-26B, 1024 batched tokens);
+- inductor's ~1.9 GiB transient compiling Ornith-9B, about one vocab × hidden matrix.
+
+Measured in expert-cache.md's phase 1 results. Shrink the embedding op's scratch, or make
+the profile cover both.
 
 **Design these together, not one at a time.** There are now five open levers, and
 each one changes the premises of the others:
@@ -2116,10 +2127,6 @@ hand — `--cpu-offload-gb 10` exceeding the 8.21 GB of eligible experts, and 0.
 unquantized `weight` counted as offloadable dense bytes when `register_offload` never
 sees it. Both looked like physics violations until the checkpoint was consulted. A
 by-category reachable-vs-offloaded line would have made each obvious at run time.
-
-**Test the budget-exhaustion path.** `_offload_one` returns 0 once
-`cpu_offload_bytes >= cpu_offload_max_bytes`, which is the mechanism behind the
-eligibility cap above, and nothing covers it. Needs a fake loader; no GPU.
 
 **Top item: prefill pays offload per token, not per step.**
 Found 2026-09-21. `exl3_mgemm` runs one single-row product per (token, expert) slot, so
