@@ -5,7 +5,9 @@
 # EXL3 quantizations of [{{ base_model }}](https://huggingface.co/{{ base_model }})
 
 These quantizations can be used with [exllamav3](https://github.com/turboderp-org/exllamav3) or vLLM via [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
-{% if composite %}
+{% if embed_quantized %}
+The token embedding is quantized too, which needs exllamav3 1.6.4 or later.
+{% endif %}{% if composite %}
 They are calibrated broadly, on what models read and write while working (documents and tool output in conversations, code and diffs, the model's own replies) rather than on web text alone{% if agentic %}, and measured with agentic and coding work as the primary use case{% endif %}.
 {% endif %}{% if recipe %}
 Bits are allocated per tensor, from the model's measured sensitivity on its own replies, at the same total size as uniform bits.
@@ -69,6 +71,26 @@ Left out of the worst-slice column, for every row:{% endif %} {{ t.slice }}, who
 ‡ A composite slice is left out where both quants sit within about twice the unquantized model's own rounding noise on it; the ratio is over the other slice alone:{% endif %} {{ '{0:0.2f}'.format(r.bits) }} bpw ({{ r.dropped | join(', ') }} left out){% if not loop.last %};{% else %}.{% endif %}{% endfor %}
 {% endif %}
 
+{% if recall %}
+# What it still knows
+
+Quantization can leave a model fluent but wrong about facts, which KLD does not show. Each quant answered {{ recall.questions }} closed-book questions the unquantized model gets right, with the answer scored token by token. This is a test of memory on short factual questions, not of overall capability.
+
+|bpw|Facts kept|Confident errors|
+|---|---|---|
+{% for r in recall.rows %}|{{ r.label }}|{{ '{0:0.1f}'.format(100 * r.kept) }}%|{{ '{0:0.2f}'.format(100 * r.errors) }}%|
+{% endfor %}{% for r in recall.others %}|{{ r.label }}|{{ '{0:0.1f}'.format(100 * r.kept) }}%|{{ '{0:0.2f}'.format(100 * r.errors) }}%|
+{% endfor %}
+- Facts kept: of the correct answers the unquantized model would give when sampling, the share this quant still gives.
+- Confident errors: questions where this quant puts at least 70% on a wrong token, so it states something false rather than hesitating.
+
+Loss is not spread evenly. A quant holds on to what the unquantized model was sure of and loses more of what it barely knew:
+
+![facts kept by how firmly the unquantized model held the answer](./recall.png)
+
+Bars are approximate and cover both sampling and the difference between equivalent conversions. Differences of a point or two between rungs mean little.
+
+{% endif %}
 # More detail
 
 What each eval slice is, every slice compared on its own, how the composite is built, the calibration, and how to reproduce these quants: [TECHNICAL.md](./TECHNICAL.md).

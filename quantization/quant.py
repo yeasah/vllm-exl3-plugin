@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import sys
 import os
 import re
@@ -99,6 +100,8 @@ CAL_DOC_KINDS = "web,wiki,technical,code,diff"
 # mostly which rows were drawn (docs/calibration.md); qbench streams its 2M+ context tokens in
 # groups that fit the card
 EVAL_SLICES = {"wild": (60, 0.80), "swe": (200, 0.20)}
+RECALL_POOL = "recall_pool"   # every question, reference-scored once by `recall-slice`
+RECALL_SLICE = "recall"       # the questions this model's reference clearly knows; not in the composite
 # Per-model composite weights, quantization/composite/<org>__<model>.json: a model its publisher
 # positions for one use (Qwen3.8-27B: coding and agents) is weighted for that use. Decide them
 # from the publisher's description, before seeing which ladder a weighting favors.
@@ -1061,6 +1064,81 @@ def plot_quality_vs_size(job, meta, path):
 
 DESCRIBE = {"wild": "real user prompts (WildChat)", "swe": "real agent sessions (Open-SWE-Traces)"}
 
+RECALL_BANDS = (("sure", "≥ 0.9"), ("firm", "0.7–0.9"), ("leaning", "0.5–0.7"), ("shaky", "0.3–0.5"), ("barely", "< 0.3"))
+RECALL_BAR_WIDEN = 2     # draw noise reached 2x binomial in a band, over MiniCPM5-2B 3.00 and 5.00 and Ornith-1.5-9B 5.00
+
+def recall_interval(p, n):
+    """(low, high) around p: a 95% Wilson interval widened to cover conversion-to-conversion spread as well as
+    sampling. Wilson rather than the normal form, whose bar collapses to nothing at 100%."""
+    z = 1.96
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return max(0.0, centre - RECALL_BAR_WIDEN * half), min(1.0, centre + RECALL_BAR_WIDEN * half)
+
+def recall_section(job, revisions):
+    """The card's recall numbers, or None when the model has no slice or only a thin one: the rule is that a model
+    with too few confident questions shows no metric, whether or not --allow-thin scored it anyway."""
+    path, trace = os.path.join(job.main, f"qb_{RECALL_SLICE}.json"), job.eval_trace(RECALL_SLICE)
+    if not (os.path.isfile(path) and os.path.isfile(trace)):
+        return None
+    with open(trace) as f:
+        selection = json.load(f)["meta"]["selection"]
+    if selection["thin"]:
+        print(f"=== recall slice is thin ({selection['confident']} confident questions): left off the card ===")
+        return None
+    with open(path) as f:
+        results = {r["label"]: r for r in json.load(f)}
+    def row(r, label, bits=None):
+        return { "label": label, "bits": bits, "kept": r["recall_kept"], "errors": r["recall_confident_errors"],
+                 "bands": r["recall_bands"] }
+    rows = [row(results[r['name']], f"{r['bits']:0.2f}", r['bits']) for r in revisions if "recall_kept" in results.get(r['name'], {})]
+    if not rows:
+        return None
+    # Scored rather than selected: a question can fall out when the scoring pass and the choosing pass differ in the last bit
+    known = next(results[r['name']]["recall_known_rows"] for r in revisions if "recall_kept" in results.get(r['name'], {}))
+    return { "rows": rows, "questions": known, "confident": selection["confident"],
+             "others": [row(r, l) for l, r in results.items() if r.get("group") == "GGUF" and "recall_kept" in r],
+             "floor": results.get("Noise floor", {}).get("recall_bands") }
+
+def plot_recall(recall, path):
+    """Kept by how firmly the unquantized model held the answer, a trace per rung, which no single figure can show."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
+    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=150)
+    fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
+    ax.grid(True, which="major", color=GRID, lw=0.8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(AXES)
+    ax.tick_params(colors=INK2, which="both")
+    names = [n for n, _ in RECALL_BANDS]
+    xs = range(len(names))
+    colors = plt.cm.plasma([0.25 + 0.6 * i / max(1, len(recall['rows']) - 1) for i in range(len(recall['rows']))])
+    offsets = [(i - (len(recall['rows']) - 1) / 2) * 0.05 for i in range(len(recall['rows']))]
+    for r, color, off in zip(recall['rows'], colors, offsets):
+        at = [x + off for x, n in zip(xs, names) if n in r['bands']]
+        kept = [r['bands'][n]['kept'] for n in names if n in r['bands']]
+        spans = [recall_interval(r['bands'][n]['kept'], r['bands'][n]['rows']) for n in names if n in r['bands']]
+        ax.errorbar(at, [100 * k for k in kept],
+                    yerr=[[100 * (k - lo) for k, (lo, _) in zip(kept, spans)], [100 * (hi - k) for k, (_, hi) in zip(kept, spans)]],
+                    color=color, lw=2, marker="D", markersize=4.5, markeredgecolor=SURF, elinewidth=1, capsize=2,
+                    label=f"{r['label']} bpw")
+    if recall['floor']:
+        ax.plot(xs, [100 * recall['floor'][n]['kept'] if 'kept' in recall['floor'].get(n, {}) else None for n in names],
+                color=INK2, lw=1, ls=(0, (2, 2)), label="noise floor")
+    ax.set_xticks(list(xs), [f"{n}\nP {label}" for n, label in RECALL_BANDS], color=INK2, fontsize=8)
+    ax.set_ylim(top=102)
+    ax.set_xlabel("how firmly the unquantized model held the answer", color=INK2)
+    ax.set_ylabel("facts kept (%)", color=INK2)
+    ax.legend(frameon=False, fontsize=8, labelcolor=INK2)
+    fig.tight_layout()
+    fig.savefig(path, facecolor=SURF)
+    plt.close(fig)
+
+
 def plot_vs_reference(job, ref, path):
     """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal body size,
     every point labelled (our bit rate and ratio; another set's branch or quant type)."""
@@ -1181,7 +1259,7 @@ PUBLISHED_TRACES = [("cal.safetensors", "calibration.safetensors"),
                     ("cal.manifest.json", "calibration.manifest.json"),
                     ("cal_cal.json", "calibration.json"),
                     ("sampling.json", "sampling.json")] + \
-                   [(f"eval_{sl}.json", f"eval_{sl}.json") for sl in list(EVAL_SLICES) + list(DIAG_SLICES)]
+                   [(f"eval_{sl}.json", f"eval_{sl}.json") for sl in list(EVAL_SLICES) + list(DIAG_SLICES) + [RECALL_SLICE]]
 
 DATA_NOTICE = """# Data in this directory
 
@@ -1241,6 +1319,12 @@ def do_card(job, args):
                        for r in meta['revisions'] if os.path.isfile(os.path.join(job.revdir(r['name']), "calibration.json")))
     if meta['reference'] and meta['reference']['traces']:
         plot_vs_reference(job, meta['reference'], os.path.join(job.main, "vs_reference.png"))
+    meta['recall'] = recall_section(job, meta['revisions'])
+    if meta['recall']:
+        plot_recall(meta['recall'], os.path.join(job.main, "recall.png"))
+    # A quantized token embedding: conditional, because reading one needs a newer exllamav3 than the checkpoints before it
+    meta['embed_quantized'] = any(json.load(open(os.path.join(job.revdir(r['name']), "calibration.json"))).get("embedding", {}).get("embed_bits", 16) < 16
+                                  for r in meta['revisions'] if os.path.isfile(os.path.join(job.revdir(r['name']), "calibration.json")))
 
     # get base metadata and add content
     base_card = ModelCard.load(job.base_repo)
@@ -1273,7 +1357,7 @@ def do_card(job, args):
     with open(os.path.join(job.main, "TECHNICAL.md"), "w") as f:
         f.write(env.get_template("technical.jinja").render(
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
-            weight_spec=weight_spec, calibration=calib, reference=meta['reference'], **{k: meta[k] for k in
+            weight_spec=weight_spec, calibration=calib, reference=meta['reference'], recall=meta['recall'], **{k: meta[k] for k in
             ('traces_published', 'eval_generator', 'multimodal', 'thresholds') if k in meta}))
 
 def fetch_uncalibrated(job, args):
@@ -1535,7 +1619,7 @@ def do_qbench(job, args):
     if not revisions and not (args.revisions and (args.reference or args.reference_gguf or args.threshold or base_want)):
         print("=== no revisions found ===")
         return False
-    slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) if os.path.isfile(job.eval_trace(sl))] + ["raw"]
+    slices = [sl for sl in list(EVAL_SLICES) + list(DIAG_SLICES) + [RECALL_SLICE] if os.path.isfile(job.eval_trace(sl))] + ["raw"]
     if args.slices:
         alias = {"scored": list(EVAL_SLICES), "diag": list(DIAG_SLICES)}
         want = [x for w in args.slices.split(",") for x in alias.get(w, [w])]
@@ -2004,6 +2088,34 @@ def trace_setup(job, args):
 
 def eval_env(args):
     return None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}
+
+def do_recall_slice(job, args):
+    """The model's recall slice (eval/recall_select.py): the pool's questions its reference clearly knows, chosen by one
+    reference pass, so that a model too thin for the metric is refused before any arm is scored. Each step is skipped
+    when its output exists, and the reference's logits stay cached for `qbench --slices recall`."""
+    x = args.exllamav3dir
+    path = snapshot_download(repo_id=job.base_repo)
+    pool = job.eval_trace(RECALL_POOL)
+    os.makedirs(os.path.dirname(pool), exist_ok=True)
+    if not os.path.isfile(pool):
+        facts = os.path.join(x, "eval", "recall_data", "wikidata_facts.jsonl")
+        if run_logged([ "python3", os.path.join(x, "eval", "recall_trace.py"), "-m", path, "-o", pool, "--facts", facts, "--popqa" ],
+                      job.log("recall-pool"), None, True):
+            print("=== recall pool failed ==="); return False
+    results = os.path.join(job.main, f"qb_{RECALL_POOL}.json")
+    if not os.path.isfile(results):
+        os.makedirs(job.main, exist_ok=True)
+        yml = os.path.join(job.main, f"qbench-{RECALL_POOL}.yaml")
+        with open(yml, "w") as f:
+            yaml.safe_dump(qbench_project(job, args, RECALL_POOL, [], results=results), f, sort_keys=False)
+        if run_logged([ "python3", os.path.join(x, "eval", "qbench.py"), os.path.abspath(yml), "-d", args.device.split(",")[0] ],
+                      job.log("recall-reference"), None, True) or not os.path.isfile(results):
+            print("=== recall reference pass failed ==="); return False
+    rc = run_logged([ "python3", os.path.join(x, "eval", "recall_select.py"), "-t", pool, "-r", results, "-o", job.eval_trace(RECALL_SLICE),
+                      "--min_p", str(args.min_p), "--min_questions", str(args.min_questions) ] +
+                    ([ "--allow_thin" ] if args.allow_thin else []), job.log("recall-select"), None, True)
+    return rc == 0
+
 
 def do_eval_traces(job, args):
     """The bf16-generated eval traces the card's composite is scored on. Holds the reference model
@@ -2982,6 +3094,16 @@ def main():
         p = subparsers.add_parser(name, help=helptext)
         trace_args(p)
         p.set_defaults(func=fn)
+
+    cmd_recall = subparsers.add_parser('recall-slice', help="choose the model's recall slice with one reference pass; "
+                                       "refuses a model with too few confident questions, before any arm is scored")
+    cmd_recall.add_argument('-d', '--device', default='0', help='GPU for the reference pass')
+    cmd_recall.add_argument('--min-p', type=float, default=0.7, help="reference probability a known answer must reach")
+    cmd_recall.add_argument('--min-questions', type=int, default=300, help="fewer confident questions than this is a refusal")
+    cmd_recall.add_argument('--allow-thin', action='store_true', help="write a slice under --min-questions anyway")
+    cmd_recall.add_argument('--logit_cache', default=None, help="as for qbench: share it, so scoring the slice reuses this pass")
+    cmd_recall.add_argument('--logit_cache_size', default=200, type=int, help='cap in GB')
+    cmd_recall.set_defaults(func=do_recall_slice)
 
     cmd_measure = subparsers.add_parser('measure', help="per-tensor sensitivity on the calibration's own-voice rows and "
                                          "on the whole calibration, for quantize's recipes (reused across shares)")

@@ -72,6 +72,15 @@ The vision encoder is left unquantized, preserving full vision fidelity against 
 {% endif %}
 {% if traces_published %}
 
+{% if recall %}
+
+# Recall
+
+The questions come from Wikidata and PopQA. One pass of the unquantized model picks, per question, the answer alias it finds most likely, and keeps the question if it produces that answer. Numeric answers are left out, and no source relation fills more than 25% of the questions at or above P 0.7, or of those below it, with PopQA held to a third of each. {{ recall.confident }} of the {{ recall.questions }} questions are at or above P 0.7. A model with fewer than 300 of those shows no recall numbers.
+
+With P the unquantized model's probability of the answer and Q the quant's, facts kept is the sum of min(P, Q) over the sum of P, so a gain on one question cannot pay for a loss on another. A confident error is a question where the quant's chosen token at its first wrong answer position has probability at least 0.7. Chart bars are 95% Wilson intervals widened 2x, about the largest spread between rounding seeds seen in any band, across two models and two rates.
+{% endif %}
+
 # Reproducing these quants
 
 Each revision's `quantization_config.json` records its calibration (source, and the SHA-256 of the calibration file) and any non-default seed offset; `calibration.json` beside it records the calibration mix's shares and composition, and `recipe.yaml`, where present, the per-tensor bit allocation the revision was converted with (solved by exllamav3's `sc_optimize` from the model's measured sensitivity). The data itself is in [`traces/`](./traces) on this branch: the packed calibration rows passed to `convert.py --cal_data`, the trace they were packed from, and the eval traces behind the composite, with their sources and licenses in [`traces/DATA_NOTICE.md`](./traces/DATA_NOTICE.md). The pipeline that produced them is `quantization/quant.py` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).

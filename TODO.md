@@ -1080,23 +1080,61 @@ bit-exact against `ngram_dequant` at K=1..8. Served against a dense twin holding
 is identical at TP=1 and TP=2. Under CUDA graphs it differs by up to 0.72 on tail logprobs, repeatably:
 compiled `gather` differs from the kernel in about 6% of elements by 1-2 fp16 ULPs, with rows following ids, and
 blockq's own eager-to-graphs gap is the same size. Compiled it is about 25x slower than blockq at 8192 tokens
-(6.5 ms against 0.26), unmeasured on the served path. Four `trellis` bench entries are in; `quant.py` passes
+(6.5 ms against 0.26), which does not reach a served engine: decode 2409 tok/s against 2418, prefill 22021
+against 22097 on MiniCPM5-1B, inside run spread. Five `trellis` bench entries are in; `quant.py` passes
 the ladder by default (`--embed-bits`, 16 keeps it dense).
 
 **A true conversion matches the simulation** (shipping recipe, YAQA and calibration mix; conversion does calibrate
 through the quantized table). Ornith-1.5-9B: 7.31 to 5.79 GB at 4.00, 8.17 to 6.78 GB at 5.00. Excess KL 1.05/1.04
 and 1.05/1.11 wild/swe, against 1.03/1.07 and 1.03/1.10 simulated. Text-answer recall -1.06 points [-2.70, +0.47]
 and +0.06 [-1.17, +1.35]. MiniCPM5-2B: 1.73 to 1.33 GB and 1.98 to 1.61 GB. Both serve through the plugin.
+Qwen3.8-27B at 5.00: 19.90 to 18.16 GB, excess KL 1.01/0.95 wild/swe, against blockq's 1.04/1.05, text-answer recall
++0.88 [-0.10, +1.90]: no cost at all on a model whose embedding tax was already near nil.
 
 **Reconverting a rung can move recall by 4 points, with no embedding involved.** MiniCPM5-2B 5.00 dense, from the
 same measurement, reconverted here: text facts 91.5 to 87.4, -4.16 [-6.93, -1.39], against that control `-eb` is
-+0.46 [-2.47, +3.24], and a K=5 table on the original body is +0.00. The original came from another host (godel)
-and an older converter, so host, converter and chance are not separated. Recall comparisons need arms from one host
-and converter, and a same-host repeat to size the noise before any further headroom hunting.
++0.46 [-2.47, +3.24], and a K=5 table on the original body is +0.00. **Conversion is deterministic per host and
+differs between hosts:** same inputs and converter tree on a 5060 Ti, 5070 Ti and RTX 3060 give byte-identical repeats
+and three different quants (885 of 1266 tensors, 97% of trellis words), and the 3060 reproduces the original exactly.
+Same-generation cards differ, so it is not architecture alone. `EXL3_SEED_IDX_OFFSET` selects a rounding draw, for
+sampling this spread on one host. Compare recall only within one host, and across draws for small effects.
+
+**Measured over seven equivalent MiniCPM5-2B 5.00 draws:** excess KL varies 0.6% wild, 2.1% swe. Text-facts retention
+averages 91.3 with sd 1.72 and range 5.2 (640 questions), PopQA 95.7 with sd 0.47. A quarter of the facts flip between
+draws, and the paired CIs in this section cover question sampling, not this. Requiring the reference to hold the answer
+at P >= 0.7 takes sd to 0.13 and flips to 0.3%, and the 3.00 rung still reads 87.9, so it keeps seeing real damage; it
+saturates at 100 on a good 5.00 rung, so it detects damage and does not rank good quants.
+
+**The card reports kept, confident errors, and kept by band.** Kept is sum min(P, Q) / sum P: of the correct answers the
+reference would give under sampling, the share the quant still gives, per question, so a gain cannot pay for a loss (a plain
+sum ratio rated the 27B's 3 bpw above 4 bpw). It stays close to binary retention, and across seven 2B draws with hosts its sd is
+0.75 against 1.72. Confident errors are the share of known questions where the quant is at P >= 0.7 on a wrong token: a low
+answer probability cannot tell a shrug from a false statement. Bands of reference probability: sure (>= 0.9), firm (0.7-0.9),
+leaning, shaky, barely (< 0.3). MiniCPM5-2B at 3 / 4 / 5 bpw: kept 75.9 / 89.5 / 95.6, confident errors 4.87 / 1.62 / 0.35%.
+Draw noise at its 3.00: kept sd 2.54, confident errors sd 1.06, band retention at most 2.0x binomial.
+
+| Qwen3.8-27B, 3059 questions | served GB | kept | confident errors |
+|---|---|---|---|
+| 4.00 one-sided | 14.12 | 96.6 | 0.33% |
+| `UD-Q4_K_M` | 16.46 | 93.4 | 0.46% |
+| plain `Q4_K_M` | 16.81 | 92.7 | 0.78% |
+| 5.00 `-eb` | 17.25 | 96.7 | 0.13% |
+| `UD-Q5_K_M` | 19.77 | 95.6 | 0.75% |
+
+YAQA at 4.00 costs kept (92.7 against 96.6) and not confident errors (0.20 against 0.33%): it weakens right answers rather
+than replacing them, which is a shrug and not a hallucination. `quant.py recall-slice`
+scores the pool (Wikidata plus PopQA, 19,684 questions) with one reference pass, then `eval/recall_select.py` keeps each
+model's known non-numeric questions, with PopQA at most 33% and one relation at most 25%, capped apart above and below P 0.7.
+It refuses under 300 confident questions before any arm is scored (`!!! RECALL SLICE TOO THIN`, exit 3, `--allow-thin`
+overrides). `qbench --slices recall` scores it, and qbench gives `recall_bands`. MiniCPM5-2B: 888 questions, 414 confident,
+7 minutes for the pass. Not in the composite. The card shows kept, confident errors and a chart by band with `quant.py`'s
+`recall_section`, and shows none of it on a thin slice. Chart bars are Wilson intervals widened 2x: draw noise reached 2.04x
+binomial in the worst band, over the 2B at 3.00 and 5.00 and the 9B at 5.00. Confident-error noise is measured on the 2B only.
 
 **It does not serve a tied head.** The earlier hope here, one tensor for head and gather, does not match the
 format: rows are rotated by random signs and a Hadamard, built for row accuracy, with no GEMM path. A tied
-model would carry it beside the head's trellis, the same trade as `EXL3BlockQTiedEmbeddingMethod`.
+model carries it beside the head's trellis, the same trade as `EXL3BlockQTiedEmbeddingMethod`, which is the accepted
+behaviour until something serves both from one tensor. fp8 was the earlier idea for that, untested.
 
 → [docs/embeddings.md](docs/embeddings.md)
 
