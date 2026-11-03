@@ -15,13 +15,13 @@
   "gpu_count": 2,
   "capability": "12.0",
   "vllm_reported": "0.32.1.dev16+g1f3b03290",
-  "pkg.digest": "20150ba563de",
-  "pkg.count": 246,
+  "pkg.digest": "d9596027572a",
+  "pkg.count": 247,
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "3f20841",
-   "head": "3f208419f1",
+   "describe": "8aac27a",
+   "head": "8aac27ab48",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -34,30 +34,30 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-86-gf6c506ff",
-   "head": "f6c506ffd2",
+   "describe": "v1.6.4-98-g60519251",
+   "head": "60519251b3",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "driver": "610.57.04"
  },
- "decode": 2417.1,
- "decode_spread_pct": 0.77,
+ "decode": 2418.1,
+ "decode_spread_pct": 0.53,
  "decode_samples": [
-  2427.4,
-  2416.3,
-  2417.1,
-  2408.7,
-  2417.4
+  2418.1,
+  2418.1,
+  2408.5,
+  2405.4,
+  2418.2
  ],
- "prefill": 21978.6,
- "prefill_spread_pct": 2.15,
+ "prefill": 21995.8,
+ "prefill_spread_pct": 0.79,
  "prefill_samples": [
-  22441.3,
-  22001.1,
-  21968.9,
-  21978.6,
-  21973.4
+  21996.4,
+  21995.8,
+  21984.6,
+  21980.4,
+  22154.3
  ]
 }
