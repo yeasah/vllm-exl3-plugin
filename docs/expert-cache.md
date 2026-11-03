@@ -10,8 +10,8 @@ Tools are in [tools/offload/](../tools/offload/). Background and older measureme
 Ultra 9 285, 23 GiB RAM. Routing traced on three models; see [Phase 0 results](#phase-0-results).
 Routing tables below are from the corrected replay.*
 
-**Status: phases 0–2 complete and gated (2026-11-03); see
-[Phase 1 results](#phase-1-results) and [Phase 2 results](#phase-2-results).** The recommendation is one mechanism that replaces
+**Status: phases 0–2 complete and gated, phase 3 built (2026-11-03); see
+[Phase 1](#phase-1-results), [Phase 2](#phase-2-results) and [Phase 3 results](#phase-3-results).** The recommendation is one mechanism that replaces
 `register_offload`: a pinned host copy of every expert written at load time, a fixed VRAM
 slot arena managed as an LRU between steps, and a whole-layer staging copy for prefill.
 
@@ -393,6 +393,101 @@ TODO `cpu-offload`.
   4.00bpw mul1 with 7.3 GiB off. A resident run does not fit this card, so no direct comparison
   exists. Gemma 4.10bpw's absolute rate, ~70 t/s, is the mcg kernel's.
 
+### Phase 3 results
+
+**Built:** `expert_cache.py`.
+
+- **Slots:** `EXL3_EXPERT_SLOTS` (a count, or a fraction of experts) per layer, allocated at end of
+  load after the staging window.
+- **One pointer table:** every layer's decode pointer table becomes a view of one `[L, 3, E]`
+  tensor, so each step's updates are one scatter.
+- **Routing:** `apply` copies `topk_ids` for decode-sized batches into a device buffer, which is
+  capturable. A wrapper on both model runners' `execute_model` copies that buffer to a pinned ring
+  after each step and records an event.
+- **The controller, at each boundary:**
+  1. points experts whose promotion copies have landed at their slots;
+  2. plans from the newest finished step;
+  3. points victims back at the host;
+  4. issues copies on a side stream that waits for those writes.
+
+  Promotions are ranked most-wanted first, up to `EXL3_PROMOTE_PER_STEP` (32). Under async
+  scheduling it reads routing one step older than intended, so the effective lag is 3. The
+  replay puts that at 89.7% against 90.5% for lag 2.
+
+**Workload:** `decode_bench.py`, eight prompts of natural long answers, 7–7.2K tokens. Hit rates
+are per 500-step window, from `EXL3_CACHE_STATS`. `measure.py`'s 200-token `ignore_eos` runs read
+3–6 points low: they are mostly cold starts and degenerate text.
+
+**`cuda`, gemma 2.10bpw, every expert offloaded:**
+
+| configuration | decode | VRAM hit, steady |
+|---|---|---|
+| resident | 126.5 t/s | — |
+| no slots | 66.9 | — |
+| **40% slots** | **116.2** (1.74x) | 86–91.5%, ~89% |
+| spread placement + 40% slots | 121–124 | 95–98% |
+
+**3060, gemma 4.10bpw, every expert offloaded (11.6 GiB), same session:**
+
+| configuration | decode | VRAM hit, steady | KV left |
+|---|---|---|---|
+| 40% slots, budget 32 | 29.0 t/s | 82–84% | 3.06 GiB |
+| **55% slots, budget 32** | **32.6** | 89–93% | 0.82 GiB |
+| 40% slots, budget 12 | 27.8 | 78–84% | 3.06 GiB |
+
+A longer 40% run measured 23.5 t/s on a busier session, with hit rates matching `cuda`'s,
+83–94%. Outputs match resident on `cuda` and phase 2's outputs on the 3060, chat and prompt
+logprobs.
+
+**Where the 3060's time goes** (profile, 40% slots, ~35 ms/token): the GPU's main stream is busy
+98.5% of the time, so the controller is not a CPU bottleneck.
+
+- MoE kernels take 23.5 ms per token. Calls with a miss over the link sit in the tail: median
+  159 µs against 294 µs at p90.
+- Everything else takes ~11 ms, the same as resident on this card.
+- Promotions take 3.3 ms per token of side-stream DMA, overlapped.
+
+The remaining cost is misses read over WSL's ~15 GB/s link, so slots are the lever: 40% to 55%
+gave +12%.
+
+**Gates.**
+
+- **Graphs on, output identical:** pass.
+- **Hit rate at least 85% at 40% slots on a fresh workload:** pass on `cuda`, ~89% steady. The
+  3060 matched it on the long run.
+- **At least 1.7x on 19.3 t/s:** pass on `cuda` (1.74x over all-offloaded). **Fails on the 3060
+  at 4.10bpw.** Same session, 2000-token `decode_bench`:
+
+  | configuration | offloaded | decode | KV left |
+  |---|---|---|---|
+  | greedy `experts`, the 19.3 baseline | 6.0 GiB | 22.4 t/s | 1.67 GiB |
+  | cold static set | 6.0 GiB | 28.0 | 1.86 GiB |
+  | every expert offloaded, 55% slots | 11.6 GiB | 31.8 | 0.89 GiB |
+  | cold set + 10 slots per layer | 6.0 GiB | **32.1** | 0.84 GiB |
+
+  That is 1.43x on today's greedy, and 1.15x on the cold static set. At equal VRAM the LRU over
+  everything and the cold set plus a small LRU land together, at 93% and 90% VRAM hit.
+  20 slots on the cold set left 0.11 GiB of KV and could not serve.
+
+**A mul1 checkpoint gives the same ratio.** Laguna-XS 4.00bpw (256 experts, 39 MoE layers),
+same session:
+
+| configuration | offloaded | decode | KV left |
+|---|---|---|---|
+| greedy `experts` | 9.0 GiB | 30.9 t/s | 2.55 GiB |
+| every expert offloaded, 45% slots | 14.6 GiB | **43.0** | 1.26 GiB |
+
+That is 1.39x, with 79–84% VRAM hit, lower than gemma's as the replay predicted for 256
+experts. Greedy at 7 GiB left 0.28 GiB of KV and could not serve.
+
+**Why the 3060 falls short.** The projection assumed ~23 ms of base work per token and ~4 ms of
+misses. Measured, the base work alone is ~11 ms of non-MoE plus the mcg MoE kernels, and the 7–10%
+of misses still cost several ms over WSL's link. More VRAM for experts is not available on this
+card without starving KV, so the remaining levers are cheaper misses and a cheaper base:
+
+- a CPU tail for misses (phase 5);
+- the embedding table on host (phase 5, ~1 GiB more for slots).
+
 ### Cost arithmetic for 4.10bpw
 
 One expert is 3 × 1.03 MiB ≈ 3.24 MB. Full routing reads 8 × 30 × 3.24 = 778 MB/token. Greedy
@@ -530,12 +625,63 @@ now bound by the MoE kernel.* Top priority as an outcome; needs phase 1's host b
 *Gate:* TTFT overhead scales with steps not tokens, measured as `first_token_ts - scheduled_ts`;
 at least 50% of resident rate at 4.10bpw.
 
-**Phase 3: slots and the controller.** *Gate:* graphs stay on; hit rate at least 85% at 40% slots on
+**Phase 3: slots and the controller.** *Built; gates pass on `cuda`; on the 3060 hit rate and identity pass, speed is 1.43x, not 1.7x; see
+[Phase 3 results](#phase-3-results).* *Gate:* graphs stay on; hit rate at least 85% at 40% slots on
 a fresh workload; at least 1.7x on the 19.3 t/s baseline; bit-identical output to resident.
 
 **Phase 4: sizing and accounting.** `--cpu-offload-gb` retained as the budget, spread computed rather
 than hand-written, reachable-versus-offloaded reporting, `TP>1` semantics, and the bench axis the
 TODO asks for. Slots sized so a user is not asked to reason about any of this.
+
+*Slots against concurrency, measured served.* The replay says 8 unrelated streams lose 13–17
+points at 40% capacity. Serving has not tested that, and sizing needs it: if the best slot
+fraction moves consistently with expected concurrency, `--max-num-seqs` or a stated target
+concurrency can choose it.
+
+- **Where:** `cuda`, gemma 2.10bpw, every expert offloaded. There is room for KV and for slots up
+  to ~70%. A 256-expert model after that.
+- **Grid:** slots {25, 40, 55, 70}% × concurrent unrelated requests {1, 2, 4, 8, 16}, with
+  `decode_bench.py`-style prompts staggered so prefills land mid-decode.
+- **Record:** windowed VRAM hit, aggregate and per-request decode t/s, and the fraction of steps
+  that skip routing.
+- **Promotion budget:** run it at 32 and at 32×n, since the replay grew it with streams.
+- **Read off:** the knee in t/s per slot fraction at each concurrency, and whether it tracks n.
+
+Two current behaviours will skew this, and should be fixed or at least counted first:
+
+- **A step over 32 tokens records no routing and stages.** Under continuous batching, any step
+  that carries a prefill chunk alongside decodes goes over 32 tokens. It takes the staged path,
+  which copies every offloaded expert, and records no routing for the controller. With frequent
+  arrivals, that could be most steps. One fix is to record per-layer expert counts, a fixed
+  `[L, E]` buffer filled by scatter-add for any batch size, instead of ids. The other is to decide
+  staging on decode rows rather than total rows.
+- **The budget is fixed per step,** while the misses a step can cause grow with its rows.
+
+*The budget has an external claimant, and it goes first.* Serving a multimodal checkpoint on a
+small card will usually mean offloading the vision tower too. Its weights are plain tensors, not
+EXL3, so vLLM's `UVAOffloader` handles them. That already happens first:
+
+- `wrap_modules` runs at model construction, before any `store()`;
+- it skips every EXL3 placeholder, since they read as already on CPU;
+- it counts what it takes in the same `cpu_offload_bytes` that store-time placement reads.
+
+So vision takes budget before any expert, and that ordering should stay. The tower runs once per
+image while experts run every token, so a vision byte offloaded costs far less than an expert
+byte. Phase 4 has to make the ordering explicit rather than accidental:
+
+- **Plan with vision counted.** Compute expert placement from what `wrap_modules` left, not from
+  `--cpu-offload-gb`.
+- **Report both.** Report vision and expert bytes separately, so a budget the tower used up does
+  not read as "offload did nothing".
+- **Never empty selectors.** With no selectors, vLLM offloads every non-EXL3 parameter in
+  construction order, including the language model's routers, norms and any unquantized
+  embedding. Default to the vision tower plus experts instead.
+- **Watch the pin rounding.** vLLM pins with `pin_memory=True`, so the power-of-two rounding
+  from phase 1 applies to the tower: up to 2x its bytes in host RAM.
+- **Measure the cost per image.** Vision prefill reads the tower over UVA once per image; whether
+  that wants staging is open.
+
+Every run so far used `--language-model-only`, so none of this is measured yet.
 
 **Phase 5: optional, each on its own evidence.** Embedding table on host: rows known before
 forward, a handful per token, the Engram access pattern on a 1.38 GiB table. Saved slot state across
@@ -561,6 +707,8 @@ python tools/offload/graph_spike.py                    # pointer flips, ring cop
 python tools/offload/pin_probe.py                      # pin 30 x 415 MiB host blocks, DMA, readback
 tools/offload/phase1_check.sh REPO [ballast|main]      # placement gates: identity, speed, tight loads
 python tools/offload/prefill_sweep.py [TOKENS ...]     # TTFT across prompt lengths, against :8123
+python tools/offload/decode_bench.py [MAX_TOKENS]      # decode on natural long answers, against :8123
+EXL3_EXPERT_SLOTS=0.4 EXL3_CACHE_STATS=500 vllm serve ...  # expert cache with windowed hit rates
 CODEBOOK=mcg python tools/offload/stage_bench.py 4 1024 # MoE prefill: resident, UVA, staged, copy
 ```
 

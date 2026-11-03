@@ -317,6 +317,7 @@ _ALIGN = 256
 def register_experts(layer, blocks: dict) -> None:
     """Note a MoE layer's trellis host blocks, by projection label, for staging."""
     layer.exl3_stage = None
+    layer.exl3_route = None  # set by expert_cache.build when slots are on
     blocks = {label: b for label, b in blocks.items() if b is not None}
     if blocks:
         layer.exl3_host_blocks = blocks
@@ -371,6 +372,9 @@ def build_staging() -> None:
         "copy a layer's offloaded experts in rather than reading them over UVA",
         size / (1 << 20), STAGE_MIN_TOKENS,
     )
+    from . import expert_cache
+
+    expert_cache.build(list(_HOSTED))
     _HOSTED.clear()
 
 

@@ -339,6 +339,9 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
         gate, up, down = cpu_offload.expert_tables(layer, flat.shape[0])
+        if layer.exl3_route is not None and flat.shape[0] <= cpu_offload.STAGE_MIN_TOKENS:
+            # Routing for the expert cache's controller; see expert_cache.py
+            layer.exl3_route[: flat.shape[0]].copy_(topk_ids)
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,

@@ -2067,8 +2067,12 @@ only.
 **Plan as of 2026-11-01: [docs/expert-cache.md](docs/expert-cache.md)**, phases and gates there,
 work on branch `cpu-offload`. It settles the layout, staging and load path below in one design,
 and supersedes the routing-uniformity reasoning further down this item. **Phase 1, pin at
-store, and phase 2, prefill staging, are done (2026-11-03)**; next is phase 3, slots and the
-controller.
+store, and phase 2, prefill staging, are done (2026-11-03)**. **Phase 3, slots and the
+controller, is built** (`expert_cache.py`, opt-in via `EXL3_EXPERT_SLOTS`): ~89% hit at 40% slots,
+1.74x on `cuda`, output identical. On the 3060 at gemma 4.10bpw mcg it tops out near 32 t/s, 1.43x
+on greedy, 1.15x on the cold static set; Laguna 4.00bpw mul1 reaches 43 t/s, 1.39x on greedy. See
+expert-cache.md, Phase 3 results. Next: phase 4 sizing (cold set plus a small LRU is as good as
+LRU over all), then cheaper misses.
 
 **Prefill is now bound by the MoE kernel, not the link.** `exl3_moe_mm` runs one row per
 (token, expert) slot at every batch size, so a 1024-token chunk decodes each expert's trellis
