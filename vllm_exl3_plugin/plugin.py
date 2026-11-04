@@ -27,6 +27,7 @@ def register() -> None:
     register_quantization_config("exl3")(EXL3Config)
     _patch_moe_trellis_rank()
     _patch_offload_summary()
+    _patch_offload_defaults()
     _REGISTERED = True
 
 
@@ -114,3 +115,38 @@ def _patch_offload_summary() -> None:
 
     base_loader.process_weights_after_loading = process_weights_after_loading
     base_loader._exl3_offload_summary_patched = True
+
+
+def _patch_offload_defaults() -> None:
+    """Give ``--cpu-offload-gb`` without ``--cpu-offload-params`` a safe default:
+    multimodal towers and routed experts, nothing else.
+
+    With no selector, vLLM's ``UVAOffloader`` offloads every parameter of every
+    module ``wrap_modules`` is handed. That is called twice over: once per tower
+    (``_mark_tower_model``, with the tower's name as `prefix`) and once for the
+    decoder layers (``make_layers``, with no prefix). For an EXL3 model the
+    decoder layers' plain tensors are what is left after the quantized ones --
+    norms, router weights -- a few KiB each and read by every token, which over
+    the link cost far more than their bytes (see `cpu_offload._OFFLOADABLE_COMPONENTS`
+    for the same effect measured on scale vectors).
+
+    So an empty selector lets tower calls through and skips the prefix-less
+    decoder-layer call. Towers are built first in the models that have them, so
+    they keep first claim on the budget; `cpu_offload` gives experts what is
+    left, and leaves dense EXL3 tensors alone without a selector. Any explicit
+    selector restores vLLM's behaviour unchanged.
+    """
+    from vllm.model_executor.offloader.uva import UVAOffloader
+
+    if getattr(UVAOffloader, "_exl3_defaults_patched", False):
+        return
+    original = UVAOffloader.wrap_modules
+
+    @wraps(original)
+    def wrap_modules(self, modules_generator, prefix: str = ""):
+        if not self.cpu_offload_params and not prefix:
+            return list(modules_generator)
+        return original(self, modules_generator, prefix)
+
+    UVAOffloader.wrap_modules = wrap_modules
+    UVAOffloader._exl3_defaults_patched = True

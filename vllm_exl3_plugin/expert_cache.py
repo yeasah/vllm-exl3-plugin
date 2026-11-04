@@ -16,17 +16,26 @@ The controller runs at step boundaries, outside the forward and outside any grap
 3. the promotions are copied on a side stream that waits for those table writes,
    so every kernel that could still read a victim slot has finished first.
 
-Routing reaches the host without a sync: `apply` copies each layer's `topk_ids`
-into one device buffer (capturable), and after the step the wrapper copies that
-buffer into a pinned ring and records an event. A ring entry is read only once its
+Routing reaches the host without a sync: `apply` copies the leading rows of each
+layer's `topk_ids` into one device buffer (capturable), and after the step the
+wrapper copies that buffer into a pinned ring and records an event. vLLM orders
+decode rows first, so the leading rows are the step's decodes even when a prefill
+chunk shares the step; the controller reads as many as the step had. A ring entry is read only once its
 event has completed, which holds under async scheduling, where the CPU runs a step
 ahead. So decisions lag the routing by about two steps, which docs/expert-cache.md
 measured as nearly free.
 
-Off unless ``EXL3_EXPERT_SLOTS`` is set: a count of slots per layer, or a fraction
-of the layer's experts if it contains a dot. ``EXL3_PROMOTE_PER_STEP`` (32) bounds
-promotions per step across all layers, ``EXL3_CACHE_STATS`` logs hit rates every
-that many steps.
+Sizing (phase 4c). On by default whenever experts are offloaded; ``EXL3_EXPERT_SLOTS``
+is "auto" (the default), 0 for off, or a fixed count per layer (a fraction of the
+layer's experts if it contains a dot). Auto sizes at vLLM's ``determine_available_memory``,
+after the memory profile and before KV and graph capture: KV keeps
+``EXL3_KV_RESERVE`` (1.0) times what one ``--max-model-len`` request needs, slots
+take the rest, and ``--cpu-offload-gb`` caps how much VRAM experts give up. With
+``--max-model-len auto`` the reserve is for 4096 tokens and vLLM fits the length to
+what is left. See `size_slots`. ``EXL3_PROMOTE_PER_STEP`` (32) bounds
+promotions per step across all layers, whatever the batch: growing it with decode rows
+thrashed, measured at 2-16 streams (docs/expert-cache.md, 4b). ``EXL3_CACHE_STATS``
+logs hit rates every that many steps.
 """
 
 from __future__ import annotations
@@ -51,9 +60,29 @@ CACHE: "ExpertCache | None" = None
 
 def _slots_per_layer(experts: int) -> int:
     spec = os.environ.get("EXL3_EXPERT_SLOTS", "")
-    if not spec:
-        return 0
     return int(float(spec) * experts) if "." in spec else int(spec)
+
+
+def size_slots(available: int, reserve: int, hosted: int, may_free: int, slot_bytes: int,
+               layers: int, per_layer_max: int) -> int:
+    """Slots per layer for the auto mode.
+
+    `available` is the KV memory vLLM measured with every hosted expert off the device,
+    `reserve` the KV to keep, `hosted` the hosted experts' bytes, `may_free` how much VRAM
+    the budget lets experts give up, and `slot_bytes` one slot across its projections.
+
+    Slots take what the reserve leaves. The budget is a floor on slots: experts never give
+    up more than it allows, even if KV then falls short of the reserve. Nothing beyond the
+    hosted experts, and nothing beyond what is available.
+    """
+    want = max(available - reserve, 0)
+    floor = max(hosted - may_free, 0)
+    target = min(max(want, floor), hosted, available)
+    return min(per_layer_max, target // max(slot_bytes * layers, 1))
+
+
+#: Tokens the reserve covers when --max-model-len is auto, before the multiplier.
+_AUTO_LEN_TOKENS = 4096
 
 
 class ExpertCache:
@@ -113,8 +142,9 @@ class ExpertCache:
         for l, layer in enumerate(layers):
             layer.exl3_route = self.route[l]
         self.ring = torch.zeros((_RING, L, _ROWS, self.top_k), dtype=torch.int32).pin_memory()
-        # launched steps whose routing is not read yet: ring slot, event, tokens, the live
-        # mask they ran with (for stats), and the step number
+        # launched steps whose routing is not read yet: ring slot, event, decode rows, the
+        # live mask they ran with (for stats; None if staged, where every expert was in VRAM),
+        # and the step number
         self.steps: list[tuple[int, torch.cuda.Event, int, numpy.ndarray | None, int]] = []
         self.step = 0
         self.clock = 0
@@ -123,6 +153,30 @@ class ExpertCache:
         self.stats_every = int(os.environ.get("EXL3_CACHE_STATS", "0"))
         self.hits = self.misses = self.resident_hits = self.promoted = 0
         self.planned = self.lag = 0
+        self.window_steps = self.decode_steps = self.staged_steps = 0
+        self._fill()
+
+    def _fill(self) -> None:
+        """Start warm: fill every slot before the first step, so a cache that holds all of a
+        layer's hosted experts never misses and one that holds some starts with hits instead
+        of a cold climb at the promotion budget. Before graph capture, so synchronous."""
+        updates = []
+        for l, layer in enumerate(self.layers):
+            for s, e in enumerate(sorted(self.host[l])[: self.capacity[l]]):
+                for j, label in enumerate(_LABELS):
+                    block = layer.exl3_host_blocks.get(label)
+                    if block is not None and e in block.rows:
+                        self.slot_tensors[l][j][s].copy_(block.host[block.rows[e]], non_blocking=True)
+                self.owner[l][s] = e
+                self.slot_of[l, e] = s
+                self.live[l, e] = True
+                updates += [(self._entry(l, j, e), self._slot_addr(l, j, s)) for j, _ in self.host[l][e]]
+        self._write(updates)
+        torch.cuda.synchronize(self.device)
+
+    @property
+    def holds_everything(self) -> bool:
+        return all(self.capacity[l] >= len(self.host[l]) for l in range(len(self.layers)))
 
     # ------------------------------------------------------------ addresses
 
@@ -172,11 +226,12 @@ class ExpertCache:
         rows = numpy.repeat(numpy.arange(L), ids.shape[1])
         flat_ids = ids.reshape(-1)
         off = self.offloaded[rows, flat_ids]
-        if self.stats_every:
+        if self.stats_every and live_then is not None:
             hit = live_then[rows, flat_ids]
             self.hits += int((off & hit).sum())
             self.misses += int((off & ~hit).sum())
             self.resident_hits += int((~off).sum())
+        if self.stats_every:
             self.planned += 1
             self.lag += self.step - step_no
         self.last_use[rows[off], flat_ids[off]] = self.clock
@@ -248,10 +303,17 @@ class ExpertCache:
         self.pending.append((done, issued))
         self.promoted += len(issued)
 
-    def step_end(self, tokens: int) -> None:
-        """After this step's forward is enqueued: move its routing to the host ring."""
+    def step_end(self, tokens: int, decodes: int) -> None:
+        """After this step's forward is enqueued: move its decode rows' routing to the host
+        ring. A step over the staging threshold ran every expert from VRAM, so its rows
+        teach the LRU but count toward no hit rate."""
         self.step += 1
-        if tokens <= _ROWS:
+        staged = tokens > _ROWS
+        self.window_steps += 1
+        self.staged_steps += staged
+        rows = min(decodes, _ROWS)
+        if rows:
+            self.decode_steps += 1
             slot = self.step % _RING
             self.ring[slot].copy_(self.route, non_blocking=True)
             ev = torch.cuda.Event()
@@ -259,20 +321,23 @@ class ExpertCache:
             # keep at most _RING - 1 unread, so a ring slot is never overwritten while queued
             if len(self.steps) >= _RING - 1:
                 self.steps.pop(0)
-            self.steps.append((slot, ev, tokens, self.live.copy() if self.stats_every else None,
-                               self.step))
+            live = self.live.copy() if self.stats_every and not staged else None
+            self.steps.append((slot, ev, rows, live, self.step))
         if self.stats_every and self.step % self.stats_every == 0:
             # over the window since the last report, so warm-up does not linger in it
             off = self.hits + self.misses
             total = off + self.resident_hits
             logger.info(
                 "expert cache: step %d; last %d: VRAM hit %.1f%% of routed, slot hit %.1f%% "
-                "of offloaded, %d promotions, routing read %.1f steps after launch",
+                "of offloaded, %d promotions, routing read %.1f steps after launch; "
+                "%d steps had decodes, %d learned from, %d staged",
                 self.step, self.stats_every, 100 * (total - self.misses) / max(total, 1),
                 100 * self.hits / max(off, 1), self.promoted, self.lag / max(self.planned, 1),
+                self.decode_steps, self.planned, self.staged_steps,
             )
             self.hits = self.misses = self.resident_hits = self.promoted = 0
             self.planned = self.lag = 0
+            self.window_steps = self.decode_steps = self.staged_steps = 0
 
 
 def _patch_runners() -> None:
@@ -304,25 +369,138 @@ def _patch_runners() -> None:
                 cache.step_begin()
             out = _original(self, scheduler_output, *args, **kwargs)
             if tokens:
-                cache.step_end(tokens)
+                # decode rows lead the batch (vLLM sorts them first); see the module docstring
+                decodes = sum(n == 1 for n in scheduler_output.num_scheduled_tokens.values())
+                cache.step_end(tokens, decodes)
             return out
 
         cls.execute_model = execute_model
         cls._exl3_cache_patched = True
 
 
-def build(layers: list) -> None:
-    """Called at the end of load, after the staging window, before KV sizing."""
+_PENDING: list = []
+#: A cache that holds every hosted expert, kept alive with no controller.
+_STATIC: "ExpertCache | None" = None
+
+
+def prepare(layers: list) -> None:
+    """Called at the end of load with the layers that hold host blocks. The cache is built
+    at vLLM's `determine_available_memory`, once the memory profile says what is free."""
+    from . import cpu_offload
+
+    if not layers or cpu_offload.cache_mode() == "off":
+        return
+    _PENDING[:] = layers
+    _patch_worker()
+
+
+def _patch_worker() -> None:
+    from functools import wraps
+
+    from vllm.v1.worker import gpu_worker
+
+    cls = gpu_worker.Worker
+    if getattr(cls, "_exl3_cache_sizing", False):
+        return
+    original = cls.determine_available_memory
+
+    @wraps(original)
+    def determine_available_memory(self):
+        available = original(self)
+        if not _PENDING:
+            return available
+        layers = list(_PENDING)
+        _PENDING.clear()
+        return available - build(layers, available, self)
+
+    cls.determine_available_memory = determine_available_memory
+    cls._exl3_cache_sizing = True
+
+
+def _kv_reserve(worker) -> tuple[int, str]:
+    """Bytes of KV to keep, and how they were arrived at, for the log."""
+    from vllm.v1.core.kv_cache_utils import max_memory_usage_bytes
+
+    mult = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
+    config = worker.vllm_config
+    specs = worker.get_kv_cache_spec().values()
+    model = config.model_config
+    if getattr(model, "original_max_model_len", None) == -1:
+        saved, model.max_model_len = model.max_model_len, _AUTO_LEN_TOKENS
+        try:
+            one = max_memory_usage_bytes(config, specs)
+        finally:
+            model.max_model_len = saved
+        return int(mult * one), f"{mult:g} x {_AUTO_LEN_TOKENS} tokens (--max-model-len auto)"
+    one = max_memory_usage_bytes(config, specs)
+    return int(mult * one), f"{mult:g} x --max-model-len {model.max_model_len}"
+
+
+def build(layers: list, available: int, worker) -> int:
+    """Size and allocate the slots; returns the bytes taken from what KV would have had."""
     global CACHE
-    if not layers or not os.environ.get("EXL3_EXPERT_SLOTS"):
-        return
-    slots = _slots_per_layer(layers[0].exl3_num_experts)
+    from . import cpu_offload
+
+    E = layers[0].exl3_num_experts
+    first = layers[0]
+    slot_bytes = sum(b.host[0].numel() * b.host.element_size()
+                     for b in first.exl3_host_blocks.values())
+    per_layer_max = max(max(len(b.rows) for b in l.exl3_host_blocks.values()) for l in layers)
+    hosted = cpu_offload._STATS["expert_bytes"]
+    loader = cpu_offload._uva_loader()
+    may_free = (max(loader.cpu_offload_max_bytes - loader.cpu_offload_bytes, 0)
+                if loader is not None else hosted)
+    if cpu_offload.cache_mode() == "fixed":
+        slots, how = min(_slots_per_layer(E), per_layer_max), "fixed by EXL3_EXPERT_SLOTS"
+        reserve = None
+    else:
+        reserve, how = _kv_reserve(worker)
+        slots = size_slots(available, reserve, hosted, may_free, slot_bytes, len(layers),
+                           per_layer_max)
     if slots <= 0:
-        return
-    CACHE = ExpertCache(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
+        logger.warning(
+            "expert cache: no VRAM left for slots after the KV reserve (%s); experts are "
+            "read from host every token. Lower EXL3_KV_RESERVE or --max-model-len.", how,
+        )
+        return 0
+    cache = ExpertCache(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
+    used = sum(t.numel() * t.element_size() for d in cache.slot_tensors for t in d.values())
+    if cache.holds_everything:
+        # Every hosted expert has a slot for good: no controller, no routing, and prefill
+        # reads the slots too, so the staging window goes back to KV.
+        global _STATIC
+        _STATIC = cache
+        window = cpu_offload._STATS.pop("window", None)
+        for layer in layers:
+            layer.exl3_stage = None
+            layer.exl3_route = None
+        freed = window.numel() if window is not None else 0
+        del window
+        torch.cuda.empty_cache()  # back to the driver, so KV's allocation can use it
+        logger.info(
+            "expert cache: every offloaded expert fits in VRAM (%d slots per layer, %.0f MiB); "
+            "they are served from there, KV keeps %.2f GiB, and the host copy goes unused. "
+            "Offload was not needed at this --max-model-len and EXL3_KV_RESERVE.",
+            slots, used / (1 << 20), (available - used + freed) / (1 << 30),
+        )
+        return used - freed
+    CACHE = cache
     _patch_runners()
-    nbytes = sum(t.numel() * t.element_size() for d in CACHE.slot_tensors for t in d.values())
+    in_vram = (E - per_layer_max + slots) / E
+    streams = 2 ** ((in_vram - 0.4) / 0.1) if in_vram >= 0.4 else 0
     logger.info(
-        "expert cache: %d slots per layer over %d layers, %.0f MiB; up to %d promotions "
-        "per step", slots, len(layers), nbytes / (1 << 20), CACHE.budget,
+        "expert cache: %d slots per layer over %d layers (%.0f MiB), %.0f%% of experts in "
+        "VRAM; KV keeps %.2f GiB (reserve: %s). Measured on gemma-4-26B, that holds "
+        "decode within ~10%% of resident for %s concurrent streams.",
+        slots, len(layers), used / (1 << 20), 100 * in_vram,
+        (available - used) / (1 << 30), how,
+        "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1
+        else "fewer than 1 (single-stream decode will be slower)",
     )
+    if reserve is not None and available - used < reserve:
+        logger.warning(
+            "expert cache: --cpu-offload-gb keeps more experts in VRAM than the KV reserve "
+            "allows (%.2f GiB of KV against %.2f reserved). Raise --cpu-offload-gb to give "
+            "KV its reserve.", (available - used) / (1 << 30), reserve / (1 << 30),
+        )
+    return used

@@ -633,6 +633,155 @@ a fresh workload; at least 1.7x on the 19.3 t/s baseline; bit-identical output t
 than hand-written, reachable-versus-offloaded reporting, `TP>1` semantics, and the bench axis the
 TODO asks for. Slots sized so a user is not asked to reason about any of this.
 
+Grown since first planned. In order, each one feeding the next:
+
+- **4a, mixed steps.** Record decode routing in every step, including those that carry a
+  prefill chunk, and let the promotion budget grow with decode rows. *Gate:* under staggered
+  arrivals, the fraction of steps the controller learns from equals the fraction with decodes.
+  Output stays identical.
+- **4b, concurrency against slots,** on `cuda` (below). *Gate:* a table, and a rule for slots from
+  expected concurrency, or the finding that none holds.
+- **4c, sizing.** Experts offloaded, slots and placement are computed from `--cpu-offload-gb` and
+  what KV needs at `--max-model-len` × `--max-num-seqs`. Phase 3 found cold set plus small LRU as
+  good as LRU over everything, so the simpler of the two wins. Allocated before KV sizing.
+  *Gate:* gemma 4.10bpw on the 3060 and gemma 2.10bpw on `cuda` within 5% of the best hand-tuned
+  configuration, from flags alone.
+- **4d, accounting.** Vision first and reported apart, default selectors, `TP>1` semantics,
+  reachable-against-offloaded reporting. *Gate:* a multimodal serve with the tower offloaded
+  reports both parts, and experts get exactly what the tower left.
+- **4e, vision cost.** Per-image prefill cost with the tower over UVA, and the pin rounding.
+  Staging the tower if the cost warrants it.
+
+**4a results.** Decode routing is now recorded in every step: `apply` copies the leading rows of
+any batch, and the controller reads as many as the step had decodes. Staged steps teach the LRU
+but count toward no hit rate. Under 4 staggered streams, every step with decodes was learned from
+(500 of 500 per window). Output is still identical to resident. Staging itself was rare there,
+because these chat prompts are under 32 tokens.
+
+**4b results,** `cuda`, gemma 2.10bpw, every expert offloaded, `concurrency_bench.py`. Unrelated
+requests ran 100 s per level, staggered 2 s apart, and every request ran to its 600-token cap. Each
+cell is aggregate decode t/s, the mean VRAM hit over that level's stats windows, and median t/s
+per request:
+
+| server | n=1 | n=2 | n=4 | n=8 | n=16 |
+|---|---|---|---|---|---|
+| resident | 123 · — · 127 | 196 · — · 101 | 235 · — · 61 | 379 · — · 52 | 419 · — · 30 |
+| no slots | 65 · — · 64 | 76 · — · 38 | 80 · — · 20 | 79 · — · 11 | 72 · — · 5 |
+| 25%, budget 32 | 103 · 75% · 103 | 135 · 65% · 68 | 157 · 61% · 41 | 173 · 57% · 24 | 165 · 56% · 12 |
+| 25%, scaled | 102 · 75% | 128 · 63% | 129 · 51% | 130 · 43% | 142 · 49% |
+| 40%, budget 32 | 115 · 90% · 116 | 165 · 84% · 84 | 193 · 78% · 50 | 248 · 76% · 35 | 216 · 74% · 18 |
+| 40%, scaled | 116 · 90% | 162 · 83% | 171 · 74% | 164 · 59% | 175 · 63% |
+| 55%, budget 32 | 121 · 97% · 121 | 181 · 94% · 94 | 213 · 90% · 55 | 317 · 88% · 43 | 276 · 86% · 24 |
+| 55%, scaled | 121 · 97% | 185 · 94% | 206 · 89% | 250 · 82% | 179 · 74% |
+| 70%, budget 32 | 123 · 99% · 124 | 194 · 98% · 98 | 226 · 97% · 58 | 339 · 96% · 47 | 343 · 94% · 26 |
+| 70%, scaled | 123 · 99% | 194 · 98% | 225 · 97% | 331 · 95% | 298 · 91% |
+
+- **Without slots, aggregate is pinned at the link,** ~80 t/s whatever n.
+- **Hit rate degrades gently with concurrency,** as the replay predicted. At 40%, 8 streams lose
+  14 points, inside the replay's 13–17.
+- **A budget scaled with decode rows (32×n) is worse at every fraction and every n > 1.** More
+  promotions per step evict what other streams still need. The fixed budget of 32 stays, and the
+  scaling option is removed.
+- **The best slot fraction moves consistently with concurrency.** As a share of resident aggregate
+  at budget 32:
+
+  | slots | n=1 | n=2 | n=4 | n=8 | n=16 |
+  |---|---|---|---|---|---|
+  | 25% | 83% | 69% | 67% | 46% | 39% |
+  | 40% | 94% | 85% | 82% | 65% | 51% |
+  | 55% | 98% | 92% | 91% | 84% | 66% |
+  | 70% | 100% | 99% | 96% | 90% | 82% |
+
+  Staying within ~10% of resident takes ~40% slots at n=1, ~55% at n=2–4, and ~70% at n=8. n=16
+  wants more than 70%. As a rule, **slots ≈ 0.4 + 0.1·log2(n) of experts**, capped at what VRAM
+  allows. More streams also want more KV, so 4c has to split the same leftover VRAM between the
+  two, against the expected n.
+- **Untested:** a 256-expert model, which hit lower in replay; and long prompts, which make steps
+  stage.
+
+**4c results: autosizing.** The cache is on by default whenever experts are offloaded.
+
+- **Placement.** Every expert matching the selectors goes to the host. If host RAM is short, each
+  layer gets the same share (`MemAvailable` less the larger of 4 GiB and 10% of RAM, split
+  across local ranks). Hosted experts do not spend vLLM's budget. With no selector, dense EXL3
+  tensors stay on the device.
+- **Sizing, at vLLM's `determine_available_memory`.** This is after the memory profile, before
+  KV and graph capture:
+  - KV keeps `EXL3_KV_RESERVE` (1.0) times what one `--max-model-len` request needs, from
+    vLLM's own `max_memory_usage_bytes`. With `--max-model-len auto`, the reserve covers 4096
+    tokens and vLLM fits the length to what is left.
+  - Slots take the rest, up to every hosted expert.
+  - `--cpu-offload-gb` caps how much VRAM experts give up, so a smaller value keeps more
+    experts in VRAM even past the reserve.
+
+  The arithmetic is `size_slots`, unit-tested.
+- **Warm start.** Every slot is filled before graph capture.
+- **Holding everything.** When the slots hold every hosted expert, there is no controller and no
+  routing capture. Prefill reads the slots too, and the staging window returns to KV.
+- **The log line** gives slots, the share of experts in VRAM, the KV kept and the reserve's
+  basis. It also says how many concurrent streams 4b's rule says that share serves within ~10%
+  of resident.
+- **Modes:** `EXL3_EXPERT_SLOTS=0` is the phase 2 behaviour; a number fixes the count.
+
+From flags alone (`--cpu-offload-gb 99 --cpu-offload-params experts`):
+
+| host | model | reserve | slots | KV | decode | against |
+|---|---|---|---|---|---|---|
+| 3060 | gemma 4.10bpw | 1 x 3000 | 78/layer, 61% in VRAM | 0.66 GiB | **33.7 t/s** | hand-tuned best 32.1 |
+| 3060 | gemma 4.10bpw | 3 x 3000 | 64/layer, 50% | 9,118 tokens | 31.5 | 32.1 |
+| `cuda` | gemma 2.10bpw | 1 x 4096 | all 128 | 5.84 GiB | **126.5**, prefill 671 | resident 126.5, 671 |
+| `cuda` | gemma 2.10bpw | 12 x 4096 | 76/layer, 59% | 49,152 tokens, exactly 12 x | 119.3 | resident 126.5 |
+| `cuda` | gemma 2.10bpw | 20 x 4096 | none fit; warned | 70K tokens | 62.9 | no slots, 66.9 |
+
+Output matches resident, or phase 2's greedy on the 3060, in every row. With warm start, the
+59% run's first 500-step window already hit 95%.
+
+**On WSL, `--gpu-memory-utilization` must leave room for the Windows desktop.** The same
+autosized 3060 configuration decoded at 25.3 t/s while the desktop held 1.2 GiB, and at 33.7 with
+0.57 GiB. At 0.90 of 12 GiB, 1.2 GiB more overcommits the card and WDDM pages. Autosizing does not
+add to this: vLLM always fills to the utilization, with KV or with slots. But it is the first
+thing to check when a WSL number looks low.
+
+**Gate:** pass. The 3060 lands 5% above the hand-tuned best, and `cuda` matches resident when
+everything fits.
+
+**4d results: accounting.** `TP>1` is still open; it needs the main system.
+
+- **Default selectors.** `--cpu-offload-gb` without `--cpu-offload-params` now means towers plus
+  experts. `plugin._patch_offload_defaults` wraps `UVAOffloader.wrap_modules`: with no selector,
+  tower calls (named by `_mark_tower_model`) go through, and the prefix-less decoder-layer call
+  from `make_layers` is skipped. vLLM would otherwise offload every norm and router weight, each
+  read by every token. Dense EXL3 tensors need an explicit selector in either cache mode. Any
+  explicit selector restores vLLM's behaviour.
+- **Vision first, reported apart.** Towers are built before the language model, so they keep first
+  claim. The summary now reads "5.80 GiB of EXL3 weights … after 1.07 GiB of non-EXL3 weights
+  vLLM offloaded first". When the tower takes the whole budget, it warns that it did, instead of
+  reporting that nothing matched.
+- **Experts get what the tower left.** On `cuda`, multimodal gemma 2.10bpw ran with
+  `--cpu-offload-gb 3` and `EXL3_KV_RESERVE=12`. The experts may free 3 − 1.07 = 1.93 GiB, so slots
+  were forced to 85 per layer, exactly as computed. The log warned that KV (7.25 GiB) fell short
+  of its 10.35 GiB reserve. Output was identical to the multimodal resident run in every
+  multimodal configuration, and the test image was described correctly.
+
+**4e results: the vision tower's cost.** The tower (1.07 GiB, two parts) costs nothing measurable
+per image when read over UVA.
+
+| host | tower | image cost (896 px, 279 tokens) | slots | decode |
+|---|---|---|---|---|
+| `cuda`, 2.10bpw | resident | 389 ms | all fit | 110.0 t/s |
+| `cuda`, 2.10bpw | offloaded | 391 ms | all fit | 109.4 |
+| 3060, 4.10bpw | in VRAM | 5208 ms | 62/layer | 18.4 |
+| 3060, 4.10bpw | **offloaded** | 4584 ms | **74/layer** | **25.0** |
+
+On the 3060, the image's cost is its 279 tokens' prefill through the mcg expert kernel (~70 t/s,
+phase 2), not the tower. Offloading the tower costs nothing and buys 12 slots per layer, **+36%
+decode**. Vision first is right, and staging the tower is not worth building.
+
+- **Pin rounding on the tower.** Still unmeasured: RSS does not track driver-pinned memory
+  reliably here.
+- **Multimodal gemma** needs `--max-num-batched-tokens` of at least 2496 (its largest image). The
+  bigger activations cost about 4 slots per layer against the text-only runs.
+
 *Slots against concurrency, measured served.* The replay says 8 unrelated streams lose 13–17
 points at 40% capacity. Serving has not tested that, and sizing needs it: if the best slot
 fraction moves consistently with expected concurrency, `--max-num-seqs` or a stated target
@@ -644,7 +793,8 @@ concurrency can choose it.
   `decode_bench.py`-style prompts staggered so prefills land mid-decode.
 - **Record:** windowed VRAM hit, aggregate and per-request decode t/s, and the fraction of steps
   that skip routing.
-- **Promotion budget:** run it at 32 and at 32×n, since the replay grew it with streams.
+- **Promotion budget:** run it at 32 and at 32×n, since the replay grew it with streams. *Run;
+  results above.*
 - **Read off:** the knee in t/s per slot fraction at each concurrency, and whether it tracks n.
 
 Two current behaviours will skew this, and should be fixed or at least counted first:
@@ -708,6 +858,9 @@ python tools/offload/pin_probe.py                      # pin 30 x 415 MiB host b
 tools/offload/phase1_check.sh REPO [ballast|main]      # placement gates: identity, speed, tight loads
 python tools/offload/prefill_sweep.py [TOKENS ...]     # TTFT across prompt lengths, against :8123
 python tools/offload/decode_bench.py [MAX_TOKENS]      # decode on natural long answers, against :8123
+python tools/offload/concurrency_bench.py N [SECONDS]  # N staggered streams of unrelated requests
+python tools/offload/concurrency_table.py OUT PHASES   # tabulate a concurrency grid's t/s and hit rates
+python tools/offload/vision_bench.py [SIZE] [REPS]     # what an image costs, with and without it
 EXL3_EXPERT_SLOTS=0.4 EXL3_CACHE_STATS=500 vllm serve ...  # expert cache with windowed hit rates
 CODEBOOK=mcg python tools/offload/stage_bench.py 4 1024 # MoE prefill: resident, UVA, staged, copy
 ```

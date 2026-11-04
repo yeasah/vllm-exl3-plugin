@@ -173,6 +173,7 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         extra_weight_attrs.pop("weight_loader", None)
         device = torch.empty(0).device
         layer_prefix = cpu_offload.layer_prefix(layer)
+        cpu_offload.declare_moe_layer(layer_prefix)
 
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
@@ -339,9 +340,10 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
         gate, up, down = cpu_offload.expert_tables(layer, flat.shape[0])
-        if layer.exl3_route is not None and flat.shape[0] <= cpu_offload.STAGE_MIN_TOKENS:
-            # Routing for the expert cache's controller; see expert_cache.py
-            layer.exl3_route[: flat.shape[0]].copy_(topk_ids)
+        if layer.exl3_route is not None:
+            # The leading rows' routing, for the expert cache's controller; see expert_cache.py
+            rows = min(flat.shape[0], layer.exl3_route.shape[0])
+            layer.exl3_route[:rows].copy_(topk_ids[:rows])
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,

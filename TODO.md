@@ -2071,8 +2071,12 @@ store, and phase 2, prefill staging, are done (2026-11-03)**. **Phase 3, slots a
 controller, is built** (`expert_cache.py`, opt-in via `EXL3_EXPERT_SLOTS`): ~89% hit at 40% slots,
 1.74x on `cuda`, output identical. On the 3060 at gemma 4.10bpw mcg it tops out near 32 t/s, 1.43x
 on greedy, 1.15x on the cold static set; Laguna 4.00bpw mul1 reaches 43 t/s, 1.39x on greedy. See
-expert-cache.md, Phase 3 results. Next: phase 4 sizing (cold set plus a small LRU is as good as
-LRU over all), then cheaper misses.
+expert-cache.md, Phase 3 results. **Phase 4a–4c are done:** mixed-batch routing, the concurrency
+grid (slots ≈ 0.4 + 0.1·log2(streams) of experts), and autosizing from `--cpu-offload-gb`,
+`--max-model-len` and `EXL3_KV_RESERVE`. 4d and 4e are done but for `TP>1`, which
+waits for the main system: default selectors are towers plus experts, the tower keeps first claim
+and is reported apart, and offloading it costs nothing per image while buying slots (+36% decode
+on the 3060). Next: `TP>1`, then cheaper misses.
 
 **Prefill is now bound by the MoE kernel, not the link.** `exl3_moe_mm` runs one row per
 (token, expert) slot at every batch size, so a 1024-token chunk decodes each expert's trellis

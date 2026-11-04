@@ -89,7 +89,25 @@ _STATS: dict[str, int | bool] = {}
 
 def _reset_stats() -> None:
     _STATS.clear()
-    _STATS.update(requested=False, selective=False, bytes=0, tensors=0, layers=set())
+    _STATS.update(requested=False, selective=False, bytes=0, tensors=0, layers=set(),
+                  expert_bytes=0, moe_layers=set(), quota=None)
+
+
+def cache_mode() -> str:
+    """The expert cache's mode, from ``EXL3_EXPERT_SLOTS``: "auto" when unset (or
+    "auto"), "off" for 0, "fixed" for a count or fraction. With the cache on, every
+    eligible expert goes to the host and slots bring back what VRAM allows; off, the
+    budget is spent greedily as before."""
+    spec = os.environ.get("EXL3_EXPERT_SLOTS", "auto").strip() or "auto"
+    if spec == "auto":
+        return "auto"
+    return "off" if float(spec) == 0 else "fixed"
+
+
+def declare_moe_layer(prefix: str) -> None:
+    """Count a routed-expert layer at construction, before any weight arrives, so the
+    first expert block can be planned knowing how many layers will follow."""
+    _STATS["moe_layers"].add(prefix)
 
 
 _reset_stats()
@@ -153,8 +171,14 @@ def _uva_loader():
     return loader
 
 
-def _count(loader, prefix: str, nbytes: int, tensors: int = 1) -> None:
-    loader.cpu_offload_bytes += nbytes
+def _count(loader, prefix: str, nbytes: int, tensors: int = 1, budget: bool = True) -> None:
+    """Record an offloaded tensor. With `budget` False (experts under the cache) it does
+    not spend vLLM's budget: slots return VRAM, so the budget caps what is freed, not
+    what is hosted. See `expert_cache.size_slots`."""
+    if budget:
+        loader.cpu_offload_bytes += nbytes
+    else:
+        _STATS["expert_bytes"] += nbytes
     _STATS["bytes"] += nbytes
     _STATS["tensors"] += tensors
     _STATS["layers"].add(prefix)
@@ -225,6 +249,10 @@ def place(param, t: torch.Tensor) -> torch.Tensor:
     )
     if (
         loader is None
+        # only an explicit selector offloads dense tensors: each of their bytes costs every
+        # token, where experts are a fraction per token and have the cache to hide behind.
+        # The empty-selector default is towers and experts; see plugin._patch_offload_defaults
+        or not loader.cpu_offload_params
         or not _matches(loader.cpu_offload_params, f".{param.exl3_prefix}.{param.exl3_name}.")
         or loader.cpu_offload_bytes >= loader.cpu_offload_max_bytes
     ):
@@ -252,8 +280,10 @@ def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
 
     Decided once, at the first expert to arrive, over every expert id in
     ascending order, so the outcome does not depend on the order the checkpoint
-    delivers them. Experts whose names match the selectors are taken while the
-    budget lasts, each checked before it is taken, as for dense tensors.
+    delivers them. Without the cache, experts whose names match the selectors are
+    taken while the budget lasts, each checked before it is taken, as for dense
+    tensors. With it, every matching expert is taken, up to the same share of each
+    layer that host RAM allows.
     """
     if param.exl3_name not in _OFFLOADABLE_COMPONENTS:
         return None
@@ -261,20 +291,74 @@ def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
     if loader is None:
         return None
     nbytes = t.numel() * t.element_size()
+    cached = cache_mode() != "off"
+    quota = _host_quota(param.exl3_num_experts, nbytes) if cached else param.exl3_num_experts
     taken = []
     for e in range(param.exl3_num_experts):
-        if loader.cpu_offload_bytes >= loader.cpu_offload_max_bytes:
+        if len(taken) >= quota or (
+            not cached and loader.cpu_offload_bytes >= loader.cpu_offload_max_bytes
+        ):
             break
         name = f".{param.exl3_prefix}.{e}.{label}_proj.{param.exl3_name}."
         if _matches(loader.cpu_offload_params, name):
             taken.append(e)
-            _count(loader, param.exl3_prefix, nbytes)
+            _count(loader, param.exl3_prefix, nbytes, budget=not cached)
     if not taken:
         return None
     return HostBlock({e: row for row, e in enumerate(taken)}, t.shape, t.dtype)
 
 
 _UNPLANNED = object()
+
+#: Host RAM left free when sizing the expert cache's host copy, at least.
+_HOST_MARGIN = 4 << 30
+
+
+def _host_quota(experts: int, nbytes: int) -> int:
+    """How many experts per layer and projection the host can hold, decided once.
+
+    Every expert of every declared layer, if host RAM allows; otherwise the same share of
+    each layer, so placement stays even. Assumes the three projections' trellises are the
+    same size, which holds for gate, up and down (k x n either way)."""
+    if _STATS["quota"] is None:
+        layers = max(len(_STATS["moe_layers"]), 1)
+        want = layers * experts * 3 * nbytes
+        free = _mem_available() // _local_ranks() - max(_HOST_MARGIN, _mem_total() // 10)
+        share = 1.0 if want <= free else max(free, 0) / want
+        _STATS["quota"] = math.ceil(share * experts)
+        if share < 1.0:
+            logger.warning(
+                "cpu-offload: host RAM holds %.2f of %.2f GiB of routed experts; offloading "
+                "%d of %d per layer for the expert cache", max(free, 0) / (1 << 30),
+                want / (1 << 30), _STATS["quota"], experts,
+            )
+    return _STATS["quota"]
+
+
+def _meminfo(key: str) -> int:
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith(key + ":"):
+                return int(line.split()[1]) << 10
+    return 0
+
+
+def _mem_available() -> int:
+    return _meminfo("MemAvailable")
+
+
+def _mem_total() -> int:
+    return _meminfo("MemTotal")
+
+
+def _local_ranks() -> int:
+    """Workers on this host, which share its RAM."""
+    try:
+        from vllm.distributed import parallel_state
+
+        return max(parallel_state.get_tensor_model_parallel_world_size(), 1)
+    except Exception:
+        return 1
 
 
 def place_expert(param, t: torch.Tensor, label: str, expert_id: int) -> torch.Tensor:
@@ -374,7 +458,7 @@ def build_staging() -> None:
     )
     from . import expert_cache
 
-    expert_cache.build(list(_HOSTED))
+    expert_cache.prepare(list(_HOSTED))
     _HOSTED.clear()
 
 
@@ -430,8 +514,24 @@ def report_once() -> None:
     if not _STATS["requested"]:
         return
 
+    # vLLM's construction-time pass (wrap_modules) offloads plain tensors, such as a vision
+    # tower, before any EXL3 tensor is stored, and counts them in the same total; so the rest
+    # of that total is theirs, and they had first claim on the budget.
+    loader = _uva_loader()
+    # (experts hosted under the expert cache are not in that total; see `_count`)
+    spent = _STATS["bytes"] - _STATS["expert_bytes"]
+    other = max(loader.cpu_offload_bytes - spent, 0) if loader is not None else 0
+    budget = loader.cpu_offload_max_bytes if loader is not None else 0
+
     if _STATS["tensors"] == 0:
-        if _STATS["selective"]:
+        if other and other >= budget:
+            logger.warning(
+                "cpu-offload: the --cpu-offload-gb budget (%.2f GiB) was used up by "
+                "%.2f GiB of non-EXL3 weights vLLM offloaded first (such as a vision "
+                "tower), so no EXL3 weights were offloaded. Raise the budget, or narrow "
+                "--cpu-offload-params.", budget / (1 << 30), other / (1 << 30),
+            )
+        elif _STATS["selective"]:
             logger.warning(
                 "cpu-offload: offload was requested but no EXL3 tensor matched "
                 "--cpu-offload-params. Nothing was offloaded and nothing will be "
@@ -448,8 +548,10 @@ def report_once() -> None:
 
     logger.info(
         "cpu-offload: %.2f GiB of EXL3 weights in %d tensors across %d layers "
-        "offloaded to host memory",
+        "offloaded to host memory%s",
         _STATS["bytes"] / (1 << 30), _STATS["tensors"], len(_STATS["layers"]),
+        f", after {other / (1 << 30):.2f} GiB of non-EXL3 weights vLLM offloaded first"
+        if other else "",
     )
 
 
