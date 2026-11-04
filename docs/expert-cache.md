@@ -488,6 +488,34 @@ card without starving KV, so the remaining levers are cheaper misses and a cheap
 - a CPU tail for misses (phase 5);
 - the embedding table on host (phase 5, ~1 GiB more for slots).
 
+### A real session, replayed (2026-11-04)
+
+`replay_requests.py` replays the JSON bodies a vLLM request log recorded, in order. Here it ran a
+logged 26-request agentic session on `cuda`: Laguna-XS 2.00bpw, 131K context, prompts up to ~113K
+tokens with ~50% prefix hits, and 12K-token tool outputs arriving mid-session. Seconds per
+tool-output turn, over the same eight turns:
+
+| configuration | per turn |
+|---|---|
+| no offload, nvfp4 or bf16 KV (identical) | 14.4–22.8 |
+| autosized (everything fits; offload switches off) | 14.4–22.9 |
+| 39% of experts in VRAM, nvfp4, `EXL3_KV_RESERVE=6` | 17.7–28.8 |
+| no slots, every expert from host, bf16 | 18.1–28.7 |
+| the old post-load offload (`dev`) | 134–165 |
+
+There were no hangs in about 130 replayed requests.
+
+Two traps came up while reading field logs:
+
+- **vLLM hides its stats during a long prefill.** Prompt tokens are counted only when a prefill
+  finishes. After two 10-second intervals with zero throughput, `LoggingStatLogger` calls the
+  engine idle and drops the stats line to DEBUG. A two-minute prefill then looks like a hang at
+  INFO: GPU busy, no stats, nothing finishing. Request logging runs at DEBUG and shows those
+  lines, so it appears to "fix" it.
+- **"GPU KV cache usage" is a share of capacity.** nvfp4 KV holds ~3.3x more tokens than bf16
+  in the same memory, so the same prefill rate moves its percentage ~3.3x more slowly. KV dtype
+  made no difference to prefill time here.
+
 ### Cost arithmetic for 4.10bpw
 
 One expert is 3 × 1.03 MiB ≈ 3.24 MB. Full routing reads 8 × 30 × 3.24 = 778 MB/token. Greedy

@@ -419,21 +419,51 @@ def _patch_worker() -> None:
 
 def _kv_reserve(worker) -> tuple[int, str]:
     """Bytes of KV to keep, and how they were arrived at, for the log."""
-    from vllm.v1.core.kv_cache_utils import max_memory_usage_bytes
-
     mult = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
     config = worker.vllm_config
-    specs = worker.get_kv_cache_spec().values()
     model = config.model_config
     if getattr(model, "original_max_model_len", None) == -1:
         saved, model.max_model_len = model.max_model_len, _AUTO_LEN_TOKENS
         try:
-            one = max_memory_usage_bytes(config, specs)
+            need = _kv_needed(config, worker.get_kv_cache_spec(), mult)
         finally:
             model.max_model_len = saved
-        return int(mult * one), f"{mult:g} x {_AUTO_LEN_TOKENS} tokens (--max-model-len auto)"
-    one = max_memory_usage_bytes(config, specs)
-    return int(mult * one), f"{mult:g} x --max-model-len {model.max_model_len}"
+        return need, f"{mult:g} x {_AUTO_LEN_TOKENS} tokens (--max-model-len auto)"
+    need = _kv_needed(config, worker.get_kv_cache_spec(), mult)
+    return need, f"{mult:g} x --max-model-len {model.max_model_len}"
+
+
+def _kv_needed(config, specs: dict, mult: float) -> int:
+    """KV bytes for `mult` requests at the current max_model_len, by the arithmetic vLLM's
+    own admission check uses (`get_kv_cache_configs`): KV cache groups, which pad hybrid
+    models' layers to uniform group sizes, at block granularity, plus the null block the
+    block pool holds back. The plain per-layer sum (`max_memory_usage_bytes`) falls short of
+    that on hybrid models -- Qwen3.6 with nvfp4 KV missed by ~600 tokens of 131072 and
+    refused to start. Single worker only, which is what this plugin sizes for.
+    """
+    from dataclasses import replace
+
+    from vllm.v1.core import kv_cache_utils as kv
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    try:
+        merged = dict(specs)
+        extra = max(0, config.num_prefill_lookahead_tokens - 1)
+        for name, spec in merged.items():
+            if isinstance(spec, SlidingWindowSpec):
+                merged[name] = replace(spec, extra_retained_tokens=extra)
+        groups = kv.get_kv_cache_groups(config, merged)
+        groups = [g for g in groups if not g.host_resident]
+        if not groups:
+            return 0
+        return (int(mult * kv._max_memory_usage_bytes_from_groups(config, groups))
+                + kv._pool_bytes_per_block(config, groups))
+    except (AttributeError, TypeError, ValueError) as e:  # vLLM internals moved
+        logger.warning_once(
+            "expert cache: could not size KV the way vLLM checks it (%s); using the per-layer "
+            "sum with a 2%% margin", e,
+        )
+        return int(1.02 * mult * kv.max_memory_usage_bytes(config, specs.values()))
 
 
 def build(layers: list, available: int, worker) -> int:
