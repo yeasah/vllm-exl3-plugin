@@ -1,0 +1,103 @@
+---
+{{ card_data }}
+---
+
+# EXL3 quantizations of [{{ base_model }}](https://huggingface.co/{{ base_model }})
+
+These quantizations can be used with [exllamav3](https://github.com/turboderp-org/exllamav3) or vLLM via [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
+{% if embed_quantized %}
+The token embedding is quantized too, which needs exllamav3 1.6.4 or later.
+{% endif %}{% if composite %}
+They are calibrated broadly, on what models read and write while working (documents and tool output in conversations, code and diffs, the model's own replies) rather than on web text alone{% if agentic %}, and measured with agentic and coding work as the primary use case{% endif %}.
+{% endif %}{% if recipe %}
+Bits are allocated per tensor, from the model's measured sensitivity on its own replies, at the same total size as uniform bits.
+{% endif %}{% if yaqa %}
+Values are rounded against how much each output matters to the model's predictions (two-sided LDLQ with an output-side Fisher factor, after YAQA), which changes only how they are rounded: the size and format are the same.
+{% endif %}{% if card_note %}
+{{ card_note }}
+{% endif %}
+Actual consumed VRAM may be significantly lower than the total checkpoint size, depending on configuration: see the VRAM column below.
+{% if generation_config and generation_config.action != 'unchanged' %}{% set gc = generation_config %}
+**Sampling defaults: `generation_config.json` {{ 'added' if gc.action == 'added' else 'changed from the base model' }}.** The base model's card recommends {% for k, v in gc['values'].items() %}`{{ k }}={{ v }}`{% if not loop.last %}, {% endif %}{% endfor %} for {{ gc.mode }} use, but its repository {% if gc.action == 'added' %}ships no `generation_config.json`, so servers fall back to their own defaults (vLLM: temperature 1.0, no truncation){% else %}ships a `generation_config.json` with {% for k, v in gc.prior.items() %}`{{ k }}={{ v }}`{% if not loop.last %}, {% endif %}{% endfor %} instead{% endif %}. Each revision here carries the card's values in that file, so servers that honor it (vLLM, TabbyAPI) default to the model's documented sampling. That is the only metadata change: the chat template and every other setting are the base model's, and clients that send their own sampling parameters are unaffected. Source: {{ gc.source }}.
+{% endif %}{% set mixed_cal = revisions | map(attribute='calibration') | unique | list | length > 1 %}
+---
+
+# Which size?
+
+Each bitrate is available as a separate revision of this repository. When planning available VRAM for kv space, refer to the VRAM column.
+
+![quality vs size](./quality_vs_size.png)
+
+{% if thresholds %}The dashed line{{ 's mark' if thresholds | length > 1 else ' marks' }} {% for t in thresholds %}[{{ t.name }}](https://huggingface.co/{{ t.repo }}){% if not loop.last %}, {% endif %}{% endfor %}, scored on the same evals as these quants: a familiar point to read them against. It is scored with its weights dequantized under bf16 compute, so it measures the checkpoint's weights, not a deployment (the activation quantization it is served with is not emulated).
+
+{% endif %}| BPW | Size on disk | VRAM (vLLM) |{% if composite %} Excess KLD |{% if show_ppl %} Δ perplexity |{% endif %}{% else %} Raw-text excess KLD |{% endif %}{% if mixed_cal %} Calibration |{% endif %}
+|---|---|---|{% if composite %}---|{% if show_ppl %}---|{% endif %}{% else %}---|{% endif %}{% if mixed_cal %}---|{% endif %}
+{% for rev in revisions %}|[{{ '{0:0.2f}'.format(rev.bits) }}](https://huggingface.co/{{ this_model }}/tree/{{ rev.name }})|{{ '{0:0.2f}'.format(rev.disk_bytes / 1024**3) }} GiB|{{ '{0:0.2f}'.format((rev.disk_bytes-rev.embed_bytes-rev.encoder_bytes-rev.mtp_bytes+rev.blockq_bytes) / 1024**3) }} GiB|{% if composite %}{{ '{0:0.4f}'.format(rev.composite) }}|{% if show_ppl %}{{ '{0:+0.2f}'.format(rev.dppl) }}%|{% endif %}{% else %}{{ '{0:0.4f}'.format(rev.raw_excess) }}|{% endif %}{% if mixed_cal %}{{ rev.calibration }}|{% endif %}
+{% endfor %}|(base)|{{ '{0:0.2f}'.format(base_disk_bytes / 1024**3) }} GiB||{% if composite %}|{% if show_ppl %}|{% endif %}{% else %}|{% endif %}{% if mixed_cal %}|{% endif %}
+
+- BPW: Average bits per weight across tensors (not including input embeddings, encoders, MTP draft layers, or output head)
+- Size on disk: Total aggregate size of tensors in checkpoint, in GiB
+- VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB ({{ 'the quantized embedding as stored' if embed_quantized else 'blockq embeddings' }}, offloaded/omitted encoders, no MTP draft layers)
+{% if composite %}- Excess KLD: how far each quant's next-token distribution is from the unquantized model's, minus the unquantized model's own rounding noise, so 0 would be indistinguishable from the original (lower is better)
+{% if show_ppl %}- Δ perplexity: change in perplexity on the same text, same weights (lower is better)
+{% endif %}{% else %}- Raw-text excess KLD: how far each quant's next-token distribution is from the unquantized model's on plain web text, minus the unquantized model's own rounding noise (lower is better). This model has no chat template, so raw text is the distribution it was trained on.
+{% endif %}
+
+{% if reference %}
+
+# Against other quants of this model
+
+*This section appears because other quantizations of this model exist ({% for r in reference.repos %}[{{ r }}](https://huggingface.co/{{ r }}){% if not loop.last %}, {% endif %}{% endfor %}); it is the case for publishing another set.*
+{% if reference.traces %}
+
+![relative to other quants](./vs_reference.png)
+
+Every set is plotted relative to the same baseline: an uncalibrated EXL3 quantization of this model at each bit rate, which favors no calibration. Each set keeps its own draw-to-draw noise (about 1-2% here) rather than one being drawn as a perfect line, and the baseline's own noise moves all of them together, so their order at any size is unaffected.
+{% endif %}
+
+| BPW | Composite vs best other quant | Compared against | Size difference | Worst eval slice | Slice |
+|---|---|---|---|---|---|
+{% for r in reference.rows %}|{{ '{0:0.2f}'.format(r.bits) }}|{% if r.vs is not none %}{{ '{0:0.2f}'.format(r.vs) }}{% if r.interpolated %}\*{% endif %}{% if r.near_floor %}†{% elif r.dropped %}‡{% endif %}{% else %}-{% endif %}|{{ r.against | default('-') }}|{% if r.size_delta is defined %}{{ r.size_delta }} ({{ '{0:+0.1f}'.format(r.size_delta_pct) }}%){% else %}-{% endif %}|{% if r.worst is defined %}{{ '{0:0.2f}'.format(r.worst) }}|{{ r.worst_desc }}{% else %}-|-{% endif %}|
+{% endfor %}
+
+Ratios of KLD including the unquantized model's own rounding noise, below 1.00 better: a difference far smaller than that noise reads close to 1.00, as it would in use. The composite ratio is the geometric mean of the two composite slices' ratios at their weights, so each slice counts as weighted whatever its absolute scale. Each revision is compared with the most competitive quant at the same nominal bit rate among the sets above; the size column shows how much larger (+) or smaller (-) this card's checkpoint is than that one. The worst eval slice is the largest ratio over every eval slice: {{ reference.slice_descs | join(', ') }}. At or below 1.00, no slice is worse. The slices beyond the two in the composite are constructed conversations, with documents and tool definitions held out of calibration; they locate an effect rather than measure real use.{% if reference.rows | selectattr('interpolated') | list %}
+
+\* No other quant at this bit rate: compared against the most competitive set's ladder, interpolated (log scale) at equal size, counting the transformer body only, since output-head bits can differ between rungs.{% endif %}{% if reference.rows | selectattr('near_floor') | list %}
+
+† Within about twice the unquantized model's own rounding noise: both quants here are, in practice, indistinguishable from the original, and the ratio compares differences too small to matter in use. Read it as noise, not as a ranking.{% endif %}{% for t in reference.tainted %}{% if loop.first %}
+
+Left out of the worst-slice column, for every row:{% endif %} {{ t.slice }}, whose prompts are in the calibration of {{ t.by | join(', ') }}: that set would be scored on prompts it was calibrated on, and this one on prompts held out of its calibration{% if not loop.last %};{% else %}.{% endif %}{% endfor %}{% for r in reference.rows if r.dropped and not r.near_floor %}{% if loop.first %}
+
+‡ A composite slice is left out where both quants sit within about twice the unquantized model's own rounding noise on it; the ratio is over the other slice alone:{% endif %} {{ '{0:0.2f}'.format(r.bits) }} bpw ({{ r.dropped | join(', ') }} left out){% if not loop.last %};{% else %}.{% endif %}{% endfor %}
+{% endif %}
+
+{% if recall %}
+# What it still knows
+
+Quantization can leave a model fluent but wrong about facts, which KLD does not show. Each quant answered {{ recall.questions }} closed-book questions the unquantized model gets right, with the answer scored token by token. This is a test of memory on short factual questions, not of overall capability.
+
+|bpw|Facts kept|Confident errors|
+|---|---|---|
+{% for r in recall.rows %}|{{ r.label }}|{{ '{0:0.1f}'.format(100 * r.kept) }}%|{{ '{0:0.2f}'.format(100 * r.errors) }}%|
+{% endfor %}{% for r in recall.others %}|{{ r.label }}|{{ '{0:0.1f}'.format(100 * r.kept) }}%|{{ '{0:0.2f}'.format(100 * r.errors) }}%|
+{% endfor %}
+- Facts kept: of the correct answers the unquantized model would give when sampling, the share this quant still gives.
+- Confident errors: questions where this quant puts at least 70% on a wrong token, so it states something false rather than hesitating.
+
+Loss is not spread evenly. A quant holds on to what the unquantized model was sure of and loses more of what it barely knew:
+
+![facts kept by how firmly the unquantized model held the answer](./recall.png)
+
+Bars are approximate and cover both sampling and the difference between equivalent conversions. Differences of a point or two between rungs mean little.
+{% if recall.sets %}
+Other published quants of this model, scored on the same questions, show how much is at stake at each size, and how fast facts go once a quant is small enough:
+
+![facts kept against VRAM, this card and other quants of this model](./recall_vs_size.png)
+
+Each dot is one published quant, at its VRAM as served. Each is a single conversion, and conversions with the same settings land a few points apart here, so read where the dots lie as a group rather than any one of them against this card's line.
+{% endif %}
+{% endif %}
+# More detail
+
+What each eval slice is, every slice compared on its own, how the composite is built, the calibration, and how to reproduce these quants: [TECHNICAL.md](./TECHNICAL.md).
+

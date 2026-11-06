@@ -282,6 +282,28 @@ def cmd_doctor(args):
         print("\nDetached revisions (present, but no ref names them):")
         for repo, rev in detached:
             print(f"  {repo.qualified}  [{rev.commit[:8]}]  {human(rev.size)}")
+        # Two things this listing cannot say for itself, and both push the same
+        # way: do not treat a detached revision as garbage.
+        #
+        # The size is what the revision *references*, not what deleting it
+        # returns. Blobs are content-addressed and shared between revisions, so
+        # a revision that differs from the live one by a README shows its full
+        # size while holding kilobytes of its own.
+        #
+        # Worse, what *is* unique to it may still be wanted. A revision goes
+        # detached when the repo's `main` moves and something then fetches only
+        # part of the new commit -- and the files it did not fetch are usually
+        # unchanged upstream, so the detached copy is still valid content the
+        # live ref simply has not linked yet. Seen here as
+        # `gemma-4-12B-it-assistant`: `main` holds the three files a draft model
+        # needs, and `tokenizer.json` exists only in the detached revision. Had
+        # the partial fetch grabbed `config.json` alone, the weights would have
+        # been the part left behind.
+        print("  ! sizes are what each revision references, not what deleting it")
+        print("    frees -- unchanged blobs are shared with the live revision.")
+        print("    Files unique to a detached revision are often still valid for")
+        print("    the current ref and merely unlinked, so discarding them costs")
+        print("    a re-download rather than reclaiming dead weight.")
     if incomplete:
         total = sum(b.stat().st_size for _, b in incomplete)
         print(f"\nIncomplete blobs ({human(total)}):")

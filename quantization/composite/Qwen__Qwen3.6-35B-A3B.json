@@ -1,0 +1,9 @@
+{
+  "source": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B (model card)",
+  "notes": "Qwen's agent-first positioning, as for Qwen3.8-27B. Decided 2026-10-09, before any scoring under the conversational calibration (the earlier published set used the default calibration).",
+  "summary": "weighted toward agent sessions, as the publisher positions this model for coding and agentic work",
+  "weights": {
+    "wild": 0.3,
+    "swe": 0.7
+  }
+}

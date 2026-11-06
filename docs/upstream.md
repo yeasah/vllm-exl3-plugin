@@ -111,13 +111,41 @@ backend, and neither matches the shape of ask that has been landing (see *Priori
 the reasoning*). The asymmetry is the point: one line recovered 232 MiB because it asked
 nothing of anyone's design; the remaining 692 MiB would cost a fork.
 
-*The consequence, which is now a fact about the path rather than a pending fix*:
-TurboQuant's prefill transient stays at **6144 B/token, linear in cached context** -- an
-axis the profile run never varies, so vLLM reports the same peak activation for a 4K
-session and a 130K one. TQ headroom cannot be validated by a short prompt, and the
-`--kv-cache-memory` pin stays load-bearing on tight configs. fp8 has no equivalent
-problem: its transient is chunk-scaled, and the chunk is exactly what the profiler
-varies.
+*The consequence*: TurboQuant's prefill transient stays at **6144 B/token, linear in
+cached context** -- an axis the profile run never varies, so vLLM reports the same peak
+activation for a 4K session and a 130K one. TQ headroom cannot be validated by a short
+prompt, and the `--kv-cache-memory` pin stays load-bearing on tight configs. fp8 has no
+equivalent problem: its transient is chunk-scaled, and the chunk is exactly what the
+profiler varies.
+
+**Declining to *offer* these is not declining to *have* them, and that distinction became
+load-bearing on 2026-09-08**, when `kv-pager` died and KV eviction/offload went off the
+table categorically. Compression is the only remaining lever on declared context per card,
+so the 692 MiB is back in scope as work we carry -- and it was carried, on 2026-09-12:
+see [memory-accounting.md](memory-accounting.md). Both the reserve and the transient are
+gone, for 1580 MiB at the peak. Two things reopen at the same time, and both were missed above
+because the framing was "what would upstream take":
+
+- **A third option on the rotation temporary that argues with nobody.** The costing went
+  straight from "per-head `mm` with `out=`" (dtype-blocked) to "make the dequant emit bf16"
+  (their numerics, our memory) without considering *slabs*: rotate a few thousand tokens at
+  a time and copy each slab into `k_full`, and the buffer is O(slab) with the dtypes,
+  kernels and arithmetic all unchanged. It is a loop bound, not a design change.
+- **Chunked-KV is not the rewrite it was priced as.** Both primitives already ship:
+  `flash_attn_varlen_func` takes `return_softmax_lse=` and `out=`, and
+  `vllm/v1/attention/ops/merge_attn_states.py` is written for precisely this split --
+  prefix output/LSE from cache, suffix from the current chunk, with a
+  `prefill_tokens_with_context` argument -- and upstream's own FLASH_ATTN backend merges
+  that way in five places. The remaining work is causal bookkeeping across chunks.
+
+**And there is a second cost the captures may not have counted.**
+`TurboQuantMetadataBuilder._reserve_workspace` reserves the two fp16 dequant buffers at
+`round_up(max_model_len - 1, block_size)` whenever chunked prefill is on and
+`max_num_batched_tokens > 128` -- 4096 B/token of *declarable* context, ~486 MiB at 128K
+on Hk=4/D=256, independent of whether a continuation ever runs. Unlike the transient it
+prices the declaration rather than the request, which is the axis the appliance sells. It
+is not obviously inside the 0.828 GiB figure in [kernels.md](kernels.md), and which side of
+`consumed`/`peak_activation` it lands on has to be measured before it is designed around.
 
 ### Blocked on a design decision that is not ours
 
@@ -224,7 +252,7 @@ was not:
 4. the trellis lands nowhere, **nothing objects**, and the tied head is left with no
    weights — hence plausible-looking garbage rather than an error.
 
-That is verbatim the hazard TODO `quantized-embeddings` predicted: *"`get_cache_scale_mapper`
+That is verbatim the hazard the `quantized-embeddings` item ([embeddings.md](embeddings.md)) predicted: *"`get_cache_scale_mapper`
 still fires with `embed_prefix` at its `model.embed_tokens` default, routing 755 MiB of
 trellis to a module path that does not exist on a nested model, and nothing objects — so
 the silent weight loss wants a guard of its own."* This run is the first observation of
@@ -233,18 +261,35 @@ model keeps serving.
 
 ### Reports, not patches
 
-**Media encoders cannot be offloaded, on any model, in any format.**
-`get_offloader().wrap_modules()` has exactly one call site in vLLM, inside
-`make_layers()` — the helper that builds a *text decoder's* `ModuleList`. Vision towers
-build their own, so no encoder is ever offered to either offload backend.
+**~~Media encoders cannot be offloaded, on any model, in any format.~~ Closed by
+upstream in v0.29.0 — do not send.** Checked 2026-09-12 before writing it up, per the
+standing check below, and it was already fixed: `BaseOffloader.supports_tower_offload`
+plus a second `wrap_modules` call site in `SupportsMultiModal._mark_tower_model`, whose
+comment states this item's diagnosis in the same words we had. UVA opts in;
+`PrefetchOffloader` deliberately does not. Verified working on our fork:
+`--cpu-offload-gb 2 --cpu-offload-params visual` offloads exactly 0.86 GiB on
+`Qwen3.8-27B-exl3@3.00bpw`, and a 4032x3024 photo is described correctly on one 16 GiB
+card. Details in [media-encoders.md](media-encoders.md).
 
-*Why it is worth someone's time*: an encoder is the one offload target whose economics
-are not a compromise — read once per image, never for a text-only request — so this is
-the cheapest headroom in a multimodal deployment and it is unreachable. Sizes are
-0.79–3.64 GiB, up to **21% of the package** on `Qwen3-VL-8B @3.0bpw`. Nine of ten
-surveyed checkpoints ship a bf16 tower, so no quantization plugin can reach it either;
-the fix has to be upstream. Numbers and method in
-[media-encoders.md](media-encoders.md), reproducible with `tools/encoder_census.py`.
+*The lesson is the process one.* This was the largest-payoff item in the queue and the
+one we had most reason to feel ownership of, and it cost nothing because someone
+checked. That is the **fifth** time `check-upstream-before-patching-vllm` has paid; it
+is now cheaper to look first than to decide whether looking is worth it.
+
+**What the fix did not solve, and may yet be worth reporting.** Offloading the tower
+weights is necessary and not sufficient: the encoder *cache* and the tower *transient*
+stay resident, and on a small card they are the larger cost. Two candidates came out of
+that measurement, neither yet filed:
+
+- **`--limit-mm-per-prompt`'s `width`/`height` do not limit anything** — they size the
+  profiling dummy only (`ImageDummyOptions`, read solely in `dummy_inputs.py`), while
+  `count` in the same dict is enforced. A 512x512 "limit" budgets 256 tokens and then
+  serves an 11844-token image, a 46x overrun that OOMs after an otherwise correct
+  profile. Reproducible in one command; the honest report is a documentation/naming
+  defect rather than a sizing bug, which makes it easy to send and easy to dismiss.
+- **FA2's ViT path reports OOM as `RuntimeError: torch_call_dispatcher("aten::empty_like",
+  ...)`** through the torch stable ABI, with no byte counts and no mention of memory. Pure
+  diagnosability, small, and independent of the above.
 
 **TurboQuant and sliding-window models — a cluster, in decreasing confidence.**
 Everything here is measured on `Laguna-XS-2.1-exl3@3.00bpw` at v0.28.0; see TODO
@@ -298,12 +343,168 @@ the native path at all. `DFlashQwen3Model.fc` is the same shape. Gated as
 measured error. *This is the general form of the `embed-quant-config` problem*, and a
 fix worth filing should be judged against both.
 
+**A cold torch.compile costs 35K tokens of declared context, permanently** (measured
+2026-09-12). `profile_run()` executes inside `memory_profiling()`
+([gpu_worker.py:553](../deps/vllm/vllm/v1/worker/gpu_worker.py#L553)), that context resets
+peak stats on entry ([mem_utils.py:291](../deps/vllm/vllm/utils/mem_utils.py#L291)), and
+the activation term the KV budget subtracts is `torch_peak - torch_allocated`. On a cold
+cache the first forward is also the compile, so inductor's compile-time allocations set
+the mark. Measured on `Qwen3.8-27B-exl3@3.00bpw` at `gpu_memory_utilization=0.975`, the
+same config reports **0.77 GiB of peak activation cold and 0.18 GiB warm** — a 0.59 GiB
+difference, 35K tokens of `max_model_len`, and the difference between auto-fit declaring
+the model's full 262144 and clamping it. `consumed` and CUDAGraph memory are identical
+across the pair, and a warm *load* of the same artifact costs nothing, which is what makes
+it attributable to compilation rather than to the graph.
+
+*Why it is worth someone's time*: every operator's first launch after a version bump or a
+flag change is the cold one, and the penalty sticks for the life of that process while
+looking like a property of the release. **A downstream deployment already carries a
+workaround for it** — the appliance project hit this independently and does warmup runs to
+get a warm cache before the run that has to declare context — so this is a report about
+removing a workaround people are already writing, not a hypothetical. It also makes any memory measurement silently
+cache-dependent — the shape of the problem `bench-cache-control` exists for on our side.
+Candidate fix is a reset between compilation and the measured forward, or compiling
+outside the window.
+
+**Not fileable yet** by the standing check below: everything above is a stock-vLLM
+mechanism with no plugin involvement, but it was measured on the fork with an EXL3 model,
+and *what* the compiler allocates is still a suspicion (inductor autotuning, on the
+strength of `benchmark_combo_kernel: True` in the config) rather than a measurement. Both
+gaps are cheap to close: one stock build, one stock model, one cold-then-warm pair.
+
 ### Carried, not offered
 
 **`vllm-fused-param-capability-check`** — lets a parameter declare it splits fused
 checkpoint tensors itself. Qwen3.5 will not load without it and `handles_fused_shards`
 has no upstream equivalent, but it is a hook shaped around how this plugin loads. No
 second consumer is known, so it is ours to maintain until one appears.
+
+### What the 0.29 bump actually cost
+
+Predicted 2026-09-08 against `v0.29.0rc6`, done 2026-09-09 against `v0.29.0`
+(`98dff2a81d`, 187 commits past `v0.28.0`). Recorded together because the prediction was
+half right in a way worth remembering.
+
+**Right about the patches.** All seven were checked against `v0.29.0` before rebasing and
+none had been fixed upstream, so nothing retired. TurboQuant's own code was frozen exactly
+as measured -- `_continuation_prefill` and `_tq_Pi_half` byte-identical -- and the rebased
+series is line-for-line the 0.28 series apart from two comment lines. Two commits needed
+resolution:
+
+- **`81566217e`** (page geometry, was `86e3b1eef`) in `v1/core/kv_cache_utils.py`, which is
+  the KV-spec plumbing the prediction named. Upstream replaced
+  `layer_spec.indexes_kv_by_block_stride` with `not isinstance(layer_spec, MLAAttentionSpec)`
+  and **deleted the attribute from the tree**, so keeping our side of that conflict would
+  have been an `AttributeError` at cache construction.
+- **`fe1cdc942`** (the embedding `quant_config` default, was `c69d01ed8`) in
+  `vocab_parallel_embedding.py`, which the prediction did not look at. Upstream added a
+  keyword-only `quant_method` for model-specific preselection and reshaped the dispatch, so
+  the fallback moved above it and is now gated on `quant_method is None` too.
+
+**Wrong about where the cost would land.** The patches were the cheap part. The expensive
+part was two *plugin* assumptions about how vLLM discards a tied model's `lm_head.*`, both
+silent until 0.29 stopped doing it: see
+[embeddings.md](embeddings.md) *A tied head vLLM used to throw away*. The lesson generalizes
+past this bump -- a survey of what our patches touch does not cover what our plugin
+*assumes*, and only the second kind fails silently.
+
+**Also worth knowing for the next bump.** MoE router logits changed on non-SM90 CUDA cards:
+`allow_cublas_router_gemm` used to require `allow_specialized_router_gemm` (SM90+, family-120
+excluded), so sm120 computed the router GEMM through `F.linear` in bf16 and copied to fp32;
+0.29 gates it on `(is_cuda() or is_rocm()) and no_bias`, so the same card now gets the cuBLAS
+bf16xbf16->fp32 epilogue with no intermediate rounding. Deterministic, reproducible, and
+*more* accurate -- but it moves top-k selection often enough to flip 3 of 63 argmax positions
+on `qwen3.5-35B-A3B` at 2.00bpw.
+
+### What the 0.32 bump actually cost (2026-10-23)
+
+Done the day it was surveyed, on `appliance/v0.32.0` (16 commits on `v0.32.0`). The survey was
+right that nothing of ours was fixed upstream except the autotune backport (dropped), and that
+the conflicts would be in the memory and TurboQuant plumbing; it was wrong about where the
+breakage would land, again.
+
+**Conflicts, all resolved without changing our behavior:** the Transformers backend's import
+block; `boundary:N` (upstream reworked the same parser for UltraQuant and fixed the
+index/keyword sort itself, so ours dropped its sort key and now applies `boundary:N` to both
+packed-KV backends); the workspace floor (upstream added persistent per-lane resources beside
+our shrink, both kept); the vision-MLP chunking, whose conflict block carried code upstream had
+deleted (`FusedInputNorm`), so only our two functions were taken. The three `ReplicatedLinear`
+commits were squashed into the one correct state.
+
+**What failed, and it was not in the survey:** Muse Glimmer via the Transformers backend.
+transformers >= 5.17 needs the vision rope type "axial", which transformers' own config class
+supplies through `default_rope_type`; vLLM's vendored config class, which replaces it in
+`AutoConfig`, did not. Fixed in our `1f3b03290`; upstream deletes the vendored config in
+`19997aac51` (#60823), three days after v0.32.0. The lesson is the 0.29 one in another form:
+the breakage was a dependency's (transformers 5.15 -> 5.19) contract with code neither side
+of the survey looked at.
+
+**What the gate showed:** fast and TP tiers bit-identical on every dense entry, Gemma
+bit-identical, and the MoE, the 27B and Muse moved at noise-floor size (MoE TP=2 against TP=1
+on the same build stays inside its floor). Weights fell ~0.09 GiB per rank on Qwen3.5/3.8,
+from upstream's smaller M-RoPE cache (`a98247ab4d`; parameters identical, buffers 0.126 ->
+0.032 GiB). Throughput unchanged on all three perf entries (within 1%).
+
+**Environment:** the build now imports `setuptools_rust` even precompiled; FlashInfer 0.7
+refuses a leftover `flashinfer-cubin` 0.6.18; pillow >= 12.3 collides with the `vastai` CLI's
+exact pin (the CLI still runs).
+
+### The 0.32 bump: survey before rebasing (2026-10-23)
+
+Read-only, against `v0.32.0` (`5df63a7203`, 2026-10-17). Upstream cuts each release from `main`;
+`v0.29.0` and `v0.32.0` share a `main` point of 2026-08-31 (`f5c3cc240b`), so the gap is every
+`main` commit after that, not the 426 a shallow submodule first reported.
+
+**Our 17 commits.** Only `e37b903e8` (the per-rank FlashInfer autotune cache, upstream
+`3403e0f176`) is in `v0.32.0`; drop it. Nothing else was fixed upstream in its own way:
+`VocabParallelEmbedding` still gets no `quant_config` default, nothing declares fused-shard
+handling, `ReplicatedLinear` still has no v2 loader, the Transformers backend still reads only
+`logit_scale`, and nothing declares backend workspace or chunks the vision MLP. Expected
+conflicts, by how much upstream rewrote under each:
+
+- **heavy:** `881c7345b` (`gpu_model_runner.py` +-1176, `cudagraph_utils.py` 263, `workspace.py`
+  126); `6ac849972`/`f8f66be1b` (`gpu_worker.py` 494, `flashinfer.py` 738, `backend.py` 288);
+  `81566217e` (`kv_cache_utils.py` 754 -- the same file the 0.29 conflict was in);
+  `2778e4a20` (`arg_utils.py` 503, plus upstream's own skip-layers fixes `0fc0cefb4e`,
+  `4ff028d77e` in the parser our `boundary:N` extends); `2f3e2a7db` (`qwen3_vl.py` 438, `envs.py`).
+- **light:** `fe1cdc942` (`vocab_parallel_embedding.py` 80, see the LM-head change below);
+  `31b57b066`/`587400bd0`/`2261ea826` (`linear.py` 44, `parameter.py` 50); `93b36225a`
+  (`causal.py` 15); `e272b1784`. TurboQuant's own backend moved 2 lines.
+
+**The plugin's import surface** is 24 symbols; all still exist. The base classes it implements
+gained only optional members: `FusedMoEMethodBase.apply` may now return `UnfinalizedMoEOutput`
+(deferred finalize, opt-in), `QuantizationConfig.get_checkpoint_weight_mapper`,
+`QuantizeMethodBase.dequantize_weight`. `base_loader.process_weights_after_loading`, which the
+plugin wraps, keeps its signature.
+
+**Plugin assumptions to check, since 0.29 showed those are what fail silently:**
+
+- `4f72bd0152` gives `VocabParallelEmbedding`/`ParallelLMHead` linear-layer metadata
+  (`input_size`, `output_size`, `output_partition_sizes`, `prefix`, `has_bias`) before
+  `create_weights`, and passes those instead of the embedding's own sizes. The plugin
+  dispatches by `isinstance`, so its routing is safe, but `cpu_offload.py:133` names a layer by
+  `getattr(layer, "prefix", ...)`, which the head and embedding now have; and the quantized
+  head's `create_weights` receives the same numbers through different names.
+- `ef42b4385f` (reclaim cached GPU memory during weight loading) and `26a488ad93` (snapshot
+  memory after weights) move the numbers our memory commits and `docs/memory-accounting.md`
+  are calibrated against.
+- Router numerics moved last bump; anything similar is caught only by the bench gate's logits.
+
+**Upstream fixes we want, beyond the deadlock.** The hybrid (GDN/Mamba) prefix-cache and state
+fixes are the main reason to move, since every Qwen3.5/3.6/3.8 model we serve runs on that path
+with prefix caching in align mode, and several are wrong-output rather than crash bugs:
+`79468c20ef` (GDN stateless first-chunk classification), `d8fa463e2b` (inconsistent hybrid
+prefix-cache boundaries), `3d6853b32c` (state index on prefix-cache hits), `7e583e615c`
+(prefill checkpoint reservation and prompt-end eviction in align mode), `874df9373d` (state for
+padded prompt tails), `fadfe1c7d4` (retire states across null gaps), `10cc2f6ae2` (GDN
+speculative decode widths). Also MoE workspace and scratch sizing (`bdea2777ea`, `e3a29aa9b3`),
+FlashInfer all-reduce selection (`ce49174247`, `764413559a`), the Transformers backend's
+attention sinks (`414057a3d3`), and MoE decode autotune before graph capture (`7fa2c63796`).
+
+**Dependencies.** torch stays 2.13.0 (the patched `libc10_cuda.so` survives unless pip
+reinstalls it: run `tools/torch-c10cuda-fix.sh --check`). transformers 5.15 -> `>=5.16.1,<5.20`
+(qbench's reference engine and the exllamav3 tooling share it), FlashInfer 0.6.18 ->
+0.7.0.post1 (every cached JIT kernel recompiles: set `MAX_JOBS`), cutlass-dsl 4.6.2 -> 4.8.0.
 
 ---
 
@@ -496,6 +697,49 @@ and it is only worth raising if there is appetite. Evidence in
 bar is higher: changes we make for ourselves do not need offering, only ones that are
 right for everyone.*
 
+### What the 1.6.4 merge cost (2026-10-23)
+
+v1.6.4 (460 commits) merged into the fork's `master`, wanted for upstream's MoE target grouping in
+`sc_measure` (`1d641116`, `6f336da2`). Conflicts: the GEMM kernel's barrier gate (ours stays,
+upstream's ROCm path beside it), the cooperative launch (our grid diagnostic kept, now reporting
+the per-device `smem_max`), `embedding.py` (blockq first), `sc_measure.py` (taken whole from
+upstream, our four flags ported onto its streaming structure), and qbench's `engines.py`
+(`token_embd` accounting stays ours, per the standing policy).
+
+**Three defaults changed under us, pinned in `quant.py` rather than adopted** (TODO
+`exl3-1.6.4-defaults`): `convert --out_scales` `always` -> `auto`; `sc_optimize -tie` adds
+`q_proj` to the k/v tie; `sc_measure` groups dense bundles and a MoE layer's experts as single
+targets. Ours groups experts per layer *and projection type* (`-g experts`), the coarsest our
+loader forces: one K per projection across a layer's experts, gate = up.
+
+**Two qbench regressions the merge brought, fixed in the merge commit:**
+
+- *The streamed HF reference went eager.* Upstream defaulted it to eager attention because remote
+  code's sdpa is not always causal (Ling 3.1). Eager materializes every head's L x L scores, which
+  the streaming budget does not count (5.8 GiB on a 0.6B's swe rows, OOM), and the attention
+  backend is not in the cache key, so fresh eager references would have mixed with cached sdpa
+  ones. Ours: eager only when the config carries remote code (`auto_map`).
+- *The streamed exl3 pass leaked every row's state.* Per-row params now persist across modules,
+  and a decoder block leaves `params["residual"]` pointing at its residual stream. With upstream's
+  new per-module `x.clone()` that doubles the states on the device, and our host offload freed
+  nothing. Dropping the key after each module fixes it; rebuilding params per module gave the same
+  scores on Qwen3, so nothing else rides across its modules. **Offer upstream**: their pass has
+  the clone and the persistent params, so it pays the doubling too.
+
+**What it cost in numbers** (Qwen3-0.6B unless noted):
+- qbench reference and noise floor bit-identical; quants' KL within 2e-5 of the old fork on wild
+  and swe.
+- The merged converter's 4 bpw recipe rung: KL -2% (wild 0.0322 -> 0.0316, swe 0.0314 -> 0.0307),
+  inside the 2-3% draw-to-draw spread, at identical size.
+- `sc_measure`: dense keys identical; KL median 2e-4 relative, unbiased, from slightly different
+  shaped-noise factors.
+- Bench gate: drift at noise-floor size on nearly every entry, from the rewritten GEMM/dequant
+  kernels (not the autotune fixture: its file and version are unchanged); MoE TP=2 weights
+  10.6 -> 10.42 GiB. The key now mixes in `half_k`, so every record of the old autotune fixture
+  went dead -- which exposed that `freeze-tune` had been seeding the old fixture over its own blob
+  at each entry (every re-freeze kept only the last entry's shapes; fixed in `29e0683`). Re-frozen
+  and re-blessed with no entry tuning live.
+
 **`sc_measure.py` reports a KLD with a constant additive floor** of ~6.1e-5, measured on
 phi-4-mini. Evidence it is a floor rather than curve shape: flat across sensitivity
 quintiles spanning 51x, log-log correlation with sensitivity 0.088, and it reproduces at
@@ -519,6 +763,127 @@ not going away; they are the replacement. `sc_optimize.py` still fits
 `kld(t, K) = S_t · rfn_t(K)^alpha` per tensor, so both halves of the finding — the floor
 and the alpha it biases — apply unchanged.
 
+**Conversion sign vectors alias within a module, and parallel mode races the RNG**
+(2026-09-23). `convert_model.py` seeds every tensor of module *idx* with `idx`, and
+`quantize_exl3` calls `torch.manual_seed` per tensor, so any two same-length draws at the
+same position get **identical** sign vectors. On Qwen3.8 that gives `gate.sv == down.su`
+in all 64 layers, `z.sv == out_proj.su` in all 48 linear-attention layers, and
+`out_proj.sv == down.sv` — producer/consumer pairs the incoherence argument treats as
+independent. `quantize_exl3_batch` reproduces the reuse deliberately, to match the serial
+path. In parallel mode (`-d 0,1`) worker threads share torch's global generator, so the
+per-tensor seed and the `randn` draw are not atomic: sign vectors differ run to run
+(33-35 of 418 on Ornith-9B) and published checkpoints show mixed draw indices.
+
+*Why it matters to them*: reproducibility of parallel conversions, and a correlation the
+method's own assumptions exclude. *What it does not claim*: any quality effect — on
+Qwen3.8 4bpw, aliased and alias-free draws overlapped completely (n = 5 and 4). Fix for
+both: seed each tensor from a stable hash of its key, drawn from a per-thread
+`torch.Generator`; resume stays exact because the seed still does not depend on order.
+Detail in [calibration.md](calibration.md).
+
+**`fallback_quant` aborts on any tensor `quantize_exl3` has moved to the CPU**
+(2026-09-29). `quantize_exl3` moves weights over 5e8 elements to the CPU before
+quantizing, and `fallback_quant`'s body already supports a work buffer off the compute
+device — but it takes the compute device from the weight and asserts it is `devices[0]`.
+So the uncalibrated path cannot quantize a large-vocab head: found converting
+Ornith-1.5-9B (248k x 4096) uncalibrated, where it aborts at `lm_head` after every layer
+has finished. Upstream master has the same lines. *Why it matters to them*: the same
+fallback serves a calibrated conversion whose head Hessian comes out empty or
+non-finite, which would then crash rather than degrade. Fix (fork `53c651f`): compute on
+`devices[0]` and keep the buffers where the weight is; CPU- and GPU-buffered results are
+bit-identical on the same weight, and the old code fails that test.
+
+---
+
+**Presence and frequency penalties count the prompt** (2026-10-04). `SS_PresFreqP`
+penalized every token of the job's whole sequence. vLLM and the OpenAI API count generated
+tokens only, and model cards' recommended penalties assume that (Ornith-1.5-9B recommends
+presence 1.5). Prompt-inclusive, a recommended penalty pushes the model away from the text it
+was given, and its effect grows turn by turn in a conversation. *Why it matters to them*:
+TabbyAPI users who follow a model card get a different sampler than the card describes.
+Fix (fork `ee22b60`): `CustomSampler.forward(num_generated=...)`, passed by `Job`;
+penalties count only the generated tail, and callers that do not pass it keep the old
+behavior. Repetition penalty unchanged (whole sequence, as in vLLM).
+
+---
+
+### qbench: two defects found using it, 2026-09-10
+
+Both surfaced while measuring whether v1.4.9 cost quality (it did not --
+[qbench.md](qbench.md)). Neither is EXL3-specific and both are cheap to fix.
+
+**The results cache is not keyed on the engine's version, so it replays across an
+upgrade.** `model_key` in `eval/qbench.py` hashes engine, source, options, source stamp
+and noise. Nothing identifies *which build of exllamav3* produced a result, so a score
+computed under one version is served to a later run under another, silently and with no
+warning. This produced a wrong answer here: a run intended to measure v1.4.9 reported
+figures computed nine days earlier under the previous version, and the giveaway was not
+in the output at all -- only `manifest.json`'s per-arm `seen` timestamp shows it.
+`manifest.json` already records `engine`, so the fix is small; adding the engine version
+to the entry and to the key would make the stale case a miss instead of a lie.
+
+**The noise floor crashes on an `exllamav3` reference.** With
+`engine: exllamav3` on the reference arm, the floor pass dies in the per-layer noise
+injection:
+
+```
+RuntimeError: Expected a 'cpu' device type for generator but found 'cuda'
+```
+
+A torch generator is being created on CPU and used on a CUDA tensor (or the reverse),
+which newer torch refuses. It looks like a path only ever exercised with a
+`transformers` reference. Worked around with `noise_floor: false`, which is the right
+setting for a quantized reference anyway -- the floor would measure that quant's
+self-noise rather than fp16's -- so this only bites projects that use a non-transformers
+reference, which is a small set but includes any comparison that cannot afford the bf16
+weights.
+
+## PyTorch
+
+*Nothing to offer: the one defect found is fixed upstream. Recorded so the workaround it
+forced gets removed on time.*
+
+**`empty_cache()` with expandable segments unmaps another device's pages under running
+kernels** ([#196258](https://github.com/pytorch/pytorch/issues/196258), fixed by
+[`3fda599`](https://github.com/pytorch/pytorch/commit/3fda5993c2572eca77dd53033f057dc0290f287f),
+not in a release as of 2026-10-02; we run 2.13). `ExpandableSegment::unmapHandles` calls
+`cudaStreamSynchronize(nullptr)`, which resolves against the caller's current device, so
+releasing a segment owned by another device does not wait for that device's queued work.
+exllamav3 enables expandable segments by default, and `free_mem()` runs at the end of a
+layer-split load while autosplit's reference forward is still executing on the last
+device: those kernels wrote into unmapped pages, an intermittent Xid 31 on the second GPU
+at the first generation step (2026-09-30 to 10-02, Ornith-1.5-9B bf16 on two 5060 Tis).
+
+*Carried, two layers.* **The fix itself, locally:** `tools/torch-c10cuda-fix.sh` rebuilds
+only `libc10_cuda.so` (the one library holding the caching allocator) from the wheel's own
+commit with `3fda599`'s hunk, with the wheel's flags and CUDA 13.0 headers, refuses to
+install unless every exported function matches the original, and keeps the original
+beside it; `--check` says whether the installed one is patched. A torch reinstall silently
+restores the stock library, so run `--check` after any venv change. Verified 2026-10-02:
+the upstream regression test fails on the stock library and passes on the patched one;
+the split-load memcheck reproducer is clean with the exllamav3 workaround below removed
+(0 of 3); qbench KL vectors are bit-identical, bf16 reference included; a from-scratch
+rebuild is byte-identical. This covers every caller, including the allocation-retry path.
+**Defence in depth for everyone else:** `free_mem()` synchronizes every device before
+`empty_cache()` (fork `3a310c6`), which protects exllamav3 users on stock torch. Verified on a deterministic reproducer (the split load under compute-sanitizer
+memcheck, which slows kernels enough to always lose the race): 4 of 4 faults before, 0 of
+3 after; and standalone, without exllamav3. On stock torch, PyTorch's own release-and-retry
+on a failed allocation still goes through the same `unmapHandles`. *Remove both when:* the
+minimum torch release contains `3fda599` (not 2.14.1).
+
+*Worth offering turboderp:* upstream exllamav3 made expandable segments the default on
+2026-09-06 and its `free_mem()` is unpatched, so every layer-split user on torch <= 2.14.1
+is exposed. The `free_mem()` sync is the right-for-everyone part; the standalone repro
+shows the mechanism without exllamav3.
+
+*How it was found, for next time:* rates and correlations (idle time, page cache, card
+order, GPC) misled for a day, twice through comparisons that were not interleaved.
+Three instruments settled it: `torch.cuda.memory._record_memory_history()` dumped on
+failure, which put the fault address in a freed and unmapped load-time temporary; memcheck
+as a reproducer rather than a detector (it never flagged the access, since it treats the
+reserved expandable-segment range as valid, but it made the race deterministic); and a
+standalone repro once the mechanism was suspected.
+
 ---
 
 ## Priority, and the reasoning
@@ -533,13 +898,19 @@ annoys us:
    Send with (2) and (3) as context, since a maintainer will immediately ask what is
    behind it.
 3. **The softcap half-patch.** Working code, gated by a bench entry, small.
-4. **Encoder offload.** Largest payoff of the set for the widest audience, but it is a
-   report against a design gap and will want a conversation rather than a diff.
+4. ~~**Encoder offload.**~~ **Closed 2026-09-12 — upstream fixed it in v0.29.0 before we
+   filed.** It had been ranked here as the largest payoff for the widest audience. Its
+   replacement in the queue, if anything, is the `--limit-mm-per-prompt` width/height
+   naming defect that the same session turned up; unranked until someone decides a
+   documentation report is worth sending.
 5. **exllamav3 KLD floor.** Small and well-evidenced, but the fork relationship means it
    is the least urgent — we already have the fix where we need it.
 6. **`embed-quant-config`.** Highest value to us, and deliberately last: it needs a
    design decision, a reproduction we have not built, and a fix judged against two
    other manifestations. Filing it early would waste the good will the others earn.
+
+7. **exllamav3 conversion RNG.** A clean report with a small fix, but no measured quality
+   effect, so it rides along with (5) rather than going on its own.
 
 **Not yet fileable**: the turboquant `kv_cache_dtype` mystery (4), until the hypothesis
 is verified or replaced.
@@ -551,6 +922,42 @@ is verified or replaced.
 - Is the fix defensible without reference to this project?
 - Have we checked whether upstream already fixed it? *We have now paid this cost four
   times* — see `check-upstream-before-patching-vllm`. The turboquant walls were measured
-  against a structure 0.28 had already replaced.
+  against a structure 0.28 had already replaced. **Fifth instance, 2026-09-12, and the
+  first where checking first is what saved the work rather than what recovered it**: the
+  encoder-offload report above was closed by reading the current tree before writing a
+  word of it. Check at the point you decide to write, not at the point you decide to send
+  — the evidence-gathering is most of the cost.
 - If it is a report rather than a patch, is the thing we do not understand stated as
   such rather than smoothed over?
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `upstream-queue` — Findings other projects should hear about
+
+Eleven items across vLLM, llm-compressor and exllamav3: two patches ready to offer, one
+blocked on a design decision that is not ours, seven reports, and one question we cannot
+yet phrase honestly. They were scattered across TODO items, patch headers and subject
+notes, which made the queue invisible *as* a queue -- what is ready, what is blocked,
+what is worth doing first.
+
+**The whole inventory, with evidence, framing and a priority order, is in
+[docs/upstream.md](upstream.md).** This item exists so the work has a slug; it
+deliberately does not duplicate the contents.
+
+**What is next**, per that note's ordering: llm-compressor's `strategy: "channel"`
+default (finished evidence, purely their benefit, nothing to negotiate), then
+TurboQuant's `key=int` collision, then the halved softcap patch. The encoder-offload
+report is **closed unsent** — upstream fixed it in 0.29.0, found by checking before
+writing rather than before sending.
+
+**One reproduction is missing and blocks the highest-value item.**
+`vllm-embed-quant-config` cannot be filed until the speculative-decoding breakage it
+introduces has a demonstration, and the two MTP entries in `bench/` do not provide one:
+an MTP drafter shares the target's embedding, so the mismatch never arises. It wants an
+*external* drafter against a quantized target -- `turboderp/Qwen3.6-27B-DFlash-exl3` is
+the checkpoint, and it would make a good `full`-tier entry regardless.
+
+→ [docs/upstream.md](upstream.md)

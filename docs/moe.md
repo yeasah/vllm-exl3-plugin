@@ -358,6 +358,15 @@ for a 35B at 2bpw is the whole reason the checkpoint fits at all. A partial form
 (reconstruct only the top-k experts of a chunk, bounded like
 `_EMBED_BLOCK_CHUNK`) is the shape that might work.
 
+**Why the ratio is so low: slots are not grouped by expert.** `_exl3_moe_mm` feeds
+`exl3_mgemm` one single-row product per (token, expert) slot (`size_m = 1`), so each
+slot reads its expert's full trellis and a bigger batch amortises nothing. Measured
+2026-09-21 on the 5060 Ti: a 15K prefill takes 32.5 / 32.6 / 32.7 s at
+`max_num_batched_tokens` 2048 / 4096 / 8192, flat across 4x. With experts in VRAM the
+re-reads are cheap-ish. With experts CPU-offloaded they cross PCIe per token, which is
+where it became visible. See [cpu-offload.md](cpu-offload.md). Grouping tokens by expert
+is the kernel-side fix for both.
+
 Recorded here rather than in TODO because it is an observation with an open
 feasibility question, not yet a task. The numbers are now gated
 (`bench/run.py perf-check --tier full`), so if anything changes them it will say
@@ -461,3 +470,62 @@ disguised twice over: detokenization hides special tokens, and greedy decoding
 returns *something* from a degenerate tensor. Sampling above temperature 0 is
 what exposes it. **Check `token_ids`, not decoded text** — the leading `0` was
 printed in the very first successful-looking run and read past.
+
+## How exllamav3 actually spends bits on experts (2026-09-18)
+
+Surveying the local collection for the `category-bits` question turned up two
+things worth separating, because "the routed experts are at 2 and 3 bits" invites
+the wrong reading.
+
+**The non-routed boost is real and shipped.** `turboderp/Laguna-XS-2.1-exl3` at
+3.00bpw: routed experts K=3 (9984 tensors), `shared_expert` K=5 (39), the dense
+`mlp.*` K=4, attention K=3. `gemma-4-26B-A4B-it-exl3` at 2.54bpw does the same
+shape — routed experts at 2-3, shared `mlp.*` at 3, attention at 4.
+`Qwen3.5-35B-A3B-exl3` at both 2.00 and 3.00bpw is flat K=3 everywhere, so the
+option is per-conversion rather than automatic.
+
+**The 2-vs-3 split inside gemma's routed experts is by layer depth, not by
+tensor.** Layers 0-13 carry K=3 across all 384 of their routed-expert tensors;
+layers 14-29 carry K=2 across all 384 of theirs. There is no scatter within a
+layer and none between the three projections. So this is not the per-tensor
+allocation that "does not compose" (docs/qbench.md) reappearing inside the expert
+category — it is a single depth-wise cut, and the earlier layers are the ones
+that get the bits.
+
+**Where the boost comes from: outside the budget.** `-hq` sets
+`select_hq_bits` (2 bits on attention and shared experts for MoE architectures) as
+a `min_bpw`, and the clamp is applied *after* the budget loop in
+`exllamav3/conversion/allocation.py`, never checked against `max_bits`. So it
+overshoots the requested bitrate rather than paying for itself. Laguna is
+published as `3.00bpw` and records `bits: 3.01`; Qwen3.5-35B-A3B, which has no
+boost, records exactly `3.0`. The 0.01 is the 0.0286 GiB — 0.24% of trellis bytes
+— that 39 shared-expert tensors at K=5 cost against 9984 routed ones at K=3.
+
+**Now finished, and `-hq` wins.** The matched pair landed 2026-09-20: 44.4% less
+excess KLD for +0.0835 bpw, **-38.7% against the budget-matched control**, with the
+promoted set at 11.8x average sensitivity against a 2.47x bar. Ornith's
+top-8-of-256 routing is a 32x duty-cycle gap, which accounts for the concentration.
+See docs/qbench.md, "`-hq` beats its budget-matched control". The reasoning that
+framed the experiment is kept below.
+
+**The KLD win had been against a smaller model, and that is what made it
+unfinished.** It needs no superposition argument: more bytes, better model. The
+comparison that has never been run is the budget-matched one — spend the same
+0.24% on the routed experts instead and see which buys more. Note that "promotion"
+is not itself an exemption: exl3's ordinary fractional allocation is also
+promotion-only from `floor(bpw)` and is taxed anyway, because a mixture of K
+levels pays a Jensen penalty no allocation can avoid. See docs/qbench.md "What the
+null is about, and what the pipeline actually does".
+
+**And the boundary is no longer the only candidate.** As of 2026-09-20 a
+promotion-only body recipe beats the uniform alternative by 16.5% on a dense model
+(docs/qbench.md, "Extra-budget promotion does compose"), with the bar at 1.76x
+average sensitivity for a first bit and 2.74x for a second. That makes
+`select_hq_bits = 2` suspect as a default here too: the same bytes spread at +1 over
+more tensors may beat +2 on attention and shared experts. The duty-cycle gap in an
+MoE is large enough that both bits could still clear, which is exactly what the
+budget-matched arm below would show.
+
+For `category-bits`, then, the arm worth building is budget-matched:
+`tools/compose_checkpoint.py --take all --keep experts` gives the non-routed
+boost, and the control it needs is the same bytes spent uniformly instead.

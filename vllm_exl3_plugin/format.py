@@ -43,6 +43,16 @@ PAD_TO = 128
 
 MIN_BITS = 1
 MAX_BITS = 8
+#: Storage dtype of each EXL3 sub-tensor as exllamav3 writes it, by name (torch-free here; see
+#: `quantization.linear.stored_dtype`). Placeholders take it so vLLM's load-time dtype check
+#: (AutoWeightsLoader, since 0.32) sees the tensor it is about to receive, not the model dtype
+STORED_DTYPES = {"trellis": "int16", "suh": "float16", "svh": "float16", "su": "int16", "sv": "int16",
+                 "mcg": "int32", "mul1": "int32"}
+
+#: Half-integer widths (exllamav3 >= 1.6.4): KA- and (KA + 1)-bit trellis steps alternate, so a
+#: tile is 16 * K = 16 * KA + 8 uint16 words. The kernels instantiate only these three, and only
+#: with the mul1 codebook.
+HALF_BITS = (1.5, 2.5, 3.5)
 
 #: Block size and value width of the block-scaled embedding format (`blockq.py`).
 #: Duplicated there as torch-facing constants; these are the torch-free copies the
@@ -51,6 +61,14 @@ BLOCKQ_BLOCK = 32
 BLOCKQ_BITS = 4
 
 #: Tensors a block-quantized embedding stores, alongside the model's own.
+#: The dense token embedding, as every EXL3 checkpoint stores it. Named here
+#: because two places need to agree on it: `tools/quantize_embedding.py` finds
+#: the tensor by this name, and the config decides from it whether a checkpoint
+#: still carries a dense copy beside its `bq_*` ones.
+EMBED_WEIGHT_SUFFIX = ".embed_tokens.weight"
+EMBED_TRELLIS_SUFFIX = ".embed_tokens.trellis"
+EMBED_SIGNS_SUFFIX = ".embed_tokens.signs"
+
 BLOCKQ_SUFFIXES = (".bq_q", ".bq_s", ".bq_r")
 
 #: Subset that must be present for an embedding to count as block-quantized.
@@ -81,16 +99,27 @@ def pad_dim(n: int, pad_to: int = PAD_TO) -> int:
     return (n + pad_to - 1) // pad_to * pad_to
 
 
-def bits_from_trellis_shape(shape) -> int:
-    """Recover the per-tensor bit width K from a trellis tensor's shape."""
+def bits_from_trellis_shape(shape, mul1: bool | None = None) -> int | float:
+    """Recover the per-tensor bit width K from a trellis tensor's shape: an int, or one of
+    `HALF_BITS` as a float. A half-integer K needs the mul1 codebook, so a caller that knows the
+    tensor's codebook passes `mul1` and a half-integer width without it is refused here rather than
+    decoded by a kernel table that has no such entry."""
     if len(shape) != 3:
         raise EXL3FormatError(f"trellis must be 3-dimensional, got shape {list(shape)}")
     last = shape[2]
     if last % TILE != 0:
-        raise EXL3FormatError(
-            f"trellis last dim {last} is not a multiple of {TILE}; "
-            "cannot recover bit width"
-        )
+        half = last / TILE
+        if half not in HALF_BITS:
+            raise EXL3FormatError(
+                f"trellis last dim {last} gives bit width {half}, which is neither an integer "
+                f"nor one of the half-integer widths {HALF_BITS}; cannot recover bit width"
+            )
+        if mul1 is False:
+            raise EXL3FormatError(
+                f"half-integer bit width {half} (trellis shape {list(shape)}) without the mul1 "
+                "codebook; exllamav3 only defines half-integer widths for mul1"
+            )
+        return half
     bits = last // TILE
     if not MIN_BITS <= bits <= MAX_BITS:
         raise EXL3FormatError(f"implausible bit width {bits} from trellis shape {list(shape)}")
@@ -104,14 +133,16 @@ def dims_from_trellis_shape(shape) -> tuple[int, int]:
     return shape[0] * TILE, shape[1] * TILE
 
 
-def trellis_shape(in_features: int, out_features: int, bits: int) -> tuple[int, int, int]:
+def trellis_shape(in_features: int, out_features: int, bits: int | float) -> tuple[int, int, int]:
     """The trellis shape a tensor of these dimensions and bit width must have."""
     if in_features % TILE or out_features % TILE:
         raise EXL3FormatError(
             f"EXL3 dimensions must be multiples of {TILE}, "
             f"got in={in_features} out={out_features}"
         )
-    return in_features // TILE, out_features // TILE, TILE * bits
+    if not (MIN_BITS <= bits <= MAX_BITS and (float(bits).is_integer() or bits in HALF_BITS)):
+        raise EXL3FormatError(f"no EXL3 bit width {bits}")
+    return in_features // TILE, out_features // TILE, int(TILE * bits)
 
 
 def is_had_aligned(n: int) -> bool:
@@ -327,6 +358,19 @@ def blockq_bpw(hidden: int, block: int = BLOCKQ_BLOCK) -> float:
     return BLOCKQ_BITS + 2 * 8 / block + 4 * 32 / hidden
 
 
+def trellis_embedding_keys(tensor_names) -> set[str]:
+    """Module keys carrying exllamav3's trellis embedding (`convert.py --embed_bits`).
+
+    Told apart by name: `.trellis` alone means a quantized linear, and an embedding
+    has no `suh`/`svh` beside it, so it must not count as one.
+    """
+    return {
+        name.removesuffix(".trellis")
+        for name in tensor_names
+        if name.endswith(EMBED_TRELLIS_SUFFIX)
+    }
+
+
 def blockq_module_keys(tensor_names) -> set[str]:
     """Module keys carrying a block-quantized embedding, given checkpoint names."""
     keys: set[str] = set()
@@ -356,6 +400,6 @@ def quantized_module_keys(tensor_names) -> set[str]:
     keys: set[str] = set()
     for name in tensor_names:
         for suffix in REQUIRED_SUFFIXES:
-            if name.endswith(suffix):
+            if name.endswith(suffix) and not name.endswith(EMBED_TRELLIS_SUFFIX):
                 keys.add(name[: -len(suffix)])
     return keys

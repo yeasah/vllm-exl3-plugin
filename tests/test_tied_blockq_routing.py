@@ -22,8 +22,11 @@ Two regressions are pinned here, both silent in the field:
 
 import os
 import sys
+import types
 import unittest
 from unittest import mock
+
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -132,3 +135,278 @@ class CombinedMethodTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeverQueryMainTest(unittest.TestCase):
+    """The config must not invent a revision for a Hub metadata lookup.
+
+    Asking for `main` when the revision is unknown is not a harmless default:
+    EXL3 repos keep weights on per-bit-rate branches, so `main` 404s, but the
+    commit is resolved before the file is missed and huggingface_hub leaves
+    `refs/main` pointing at a snapshot it never fetched. A dangling ref makes
+    `scan_cache_dir` discard the entire repo, so every cache tool goes blind to
+    all of it -- the checkpoint looks lost while every byte is on disk.
+
+    A local directory is exempt: no revision to invent, no request to make.
+    """
+
+    def setUp(self):
+        self.cfg = EXL3Config(bits=3.0, head_bits=6)
+
+    def test_repo_id_without_revision_is_skipped(self):
+        self.assertTrue(self.cfg._skip_hub_lookup("turboderp/Qwen3-8B-exl3", None))
+
+    def test_repo_id_with_revision_proceeds(self):
+        self.assertFalse(self.cfg._skip_hub_lookup("turboderp/Qwen3-8B-exl3", "3.0bpw"))
+
+    def test_local_directory_proceeds_without_a_revision(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(self.cfg._skip_hub_lookup(d, None))
+
+    def test_no_hub_call_is_made_without_a_revision(self):
+        """The predicate is not the point; not reaching the network is."""
+        from unittest import mock
+
+        calls = []
+
+        def spy(filename, model, revision):
+            calls.append((filename, model, revision))
+            return None
+
+        with mock.patch(
+            "vllm.transformers_utils.repo_utils.get_hf_file_to_dict", spy
+        ):
+            self.cfg._load_tensor_storage("turboderp/Qwen3-8B-exl3", None)
+        self.assertEqual(calls, [], f"queried the Hub anyway: {calls}")
+
+    def test_a_revision_does_reach_the_lookup(self):
+        """The guard must not be so broad that it disables the feature."""
+        from unittest import mock
+
+        calls = []
+
+        def spy(filename, model, revision):
+            calls.append((filename, model, revision))
+            return None
+
+        with mock.patch(
+            "vllm.transformers_utils.repo_utils.get_hf_file_to_dict", spy
+        ):
+            self.cfg._load_tensor_storage("turboderp/Qwen3-8B-exl3", "3.0bpw")
+        self.assertTrue(calls, "the lookup never happened even with a revision")
+        self.assertTrue(all(r == "3.0bpw" for _, _, r in calls),
+                        f"a call used a substituted revision: {calls}")
+
+
+class BlockQOnLoadTest(unittest.TestCase):
+    """`EXL3_BLOCKQ_ON_LOAD` encodes a dense embedding while it loads.
+
+    The decision has to be made where the method is chosen, not at load time.
+    Every refusal below ends on the dense path -- exactly what would have
+    happened without the flag -- because the alternative is a layer built for
+    `bq_*` that nothing can fill, failing far from the cause.
+    """
+
+    def _cfg(self, *, on_load, hidden=1536, tied=False, stored=False):
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg._blockq_on_load = on_load
+        cfg._hidden_size = hidden
+        cfg.tie_word_embeddings = tied
+        if stored:
+            cfg._blockq_modules = {GEMMA_PREFIX}
+        return cfg
+
+    def test_on_load_is_the_default_and_zero_opts_out(self):
+        env = {k: v for k, v in os.environ.items() if not k.endswith("BLOCKQ_ON_LOAD")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(EXL3Config(bits=3.0, head_bits=6)._blockq_on_load)
+        with mock.patch.dict(os.environ, {"EXL3_BLOCKQ_ON_LOAD": "0"}):
+            self.assertFalse(EXL3Config(bits=3.0, head_bits=6)._blockq_on_load)
+
+    def test_flag_off_leaves_a_stock_checkpoint_dense(self):
+        cfg = self._cfg(on_load=False)
+        self.assertFalse(cfg.embedding_is_blockq())
+        self.assertFalse(cfg.blockq_is_on_load())
+
+    def test_flag_on_encodes_an_untied_checkpoint(self):
+        cfg = self._cfg(on_load=True)
+        self.assertTrue(cfg.embedding_is_blockq())
+        self.assertTrue(cfg.blockq_is_on_load())
+
+    def test_incompatible_hidden_size_falls_back_to_dense(self):
+        """BLOCKQ_BLOCK must divide the hidden size; 1000 is not divisible by 32."""
+        from vllm_exl3_plugin import format
+
+        with self.assertRaises(format.EXL3FormatError):
+            format.check_blockq_hidden(1000)
+        cfg = self._cfg(on_load=True, hidden=1000)
+        self.assertFalse(cfg.embedding_is_blockq(),
+                         "a model that cannot use the format must serve dense")
+
+    def test_unknown_hidden_size_falls_back_to_dense(self):
+        cfg = self._cfg(on_load=True, hidden=None)
+        self.assertFalse(cfg.embedding_is_blockq())
+
+    def test_a_stored_checkpoint_is_not_an_on_load_one(self):
+        """Pre-quantized checkpoints keep reading bq_*, flag or not."""
+        cfg = self._cfg(on_load=True, stored=True)
+        self.assertTrue(cfg.embedding_is_blockq())
+        self.assertFalse(cfg.blockq_is_on_load(),
+                         "would re-encode over tensors the checkpoint already has")
+
+    def test_dense_embed_flag_still_wins(self):
+        cfg = self._cfg(on_load=True)
+        cfg._dense_embed = True
+        self.assertFalse(cfg.embedding_is_blockq())
+
+    def test_the_dense_tensor_is_routed_not_dropped(self):
+        """On-load needs the dense embedding to arrive; every other mode drops it."""
+        cfg = self._cfg(on_load=True)
+        mapper = cfg.get_cache_scale_mapper()
+        name = "model.embed_tokens.weight"
+        mapped = mapper._map_name(name)
+        self.assertEqual(mapped, "model.embed_tokens.bq_src",
+                         "the encoder never receives the tensor it encodes")
+
+    def test_a_stored_checkpoint_still_drops_the_dense_tensor(self):
+        cfg = self._cfg(on_load=True, stored=True)
+        mapper = cfg.get_cache_scale_mapper()
+        self.assertIsNone(mapper._map_name("model.embed_tokens.weight"))
+
+
+class RebasedEmbeddingTest(unittest.TestCase):
+    """A class vLLM rebased keeps the dense `weight` its constructor made.
+
+    Muse-Glimmer's normed embedding, under the Transformers backend, held the
+    dense table and `bq_*` together: 2.5 GiB resident that nothing reads.
+    """
+
+    def _layer(self):
+        layer = torch.nn.Module()
+        layer.register_parameter("weight", torch.nn.Parameter(torch.empty(64, 128)))
+        layer.shard_indices = types.SimpleNamespace(
+            padded_org_vocab_start_index=0, padded_org_vocab_end_index=64,
+            org_vocab_start_index=0, org_vocab_end_index=64,
+        )
+        return layer
+
+    def _create(self, *, on_load):
+        from vllm_exl3_plugin.quantization.embedding import EXL3BlockQEmbeddingMethod
+
+        cfg = mock.Mock()
+        cfg.blockq_is_on_load.return_value = on_load
+        layer = self._layer()
+        with mock.patch(
+            "vllm_exl3_plugin.quantization.embedding.EXL3Parameter",
+            side_effect=lambda **_: torch.nn.Parameter(torch.empty(0)),
+        ):
+            EXL3BlockQEmbeddingMethod(cfg, "model.embed_tokens").create_weights(
+                layer, 128, [64], 128, 64, params_dtype=torch.bfloat16
+            )
+        return layer
+
+    def test_on_load_leaves_no_dense_weight(self):
+        self.assertNotIn("weight", dict(self._create(on_load=True).named_parameters()))
+
+    def test_stored_blockq_leaves_no_dense_weight(self):
+        self.assertNotIn("weight", dict(self._create(on_load=False).named_parameters()))
+
+
+class TrellisEmbeddingTest(unittest.TestCase):
+    """A checkpoint from `convert.py -eb`: no dense table, and no choice of method."""
+
+    TENSORS = {
+        "model.language_model.embed_tokens.trellis": "a.safetensors",
+        "model.language_model.embed_tokens.signs": "a.safetensors",
+        "model.language_model.layers.0.mlp.up_proj.trellis": "a.safetensors",
+    }
+
+    def _load(self, tensors, *, tied=False, on_load=True):
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg._blockq_on_load = on_load
+        cfg._hidden_size = 1536
+        cfg.tie_word_embeddings = tied
+        with mock.patch(
+            "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
+            return_value={"weight_map": tensors},
+        ):
+            cfg._load_index_modules("org/x-exl3", "3.0bpw")
+        return cfg
+
+    def test_it_is_trellis_and_on_load_has_nothing_to_encode(self):
+        cfg = self._load(self.TENSORS)
+        self.assertTrue(cfg.embedding_is_trellis())
+        self.assertFalse(cfg.embedding_is_blockq())
+        self.assertFalse(cfg.blockq_is_on_load())
+
+    def test_the_embedding_is_not_a_quantized_linear(self):
+        cfg = self._load(self.TENSORS)
+        self.assertEqual(
+            cfg.quantized_modules, {"model.language_model.layers.0.mlp.up_proj"}
+        )
+
+    def test_a_single_file_checkpoint_is_seen_too(self):
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg.tie_word_embeddings = False
+        with (
+            mock.patch(
+                "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
+                return_value=None,
+            ),
+            mock.patch.object(
+                EXL3Config, "_single_file_tensor_names", return_value=set(self.TENSORS)
+            ),
+        ):
+            cfg._load_index_modules("org/x-exl3", "3.0bpw")
+        self.assertTrue(cfg.embedding_is_trellis())
+
+    def test_a_tied_config_is_refused_by_name(self):
+        from vllm_exl3_plugin import format
+
+        cfg = self._load(self.TENSORS, tied=True)
+        with self.assertRaisesRegex(format.EXL3FormatError, "cannot serve a head"):
+            cfg.embedding_is_trellis()
+
+    def test_a_trellis_head_is_not_an_embedding(self):
+        cfg = self._load({
+            "lm_head.trellis": "a.safetensors",
+            "model.embed_tokens.weight": "a.safetensors",
+        })
+        self.assertFalse(cfg.embedding_is_trellis())
+        self.assertIn("lm_head", cfg.quantized_modules)
+
+
+class CompileKeyTest(unittest.TestCase):
+    """The embedding flags have to reach vLLM's compile-cache key.
+
+    Each one decides whether the embedding owns a dense `weight` or `bq_*`, and
+    vLLM's key hashes neither -- only `hf_config`, through `to_json_string()`.
+    Without the stamp, a graph cached with the flag off is loaded with it on and
+    dies with `KeyError: 'weight'` inside torch's AOT wrapper (reproduced
+    2026-09-21 on Qwen3-8B-exl3). This pins both halves: that the stamp changes
+    what vLLM hashes, and that it survives the pickle to the engine process.
+    """
+
+    def _hashed(self, *, on_load, dense):
+        import pickle
+
+        from transformers import Qwen3Config
+        from vllm.config.utils import normalize_value
+
+        cfg = EXL3Config(bits=3.0, head_bits=6)
+        cfg._blockq_on_load = on_load
+        cfg._dense_embed = dense
+        hf = Qwen3Config()
+        cfg._stamp_compile_factors(hf)
+        return normalize_value(pickle.loads(pickle.dumps(hf)))
+
+    def test_each_flag_changes_the_key(self):
+        base = self._hashed(on_load=False, dense=False)
+        self.assertNotEqual(base, self._hashed(on_load=True, dense=False))
+        self.assertNotEqual(base, self._hashed(on_load=False, dense=True))
+
+    def test_same_flags_same_key(self):
+        self.assertEqual(self._hashed(on_load=True, dense=False),
+                         self._hashed(on_load=True, dense=False))

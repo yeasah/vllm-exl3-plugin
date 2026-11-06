@@ -1,0 +1,63 @@
+{
+ "entry": "minicpm5-1B-3.0bpw-blockq-perf",
+ "label": "minicpm5-1B 3.0bpw blockq perf",
+ "reps": 5,
+ "platform": "rtx5060ti-dev",
+ "fixture": {
+  "kind": "blockq",
+  "base": "turboderp/MiniCPM5-1B-exl3@3.00bpw",
+  "digest": "2fd4685d5c65139c"
+ },
+ "environment": {
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA GeForce RTX 5060 Ti",
+  "gpu_count": 2,
+  "capability": "12.0",
+  "vllm_reported": "0.32.1.dev16+g1f3b03290",
+  "pkg.digest": "d9596027572a",
+  "pkg.count": 247,
+  "pkg.transformers": "5.19.0",
+  "pkg.compressed-tensors": "0.17.0",
+  "src.plugin": {
+   "describe": "8aac27a",
+   "head": "8aac27ab48",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "src.vllm": {
+   "describe": "v0.32.0-16-g1f3b032909",
+   "head": "1f3b032909",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "src.exllamav3": {
+   "describe": "v1.6.4-98-g60519251",
+   "head": "60519251b3",
+   "dirty_files": 0,
+   "diff_sha": null,
+   "untracked": 0
+  },
+  "driver": "610.57.04"
+ },
+ "decode": 2418.1,
+ "decode_spread_pct": 0.53,
+ "decode_samples": [
+  2418.1,
+  2418.1,
+  2408.5,
+  2405.4,
+  2418.2
+ ],
+ "prefill": 21995.8,
+ "prefill_spread_pct": 0.79,
+ "prefill_samples": [
+  21996.4,
+  21995.8,
+  21984.6,
+  21980.4,
+  22154.3
+ ]
+}

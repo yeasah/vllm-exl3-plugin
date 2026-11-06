@@ -59,6 +59,20 @@ BLOCKQ_SOURCES = (
 )
 
 
+#: The same for a `trellis` fixture. The encoder is exllamav3's, and the rewrite is ours.
+TRELLIS_SOURCES = (
+    "tools/quantize_embedding.py",
+    "deps/exllamav3/exllamav3/conversion/ngram.py",
+    "deps/exllamav3/exllamav3/modules/quant/exl3_lib/ngram_codec.py",
+)
+
+#: What each recipe depends on, and what it passes the tool.
+RECIPES = {
+    "blockq": (BLOCKQ_SOURCES, ()),
+    "trellis": (TRELLIS_SOURCES, ("--trellis", "4")),
+}
+
+
 def cache_root() -> str:
     """Where derived checkpoints live. Never inside the repo -- they are large,
     and `bench/expected/` is deliberately the only thing a run writes in-tree."""
@@ -87,10 +101,10 @@ def key(kind: str, model: str, revision: str) -> str:
     A cached directory under this name was produced by exactly this code from
     exactly this checkpoint, so it can be reused without a staleness check.
     """
-    if kind != "blockq":
+    if kind not in RECIPES:
         raise SystemExit(f"unknown fixture recipe: {kind!r}")
     slug = f"{model}@{revision}".replace("/", "-").replace("@", "-at-")
-    return f"{slug}-{kind}-v{RECIPE_VERSION}-{_source_digest(BLOCKQ_SOURCES)}"
+    return f"{slug}-{kind}-v{RECIPE_VERSION}-{_source_digest(RECIPES[kind][0])}"
 
 
 def path(kind: str, model: str, revision: str) -> str:
@@ -112,7 +126,7 @@ def digest(fixture_dir: str) -> str:
     )
     for name in shards:
         with safe_open(os.path.join(fixture_dir, name), framework="pt") as f:
-            for tensor in sorted(k for k in f.keys() if ".bq_" in k):
+            for tensor in sorted(k for k in f.keys() if ".bq_" in k or ".embed_tokens." in k):
                 h.update(tensor.encode())
                 h.update(f.get_tensor(tensor).numpy().tobytes())
     return h.hexdigest()[:16]
@@ -140,7 +154,7 @@ def ensure(kind: str, model: str, revision: str, quiet: bool = False) -> str:
         print(f"     building fixture {os.path.basename(dest)}", flush=True)
     proc = subprocess.run(
         [sys.executable, os.path.join(ROOT, "tools", "quantize_embedding.py"),
-         base, staging],
+         base, staging, *RECIPES[kind][1]],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     if proc.returncode != 0:

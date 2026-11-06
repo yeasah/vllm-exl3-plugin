@@ -39,12 +39,14 @@ The two tied-model shapes vLLM builds are handled differently:
 
 from __future__ import annotations
 
+import time
+
 import torch
 
 from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
-from .. import blockq, format, ops, tp
+from .. import blockq, blockq_cache, env, format, ops, tp, trellis_embed
 from ..log import init_logger
 from .linear import EXL3Parameter
 from .lm_head import EXL3LMHeadMethod
@@ -80,7 +82,7 @@ class EXL3EmbeddingMethod(EXL3LMHeadMethod):
             layer.exl3_trellis_0,
             layer.exl3_suh_0,
             layer.exl3_svh_0,
-            format.bits_from_trellis_shape(layer.exl3_trellis_0.shape),
+            format.bits_from_trellis_shape(layer.exl3_trellis_0.shape, self.mul1),
             self.mcg,
             self.mul1,
             flat,
@@ -148,6 +150,251 @@ def _blockq_weight_loader(param, loaded_weight: torch.Tensor) -> None:
     param.store(param._take_row(loaded_weight, param.row_shard_size, param.tp_rank))
 
 
+def _encode_on_load(dense: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Encode a dense embedding into the three stored tensors, in row chunks.
+
+    On CPU deliberately, and that is a correctness choice rather than a
+    performance one. `blockq.encode` does not reproduce across devices -- the
+    per-row affine ranges come out of `amin`/`amax` reductions whose order
+    differs, and decoded values disagree by up to 2x a quantization step
+    (measured; see `blockq.encode`). Neither encoding is worse, but only one of
+    them matches what `tools/quantize_embedding.py` writes by default, and a
+    model served this way should not disagree with the same model served from a
+    checkpoint someone quantized offline.
+
+    Chunked because the encode needs the rows in fp32: a vocabulary-sized
+    temporary is several GiB, and the whole point here is not to materialize the
+    dense embedding. Every reduction in `encode` is inside a row, so chunking by
+    rows is exact rather than approximate.
+    """
+    chunk = max(1, int(env.get("BLOCKQ_ENCODE_CHUNK", "16384")))
+    names = tuple(n.removeprefix(".") for n in format.BLOCKQ_SUFFIXES)
+    parts = []
+    for start in range(0, dense.shape[0], chunk):
+        block = dense[start : start + chunk].to(device="cpu", dtype=torch.float32)
+        parts.append(blockq.encode(block))
+    return {n: torch.cat([p[n] for p in parts], dim=0) for n in names}
+
+
+def _row_span(param, rows: int) -> tuple[int, int]:
+    """This rank's `[start, stop)` of the vocabulary, spelled out.
+
+    `EXL3Parameter._take_row` does the same slice, but as a slice: the cache
+    needs the bounds themselves, so that a hit can read only these rows out of
+    the file instead of materializing the vocabulary and throwing most of it
+    away. Clamped the way Python's own slicing clamps, because the last rank's
+    nominal span runs past the end -- vLLM's per-rank size covers the padded
+    vocabulary and the checkpoint stores the real one.
+    """
+    if param.tp_size == 1 or param.row_shard_size is None:
+        return 0, rows
+    first = param.tp_rank * param.row_shard_size
+    return min(first, rows), min(first + param.row_shard_size, rows)
+
+
+def _cache_entry(quant_config, tensor: str, rows: int, hidden: int):
+    """The cache entry for this encode, or `None` if it should not be cached."""
+    if not blockq_cache.enabled():
+        return None
+    identity = blockq_cache.checkpoint_identity(
+        getattr(quant_config, "model_name", None),
+        getattr(quant_config, "commit_hash", None),
+    )
+    if identity is None:
+        logger.debug(
+            "No commit hash resolved for this checkpoint, so the on-load encode "
+            "of %s is not being cached: an entry could not be told apart from "
+            "one belonging to a different commit of the same repo.",
+            tensor,
+        )
+        return None
+    return blockq_cache.entry(identity, tensor, rows, hidden)
+
+
+def _make_on_load_loader(layer: torch.nn.Module, method):
+    """Receive the dense embedding and leave `bq_*` behind in its place.
+
+    The three parameters are filled exactly as a checkpoint would have filled
+    them -- same `store()`, same shards -- so everything downstream, including
+    the shape checks and the vocabulary padding in
+    `process_weights_after_loading`, is the path already exercised by
+    pre-quantized checkpoints rather than a parallel one.
+
+    Two shapes of the same work, chosen by whether there is an entry to fill:
+
+    - **Cacheable.** Encode the whole vocabulary, store it, and hand this rank
+      its rows. The entry is then TP-independent, which is the point -- a
+      profiling sweep over TP=1,2,4 pays for one encode, not three. A cold load
+      at TP>1 has every rank encode the full matrix to write the same bytes,
+      which is once per checkpoint and the price of that independence.
+    - **Not cacheable** (`EXL3_BLOCKQ_CACHE=0`, or a revision that never
+      resolved). Encode only this rank's rows, exactly as before the cache
+      existed. There is nothing to amortize, so there is no reason to do the
+      other ranks' work.
+    """
+
+    def load(param, loaded_weight: torch.Tensor) -> None:
+        if loaded_weight.dim() != 2:
+            raise format.EXL3FormatError(
+                f"embedding must be 2-D, got {list(loaded_weight.shape)}"
+            )
+        rows, hidden = loaded_weight.shape
+        start, stop = _row_span(param, rows)
+        entry = _cache_entry(method.quant_config, method.embed_tensor, rows, hidden)
+
+        shards = None
+        if entry is not None:
+            shards = blockq_cache.read(
+                entry, rows=rows, hidden=hidden, row_start=start, row_stop=stop
+            )
+            if shards is not None:
+                logger.info(
+                    "Reusing the cached block-quantized encoding of %s (%s).",
+                    method.embed_tensor, entry.path,
+                )
+
+        if shards is None:
+            began = time.perf_counter()
+            encoded = _encode_on_load(
+                loaded_weight if entry is not None else loaded_weight[start:stop]
+            )
+            logger.info(
+                "Encoded %s (%d x %d) into the block-quantized embedding format "
+                "in %.1f s.",
+                method.embed_tensor, rows if entry is not None else stop - start,
+                hidden, time.perf_counter() - began,
+            )
+            if entry is not None:
+                if blockq_cache.write(entry, encoded):
+                    logger.info(
+                        "Cached it at %s; later loads of this checkpoint skip the "
+                        "encode. EXL3_BLOCKQ_CACHE=0 disables this.", entry.path,
+                    )
+                shards = {n: t[start:stop].contiguous() for n, t in encoded.items()}
+            else:
+                shards = encoded
+
+        for name, tensor in shards.items():
+            getattr(layer, name).store(tensor)
+
+    return load
+
+
+def _replicated_weight_loader(param, loaded_weight: torch.Tensor) -> None:
+    """A tensor no vocabulary split touches: every rank keeps all of it."""
+    param.store(loaded_weight)
+
+
+class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
+    """Token embedding served from exllamav3's trellis table (`trellis_embed.py`).
+
+    Each row is independent of every other, so a vocabulary split is a row slice,
+    as for `bq_*`. The sign vectors and the codebook belong to no row and stay
+    whole on every rank.
+    """
+
+    def __init__(self, quant_config):
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size
+        indices = layer.shard_indices
+        rows_per_rank = (
+            indices.padded_org_vocab_end_index - indices.padded_org_vocab_start_index
+        )
+        extra_weight_attrs.pop("weight_loader", None)
+        # As in `EXL3BlockQEmbeddingMethod`: a rebased embedding still owns the
+        # `weight` its constructor made, and nothing would ever fill it.
+        layer._parameters.pop("weight", None)
+
+        device = torch.empty(0).device
+        layer.register_parameter(
+            "et_table",
+            EXL3Parameter(
+                num_shards=1,
+                device=device,
+                weight_loader=_blockq_weight_loader,
+                role=tp.role_of("et_table"),
+                row_shard_size=rows_per_rank,
+            ),
+        )
+        layer.register_parameter(
+            "et_signs",
+            EXL3Parameter(
+                num_shards=1,
+                device=device,
+                weight_loader=_replicated_weight_loader,
+                role=tp.role_of("et_signs"),
+            ),
+        )
+        layer.exl3_hidden_size = input_size_per_partition
+        layer.exl3_params_dtype = params_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        params = {n: getattr(layer, n) for n in ("et_table", "et_signs")}
+        for name, param in params.items():
+            if 0 not in param.shards:
+                raise format.EXL3FormatError(
+                    f"{getattr(layer, 'prefix', '<embedding>')}: no '{name}' "
+                    "tensor was loaded for the trellis embedding"
+                )
+        table, signs = params["et_table"].shards[0], params["et_signs"].shards[0]
+
+        hidden = layer.exl3_hidden_size
+        groups = (hidden + trellis_embed.GROUP_DIM - 1) // trellis_embed.GROUP_DIM
+        if signs.shape != (groups, trellis_embed.GROUP_DIM):
+            raise format.EXL3FormatError(
+                f"trellis embedding signs have shape {list(signs.shape)}, but a "
+                f"hidden size of {hidden} needs "
+                f"{[groups, trellis_embed.GROUP_DIM]}"
+            )
+        trellis_embed.depth_from_shape(table.shape[1], groups)
+
+        # vLLM pads the vocabulary partition past the stored rows. An all-zero
+        # row has scale 0 and decodes to zeros, which is what those ids want.
+        target = layer.num_embeddings_per_partition
+        if table.shape[0] > target:
+            raise format.EXL3FormatError(
+                f"trellis embedding has {table.shape[0]} rows but vLLM allocated "
+                f"only {target}"
+            )
+        table = torch.nn.functional.pad(table, (0, 0, 0, target - table.shape[0]))
+
+        layer.register_parameter("et_table", Parameter(table, requires_grad=False))
+        layer.register_parameter("et_signs", Parameter(signs, requires_grad=False))
+        layer.register_buffer(
+            "et_book", trellis_embed.codebook(table.device), persistent=False
+        )
+        for param in params.values():
+            param.release()
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        """Row gather, replacing `F.embedding(input_, layer.weight)`."""
+        return trellis_embed.gather(
+            input_,
+            layer.et_table,
+            layer.et_signs,
+            layer.et_book,
+            layer.exl3_hidden_size,
+            layer.exl3_params_dtype,
+        )
+
+    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+        raise format.EXL3FormatError(
+            "the trellis embedding has no matmul path: its rows are rotated for "
+            "accuracy as vectors, not stored for a GEMM"
+        )
+
+
 class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
     """Token embedding served from block-scaled 4-bit storage (`blockq.py`).
 
@@ -162,8 +409,21 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
     calling a hand-written dequant kernel (docs/embeddings.md, "Build or adopt").
     """
 
-    def __init__(self, quant_config):
+    def __init__(self, quant_config, prefix: str | None = None):
         self.quant_config = quant_config
+        # Which embedding this is, in vLLM's naming, recorded per method rather
+        # than read off the config. `EXL3Config.embed_prefix` holds whichever
+        # embedding was constructed last, which is the same thing only while a
+        # model has exactly one -- and multimodal checkpoints already carry
+        # more. The on-load cache keys on this name, so a second embedding
+        # sharing a key with the first would serve the wrong matrix.
+        self.embed_prefix = prefix or quant_config.embed_prefix
+
+    @property
+    def embed_tensor(self) -> str:
+        """The dense tensor this method's storage was encoded from, named the
+        way the weight stream names it."""
+        return f"{self.embed_prefix}.weight"
 
     def create_weights(
         self,
@@ -187,6 +447,12 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
 
         # The layer's own loader cannot drive this layout; dropped as elsewhere.
         extra_weight_attrs.pop("weight_loader", None)
+        # An embedding class vLLM rebased rather than built (MuseGlimmer's normed
+        # embedding, under the Transformers backend) still owns the `weight` its
+        # own constructor made. Nothing fills it, since the dense tensor goes to
+        # the encoder or is dropped, and left alone it is materialized anyway:
+        # the whole dense table's bytes, resident and unread.
+        layer._parameters.pop("weight", None)
 
         device = torch.empty(0).device
         for name in format.BLOCKQ_SUFFIXES:
@@ -198,6 +464,22 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
                     device=device,
                     weight_loader=_blockq_weight_loader,
                     role=tp.role_of(suffix),
+                    row_shard_size=rows_per_rank,
+                ),
+            )
+
+        if self.quant_config.blockq_is_on_load():
+            # Nothing in the checkpoint fills `bq_*` here, so a parameter has to
+            # exist for the dense tensor to arrive on. Sized zero: it is a
+            # landing point for a loader, never storage. The config renames
+            # `embed_tokens.weight` onto this name.
+            layer.register_parameter(
+                "bq_src",
+                EXL3Parameter(
+                    num_shards=1,
+                    device=device,
+                    weight_loader=_make_on_load_loader(layer, self),
+                    role=tp.role_of("bq_q"),
                     row_shard_size=rows_per_rank,
                 ),
             )
@@ -259,6 +541,11 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
             layer.register_parameter(name, Parameter(t, requires_grad=False))
         for param in params.values():
             param.release()
+        if hasattr(layer, "bq_src"):
+            # Its whole job was to catch the dense tensor; keeping it would
+            # leave a zero-size parameter on the layer forever.
+            layer.bq_src.release()
+            del layer.bq_src
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         """Row gather, replacing `F.embedding(input_, layer.weight)`.
@@ -308,11 +595,13 @@ class EXL3BlockQTiedEmbeddingMethod(EXL3BlockQEmbeddingMethod, EXL3EmbeddingMeth
       only via the tied head's `exl3_tied_source`.
     """
 
-    def __init__(self, quant_config):
+    def __init__(self, quant_config, prefix: str | None = None):
         # Not `EXL3BlockQEmbeddingMethod.__init__`, which records only the
-        # config: the inherited `apply()` needs the codebook flags that
-        # `EXL3LinearMethod.__init__` derives.
+        # config and the prefix: the inherited `apply()` needs the codebook
+        # flags that `EXL3LinearMethod.__init__` derives. The prefix is then
+        # set by hand, since the base that would have done it was skipped.
         EXL3EmbeddingMethod.__init__(self, quant_config)
+        self.embed_prefix = prefix or quant_config.embed_prefix
 
     def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
         """Allocate both sets. Safe to run back to back: the parameter names are

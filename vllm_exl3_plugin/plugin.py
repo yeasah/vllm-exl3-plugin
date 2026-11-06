@@ -26,6 +26,8 @@ def register() -> None:
 
     register_quantization_config("exl3")(EXL3Config)
     _patch_moe_trellis_rank()
+    _patch_offload_summary()
+    _patch_offload_defaults()
     _REGISTERED = True
 
 
@@ -69,3 +71,82 @@ def _patch_moe_trellis_rank() -> None:
 
     RoutedExperts.load_weights = load_weights
     RoutedExperts._exl3_trellis_rank_patched = True
+
+
+def _patch_offload_summary() -> None:
+    """Emit the CPU-offload summary at the end of weight loading.
+
+    There is no hook for "every layer has been offered to the offloader".
+    `wrap_modules` runs at model *construction*, and nothing in vLLM calls back
+    after the `process_weights_after_loading` loop, which is where
+    `cpu_offload.register_offload` does its work.
+
+    The obvious place -- the first `apply()` -- is wrong, and expensively so:
+    `apply()` runs inside vLLM's `torch.compile` region, and Dynamo refuses
+    `logging.Logger` calls outright (`gb0291`, "logging.Logger method not
+    supported for non-export cases"), taking the engine down at startup rather
+    than degrading. Guarding on `torch.compiler.is_compiling()` would avoid the
+    crash but never fire, since `apply()` is only ever reached through the
+    compiled path unless `--enforce-eager` is set.
+
+    So wrap the module-level `process_weights_after_loading` instead. It is
+    called exactly once, from `BaseModelLoader.load_model`, after every module's
+    own `process_weights_after_loading` has run -- and the call site resolves the
+    name from module globals, so patching the attribute works whatever the import
+    order. `TensorizerLoader` and `ModelExpressLoader` override `load_model` and
+    will not report; they are not paths EXL3 takes, and the cost of missing it is
+    one log line.
+    """
+    from vllm.model_executor.model_loader import base_loader
+
+    if getattr(base_loader, "_exl3_offload_summary_patched", False):
+        return
+
+    original = base_loader.process_weights_after_loading
+
+    @wraps(original)
+    def process_weights_after_loading(*args, **kwargs):
+        result = original(*args, **kwargs)
+        from .cpu_offload import build_staging, report_once
+
+        build_staging()
+        report_once()
+        return result
+
+    base_loader.process_weights_after_loading = process_weights_after_loading
+    base_loader._exl3_offload_summary_patched = True
+
+
+def _patch_offload_defaults() -> None:
+    """Give ``--cpu-offload-gb`` without ``--cpu-offload-params`` a safe default:
+    multimodal towers and routed experts, nothing else.
+
+    With no selector, vLLM's ``UVAOffloader`` offloads every parameter of every
+    module ``wrap_modules`` is handed. That is called twice over: once per tower
+    (``_mark_tower_model``, with the tower's name as `prefix`) and once for the
+    decoder layers (``make_layers``, with no prefix). For an EXL3 model the
+    decoder layers' plain tensors are what is left after the quantized ones --
+    norms, router weights -- a few KiB each and read by every token, which over
+    the link cost far more than their bytes (see `cpu_offload._OFFLOADABLE_COMPONENTS`
+    for the same effect measured on scale vectors).
+
+    So an empty selector lets tower calls through and skips the prefix-less
+    decoder-layer call. Towers are built first in the models that have them, so
+    they keep first claim on the budget; `cpu_offload` gives experts what is
+    left, and leaves dense EXL3 tensors alone without a selector. Any explicit
+    selector restores vLLM's behaviour unchanged.
+    """
+    from vllm.model_executor.offloader.uva import UVAOffloader
+
+    if getattr(UVAOffloader, "_exl3_defaults_patched", False):
+        return
+    original = UVAOffloader.wrap_modules
+
+    @wraps(original)
+    def wrap_modules(self, modules_generator, prefix: str = ""):
+        if not self.cpu_offload_params and not prefix:
+            return list(modules_generator)
+        return original(self, modules_generator, prefix)
+
+    UVAOffloader.wrap_modules = wrap_modules
+    UVAOffloader._exl3_defaults_patched = True

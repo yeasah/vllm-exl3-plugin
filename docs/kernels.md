@@ -345,6 +345,20 @@ held live across the multiply** -- and a memory capture of a real prefill step
 put it at 70% of *all* dynamic VRAM, larger than every vLLM allocation in the
 step combined. It is the single biggest thing the plugin does to peak memory.
 
+**And the tile it decodes into is pooled, as of 2026-09-12.** Bounding the scratch was the
+first half; the second is not re-requesting it. A capture during a 30K prefill put the
+tile at 29 MiB and the rotated activations at 27 MiB, allocated on *every* call — 46 MiB
+of a 107 MiB transient peak, and allocated after the memory profiler's window closes,
+which means the KV budget cannot see it and the operator pays for it in utilization
+headroom. Both buffers are fully overwritten before they are read, so one buffer per slot
+(keyed by stream, and declining to pool during CUDA-graph capture) serves every call. They
+then show up as long-lived 0.027 and 0.029 GiB allocations *inside* the profiled peak,
+which is the point: the pool's high-water mark is bounded by `max_num_batched_tokens`, and
+the profile run uses exactly that width, so it cannot grow afterwards. `EXL3_SCRATCH_POOL=0`
+restores per-call allocation. Combined with the attention backend declaring its own reserve
+this is what took `gpu_memory_utilization` to the card's `free/total` on the 27B — see
+[memory-accounting.md](memory-accounting.md).
+
 `reconstruct_slice` (already in the extension, alongside `reconstruct_had_slice`)
 decodes a column range, so the fix is to block the GEMM: decode one tile,
 `torch.mm` it into the matching slice of the output, repeat. `torch.mm` honours
@@ -446,6 +460,74 @@ Same model, two KV paths, both at ~119K context with a 2K chunk:
 The two paths differ in *shape*, not just size, and that is the durable finding: TQ's
 transient is **6144 B/token, linear in cached context**, on an axis the profile run never
 varies. fp8's is chunk-scaled. So a short test prompt validates an fp8 config and tells
-you nothing about a TQ one. Removing the rest of TQ's would mean changing a dequant
-kernel's dtype or rewriting an attention backend we do not own; both were costed and
-declined -- see [upstream.md](upstream.md).
+you nothing about a TQ one. The profiled window is narrower than "never varies" makes
+it sound: `profile_run()` compiles for `max_num_batched_tokens`, so on these runs it
+measures a **512-token** forward pass and reports the result as a constant — see
+[memory-accounting.md](memory-accounting.md).
+
+### What the 0.29 bump did to the budget (2026-09-10)
+
+The re-bless at vLLM 0.29 moved KV headroom on 14 of 14 entries, and the sign splits
+cleanly on execution mode -- same weights, same plugin, same card:
+
+| entry | mode | KV GiB |
+|---|---|---|
+| qwen3-0.6B 3.0bpw | eager | 12.20 -> 12.27 (+0.07) |
+| qwen3-0.6B 3.0bpw | **graphs** | 12.20 -> **11.19 (-1.01)** |
+| minicpm5-1B blockq | eager | 11.89 -> 12.00 (+0.11) |
+| minicpm5-1B blockq | **graphs** | 11.89 -> **11.61 (-0.28)** |
+| gemma-4-12B mul1 tied | eager | 6.50 -> 7.13 (+0.63) |
+| qwen3.8-27B blockq tq4 | eager | 0.65 -> 1.23 (+0.58) |
+
+Every eager entry gains, both graph entries lose, and the one eager exception is the
+MoE entry (1.79 -> 1.60), where 0.29's router change is the obvious suspect. So 0.29
+shrank something eager pays for and grew something CUDA-graph capture pays for, and in
+both directions the *KV cache absorbed the difference* -- which is the budget having no
+term for either, exactly as recorded above.
+
+**The gain is what broke the two tightest entries.** `qwen3.8-27B-blockq-MTP-fp8` and
+its tq4 sibling are `enforce_eager`, so they were handed **more** KV (1.05 -> 1.62 GiB)
+and then had nothing left for inference-time scratch: FlashInfer's autotuner asks 544
+MiB, fails, and the next kernel OOMs. A config that profiles successfully now fails to
+serve, and it fails *because* the transient footprint improved. Tracked as
+`kv-budget-margin` in [../TODO.md](../TODO.md).
+
+**Resolved 2026-09-12**: the budget has no term for either because the profiling window
+closes before the attention backend finishes allocating. FlashInfer's autotuner is not
+the culprit so much as the second victim — FlashInfer itself holds 0.385 GiB of static
+workspace the budget never sees, and TurboQuant 1.000 GiB. See
+[memory-accounting.md](memory-accounting.md).
+
+**But the eager/graphs sign split above is not established, and a cheap test settles it**
+(noted 2026-09-12). A cold torch.compile cache was measured that day costing 0.59 GiB of
+*profiled peak activation*, because compilation happens inside the profiling window and
+its high-water mark becomes the activation term
+([memory-accounting.md](memory-accounting.md)). `enforce_eager` sets
+`CompilationMode.NONE` ([vllm.py:1370](../deps/vllm/vllm/config/vllm.py#L1370)), so an
+eager entry cannot pay that term at all — and the two entries that *lost* KV headroom in
+the table are exactly the two graph entries, at 1.01 and 0.28 GiB. These runs predate
+`bench/`'s cache control (built 2026-09-10, which redirects every store and runs a warmup
+per entry precisely so the measured run is warm), so nothing recorded what cache state
+they were in. "0.29 grew something CUDA-graph capture pays for" and "these two runs
+compiled cold" predict the same table.
+
+The test is one entry, two runs, no bump involved: take `qwen3-0.6B 3.0bpw`, run it with
+the warmup and again without, and compare `kv_cache_gib`. If the delta is the 1.01 GiB the
+table attributes to 0.29, the attribution is wrong and the mechanism is cache state. This
+is not a reason to re-open the 0.29 conclusions — the *static workspace* finding stands on
+its own controlled experiment — but it is a reason not to cite this table as evidence
+about what a version bump cost.
+
+Removing the rest of TQ's was costed as changing a dequant
+kernel's dtype or rewriting an attention backend we do not own, and both were declined as
+things to *offer*; that decision was reopened on 2026-09-08 as work to carry, with a
+cheaper third option and a `max_model_len`-sized workspace reservation these captures may
+not include -- see [upstream.md](upstream.md), [memory-accounting.md](memory-accounting.md)
+(where `turboquant-prefill-transient` closed) and
+[../TODO.md](../TODO.md).
+
+They did not include it. Measured 2026-09-12 at **1.000 GiB** — sized by the declared
+262144 rather than the served context, and present in neither `consumed` nor
+`peak_activation`, so it was never going to show up in a capture that starts from
+vLLM's own figures. It is larger than the ~486 MiB guessed here, because the guess
+assumed it scaled with served context. [memory-accounting.md](memory-accounting.md).

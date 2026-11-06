@@ -198,7 +198,7 @@ queue and nobody is waiting on a first token, which is exactly the regime its
 design targets. The arm costs one string: `tools/gsm8k_kv.py` and
 `tools/niah_kv.py` take the KV dtype straight through `build_llm`, trial lists are
 seeded identically, so results pair against the existing TQ and fp8 runs and the
-McNemar test applies unchanged. See TODO `kvarn-accuracy`.
+McNemar test applies unchanged. See FUTURE.md `kvarn-accuracy`.
 
 Pin `KVARN_FUSED_VERIFY=0` when doing it. The fused-verify gate triggers at
 `ceil(max_seq_len/group) >= 64`, which at group 128 is **exactly 8192 tokens** --
@@ -232,3 +232,28 @@ two months, gated on five lines. See [upstream.md](upstream.md).
 `block_size` must equal the preset's group. KVarN asserted that inside
 `get_kv_cache_shape`, which the current backend contract never calls, so the
 invariant is now unguarded -- it should be re-asserted in `customize_spec`.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `kvarn-accuracy` — Does KVarN actually match FP16 accuracy?
+
+KVarN's published claim is "matches FP16 accuracy", which is strong vague language
+and untested by us. It lost on our axes -- +17% context for 3.5x slower prefill --
+but prefill cost amortizes across a queue, so if the accuracy claim survives
+measurement there is plausibly a place for it in **offline batched** work, which is
+the regime its design actually targets.
+
+Candidate approach: run the existing KV-targeted harnesses rather than building
+anything. `tools/gsm8k_kv.py` and `tools/niah_kv.py` take the KV dtype straight
+through `build_llm`, and their trial lists are seeded identically, so a KVarN arm
+pairs item-for-item against the TQ and fp8 runs already in
+`docs/data/turboquant-kv/` and the McNemar test applies unchanged. Use
+`kvarn_k4v2_g128`, not `k4v4` -- see the note for why k4v4 degenerates at head_dim
+256. Pin `KVARN_FUSED_VERIFY=0`: the routing crossover sits at exactly 8192 tokens,
+which is exactly the middle NIAH rung, so an unpinned arm spans two
+implementations. The engine is branch `experiment/kvarn` in our vLLM fork.
+
+→ [docs/kvarn.md](kvarn.md)

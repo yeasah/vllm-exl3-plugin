@@ -1,6 +1,6 @@
 # YAQA in the EXL3 quantizer
 
-Investigation opened 2026-08-26 against `TODO: yaqa`, measured out over the following
+Investigation opened 2026-08-26 against TODO `yaqa` (now `yaqa-probe`), measured out over the following
 days. Nothing is implemented in the converter; the rounding algorithm, five correctness
 guards and six diagnostics live in [tools/yaqa/](../tools/yaqa/).
 
@@ -847,3 +847,131 @@ KL rather than saving anything; the omission is load-bearing. See
 [The ignored `H_O` is load-bearing](#the-ignored-h_o-is-load-bearing). What it left
 behind is item 0 above — the same measurement showed `probe.py` has been scoring YAQA
 against a baseline the converter does not use.
+
+## Blended Hout: what ships (2026-10-26 to -27)
+
+exllamav3 1.6.4 shipped the half this note was missing: `util/yaqa_hessians.py` collects the output-side
+factor (Hout) in Transformers, and `convert.py -hess` runs two-sided LDLQ against it while keeping the
+online input side. Measured on our pipeline (our calibration and recipe, `--out_scales always`), equal
+size, excess KL against the one-sided conversion:
+
+| Hout from | Qwen3-0.6B 3 bpw wild / swe | 4 bpw wild / swe | Ornith-1.5-9B 3.5 bpw wild / swe | 4 bpw wild / swe |
+|---|---|---|---|---|
+| the calibration (2 seeds) | -17 / -19% | -21 / -18..-26% | +3 / -1% | +1 / -3..-9% |
+| own voice (240 bf16 rows; 218 on the 0.6B) | -19 / -20% | -23 / -24% | -11 / +2..-8% | -11 / -5..-6% |
+| **50/50 blend, unit trace per tensor** | **-20 / -22%** | **-22 / -28%** | **-8 / -4%** | **-11 / -11%** |
+
+- **The calibration's Hout fails on the 9B.** Two seeds agree on nothing gained, and rounding against
+  it inflates early-layer weight error 12-14%, tapering to none by the last layer. Its documents and
+  tool turns put the gradients through the states where Ornith's early layers are numerically fragile
+  ([qbench.md](qbench.md) "KL floors"). The same rounding against own-voice rows gains 11% on chat.
+- **Each factor helps the slice it resembles, and they add.** Own voice is chat-like, the calibration
+  agent-like; the blend keeps own voice's chat gain and adds swe on the 9B, and is best or tied on
+  every cell of the 0.6B. Only the rounding metric changes, not the allocation, so it does not fall
+  into the measurement-mix trap ([qbench.md](qbench.md), the 27B's loud rows).
+- **YAQA's own output scales lose.** `--out_scales yaqa` cost +0.5-3% alone and gave back half the
+  gain in combination: `always` stays, as the 2026-08-31 sweep above found.
+- **A recipe re-solved for two-sided error does not add.** `sc_measure --hout` (two-sided LDLQ-shaped
+  noise, validated on the 0.6B: 11-25% cheaper than one-sided at equal rfn, the size of the real gain)
+  moves bits from layers 28-31 to 0-7. That traded wild for 4 bpw swe instead of improving both.
+
+**In the pipeline:** `quant.py yaqa` (after `traces`) generates own-voice rows through the eval generator
+(three passes over the 157-prompt pool, raw fill rows dropped), collects Hout on them and on the
+calibration, and blends them into `_hess/blend`; `quantize` then converts with `-hess` and records it in
+each revision's `calibration.json` (`--no-yaqa` converts one-sided). Costs: the factor pass holds the
+bf16 model and its full backward pass (a 9B needs ~44 GB at `--layers-per-run 4`, ~45 min per factor on
+an A6000), so it belongs with the traces and measurement on a cloud box; conversion takes 1.7x as long
+(the 9B: ~2 min per layer against ~1.1); inference is unchanged. vLLM's sampling is not reproducible
+run to run, so a regenerated own-voice set differs in text (same prompts) and the quant in bytes; on the
+0.6B a pipeline rerun landed within 1.3 points of the hand-built blend (wild -23.0%, swe -26.6%).
+Fused MoE experts are not covered by the factor tool and stay one-sided. Work: `quant_work/_yaqa`,
+`quant_work/_yaqa9`; factors and measurements in the `yeasah/yaqa-9b-hess` bucket.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `yaqa` — YAQA-quality rounding in the quantizer
+
+Round with a second Hessian on the output channels, minimizing the full-model output KL
+instead of each layer's immediate activation error. Converter-side only — format, kernels
+and plugin untouched — so every model we ship would get better at no inference cost.
+
+**Measured, and the decision is open rather than blocked.** At the paper's minimum data
+budget, on its own model family, YAQA gives **−19% KL in-domain and −16% on neutral text**
+(Llama-3.2-1B, 2 bits, per-layer), against Appendix A.11's −20.4% at that same budget —
+i.e. it reproduces the paper, and nothing structural in EXL3 is costing us the effect. It
+survives the domain shift that `EXL3-SC` failed, and the gain grows as bitrate falls.
+A.11's curve suggests ~−25% at full budget.
+
+**The cost is the question, not the benefit.** A reverse-streaming gradient pass the
+converter does not have (it is forward-only, one module resident, no autograd), 2.8x the
+Hessian working set on dense models and 14x on wide MoE, a calibration corpus we do not
+ship, and one unexplained pathological layer — the first block's `down_proj`, reproducible
+across both models tested — worth 1-3 points if gated around.
+
+**What would move it, cheapest first:** re-run the headline with
+`apply_out_scales = True` (see below) — it runs on this workstation and can close the
+entry outright; then the 8B (~20.5 GiB, one 24 GiB card, not this workstation); a
+full-budget sketch (corpus already in the HF cache, only GPU time missing); or an
+explanation of that first-block layer.
+
+**The cheap side-result was measured and is closed (2026-08-31).** EXL3 applies
+`out_channel_scales` and then rounds as if the output metric were the identity, which it
+no longer is — but restoring it costs up to **+57% KL**, and `α = 0` (the shipped
+behaviour) is at the optimum of a five-point sweep. Dropping that factor is *how*
+`apply_out_scales` works: it makes the rounding minimize relative per-channel error
+rather than absolute. Nothing to harvest.
+
+**A caveat this leaves on the numbers above:** `probe.py` sets `apply_out_scales = False`,
+so the −19% is measured against a baseline up to 66% worse than what the converter ships
+(`--out_scales` defaults to `always`). Whether the gain survives on top of the heuristic
+is untested and is now the cheapest thing to check first.
+
+**Upstream shipped the missing half (exllamav3 1.6.4, now in the fork).** `util/yaqa_hessians.py`
+computes the Kronecker factors in Transformers (Fisher from the model's own sampled targets), and
+`convert.py -hess` consumes them for two-sided LDLQ, with `--out_scales yaqa` from the output
+diagonal. Its default collects only the output side -- one forward and one backward pass -- and
+upstream reports that on Qwen3.5-2B the output factor with the regular online input side beat the
+fully iterated pair. That is most of the cost problem above gone. **Next pipeline item:** the output-only arm against our pipeline's
+calibration at one rung on the 0.6B, then the 9B; memory of the Transformers backward pass is the
+thing to watch on anything larger.
+
+**A cheap YAQA diagnostic, before paying for the full Hessians (idea, 2026-11-03).** Whether YAQA's KL gain is worth its
+recall cost is model-dependent: on Qwen3.8-27B 4.00 the blend costs 3.9 points of kept and own voice alone 1.5, while
+on the 9B and 2B YAQA costs 0 to 2. The probe would be an own-voice Hout from far fewer rows, which cuts the pass's time,
+not its peak memory (that is one row's activations), and possibly from an FP8 release, which halves the weights (27B:
+about 110 GB to about 81, so perhaps one 96 GB card rather than 4x48). Rows first: MiniCPM5-2B 4.00 with 60, 120 and 217
+rows is queued. FP8 has two unknowns, Transformers' backward through FP8 linears and whether FP8 factors rank models as
+BF16 ones do, both testable on a model whose BF16 factors exist. exllamav3 1.6.6's VRAM savings are in `convert.py`'s
+capture pass (FP4/FP8 sources kept packed), not in `util/yaqa_hessians.py`, which is unchanged.
+
+**Measured on Qwen3-0.6B (2026-10-26): two-sided LDLQ is a large, robust win; the YAQA scales are
+not.** The pipeline's own calibration and recipe were used throughout, at 3 and 4 bpw. Hout came from
+`util/yaqa_hessians.py` at its defaults (output side, weighted, 250 rows, ~4.5 min, 11.9 GB). Against the
+pipeline's quant, `-hess` with `--out_scales always` cut excess KL by 17-26% on wild and swe at both
+rates, and a second Hout seed landed at -17% to -20%. `--out_scales yaqa` cost +0.5-3% alone and gave
+back about half the LDLQ gain together (-2% to -10%). That matches the August result that `always`
+sits at the optimum, and it settles the caveat above: the gain survives the out-scales heuristic.
+Plumbing control: `-hess -h1` with `always` is byte-identical to the pipeline quant across all 902
+tensors. **On Ornith-1.5-9B (2026-10-27) the Hout's rows decide it.** Collected from the full calibration,
+two-sided LDLQ gained nothing: wild +0.5% to +4%, swe -1% to -8.5% (inside its draw noise), with two
+seeds agreeing. Rounding against it inflated early-layer weight error by 12-14%, tapering to none by
+the last layer. Collected from 240 bf16-generated own-voice rows (`ctx_trace` self-only, three seeds),
+the same conversion gives **wild -11.1% to -11.6%** at 3.5 and 4 bpw (two Hout seeds), and swe -5% to
+-8% on three of four arms. Re-solving the recipe from a two-sided measurement (`sc_measure --hout`,
+`89f9cd3d`) does not add to it: wild -8% to -10% with the own-voice Hout and worse with the full one,
+swe mixed. So the step is own-voice rows -> Hout (cloud, ~45 min per seed for a 9B on 48-96 GB) ->
+`convert -hess` (1.7x the conversion time); measurement and recipe unchanged. **Blended Hout is the default** (2026-10-27): per tensor, the own-voice and full-calibration factors,
+each normalized to unit trace, averaged 50/50 (`quant_work/_yaqa9/blend.py`). On the 9B it keeps
+own voice's chat gain and adds swe: wild -8.0% / -10.7% and swe -4.2% / -11.2% at 3.5 / 4 bpw, the best
+single arm at 4. On Qwen3-0.6B, where the full-calibration Hout already worked (-17% to -26%), own voice
+adds 1-3 points and the blend is best or tied on every cell: wild -19.5% / -22.0%, swe -21.8% / -27.9%
+at 3 / 4 bpw. **Integrated (`5c4a35c`):** `quant.py yaqa` after `traces`, and `quantize` converts with `-hess` when the
+blend exists ([docs/yaqa.md](yaqa.md) "Blended Hout: what ships"). **Next: real runs**, starting with
+Qwen3.8-27B on a cloud box (the factor pass needs the bf16 model and a full backward pass), then the
+Ornith-1.5-9B re-publish. The item closes when a published ladder carries it. Work: `quant_work/_yaqa9`, Hout and
+measurements in the `yeasah/yaqa-9b-hess` bucket.
+
+→ [docs/yaqa.md](yaqa.md), [tools/yaqa/](../tools/yaqa)

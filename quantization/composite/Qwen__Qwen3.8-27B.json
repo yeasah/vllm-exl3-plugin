@@ -1,0 +1,6 @@
+{
+  "source": "https://huggingface.co/Qwen/Qwen3.8-27B (model card, first line of the introduction)",
+  "notes": "The publisher positions the model for agentic use: \"Qwen3.8-27B excels at coding, agentic workflows, and office automation tasks.\" Conversational chat is the side case, so real agent sessions carry most of the composite. Decided 2026-10-09, after the wild slice had been scored but before swe was, from the publisher's description alone.",
+  "summary": "weighted toward agent sessions, as the publisher positions this model for coding and agentic work",
+  "weights": {"wild": 0.30, "swe": 0.70}
+}

@@ -530,6 +530,94 @@ class TestEmbedRows(unittest.TestCase):
 
 
 @requires_gpu
+class TestReconstructScratchPool(unittest.TestCase):
+    """Reusing the reconstruct scratch must not change the answer.
+
+    The decoded weight tile and the rotated activations were allocated per call,
+    which measured 46 MiB of the 107 MiB transient peak in a 30K prefill -- and
+    that peak is charged to nobody, because it happens after the memory
+    profiler's window closes. Pooling them is only safe because both are fully
+    overwritten before they are read, so the test that matters is that a second
+    call through a dirty buffer produces what a first call through a fresh one
+    does.
+    """
+
+    def _fetch(self):
+        from tests.remote_tensors import fetch_module_tensors
+
+        repo, revision, key = (
+            "turboderp/Llama-3.2-1B-Instruct-exl3",
+            "3.0bpw",
+            "model.layers.0.self_attn.q_proj",
+        )
+        try:
+            return fetch_module_tensors(repo, revision, key)
+        except OSError as e:
+            self.skipTest(f"could not fetch {repo}@{revision}: {e}")
+
+    def test_pooled_matches_unpooled_and_reuses(self):
+        from unittest import mock
+
+        from vllm_exl3_plugin import format, ops
+
+        t = self._fetch()
+        in_f, out_f = format.dims_from_trellis_shape(t["trellis"].shape)
+        mcg, mul1 = "mcg" in t, "mul1" in t
+
+        budget = ops.RECONSTRUCT_TILE_MB
+        pool = ops.SCRATCH_POOL
+        self.addCleanup(setattr, ops, "RECONSTRUCT_TILE_MB", budget)
+        self.addCleanup(setattr, ops, "SCRATCH_POOL", pool)
+        # Force tiling, so the pooled `w` is actually exercised.
+        ops.RECONSTRUCT_TILE_MB = in_f * out_f // 4 >> 19
+
+        torch.manual_seed(0)
+        # Comfortably past RECONSTRUCT_THRESHOLD, so the reconstruct path runs.
+        xs = [
+            torch.randn((512, in_f), dtype=torch.half, device="cuda:0") * 0.1
+            for _ in range(3)
+        ]
+
+        ops.SCRATCH_POOL = 0
+        ops._SCRATCH.clear()
+        unpooled = [
+            ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1) for x in xs
+        ]
+
+        ops.SCRATCH_POOL = 1
+        ops._SCRATCH.clear()
+        allocations = []
+        real_empty = torch.empty
+
+        def counting_empty(*a, **kw):
+            out = real_empty(*a, **kw)
+            if kw.get("device") is not None and out.is_cuda:
+                allocations.append(out.numel() * out.element_size())
+            return out
+
+        with mock.patch.object(torch, "empty", counting_empty):
+            pooled = [
+                ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1) for x in xs
+            ]
+
+        for i, (got, want) in enumerate(zip(pooled, unpooled)):
+            with self.subTest(call=i):
+                # Same arithmetic, same order: this one is exact.
+                torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+        # The first call fills the pool; later ones must not grow it, which is
+        # the whole point. Two slots, so two buffers, and never a third.
+        self.assertEqual(
+            len(ops._SCRATCH), 2, f"expected two pooled slots, got {list(ops._SCRATCH)}"
+        )
+        self.assertLessEqual(
+            len(allocations),
+            len(xs) + 2,
+            "pooling did not stop the per-call scratch allocations",
+        )
+
+
+@requires_gpu
 class TestTiledReconstruct(unittest.TestCase):
     """Decoding the weight in column tiles must not change the answer.
 
@@ -604,6 +692,13 @@ class TestTiledReconstruct(unittest.TestCase):
 
         Asserted against `torch.cuda.max_memory_allocated`, since a version
         that silently decoded whole would still return the right numbers.
+
+        Measured with the scratch pool off, because the pool exists precisely to
+        stop that scratch being allocated per call: with it on, the second
+        configuration reuses the first's buffer and the measured peak falls by
+        more than the tiling explains. That is the pool working, and it is
+        covered by `TestReconstructScratchPool`; what is under test here is the
+        budget's bound on the size of the buffer, pooled or not.
         """
         from tests.remote_tensors import fetch_module_tensors
         from vllm_exl3_plugin import format, ops
@@ -624,7 +719,10 @@ class TestTiledReconstruct(unittest.TestCase):
         x = torch.randn((512, in_f), dtype=torch.half, device="cuda:0") * 0.1
 
         budget = ops.RECONSTRUCT_TILE_MB
+        pool = ops.SCRATCH_POOL
         self.addCleanup(setattr, ops, "RECONSTRUCT_TILE_MB", budget)
+        self.addCleanup(setattr, ops, "SCRATCH_POOL", pool)
+        ops.SCRATCH_POOL = 0
 
         peaks = {}
         for mb in (0, in_f * out_f // 4 >> 19):

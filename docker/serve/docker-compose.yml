@@ -1,0 +1,21 @@
+services:
+  vllm-exl3-serve:
+    image: yeasah/vllm-exl3-serve:latest
+    ports:
+      - ${HOST_PORT:-8000}:8000
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    command: 'yeasah/Ornith-1.5-9B-exl3 --revision 5.00bpw --max-model-len auto --max-num-seqs 4 --max-num-batched-tokens 512 --trust-remote-code --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --kv-cache-dtype nvfp4 --enable-prefix-caching --cpu-offload-gb 1 --cpu-offload-params visual --mm-processor-kwargs ''{"max_pixels": 1048576}'' --gpu-memory-utilization 0.90 --override-generation-config ''{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'''
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - vllm-exl3-serve-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  vllm-exl3-serve-cache:

@@ -30,7 +30,7 @@ import torch
 from torch.nn import Parameter
 
 from .. import format, ops, tp
-from .linear import EXL3LinearMethod, EXL3Parameter
+from .linear import EXL3LinearMethod, EXL3Parameter, stored_dtype
 
 
 def _lm_head_weight_loader(param: EXL3Parameter, loaded_weight: torch.Tensor) -> None:
@@ -81,6 +81,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
             layer.register_parameter(
                 name,
                 EXL3Parameter(
+                    dtype=stored_dtype(name),
                     num_shards=1,
                     device=device,
                     weight_loader=_lm_head_weight_loader,
@@ -107,7 +108,7 @@ class EXL3LMHeadMethod(EXL3LinearMethod):
         suh = self._shard(params, "suh", 0, layer)
         svh = self._shard(params, "svh", 0, layer)
 
-        bits = format.bits_from_trellis_shape(trellis.shape)
+        bits = format.bits_from_trellis_shape(trellis.shape, "mul1" in params)
         stored_in, stored_out = format.dims_from_trellis_shape(trellis.shape)
         # At TP=1 nothing was sliced and the checkpoint is sized against the
         # real vocabulary; at TP>1 the loader already cut this rank's slice.

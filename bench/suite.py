@@ -11,12 +11,22 @@ process isolation plus a timeout contains.
 
 The `full` tier is not yet populated -- MoE, `mul1`, the Transformers backend and
 TP all need entries, and they get added against a gate that is already working
-rather than as part of standing it up. See TODO `bench-suite`.
+rather than as part of standing it up. See TODO `bench-gaps`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+
+#: Measured 2026-10-23 on the 5060 Ti, cold and seeded from the committed fixture: the
+#: graphs-mode blockq entry and the MoE entry are not bit-reproducible run to run (1 of 3
+#: and 1 of 6 cold runs of identical code differed on one prompt: KL max 0.009-0.018, 2-3
+#: argmax flips, greedy unchanged), while every other entry is. Likely torch.compile for
+#: the first and an order-dependent reduction in the MoE path; not yet traced (TODO
+#: `bench-cache-control`). Until it is, these entries allow that many flips rather than
+#: failing on chance.
+RUN_TO_RUN_FLIPS = {"argmax_disagreements": 3}
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,14 @@ class Entry:
     #: failure instead of failing the gate. Clearing this field is how the fix
     #: gets verified.
     known_broken: str | None = None
+    #: The TP=1 entry this one shards. Its committed baseline is a second
+    #: reference: `bless` refuses and `check` fails when this capture leaves it
+    #: by more than the sibling tolerance in run.py. A TP entry's own baseline
+    #: only says it has not changed; without this, a first bless would record a
+    #: TP bug and the gate would then defend it.
+    tp_reference: str | None = None
+    #: Overrides for that sibling comparison, as `tolerance` is for the baseline.
+    tp_tolerance: dict = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -111,11 +129,14 @@ ENTRIES: list[Entry] = [
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
         model_impl="auto",
+        env={"EXL3_BLOCKQ_ON_LOAD": "0"},
         exercises="the mcg codebook, an untied model, and a separately "
         "quantized 6-bit head -- none of which the Qwen3/Llama entries reach. "
-        "Paired with the transformers-backend entry below: together the two "
-        "are the claim that the backend is token-for-token identical to the "
-        "native implementation",
+        "Pinned dense since on-load became the default: unpinned this entry "
+        "equals the blockq fixture exactly, and nothing would gate an untied "
+        "model's dense embedding, which is both the opt-out and the fallback "
+        "for a hidden size blockq cannot divide. The default path is the tq4 "
+        "and transformers-backend entries, which also exercise the encoder",
     ),
     Entry(
         label="minicpm5-1B 3.0bpw via transformers backend",
@@ -147,6 +168,7 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="minicpm5-1B 3.0bpw blockq graphs",
+        tolerance=RUN_TO_RUN_FLIPS,
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
         fixture="blockq",
@@ -161,26 +183,52 @@ ENTRIES: list[Entry] = [
         "same claim through vLLM's own graph handling",
     ),
     Entry(
+        label="minicpm5-1B 3.0bpw trellis eager",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        exercises="exllamav3's trellis embedding end to end: "
+        "EXL3TrellisEmbeddingMethod decoding rows that have no dense copy "
+        "anywhere and no fallback. What the pipeline publishes from now on, so "
+        "a loader that stopped recognizing the format fails here. The "
+        "weight-bytes gate catches a table left resident beside a dense one, "
+        "the shape of the Muse bug that on-load blockq had",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis graphs",
+        tolerance=RUN_TO_RUN_FLIPS,
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        enforce_eager=False,
+        exercises="the same table under torch.compile and CUDA graph replay. "
+        "The decode is plain torch and fuses, so the compiled path differs from "
+        "the kernel by 1-2 fp16 ULPs on about 6% of elements, and a gather with "
+        "baked-in indices would return the previous batch's rows while failing "
+        "nothing else",
+    ),
+    Entry(
         label="minicpm5-1B 3.0bpw tq4",
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
         kv_cache_dtype="turboquant_4bit_nc",
         exercises="a quantized KV cache under EXL3 weights, which nothing else "
         "in the matrix touches -- every other entry runs the default `auto` "
-        "dtype. Differs from `minicpm5-1B-3.0bpw-mcg` by the KV dtype alone, so "
-        "a divergence is attributable to turboquant rather than to the "
-        "checkpoint.\n\n"
+        "dtype. Its embedding is encoded on load, which equals the fixture of "
+        "`minicpm5-1B-3.0bpw-blockq-eager`, so a divergence from that entry is "
+        "attributable to turboquant rather than to the checkpoint.\n\n"
         "It earns fast-tier placement because turboquant is the linchpin of "
         "this project's low end -- it is what makes a long context fit beside a "
         "2-3bpw model on 16 GiB -- and because this model can host it at all: "
         "MiniCPM5-1B has no sliding window, which is the one thing TurboQuant "
-        "cannot serve (see TODO `turboquant-sliding-window`, where gemma-4 and "
+        "cannot serve (see FUTURE.md `turboquant-sliding-window`, where gemma-4 and "
         "Laguna are both blocked on exactly that)",
     ),
     # ---- full tier: the surfaces the fast tier cannot reach on a 16 GiB card
     # in a couple of minutes. Same gate, run before a bump rather than casually.
     Entry(
         label="qwen3.5-35B-A3B 2.0bpw MoE",
+        tolerance=RUN_TO_RUN_FLIPS,
         model="turboderp/Qwen3.5-35B-A3B-exl3",
         revision="2.00bpw",
         tier="full",
@@ -320,6 +368,13 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="qwen3.8-27B 3.0bpw blockq MTP fp8",
+        known_broken="OOMs at first inference on the 16 GiB dev card: exl3_mm "
+        "cannot get 272 MiB with 217 MiB free. Not a spec or dtype conflict, and "
+        "not the 0.29 bump -- it passed on the 0.28 build hours earlier. The KV "
+        "cache took 1.05 -> 1.62 GiB against this baseline, i.e. it was handed "
+        "memory that inference-time scratch used to have. Tracked as "
+        "`kv-budget-margin` in TODO.md; the one-run test is whether pinning "
+        "--kv-cache-memory at the blessed figure restores it.",
         model="turboderp/Qwen3.8-27B-exl3",
         revision="3.00bpw",
         tier="full",
@@ -362,39 +417,156 @@ ENTRIES: list[Entry] = [
         "(8 trellis modules, 202.5 MiB). Nothing else in the matrix serves two "
         "models in one engine, and a plugin that mis-handles the second would "
         "fail nowhere else",
+    ),    # ---- tp tier: the same surfaces sharded across two GPUs. Baselines are
+    # per degree (these are TP=2, blessable on the local 2x5060 Ti); each entry
+    # also answers to its TP=1 sibling's baseline (`tp_reference`). The local
+    # cards have no peer access, so vLLM's custom all-reduce is never reached
+    # here: NCCL only. That path, and TP=4/8, need a cloud box of their own.
+    Entry(
+        label="qwen3-0.6B 3.0bpw tp2 eager",
+        known_broken="Qwen3's vocabulary (151936 = 1187 Hadamard blocks of 128) "
+        "cannot split evenly into whole blocks across 2 ranks, so the plugin "
+        "refuses the vocab-parallel quantized head at load (EXL3FormatError, "
+        "lm_head vocab: 75968 channels per rank). A refusal, not wrong output. "
+        "Every Qwen3-family checkpoint shares it. See TODO `tp-vocab-alignment`",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.0bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="qwen3-0.6B-3.0bpw-eager",
+        exercises="column/row-sharded EXL3 linears and the NCCL all-reduce, on "
+        "the simplest target: the TP baseline every other tp entry differs "
+        "from by one variable",
     ),
     Entry(
-        label="qwen3.8-27B 3.0bpw blockq MTP tq4",
-        model="turboderp/Qwen3.8-27B-exl3",
+        label="qwen3-0.6B 3.0bpw tp2 graphs",
+        known_broken="Qwen3's vocabulary (151936 = 1187 Hadamard blocks of 128) "
+        "cannot split evenly into whole blocks across 2 ranks, so the plugin "
+        "refuses the vocab-parallel quantized head at load (EXL3FormatError, "
+        "lm_head vocab: 75968 channels per rank). A refusal, not wrong output. "
+        "Every Qwen3-family checkpoint shares it. See TODO `tp-vocab-alignment`",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.0bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        tp_reference="qwen3-0.6B-3.0bpw-graphs",
+        exercises="the same under torch.compile and CUDA graph capture, where "
+        "the collectives are captured into the graph rather than issued eagerly",
+    ),
+    Entry(
+        label="qwen3-0.6B 3.5bpw mixed tp2",
+        known_broken="Qwen3's vocabulary (151936 = 1187 Hadamard blocks of 128) "
+        "cannot split evenly into whole blocks across 2 ranks, so the plugin "
+        "refuses the vocab-parallel quantized head at load (EXL3FormatError, "
+        "lm_head vocab: 75968 channels per rank). A refusal, not wrong output. "
+        "Every Qwen3-family checkpoint shares it. See TODO `tp-vocab-alignment`",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.5bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="qwen3-0.6B-3.5bpw-mixed",
+        exercises="bit widths mixed inside a merged linear, then sharded: the "
+        "shard boundaries have to fall per sub-tensor, not across the merge",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw mcg tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
-        tier="full",
+        tier="tp",
+        tensor_parallel_size=2,
+        env={"EXL3_BLOCKQ_ON_LOAD": "0"},
+        tp_reference="minicpm5-1B-3.0bpw-mcg",
+        exercises="column/row-sharded EXL3 linears and the NCCL all-reduce on "
+        "a model whose vocabulary splits into whole Hadamard blocks (130560 = "
+        "510 per rank): the dense TP baseline, standing in for the Qwen3 "
+        "entries above until their head can be split",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-trellis-eager",
+        exercises="the trellis table sliced by rows across ranks, with its sign "
+        "vectors and codebook replicated",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis graphs tp2",
+        tolerance=RUN_TO_RUN_FLIPS,
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        tier="tp",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        tp_reference="minicpm5-1B-3.0bpw-trellis-graphs",
+        exercises="the sliced table under torch.compile and CUDA graph replay",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw blockq graphs tp2",
+        tolerance=RUN_TO_RUN_FLIPS,
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
         fixture="blockq",
-        kv_cache_dtype="turboquant_4bit_nc",
-        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
-        language_model_only=True,
-        # Tight on a 16 GiB card, and the requirement is mostly a *constant*:
-        # halving max_model_len 4096 -> 2048 moved it only 0.88 -> 0.83 GiB,
-        # because 48 of this model's 64 layers are linear-attention whose state
-        # does not scale with context. So headroom comes from utilization, not
-        # from a shorter context -- the same 0.95 the tight-fit line in
-        # ~/ckpt/run-qwen3.8-27b.sh uses.
-        max_model_len=2048,
-        gpu_memory_utilization=0.95,
-        exercises="an MTP drafter, which is the coverage nothing else has: a "
-        "*second model instance* built by vLLM's speculative machinery from the "
-        "same checkpoint, whose modules go through `get_quant_method` "
-        "independently of the main model's. This checkpoint's MTP head is "
-        "genuinely EXL3-quantized (8 trellis modules, 202.5 MiB), so a plugin "
-        "that mishandled a secondary model would fail here and nowhere else.\n\n"
-        "It also stacks four lossy schemes -- blockq embedding, trellis "
-        "weights, turboquant KV, and speculative drafting -- on top of the "
-        "deployed `--language-model-only` shape.\n\n"
-        "**This entry was added as `known_broken` on the belief that MTP and "
-        "TurboQuant do not combine. They do.** The first two runs failed on KV "
-        "cache sizing (0.88 GiB needed against 0.28 available) rather than on "
-        "any spec conflict, and given utilization headroom it captures cleanly. "
-        "Worth remembering when the next `known_broken` is written from "
-        "recollection rather than from a message",
+        tier="tp",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        tp_reference="minicpm5-1B-3.0bpw-blockq-graphs",
+        exercises="sharded linears and the blockq embedding under torch.compile "
+        "and CUDA graph capture, where the collectives are captured into the "
+        "graph rather than issued eagerly",
+    ),
+    Entry(
+        label="llama-3.2-1B 3.0bpw tied tp2",
+        model="turboderp/Llama-3.2-1B-Instruct-exl3",
+        revision="3.0bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="llama-3.2-1B-3.0bpw-tied",
+        exercises="the tied embedding served from a vocab-parallel quantized "
+        "lm_head: each rank holds half the vocabulary, and the embedding "
+        "lookup has to find its rows on the right rank",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw blockq tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="blockq",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-blockq-eager",
+        exercises="the block-quantized embedding at TP>1, written and never run "
+        "on more than one GPU: all three of its tensors slice on dim 0, with "
+        "none of the trellis path's 128-row Hadamard rule",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw via transformers backend tp2",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        model_impl="transformers",
+        tier="tp",
+        tensor_parallel_size=2,
+        tp_reference="minicpm5-1B-3.0bpw-via-transformers-backend",
+        exercises="the Transformers backend under TP, which no run has ever "
+        "taken: its tensor-parallel plan comes from the model's HF config "
+        "rather than from a vLLM model file",
+    ),
+    Entry(
+        label="qwen3.5-35B-A3B 2.0bpw MoE tp2",
+        tolerance=RUN_TO_RUN_FLIPS,
+        model="turboderp/Qwen3.5-35B-A3B-exl3",
+        revision="2.00bpw",
+        tier="tp",
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.92,
+        tp_reference="qwen3.5-35B-A3B-2.0bpw-MoE",
+        exercises="MoE under TP: exl3_mgemm on each rank's expert shards, and "
+        "the unquantized router and shared-expert gate through ReplicatedLinear "
+        "-- the loader 2261ea826 fixed after it had crashed every bf16 model "
+        "with one at TP>=2 since 2026-09-04",
     ),
 ]
 
@@ -448,6 +620,16 @@ PERF_ENTRIES: list[Entry] = [
         "protection of the gather belongs to a microbenchmark, which would "
         "miss interaction regressions entirely and is the likelier direction "
         "for this path to break, blockq being ours to change",
+    ),
+    Entry(
+        label="minicpm5-1B 3.0bpw trellis perf",
+        model="turboderp/MiniCPM5-1B-exl3",
+        revision="3.00bpw",
+        fixture="trellis",
+        enforce_eager=False,
+        exercises="the same claim as the blockq entry above for the trellis "
+        "gather, which is about 25x slower than blockq's at 8192 tokens "
+        "compiled. Whether that reaches a served prefill is what this measures",
     ),
     Entry(
         label="qwen3.5-35B-A3B 2.0bpw MoE perf",

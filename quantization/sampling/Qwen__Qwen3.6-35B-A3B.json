@@ -1,0 +1,14 @@
+{
+ "source": "Qwen/Qwen3.6-35B-A3B README, 'We recommend using the following set of sampling parameters for generation'; read 2026-10-04",
+ "notes": "Use-case *and* thinking modes. swe takes 'coding' (the README's recommendation for precise coding)",
+ "modes": {
+   "thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0},
+   "instruct": {"temperature": 0.7, "top_p": 0.80, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0},
+   "coding":  {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}
+ },
+ "rules": [
+  {"slice": "swe", "mode": "coding"},
+  {"thinking": true, "mode": "thinking"},
+  {"mode": "instruct"}
+ ]
+}

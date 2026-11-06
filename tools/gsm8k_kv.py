@@ -64,6 +64,50 @@ def override_boundary(boundary):
     )
 
 
+#: Calls to each continuation-prefill implementation, or None when the engine
+#: runs out of process and this cannot be observed at all. The distinction
+#: matters: a null accuracy result is worthless unless the path under test
+#: actually ran, and `0` and "could not tell" are not the same claim.
+PREFILL_CALLS = None
+
+
+def count_continuation_prefills():
+    """Count calls to each continuation-prefill implementation, if observable.
+
+    Nothing here changes behaviour; it records which path served the run so the
+    JSON says so. Worth having beyond one experiment: `_continuation_prefill`
+    is reached only when a prefill is chunked *and* the resumed chunk exceeds
+    the decode threshold, and prefix caching removes both conditions quietly --
+    with a shared prefix only the first item prefills the long context at all.
+
+    **Only works in-process.** With vLLM's default multiprocessing the engine
+    is a child process and patches applied here never reach it, which would
+    otherwise report a confident zero for a path that ran on every token.
+    """
+    global PREFILL_CALLS
+    if os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING") != "0":
+        return  # stays None: unobservable, not zero
+
+    from vllm.v1.attention.backends import turboquant_attn as tqa
+
+    impl = getattr(tqa, "TurboQuantAttentionImpl", None)
+    if impl is None or not hasattr(impl, "_continuation_prefill_chunked"):
+        return  # older vLLM: one implementation, nothing to tell apart
+    PREFILL_CALLS = {"chunked": 0, "monolithic": 0}
+    for which in ("chunked", "monolithic"):
+        name = f"_continuation_prefill_{which}"
+        orig = getattr(impl, name)
+
+        def wrap(orig=orig, which=which):
+            def counted(self, *a, **kw):
+                PREFILL_CALLS[which] += 1
+                return orig(self, *a, **kw)
+
+            return counted
+
+        setattr(impl, name, wrap())
+
+
 def build_llm(model, kv):
     """Engine with the requested KV dtype; prints back the effective skip list."""
     from vllm import LLM
@@ -79,10 +123,33 @@ def build_llm(model, kv):
         kwargs["kv_cache_dtype_skip_layers"] = os.environ["SKIP_SLIDING"].split(",")
     if kv != "auto":
         kwargs["kv_cache_dtype"] = kv
+    # Chunked prefill is the only way to reach `_continuation_prefill` at all,
+    # and SLABMIB is what that path's VRAM is traded against; both belong to
+    # the configuration a result is about, so both are recorded below.
+    if os.environ.get("MAXBATCH"):
+        kwargs["max_num_batched_tokens"] = int(os.environ["MAXBATCH"])
+    if os.environ.get("SLABMIB"):
+        kwargs["attention_config"] = {
+            "tq_prefill_workspace_mib": int(os.environ["SLABMIB"])
+        }
+    if os.environ.get("NOPREFIX"):
+        # A shared prefix means only the first item prefills the long context;
+        # the rest resume from cache and never chunk.
+        kwargs["enable_prefix_caching"] = False
+    count_continuation_prefills()
     llm = LLM(**kwargs)
     skips = llm.llm_engine.vllm_config.cache_config.kv_cache_dtype_skip_layers
     print("EFFECTIVE SKIP LAYERS:", skips, flush=True)
     return llm, list(skips)
+
+
+def config_env():
+    """The knobs a result has to be labelled with to be comparable."""
+    return {
+        k: os.environ[k]
+        for k in ("MML", "UTIL", "SHOTS", "MAXBATCH", "SLABMIB", "NOPREFIX", "NEEDLES")
+        if os.environ.get(k)
+    }
 
 
 def run(model, kv, boundary, n, outp, mode):
@@ -150,6 +217,7 @@ def run(model, kv, boundary, n, outp, mode):
         model=model, kv=kv, boundary=boundary, n=n, correct=sum(items),
         acc=sum(items) / n, skip_layers=list(skips), items=items,
         n_shots=n_shots, shot_tokens=shot_tokens, mode=mode,
+        env=config_env(), prefill_calls=PREFILL_CALLS,
     )
     json.dump(res, open(outp, "w"), indent=1)
     print("RESULT", json.dumps({k: v for k, v in res.items() if k != "items"}), flush=True)

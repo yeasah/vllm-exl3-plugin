@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -127,12 +128,177 @@ def _env_with_nvcc() -> dict:
     return env
 
 
-def run_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
-    """Capture one entry in its own process, returning the measurement."""
+#: Where `check` keeps its caches when it is not running cold. Bench-owned rather
+#: than the operator's home, so an ordinary `check` is at least insulated from
+#: whatever else on the box has been compiling kernels.
+PERSISTENT_CACHE_ROOT = os.path.expanduser("~/.cache/vllm-exl3-plugin/bench-caches")
+
+
+def cache_policy(cold: bool, tmp: str) -> tuple[str, bool, str]:
+    """(root, warmup, description) for a run.
+
+    `bless` is always cold. It writes the reference every later run is judged
+    against, and a reference taken against caches nobody can reconstruct is not a
+    fact about the code -- the same reasoning that makes it refuse a dirty tree.
+    `check` defaults to the persistent root because comparing work in progress is
+    the normal way to use it, and doubling every iteration to chase a confound that
+    `--cold` settles on demand is the wrong trade.
+    """
+    if cold:
+        return os.path.join(tmp, "caches"), True, "cold (empty caches, warmup run per entry)"
+    return PERSISTENT_CACHE_ROOT, False, f"persistent ({PERSISTENT_CACHE_ROOT})"
+
+
+#: Committed autotune fixtures, one per GPU. Keyed on the device rather than on an
+#: operator tag, unlike `perf/`: what a tuned blob encodes is which kernel shapes are
+#: fastest, which is a property of the silicon and not of the chassis, its neighbours
+#: or its cooling. A mis-key is caught rather than trusted -- see `tune_drift`.
+TUNE_DIR = os.path.join(EXPECTED, "tune")
+TUNE_FILE = "coop_autotune_v1.bin"
+
+
+def tune_key() -> str:
+    """Device identity for the tune fixture. `BENCH_TUNE_KEY` overrides."""
+    override = os.environ.get("BENCH_TUNE_KEY")
+    if override:
+        return override
+    try:
+        import torch
+
+        name = torch.cuda.get_device_name(0)
+        cap = "".join(str(c) for c in torch.cuda.get_device_capability(0))
+        return re.sub(r"[^A-Za-z0-9]+", "-", f"{name}-sm{cap}").strip("-").lower()
+    except Exception:
+        return "unknown"
+
+
+def tune_fixture() -> str:
+    return os.path.join(TUNE_DIR, tune_key(), TUNE_FILE)
+
+
+def _blob_digest(path: str) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:12]
+    except OSError:
+        return None
+
+
+def _blob_keys(path: str) -> set[int]:
+    """The record hashes in an exllamav3 autotune blob (coop_autotune_v1: a 16-byte
+    header carrying the record size, then fixed-size records led by a u64 hash).
+    A header embedded mid-file -- two processes' first appends racing, which the
+    reader skips -- is skipped here too."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            b = f.read()
+    except OSError:
+        return set()
+    if len(b) < 16:
+        return set()
+    magic, _, size = struct.unpack_from("<8sII", b, 0)
+    keys, off = set(), 16
+    while off + size <= len(b):
+        if b[off:off + 8] == magic:
+            off += 16
+            continue
+        keys.add(struct.unpack_from("<Q", b, off)[0])
+        off += size
+    return keys
+
+
+def install_tune_fixture(root: str | None) -> tuple[str | None, str | None]:
+    """Seed the run's autotune cache from the committed fixture.
+
+    Emptying this cache does not make a run reproducible, it makes it *freshly
+    nondeterministic*: three cold runs of one entry, same build and machine, spread
+    0.156-0.230 nats with argmax flips and an intermittent greedy change -- as large
+    as the upstream version difference the gate was asked to measure. Kernel choice
+    is timed, so it follows the clocks. Seeding a frozen blob removes the timing step
+    for every shape the blob covers, which is what makes the result a fact about the
+    code. Returns (destination, digest-at-seed).
+    """
+    if root is None:
+        return None, None
+    dest = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
+    src = tune_fixture()
+    if not os.path.exists(src):
+        return dest, None
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copyfile(src, dest)
+    return dest, _blob_digest(dest)
+
+
+def tune_drift(dest: str | None, before: str | None) -> str | None:
+    """Whether the run tuned anything, which is whether it is reproducible.
+
+    A write means some shape was missing from the fixture and got timed live, so
+    that shape's kernel -- and the arithmetic downstream of it -- was chosen by the
+    state of the card rather than by the fixture. Reported rather than corrected:
+    the fix is to re-freeze deliberately, not to silently accept whichever kernel
+    today's thermals preferred.
+    """
+    if dest is None:
+        return None
+    after = _blob_digest(dest)
+    if before is None and after is None:
+        return "no autotune fixture for this device; every shape was tuned live"
+    if before is None:
+        return "no autotune fixture for this device; the run tuned and wrote one"
+    if after != before:
+        return (f"autotune cache changed during the run ({before} -> {after}): the "
+                f"fixture is missing shapes this entry needs, so the result is not "
+                f"reproducible. Re-freeze with `bench/run.py freeze-tune`.")
+    return None
+
+
+def cache_env(env: dict, root: str | None) -> dict:
+    """Point every cache this suite knows about at `root`, or leave them ambient.
+
+    Ambient caches are an uncontrolled input the measurement cannot see: the same
+    build, re-run with only exllamav3's 4 KB autotune file deleted, changed a greedy
+    continuation this gate treats as exact. Redirecting them makes a run a fact about
+    the code plus a *named* cache state instead of the operator's home directory.
+    """
+    if root is None:
+        return env
+    env = dict(env)
+    os.makedirs(root, exist_ok=True)
+    for name, (var, _default, _kind) in core.CACHE_STORES.items():
+        path = os.path.join(root, name)
+        os.makedirs(path, exist_ok=True)
+        env[var] = path
+    return env
+
+
+def run_entry(entry: suite.Entry, out_path: str, timeout: int,
+              cache_root: str | None = None, warmup: bool = False,
+              report_drift: bool = True, seed_tune: bool = True) -> dict:
+    """Capture one entry in its own process, returning the measurement.
+
+    With `warmup`, the entry is run once and discarded before the run that counts.
+    That is what makes a cold cache root measurable rather than merely empty: the
+    first run pays every compile and every autotune, so the measured run sees the
+    steady state a served deployment sees, reached from a known starting point.
+    """
     cmd = [sys.executable, os.path.join(HERE, "capture.py"), entry.name,
            "--out", out_path]
-    env = _env_with_nvcc()
+    env = cache_env(_env_with_nvcc(), cache_root)
+    # seed_tune=False is for freeze-tune, which accumulates one blob over many entries:
+    # seeding there overwrote everything the earlier entries had tuned
+    tune_dest, tune_before = install_tune_fixture(cache_root) if seed_tune else (None, None)
     print(f"  -- {entry.label}", flush=True)
+    if warmup:
+        print("     warming caches (discarded run)", flush=True)
+        warm_out = out_path + ".warmup"
+        subprocess.run([sys.executable, os.path.join(HERE, "capture.py"), entry.name,
+                        "--out", warm_out], cwd=ROOT, env=env, timeout=timeout,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        # A warmup that fails is not fatal on its own: the measured run below will
+        # fail the same way and report it properly, with the log the caller needs.
+        if os.path.exists(warm_out):
+            os.remove(warm_out)
     proc = subprocess.run(cmd, cwd=ROOT, env=env, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True)
@@ -151,7 +317,12 @@ def run_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
                          f"(exit {proc.returncode}); full log at {log_path}\n"
                          f"{detail}")
 
+    drift = tune_drift(tune_dest, tune_before)
+    if drift and report_drift:
+        print(f"     ! {drift}")
+
     data = json.load(open(out_path))
+    data["tune_drift"] = drift
     found = WEIGHT_RE.findall(proc.stdout)
     # Under TP there is one line per worker; they are shards of one model, so
     # the total is what corresponds to the single-GPU number.
@@ -239,6 +410,65 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
               f"|dlogprob| max {m['dlogprob_max']:.3e}, "
               f"KL max {m['kl_max']:.3e}, "
               f"greedy {'ok' if m['generated_match'] else 'CHANGED'}")
+    return failures
+
+
+#: A TP entry against its TP=1 sibling's committed baseline. Not the per-entry
+#: tolerance: sharding changes the reduction order, so this is the regime of
+#: eager vs CUDA graphs on one card, not of a rerun. That floor, measured from
+#: the committed qwen3-0.6B 3.0bpw eager/graphs baselines: KL mean 0.0009 and
+#: 0.0014, KL max 0.0034 and 0.0226, 2 argmax flips in 61 positions, and the
+#: greedy continuation changed on the long prompt. So tokens cannot be required
+#: to match; the bound is on the distribution, at ~7-10x the floor's mean KL and
+#: ~4x its max. A real sharding bug (a wrong slice, a missing all-reduce, a
+#: mis-split vocabulary) lands orders of magnitude above either.
+SIBLING_TOLERANCE = {
+    "kl_mean": 1e-2,
+    "kl_max": 1e-1,
+    "argmax_fraction": 0.1,
+    # `weight_gib` is the sum over ranks, so a sharded model totals about what
+    # TP=1 holds; replicated pieces (norms, a blockq embedding's small tensors)
+    # add a little: 1.00-1.12 at TP=2 on the first bless. A rank that loads the
+    # whole model instead of its shard doubles it.
+    "weight_ratio": 1.25,
+}
+
+
+def check_sibling(entry: suite.Entry, fresh: dict) -> list[str]:
+    """A TP entry against its TP=1 sibling's baseline. Returns failures."""
+    if not entry.tp_reference:
+        return []
+    path = os.path.join(EXPECTED, f"{entry.tp_reference}.json")
+    if not os.path.exists(path):
+        return [f"TP=1 sibling {entry.tp_reference} has no baseline to answer to"]
+    sib = json.load(open(path))
+    tol = {**SIBLING_TOLERANCE, **entry.tp_tolerance}
+    failures = []
+    for i, (pf, ps) in enumerate(zip(fresh["prompts"], sib["prompts"])):
+        m = core.compare_prompt(ps, pf)
+        if not m["comparable"]:
+            failures.append(f"prompt {i}: token ids differ from TP=1 sibling")
+            continue
+        frac = m["argmax_disagreements"] / max(1, m["positions"])
+        print(f"     vs TP=1 {entry.tp_reference}, prompt {i}: KL mean "
+              f"{m['kl_mean']:.2e}, max {m['kl_max']:.2e}, argmax "
+              f"{m['argmax_disagreements']}/{m['positions']}, greedy "
+              f"{'same' if m['generated_match'] else 'differs'}")
+        if m["kl_mean"] > tol["kl_mean"]:
+            failures.append(f"prompt {i}: KL mean vs TP=1 {m['kl_mean']:.3e} > {tol['kl_mean']:.1e}")
+        if m["kl_max"] > tol["kl_max"]:
+            failures.append(f"prompt {i}: KL max vs TP=1 {m['kl_max']:.3e} > {tol['kl_max']:.1e}")
+        if frac > tol["argmax_fraction"]:
+            failures.append(f"prompt {i}: {m['argmax_disagreements']}/{m['positions']} "
+                            f"argmax flips vs TP=1 > {tol['argmax_fraction']:.0%}")
+    # The same checkpoint split across ranks: `weight_gib` already sums them.
+    if fresh.get("weight_gib") and sib.get("weight_gib"):
+        ratio = fresh["weight_gib"] / sib["weight_gib"]
+        print(f"     weights {fresh['weight_gib']} GiB over {entry.tensor_parallel_size} "
+              f"ranks vs TP=1 {sib['weight_gib']} GiB ({ratio:.2f}x)")
+        if ratio > tol["weight_ratio"]:
+            failures.append(f"weights total {ratio:.2f}x TP=1 > {tol['weight_ratio']}x: "
+                            f"ranks are holding more than their shard")
     return failures
 
 
@@ -529,6 +759,21 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_deps(args) -> int:
+    """What a tier needs on disk: `repo@revision` per entry, and with --fetch the
+    downloads, so a short-lived box finds a missing checkpoint before a bless
+    does and not halfway through one."""
+    from huggingface_hub import snapshot_download
+    seen = {}
+    for e in list(suite.by_tier(args.tier)) + list(suite.perf_by_tier(args.tier)):
+        seen.setdefault((e.model, e.revision), []).append(e.name)
+    for (model, rev), names in sorted(seen.items()):
+        print(f"{model}@{rev}  ({len(names)} entr{'y' if len(names) == 1 else 'ies'})")
+        if args.fetch:
+            print(f"   -> {snapshot_download(model, revision=rev)}")
+    return 0
+
+
 def cmd_capture(args) -> int:
     run_entry(suite.by_name(args.entry), args.out, args.timeout)
     print(f"wrote {args.out}")
@@ -601,18 +846,111 @@ def refuse_if_dirty(allow_dirty: bool = False) -> int:
     return 1
 
 
+def cmd_freeze_tune(args) -> int:
+    """Populate and commit the autotune fixture for this device.
+
+    Deliberate and rare, like a bless: it decides which kernels every later run
+    will use, so it should happen when someone chose to, not as the side effect of
+    a cache that happened to be cold. Runs each entry once against an empty cache so
+    the blob covers exactly the shapes the gate needs -- no more, since an unused
+    entry is dead weight, and no less, since a missing one is tuned live and
+    reintroduces the nondeterminism this exists to remove.
+    """
+    import tempfile
+
+    key = tune_key()
+    dest = tune_fixture()
+    print(f"freezing autotune for {key}\n  -> {dest}")
+    print("  every entry below tunes from empty; that is what is being captured\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "caches")
+        blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
+        for e in suite.by_tier(args.tier):
+            if e.known_broken:
+                print(f"  -- {e.label}\n     ! known broken, skipped")
+                continue
+            try:
+                # No fixture seeded: this run *is* the tuning pass.
+                # Warmup on, so the freeze performs the same sequence `--cold`
+                # measures. Note what this does *not* fix, since the comment here
+                # first claimed it did: turning warmup on produced a byte-identical
+                # blob, and the entry it was meant to help then tuned live anyway,
+                # writing a different blob on each of two runs. The requested shapes
+                # are not stable between runs -- vLLM sizing profiling batches from
+                # free memory is the likeliest reason -- so no freeze from any fixed
+                # sequence can be guaranteed complete. Warmup is kept because
+                # matching the measured sequence is still the right shape for this
+                # to have; tune_drift is what makes the residue visible.
+                #
+                # Drift is not reported here: nothing is seeded during a freeze, so
+                # every entry tunes by construction. Saying so per entry would be an
+                # alarm that always fires, which is how one stops being read.
+                before = _blob_keys(blob)
+                run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
+                          cache_root=root, warmup=True, report_drift=False, seed_tune=False)
+                # The blob only ever grows: an entry that loses records an earlier one
+                # tuned means something rewrote it. Until this check existed, every
+                # re-freeze copied the committed fixture over the blob at each entry's
+                # start, so a "freeze" kept the old fixture plus the last entry's shapes
+                lost = before - _blob_keys(blob)
+                if lost:
+                    print(f"\n{len(lost)} autotune record(s) from earlier entries vanished during "
+                          f"{e.name}; the blob is being overwritten, refusing to freeze it")
+                    return 1
+            except SystemExit as exc:
+                print(f"     ! capture failed, its shapes will be missing: {exc}")
+        blob = os.path.join(root, "exllamav3_autotune", TUNE_FILE)
+        if not os.path.exists(blob):
+            print("\nno autotune cache was produced; nothing to freeze")
+            return 1
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(blob, dest)
+    print(f"\nfroze {os.path.getsize(dest)} bytes at {_blob_digest(dest)}")
+    print("commit it: this is now what every check and bless will run.")
+    return 0
+
+
 def cmd_bless(args) -> int:
+    import tempfile
+
     if refuse_if_dirty(getattr(args, "allow_dirty", False)):
         return 1
     os.makedirs(EXPECTED, exist_ok=True)
-    blessed = 0
-    for e in suite.by_tier(args.tier):
-        if e.known_broken:
-            print(f"  -- {e.label}\n     ! known broken, not blessed: "
-                  f"{e.known_broken.splitlines()[0]}")
-            continue
-        run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout)
-        blessed += 1
+    blessed, refused = 0, []
+    with tempfile.TemporaryDirectory() as tmp:
+        # Always cold. A baseline is supposed to be reproducible somewhere other
+        # than this machine, and a warm ambient cache is neither recorded by it nor
+        # reconstructible from it.
+        root, warmup, how = cache_policy(True, tmp)
+        print(f"caches: {how}\n")
+        for e in suite.by_tier(args.tier):
+            if e.known_broken:
+                print(f"  -- {e.label}\n     ! known broken, not blessed: "
+                      f"{e.known_broken.splitlines()[0]}")
+                continue
+            if e.tp_reference:
+                # Captured aside and installed only if it answers to its TP=1
+                # sibling: a TP baseline is exactly where a bug gets recorded
+                tmp_out = os.path.join(tmp, f"{e.name}.json")
+                try:
+                    fresh = run_entry(e, tmp_out, args.timeout, cache_root=root, warmup=warmup)
+                except SystemExit:
+                    # one entry that cannot capture must not hide the rest of the tier
+                    print(f"     ! not blessed: capture failed (log printed above)")
+                    refused.append(e.name)
+                    continue
+                problems = check_sibling(e, fresh)
+                if problems:
+                    print(f"     ! not blessed: diverges from TP=1 sibling")
+                    for p in problems:
+                        print(f"       - {p}")
+                    refused.append(e.name)
+                    continue
+                shutil.copyfile(tmp_out, os.path.join(EXPECTED, f"{e.name}.json"))
+            else:
+                run_entry(e, os.path.join(EXPECTED, f"{e.name}.json"), args.timeout,
+                          cache_root=root, warmup=warmup)
+            blessed += 1
     # The manifest behind `environment()`'s pkg.digest: a digest says something
     # moved, this says what. One per bless, since a bless is one snapshot.
     try:
@@ -622,9 +960,12 @@ def cmd_bless(args) -> int:
         print(f"     ! could not write environment manifest: {exc}")
 
     print(f"\nblessed {blessed} entries into {EXPECTED}")
+    if refused:
+        print(f"REFUSED {len(refused)}: {', '.join(refused)} -- no baseline written; "
+              f"a TP entry that leaves its TP=1 sibling is a bug until shown otherwise")
     print("review the diff before committing -- blessing a real regression "
           "is how a gate stops working")
-    return 0
+    return 1 if refused else 0
 
 
 def cmd_check(args) -> int:
@@ -650,12 +991,15 @@ def cmd_check(args) -> int:
     known = []
     entries = suite.by_tier(args.tier)
     with tempfile.TemporaryDirectory() as tmp:
+        root, warmup, how = cache_policy(getattr(args, "cold", False), tmp)
+        print(f"caches: {how}\n")
         for e in entries:
             if e.known_broken:
                 # Still run it: the cheapest way to learn a known defect is
                 # fixed is for its entry to stop failing.
                 try:
-                    run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout)
+                    run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
+                              cache_root=root, warmup=warmup)
                 except SystemExit:
                     known.append(e.name)
                     print(f"     known broken, as expected")
@@ -668,8 +1012,9 @@ def cmd_check(args) -> int:
                 print(f"  -- {e.label}\n     ! no baseline; run bless")
                 failed[e.name] = ["no baseline recorded"]
                 continue
-            fresh = run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout)
-            problems = check_entry(e, fresh, json.load(open(baseline)))
+            fresh = run_entry(e, os.path.join(tmp, f"{e.name}.json"), args.timeout,
+                              cache_root=root, warmup=warmup)
+            problems = check_entry(e, fresh, json.load(open(baseline))) + check_sibling(e, fresh)
             if problems:
                 failed[e.name] = problems
 
@@ -701,16 +1046,25 @@ def main() -> int:
     p.set_defaults(func=cmd_env)
 
     p = sub.add_parser("check"); p.add_argument("--tier", default="fast")
+    p.add_argument("--cold", action="store_true",
+                   help="empty caches plus a warmup run per entry, as bless always "
+                        "does; slower, and the only mode whose result does not "
+                        "depend on this machine's cache state")
     p.add_argument("--strict-env", action="store_true",
                    help="refuse to run if the environment differs from the "
                         "blessed manifest")
     p.set_defaults(func=cmd_check)
+    p = sub.add_parser("freeze-tune"); p.add_argument("--tier", default="all")
+    p.set_defaults(func=cmd_freeze_tune)
     p = sub.add_parser("bless"); p.add_argument("--tier", default="fast")
     p.add_argument("--allow-dirty", action="store_true",
                    help="bless even though a source tree has uncommitted "
                         "changes; the baselines will name a state no checkout "
                         "can return to")
     p.set_defaults(func=cmd_bless)
+    p = sub.add_parser("deps"); p.add_argument("--tier", default="all")
+    p.add_argument("--fetch", action="store_true", help="download what is listed")
+    p.set_defaults(func=cmd_deps)
     p = sub.add_parser("capture"); p.add_argument("entry"); p.add_argument("out")
     p.set_defaults(func=cmd_capture)
     for name, fn in (("perf-check", cmd_perf_check), ("perf-bless", cmd_perf_bless)):

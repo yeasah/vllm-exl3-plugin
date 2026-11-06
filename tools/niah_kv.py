@@ -31,7 +31,8 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gsm8k_kv import build_llm, override_boundary  # noqa: E402
+import gsm8k_kv  # noqa: E402
+from gsm8k_kv import build_llm, config_env, override_boundary  # noqa: E402
 
 NEEDLE = "The special magic {key} number is: {value}."
 QUESTION = (
@@ -124,7 +125,7 @@ def run(model, kv, boundary, n, outp, ctx):
         model=model, kv=kv, boundary=boundary, n=len(items), correct=sum(items),
         acc=sum(items) / len(items), skip_layers=skips, items=items,
         task="niah", ctx=ctx, depths=depths, needles=k, trials=n,
-        same_key=same,
+        same_key=same, env=config_env(), prefill_calls=gsm8k_kv.PREFILL_CALLS,
     )
     json.dump(res, open(outp, "w"), indent=1)
     print("RESULT", json.dumps({k: v for k, v in res.items()

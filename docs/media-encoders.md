@@ -1,6 +1,7 @@
-# Media encoders: how big, and why nothing can evict them
+# Media encoders: how big, and what it takes to evict them
 
-*Measured 2026-08-24. Tracked in TODO as `encoder-offload`.*
+*Census measured 2026-08-24; eviction measured 2026-09-12. Tracked in TODO as
+`encoder-offload`.*
 
 A vision or audio encoder is the one weight in a multimodal checkpoint whose offload
 economics are not a compromise. Every other offload target is re-read across PCIe **every
@@ -11,7 +12,8 @@ Evicting it is close to free across a large fraction of real use, and unlike
 
 So the value of doing this is entirely a question of how many bytes an encoder is. HF's
 tensor viewer answers that one tensor at a time, which for a 300-module tower is no answer
-at all. This note is the census, and the structural reason none of it is reachable today.
+at all. This note is the census, the structural reason none of it was reachable until
+vLLM 0.29.0, and what it actually took to serve vision on a 16 GiB card once it was.
 
 ## The census
 
@@ -108,8 +110,8 @@ use.
 depth an encoder is stored at, moving it to host memory costs zero accuracy, one PCIe pass
 per image, and nothing at all for a text-only request. The quantization question is
 contested and model-dependent; the eviction question is not, and the two do not trade
-against each other. That is why the upstream fix below is the half worth pursuing: it
-serves the reader who wants bf16 vision quality and the one who does not.
+against each other. That is why eviction was the half worth pursuing: it serves the
+reader who wants bf16 vision quality and the one who does not.
 
 **3. It is a fixed cost over a shrinking denominator, so it is worst on the smallest
 model.** The Qwen3-VL family ships essentially one encoder at every size — 1.074 GiB at
@@ -196,44 +198,506 @@ Read the trellis carefully when sizing one of these: EXL3 stores it as int16 wit
 width in the last dimension, so element count is `16/K` of the parameters it encodes. A
 naive byte-per-element reading reports 16 bpw for everything.
 
-## Nothing can evict any of it
+## Nothing could evict any of it — until 0.29.0
 
-`--cpu-offload-gb` offloads no encoder on any model, in any format. Not a dtype question,
-not an EXL3 question, not a selector question:
+*The section below described v0.28.0 and was true of it. Upstream closed the gap in
+v0.29.0; the fix is in our fork already, and was found by looking rather than by asking
+(2026-09-12). Kept rather than deleted, because the diagnosis is what made the fix
+recognisable when it arrived.*
+
+**What was true.** `--cpu-offload-gb` offloaded no encoder on any model, in any format —
+not a dtype question, not an EXL3 question, not a selector question:
 
 ```
 get_offloader().wrap_modules(…)      # vllm/model_executor/models/utils.py:824
 ```
 
-That is the **only** call site in vLLM, and it sits inside `make_layers()` — the helper
+That was the **only** call site in vLLM, and it sat inside `make_layers()` — the helper
 that builds a *text decoder's* `ModuleList`. Vision towers build their own
-(`self.blocks = nn.ModuleList([...])`, e.g. `qwen3_vl.py:628`) and are never handed to the
-offloader. Both backends are affected identically, since the omission is upstream of the
-backend choice.
+(`self.blocks = nn.ModuleList([...])`, e.g. `qwen3_vl.py:628`) and were never handed to
+the offloader. Both backends were affected identically, since the omission was upstream
+of the backend choice.
 
-This is a **third** cause, alongside the two traced in TODO `cpu-offload` (eligibility
-decided at construction against empty placeholders; `process_weights_after_loading`
-replacing the parameters afterwards). Unlike those two it is not ours and not
-quantization-specific, so it will never show up as an EXL3 anomaly in a cross-format
-comparison — every format loses the same bytes.
+### What landed
 
-### Two fixes, and they compound rather than overlap
+v0.29.0 adds `BaseOffloader.supports_tower_offload` (default `False`) and a **second**
+call site, in `SupportsMultiModal._mark_tower_model`
+([interfaces.py:380](../deps/vllm/vllm/model_executor/models/interfaces.py#L380)), whose
+comment names this note's diagnosis outright: *"Towers are constructed directly, so
+`make_layers` never routes them through the offloader."* It wraps at construction, so
+offloaded tower weights are never allocated on the device at all. Around 100 model files
+carry the marker — `qwen3_vl`, `qwen3_vl_moe`, `qwen3_5`, `gemma3_mm`, `gemma4_mm`,
+`step3p7` and `muse_glimmer` among them.
 
-**Upstream: offer the tower to the offloader.** Small, general, format-agnostic — every
-multimodal model in vLLM gains 0.8-3.6 GiB of optional headroom regardless of quantization.
-This is the one that matters for the table above, because in nine of ten rows the tower is
-bf16 and therefore invisible to any quantization plugin. Tracked as
-`upstream-queue`; framing and priority in [upstream.md](upstream.md).
+**UVA only.** `PrefetchOffloader` keeps the flag `False` deliberately, because it
+schedules prefetches over a circular layer stack. That is the correct half regardless:
+a tower is read once per image and not at all for a text-only request, which is the
+access pattern UVA wins by 4x (see [format-and-loading.md](format-and-loading.md)).
 
-**Ours: register offload from `process_weights_after_loading`.** The approach already
-proposed under `cpu-offload` reaches only *quantized* modules, so today it covers exactly
-one checkpoint. What it buys there is not capacity but bandwidth: a quantized tower moves
-0.89 GiB per image batch instead of 3.57, so the per-image cost of having evicted it drops
-4x. That is the difference between an eviction you tolerate and one you leave in place —
-or, read the other way, a resident tower cheap enough that you decline to offload at all.
+**Measured 2026-09-12** on `Qwen3.8-27B-exl3@3.00bpw`, a 16 GiB card:
 
-The two are independent and multiply: the first makes eviction possible, the second makes
-it cheap. Neither helps a unified model, which has nothing to evict.
+```
+--cpu-offload-gb 2 --cpu-offload-params visual
+INFO [uva.py:65] Total CPU offloaded parameters: 0.86
+```
+
+0.86 GiB, matching the census. **The selector works and matters**: the counter stops at
+0.86 under a 2 GiB budget, proving nothing but the tower matched. `wrap_modules` is called
+with `prefix=<attr>` and the selector matches dot-delimited segments of
+`f".{prefix}{name}."`, so `visual` names the Qwen tower exactly. Without it the budget is
+first-come, and the tower wins only by construction order — an accident, not a design.
+
+### The bytes freed are not the bytes that gate multimodal
+
+Offloading the tower is necessary and not sufficient, and the follow-on measurement is the
+useful half of this section. Two *other* encoder costs remain resident, and on a 16 GiB
+card they are larger than the weights:
+
+| | bytes | scales with |
+|---|---|---|
+| tower **weights** (offloadable, lossless) | 0.86 G | model |
+| encoder **cache** `[tokens, out_hidden]` | 0.156 G | token budget |
+| tower **transient**, one forward | ~1.6 G | patches |
+
+The budget is derived, not defaulted:
+`encoder_cache_size = max(max_num_batched_tokens, max_tokens_per_mm_item)`, and
+`max_tokens_per_mm_item` comes off `preprocessor_config.json` as
+`size.longest_edge / (patch_size * merge_size)^2`. Stock Qwen3.8 ships
+`longest_edge: 16777216` with patch 16 and merge 2 — **16384 tokens**, 65536 pre-merge
+patches, whose largest single buffer is `[65536, 4304]` bf16 = **564,133,888 bytes**,
+the exact figure the allocator names when it fails. Left at the default, profiling that
+transient starves KV to 0.21 GiB and the engine refuses to start.
+
+**The knob is `mm_processor_kwargs`, not `--limit-mm-per-prompt`.** The latter's `width`
+and `height` are `ImageDummyOptions` — profiling-only, read in
+`multimodal/processing/dummy_inputs.py` and nowhere in the request path — so they shrink
+the budget while the real image sails through at full resolution. `{"max_pixels": N}`
+reaches `smart_resize` inside `_get_vision_info`, the same function that computes the
+profiling token count, so budget and request move together by construction. The accounting
+consequences are in [memory-accounting.md](memory-accounting.md); the trap's general form
+and its tell are in the ecosystem field notes.
+
+**Verified end to end, 2026-09-12** — vision serving with the tower on the host, on one
+16 GiB card:
+
+```
+--gpu-memory-utilization 0.985 --kv-cache-dtype turboquant_4bit_nc
+--cpu-offload-gb 2 --cpu-offload-params visual
+--mm-processor-kwargs '{"max_pixels": 1048576}' --max-model-len 32768
+```
+
+0.86 GiB of tower on the host, 2.3 GiB of KV (90,593 tokens), a 4032x3024 photo described
+correctly. At `max_pixels` 4194304 the same config OOMs inside the tower — twice, once
+with KV pinned to vLLM's own recommendation — so the cap is doing real work and is not
+cosmetic.
+
+### The remaining fix, which still compounds
+
+**Ours: register offload from `process_weights_after_loading`.** Unchanged by the above,
+because it answers a different question. The approach proposed under `cpu-offload` reaches
+only *quantized* modules, so today it covers exactly one checkpoint. What it buys there is
+not capacity but bandwidth: a quantized tower moves 0.89 GiB per image batch instead of
+3.57, so the per-image cost of having evicted it drops 4x. That is the difference between
+an eviction you tolerate and one you leave in place — or, read the other way, a resident
+tower cheap enough that you decline to offload at all.
+
+Upstream made eviction possible; this makes it cheap. Neither helps a unified model,
+which has nothing to evict.
+
+**`compile_mm_encoder` is not the cheap way out (measured 2026-09-12).** The obvious
+one-flag route — let inductor fuse the activation into the GEMM epilogue so the
+full-width intermediate never materialises — does not happen. The flag is genuinely
+active on this tower (28 compile passes, one per vision block, despite a docstring
+naming only `Qwen2_5_vl` and `mLLaMa4`), and it left peak activation at 0.43 GiB against
+0.44 without it: no reduction. What it *did* do is add **1.13 GiB** to consumed
+memory (weights + non-torch), where compiled artifacts and autotune workspaces live,
+halving the KV cache from 2.28 to 1.14 GiB (90,593 -> 44,333 tokens). The image still
+OOMs at `max_pixels` 4194304. Worth noting the figure is larger and more persistent than
+the 0.59 GiB cold-compile term [memory-accounting.md](memory-accounting.md) already has
+open; same suspect, and this is a second sighting.
+
+**A third lever this measurement exposed, not yet built.** The tower transient is
+image-scaled and therefore unbudgetable in the sense
+[memory-accounting.md](memory-accounting.md) sets out — it has to stop existing rather
+than be reserved for. `Qwen3_VisionMLP.forward` is
+`linear_fc2(act_fn(linear_fc1(x)))`, purely pointwise over dim 0, so chunking it over
+tokens is bit-for-bit identical and caps the `[patches, 4304]` pair at the chunk. That is
+structurally the same move as TurboQuant's slabbed continuation prefill. It raises the
+affordable image size; it does not remove the need for a cap at 12 MP.
+
+## GLM-4.1V: where the transient is measurable, and the law it obeys (2026-09-12)
+
+`Qwen3.8-27B` is a bad instrument for the tower transient — its profiled peak is
+decoder-dominated, so the encoder's requirement hides underneath a larger number.
+`turboderp/GLM-4.1V-9B-Thinking-exl3@5.00bpw` is the opposite and is now the reference
+platform for this work: 8.01 GiB of weights on a 15.5 GiB card leaves room to move, and
+the profiled peak *is* the tower.
+
+**Tower offload works unchanged on a second architecture.** `--cpu-offload-gb 3
+--cpu-offload-params visual` offloads **1.66 GiB**, matching the census's 1.662 G exactly.
+GLM names its tower `visual` as Qwen does, so the same selector works. Uncapped, it serves
+a 4032x3024 photo correctly at 6045 prompt tokens with no `max_pixels` at all — the
+headroom that Qwen3.8 lacked is what buys that.
+
+**The transient is linear in patch rows, measured.** Two runs differing only in which
+modality the profiler chose:
+
+| profiled modality | patch rows | peak activation | KV available |
+|---|---|---|---|
+| video (default) | 48,672 | 1.85 GiB | 5.89 GiB |
+| image (`--limit-mm-per-prompt '{"video": 0}'`) | 24,336 | 0.89 GiB | **7.00 GiB** |
+
+2.00x the rows gives 2.08x the peak, and fitting the two points yields **42,357 B/row with
+a -72 MiB intercept** — zero floor within the precision of the logged figures. So the peak
+is the tower, it is linear, and chunking at C rows should land at `C x 42.4 KB`: 0.32 GiB
+at 8192, 0.08 GiB at 2048. That linearity is the property the chunking argument needs, and
+it is now measured rather than assumed.
+
+*Recorded because the arithmetic route failed here:* predicting the peak from
+`vision_config` alone gave 1.862 GiB against a measured 1.85, which looked like
+confirmation and was not — the prediction used 24,336 rows while the profiled video item
+has 48,672. Two measurements that differ in one variable beat one measurement that agrees
+with a calculation.
+
+**Why GLM is a good control.** Its MLP is gated — `gate_up_proj` emits `[rows, 2I]`
+before `SiluAndMul` halves it — which makes it a different code path from Qwen's plain
+form even though the widths are comparable.
+
+*Corrected 2026-09-12.* An earlier version of this section put GLM's `I/H` at **8.92**,
+reading `vision_config.intermediate_size` (13696). That value feeds a merger elsewhere;
+the vision **block** MLP is built with `mlp_hidden_dim=vision_config.out_hidden_size`,
+so it is 1536 -> 4096 gated, `I/H` **2.67**. The `intermediate_size` field is not the
+block MLP's width on this architecture, and reading a config key by name rather than by
+its use site is how that got through. The runtime was never affected — the chunk sizer is
+handed `hidden_features` by the module itself, not by the config.
+
+### Two incidental findings, both usable
+
+**`--limit-mm-per-prompt '{"video": 0}'` is worth 1.11 GiB of KV** (+19% context) on a
+video-capable model you only ever send images to. Unlike `width`/`height`, `count` **is**
+enforced, so this one does what it says.
+
+**The profiled modality is chosen by `(tokens, name)`, and the name can decide it.**
+GLM's image and video budgets are *tied* at 6084 tokens, so `get_modality_with_max_tokens`
+picked `video` on an alphabetical tiebreak. Equal tokens do not mean equal work: video's
+token divisor includes `temporal_patch_size`, so at the same budget a video item carries
+**twice** the patch rows an image does. Profiling as video is therefore ~2x conservative
+here, by accident of sort order.
+
+### How video actually reaches the tower
+
+Frame count does not multiply the token budget — the pixel budget is a total across the
+clip, so more frames buys lower per-frame resolution at constant tokens. Frames *are*
+independent for attention: `prepare_encoder_metadata` builds `cu_seqlens` as
+`patches_per_frame` repeated `grid_t` times, one sequence per frame, so no frame attends to
+another. But the forward is a single pass over one concatenated `[total_rows, 1176]`
+tensor, so the linear layers see every frame at once and the transient scales with the
+total. `max_frames_per_batch` only pads `cu_seqlens` for CUDA-graph capture; it does not
+split the forward.
+
+**That is what makes chunking obviously safe here rather than merely plausible:** attention
+is already frame-independent and the MLP is pointwise, so nothing in the tower requires all
+rows resident simultaneously. The concatenation is an implementation choice, not a
+constraint.
+
+## Cutting the tower transient: three changes that each hide the others (2026-09-12)
+
+Everything above pointed at the vision MLP. It was the wrong target, and the way it was
+wrong is more useful than the original claim.
+
+**What was built.** The MLP is pointwise over tokens, so slicing its forward into
+row-chunks is bit-for-bit identical and bounds a buffer that otherwise scales with patch
+count. Implemented behind a byte budget so one setting holds across tower widths, verified
+equivalent (`torch.equal`, max abs diff 0.0) and verified to fire in a real serve
+(`Chunking vision MLP: 48672 rows in 72 chunks of <=682`).
+
+**What it did to the number that matters: nothing.**
+
+| Qwen3.8 tower, 65536 rows | peak live | largest single allocation |
+|---|---|---|
+| unchunked | 1.728 GiB | **538.0 MiB** — `activation.py:816` via the MLP |
+| chunked | 1.728 GiB | 432.0 MiB — the qkv gemm |
+
+GLM-4.1V behaves identically: 1.856 GiB either way, unmoved down to a 16 MiB budget.
+
+**The distinction that was being missed.** *Largest single allocation* is what an OOM
+message reports — whichever request happened to fail once memory was already gone.
+*Peak live* is the sum of everything alive at one instant; it is what the profiler
+budgets and what sets the KV cache. Chunking removes the 538 MiB buffer — which is
+exactly the `564,133,888` bytes the original Qwen OOM named — and the peak does not move,
+because that buffer is never live at the same moment as the peak. The OOM named the MLP
+because it was the allocation that failed, not the one that filled the card.
+
+**Where the peak actually is, on both architectures: the attention preamble**, holding
+several copies of q/k/v at once.
+
+| | Qwen3.8 | GLM-4.1V |
+|---|---|---|
+| qkv gemm output | 576 MiB | 428 MiB |
+| `rearrange(...).contiguous()` | 288 MiB | 428 MiB |
+| `apply_rotary` | 288 MiB | 285 MiB |
+| positional-embedding interpolate | 144 MiB | 143 MiB |
+| norm + flash-attn + patch conv | 320 MiB | 317 MiB |
+| **peak live** | **1.728 GiB** | **1.856 GiB** |
+
+The shape is the same in both files. `self.qkv(x)` emits `[rows, 3H]`; the generator
+`q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))` then
+makes three full copies while that output is still live; `torch.cat([q, k])` copies two of
+them again; the rotary emits another pair. The same data is materialized about four times
+over, ~1.4 GiB of a 1.85 GiB peak.
+
+### What the copies turned out to cost, and the ordering that hid it
+
+Neither copy was required. `einops` yields a strided view when the rearrange moves the q/k
+selector to dim 0, and the code forces it contiguous — but the triton rotary takes
+`x.stride(0/-3/-2/-1)` explicitly and forces only `cos`/`sin` contiguous, a few KB. The
+same kernel supports `inplace`, which `ApplyRotaryEmb.forward_cuda` never passes, so the
+rotary allocates a second full-size output beside an input it could overwrite.
+
+**Each of the three changes is invisible until the others unmask it**, which is the
+reason the MLP work was shelved and then immediately un-shelved:
+
+| Qwen3.8 tower, 65536 rows | peak | vs baseline |
+|---|---|---|
+| baseline | 1.728 GiB | — |
+| drop `.contiguous()` | 1.653 GiB | −75 MiB |
+| + inplace rotary | 1.653 GiB | −0, masked by the MLP |
+| drop `.contiguous()` + chunk MLP | 1.446 GiB | −282 MiB |
+| **all three** | **1.165 GiB** | **−563 MiB (−32.6%)** |
+
+Peak live is a `max` over the forward, so whichever tensor is largest at the peak instant
+hides every change aimed elsewhere. Chunking alone moves Qwen's peak by *zero*; the
+inplace rotary alone moves it by zero; together with the contiguous drop they are worth a
+third of the tower's transient.
+
+**Portability, which was the reason to do GLM up front.** The chunking is fully portable —
+same helper, both models, the larger win on each. The attention changes are *structural*:
+worth 75 MiB on Qwen and ~2 MiB on GLM, because GLM's preamble concatenates q and k
+afterwards and the `torch.cat` immediately re-makes the copy the contiguous drop saved.
+Getting GLM's share would mean restructuring its preamble the way `qwen2_5_vl` already
+does. So: one technique ports as-is, one is shaped by the model file it lands in.
+
+| tower | baseline | after | saving |
+|---|---|---|---|
+| Qwen3.8 | 1.728 GiB | 1.165 GiB | −32.6% |
+| GLM-4.1V | 1.856 GiB | 1.438 GiB | −22.5% |
+
+**End to end on a GLM-4.1V serve**, confirming the isolated rig (1.438 predicted, 1.43
+measured): peak activation 1.85 → 1.43 GiB, KV cache **5.89 → 6.31 GiB**, context
+**154,480 → 165,456 tokens**, same image described identically.
+
+### Two claims that had to be withdrawn
+
+**"Bit-for-bit identical" is true of the attention changes and false of chunking.** The
+attention work moves lifetimes, not GEMM shapes, and is exact. Chunking is *mathematically*
+exact — rows are independent — but cuBLAS picks its kernel from the M dimension, and a
+smaller M can select a split-K variant that reduces over K in a different order. On a
+20000x1536x4304 MLP: exact at 5000 and 10394 rows per chunk, up to 4.9e-4 out at 649 and
+2598, about one bf16 ULP. It is exact at the default budget on both real towers, which is
+precisely why the wrong claim survived several checks before a parametrized test caught it.
+
+**An all-NaN output makes every equality check pass vacuously.** The isolated rig used
+default random init, and ~27 bf16 blocks overflow into an output that is 99.99998% NaN —
+where matching MD5s prove nothing and `torch.equal` returns False for the same reason, so
+the two disagree and neither means anything. Every equivalence figure above is from a
+small-sigma init with a 99.99999%-finite output. The memory figures were never affected;
+they are shape-driven.
+
+**Method note, since this cost two wrong turns.** Both were the same error: reasoning about
+memory from arithmetic and from error messages instead of from a snapshot.
+`tools/memprof.py` answered it in one run and existed the whole time. Its distinction
+between "composition of the peak" and "largest single allocation per call site" is exactly
+the one being conflated — the tool had already been built to make this mistake visible.
+
+## Muse-Glimmer: recomposing a bf16 tower, and why that is also the instrument
+
+`turboderp/Muse-Glimmer-30B-exl3` is the one checkpoint in the census with a quantized
+tower (`-vb 4`, 0.904 G for 1.92B parameters). Two separate wants point at the same
+artifact: a **usable** checkpoint, and the **control arm** for a measurement that cannot
+otherwise be made.
+
+**The usability case.** A quantized tower is unreachable by vLLM's offloader — that path
+sees `nn.Parameter`s, and EXL3 stores trellis tensors the offloader never registers — so
+today the tower is resident or nothing. With a bf16 tower it can be evicted like any
+other, and eviction being lossless means the size stops mattering: 3.57 GiB on the host is
+one PCIe pass per image, not a capacity problem. Bigger but offloadable beats smaller but
+pinned. It should also unblock native vLLM for this model, whose current blocker is
+`vision_adapter.c_fc` being a plain `nn.Linear` no quantization plugin can reach — a bf16
+adapter is exactly what that path wants.
+
+**The measurement case, which is the one this note has been missing.** This document has
+argued since 2026-08-24 that the quantized tower's quality is cheaply measurable: a
+self-comparison of bf16 tower against quantized tower on the same per-position logprob
+divergence `bench/` already computes, an instrument indifferent to whether the prompt
+carries an image, with adapter-output cosine divergence as a cheaper first look. It named
+Muse-Glimmer as "the checkpoint that makes the comparison possible", which was only half
+true: a self-comparison needs **both arms**, and only the quantized one exists. The
+recomposed checkpoint is the missing arm, so building it for use also builds the
+instrument.
+
+**And nothing currently characterises that tower.** qbench cannot: its axis is total
+weight bytes and its quality signal is KLD against a *text* corpus, which a vision tower
+does not touch. The conversion log cannot either — under `q_fallback` `proxy_err` is plain
+unweighted MSE where every body tensor's is Hessian-weighted relative error, the same
+column holding two incomparable quantities. So the honest prior is wide: the tower was
+quantized with no calibration data (`quantize_side_model` is called with `state = None`;
+the corpus is six `.utf8` files tokenized to `input_ids` and the tower takes pixels), and
+it sits somewhere between nearly blind and nearly lossless with nothing published either
+way. That is not a criticism of whoever ran the conversion — it is what the pipeline
+structurally produces, and `--vision_bits` offers no third option.
+
+**Feasibility.** The vision tensors are cleanly separable. The `2.00bpw` index holds 3596
+tensors, of which 1718 are vision, under four prefixes — `model.vision_tower.*` (plus
+`ln_pre`, `ln_post`, `patch_embedder`), `model.vision_adapter.*`, `model.vision_projection.*`
+— and every quantized one carries EXL3's `trellis` / `suh` / `svh` / `mul1` suffixes, so
+they are identifiable by name without inspecting shapes. The graft is: drop those, copy the
+corresponding bf16 tensors from the reference repo, rewrite
+`model.safetensors.index.json`, and delete `vision_bits` from `quantization_config` so the
+loader does not expect a quantized tower.
+
+**Two things to verify before trusting the result**, neither yet done: that the reference
+and EXL3 checkpoints agree on tower tensor *names* (EXL3 conversion may rename or fuse),
+and that the adapter and projection are grafted as a set with the tower — they sit on the
+boundary and a mixed-precision seam there is exactly the kind of silent corruption that
+[docs/format-and-loading.md](format-and-loading.md) exists to catch. Emitting a checkpoint
+nobody else emits also needs the precedent check: whether any published EXL3 checkpoint
+mixes a bf16 tower with a quantized body, since "it loads" is a property of one loader,
+not of the format.
+
+### The graft now has a tool, and the three open questions are closed (2026-09-18)
+
+`tools/compose_checkpoint.py --restore vision` performs exactly the operation above:
+drop the tower's EXL3 tensors, bring the dense originals across from the reference
+repo, regenerate the index against what is actually written, rewrite the
+`tensor_storage` entries as dense and drop `vision_bits`. The `vision` category
+covers `vision_tower`, `vision_adapter` and `vision_projection` together, so the
+"grafted as a set" requirement is the default rather than a thing to remember.
+
+**Precedent: settled, and it is the majority convention.** The question was whether
+any published EXL3 checkpoint mixes a bf16 tower with a quantized body. Nearly all of
+them do. Of 14 vision-bearing `turboderp` repos on the Hub (122 revisions),
+**111 revisions ship a fully dense bf16 tower** — including `GLM-4.1V-9B-Thinking-exl3`
+(1.662 GiB, 178 dense tensors, no `vision_bits`), the whole `Qwen3-VL` family
+(30B-A3B, 32B, 235B-A22B), `gemma-3-27b-it`, `Step-3.7-Flash`, `Qwen3.5-9B/35B-A3B`,
+`Qwen3.8-27B` and `gemma-4-26B-A4B`. So the artifact a restore produces is not a shape
+anyone would be inventing; it is what almost every vision checkpoint already is.
+
+**Census update: there are two quantized towers now, not one.** Alongside
+`Muse-Glimmer-30B-exl3` (6 revisions, `vision_bits` 4 at 2.00/2.50bpw and 6 above),
+`turboderp/DeepSeek-V4-Flash-Vision-Exp-exl3` quantizes its tower at `vision_bits=5`
+across **all five** of its revisions (2.04 through 3.04bpw). Eleven revisions across
+two model families, and the newer of the two does it at every bitrate — so this is a
+live pipeline choice rather than a one-off.
+
+**Neither family is SC-only, which matters for whether repairing one is worth it.**
+Muse-Glimmer labels its solved-recipe branches explicitly (`SC_1.75bpw_H3` through
+`SC_5.00bpw_H6`, head following `min(body+1, 6)`) and ships seven plain ones beside
+them. The split runs opposite to intuition: **every `SC_` revision has
+`vision_bits: null`** — a dense tower — while the plain revisions are the ones that
+quantize it. DeepSeek-V4-Flash-Vision-Exp carries no `SC_` marker at all, and its odd
+bitrates are better explained by `--hq` overshoot on round targets (2.00-3.00 plus
+~0.04, the same signature as the +0.08 measured on our own 35B-A3B runs) than by a
+solved recipe. So a non-SC checkpoint with a quantized tower is the normal case, and
+repairing one does not mean adopting SC. The model cards say SC is "coming soon", so
+both forms are being published for now; what misleads is that the *evals* on these
+cards are still run on an in-domain corpus, which is the confound
+[qbench.md](qbench.md) measures at a 1.52x swing in relative standing. An in-domain
+eval chart is not evidence the checkpoint is SC.
+
+**What to check before assuming `--drop` is enough**, if a future checkpoint of
+interest splits a fused projection. Dropping the split trellis only works when the
+converter *retained* the fused dense source, as `qwen3_vl` does -- then the
+replacement is already in the file. If some architecture splits and does **not**
+retain it, dropping leaves nothing behind, and restoring cannot help either: the
+fused tensor is a module the base does not have, and adding modules is a thing this
+tool refuses by design. That case needs un-splitting (slicing the original's fused
+weight) or re-conversion, not a drop. One header survey of the candidate checkpoint
+answers which it is.
+
+**Name agreement is enforced rather than assumed.** If the converter renamed, fused or
+split a tower tensor, the selected module simply does not exist in the reference repo
+and the tool refuses by name, saying which modules and why. That is the cheap half.
+
+**The expensive half is a numerical guard, and it is the reason this is publish-grade.**
+Matching names and shapes do not establish that the dense tensor is the one the trellis
+was made from: a different fine-tune of the same architecture, a transposition, or a
+scale convention baked into the stored weights and recorded nowhere (Laguna's
+`interm_div`, [format-and-loading.md](format-and-loading.md)) all pass every structural
+check. So `--verify N` dequantizes a sample of the modules being replaced with
+`ops.dense_weight` and measures relative error against the incoming dense tensor.
+Validated on `gemma-4-12B-it-exl3@3.00bpw_mul1` against `google/gemma-4-12B-it`: a
+genuine restore measures **0.1674** at K=3, inside the 0.1441-0.1790 band
+[qbench.md](qbench.md) records for that bit width, while the same tensor with its rows
+permuted measures **1.4128**. The threshold sits at 0.6, in an 8.4x gap that nothing
+lands in by accident.
+
+### A third quantized tower, from our own pipeline, and what it stores twice (2026-09-18)
+
+exllamav3's default `vision_bits` became architecture-dependent at some point
+before 2026-09-18, and for `qwen3_5`/`qwen3_5_moe` it resolves to **6**. This is
+not a Hub observation: it showed up in our own sweep. `~/ckpt` holds
+`Ornith-1.5-35B-A3B-exl3_3.00bpw` from 2026-09-16 with `vision_bits: null` and a
+fully dense 0.832 GiB tower, and `..._4.00bpw-H5` from 2026-09-18 with
+`vision_bits: 6` and **164 quantized modules at K=6**, tower down to 0.521 GiB.
+Same pipeline, same model, two days apart. So anything published from this sweep
+ships a quantized tower unless something is done about it.
+
+**The tower is split for quantization, and the fused source is kept.** Qwen3-VL
+stores vision attention as one packed `blocks.N.attn.qkv` (3456x1152 here).
+exllamav3 quantizes it as three separate `q_proj`/`k_proj`/`v_proj` — 81 modules
+across 27 blocks — **and leaves the fused bf16 `attn.qkv.weight`/`.bias` in the
+output untouched.** Verified byte-identical to the source repo's, hash and all,
+while every neighbouring norm was cast bf16 -> fp16 on the way through. That is
+**0.2004 GiB per checkpoint** stored twice, in two different factorizations.
+
+Two consequences, one of them convenient:
+
+- **Restoring this tower does not need the original for attention.** The dense
+  weights are already in the file. `--restore vision` against the source repo
+  fails by name on exactly those 81 modules -- which is the fusion case
+  [format-and-loading.md](format-and-loading.md) warns about, caught by the tool
+  rather than silently mismatched -- and the remaining 83 (`attn.proj`,
+  `mlp.linear_fc1`, `mlp.linear_fc2`) do match and restore normally. A fully
+  dense tower is those 83 restored plus the 81 trellis modules simply dropped.
+- **vLLM almost certainly cannot serve the split form**, and it no longer
+  matters enough to test. `Qwen3VisionBlock` builds one packed `attn.qkv`
+  (`qwen3_vl.py`: `"qkv": ["qkv"],  # For vision tower's already-packed QKV`),
+  and its only unpacking rule maps `attn.q.`/`attn.k.`/`attn.v.` onto
+  `attn.qkv.` with a shard id -- a dense weight-loader path, keyed on names the
+  checkpoint does not use (`q_proj`, not `q`). Left here as the reason not to
+  pursue it, not as a finding: it was never run.
+
+## Policy: unquantized vision, always (2026-09-18)
+
+**Decided, and it closes the quantized-tower question rather than answering it.**
+Nothing published from here carries a quantized vision tower, whatever the
+pipeline defaults to.
+
+The reasoning is that the upside stopped existing. Host offload of the tower is
+effective, and the slowness of that path does not show up in real use -- one PCIe
+pass per image is not a capacity problem (see "Nothing could evict any of it"
+above, and the transient sections). So a quantized tower buys back host
+transfers and nothing else, against a **quality cost nobody has characterised
+anywhere**: the tower is quantized as an uncalibrated side model, `proxy_err` is
+not comparable to any body tensor's error column, and qbench's text-KLD axis
+cannot see a vision tower at all. An uncharacterised quality loss for a saving
+that offload already makes irrelevant is not a trade worth taking, and it is not
+worth the measurement either.
+
+**How to get it.** `-vb 16` / `--vision_bits 16` stores the tower unquantized;
+the default is `0` (auto), which resolves to the architecture's
+`default_vision_bits`. Seven architectures now declare that as **6** --
+`qwen3_vl`, `gemma4` (twice), `glm4v`, `muse_glimmer`, `step3_7` and
+`deepseek_v4_vision` -- so this is the default for a growing set, not a quirk of
+one model. `-vb 16` leaves the output directory name unchanged (the `-V` suffix
+is only added for values other than 16), so it does not disturb an existing
+naming scheme.
+
+**It does not affect arm selection.** qbench scores text KLD, which never touches
+the tower, so sweep arms converted with a quantized tower are fine to *choose
+between*. The flag only has to be right for the conversions that get published --
+which means the cheapest correct path is to select first and pass `-vb 16` on the
+final conversion, rather than repairing or re-running a sweep.
 
 ## Reproducing
 
@@ -246,3 +710,297 @@ tools/encoder_census.py <repo>[@rev] --detail   # per-suffix storage breakdown
 is stored in a way the plugin can read — and has its own "never loaded when serving text"
 bucket. That bucket fuses the encoder with MTP and draft heads; this tool separates them,
 because they are evictable on completely different terms.
+
+## What chunking costs in time (2026-09-12)
+
+Memory was measured before throughput was, which is the wrong order; these are the
+numbers that were missing.
+
+**Intrinsically it is ~1%.** In the isolated rig, where the tower is resident, a full
+forward at full resolution takes 8.325s unchunked and 8.342s chunked on Qwen3.8, 3.053 vs
+3.084s on GLM-4.1V. Slicing a pointwise MLP costs a handful of extra kernel launches and
+nothing else.
+
+**On a serve it costs more, because the tower is on the host.** UVA reads an offloaded
+weight on every GEMM that touches it, so chunking into N pieces reads the MLP weights N
+times per image instead of once. Measured on a GLM-4.1V serve, `--cpu-offload-params
+visual`, 5 chunks:
+
+| | startup | first image | second image | KV |
+|---|---|---|---|---|
+| unchunked | 55.2 s | 13.7 s | 2.21 s | 6.17 GiB |
+| chunked | 58.2 s | 12.8 s | 2.47 s | 6.31 GiB |
+
+**+3s at startup, nothing measurable per image.** The first-vs-second gap is warmup —
+cuBLAS heuristics and allocator growth — and belongs to both arms equally.
+
+**On Qwen3.8 uncapped the comparison cannot be made, which is itself the result.** At 7
+chunks the config *starts*; without chunking it does not exist:
+
+| | KV available | outcome |
+|---|---|---|
+| unchunked | 0.55 GiB | **refuses to start** — 0.58 GiB needed for 16384 context |
+| chunked | 1.04 GiB | starts; serves the 4032x3024 image at full resolution, 11,905 prompt tokens |
+
+Startup 82s and a 7s steady-state image on that configuration. Both are the price of a
+65536-patch tower whose weights live on the host, not of chunking — but they are the price
+of the *only* configuration that runs it uncapped, so they should be quoted together.
+
+**So the default stays on and the escape hatch is `VLLM_MM_ENCODER_MLP_CHUNK_MB=0`**,
+which restores the single-shot form exactly. Where the tower is resident rather than
+offloaded, chunking is nearly free and there is no reason to turn it off; where it is
+offloaded, the trade is a few seconds of startup against a configuration that may not
+otherwise fit.
+
+## Can the tower cost be reduced to bytes-per-pixel, the way KV reduces to bytes-per-token?
+
+The appliance already does pre-launch KV estimation, and an image budget looks like the
+same shape of problem with pixels where tokens were. Measured 2026-09-12, the answer is
+**the form reduces cleanly and the coefficient does not**, and the difference is what
+decides where the calculation belongs.
+
+**The form reduces.** The tower's peak is linear in patch rows with a negligible
+intercept, and one row is a fixed number of pixels (`patch_size^2`, times
+`temporal_patch_size` for video). Qwen3.8's tower, chunked, sweeping the grid:
+
+| patch rows | peak | B/row | / (H x dtype) |
+|---|---|---|---|
+| 9,216 | 0.260 GiB | 30,295 | 13.15 |
+| 16,384 | 0.346 GiB | 22,673 | 9.84 |
+| 25,600 | 0.445 GiB | 18,682 | 8.11 |
+| 36,864 | 0.644 GiB | 18,747 | 8.14 |
+| 65,536 | 1.134 GiB | 18,576 | 8.06 |
+
+Fitting the two largest: **18,350 B/row + 14.3 MiB**. So above the chunk threshold the
+cost is `c x hidden_size x dtype_size x rows`, with `c ~ 8` — a small integer count of
+`[rows, hidden]`-shaped tensors simultaneously live at the peak instant, which is exactly
+the shape of a KV calculator's `2 x layers x kv_heads x head_dim x dtype`. The curve at
+small row counts is not noise: below `chunk_rows` the MLP runs single-shot and its two
+full-width buffers rejoin the peak, so the law is piecewise with the knee at the chunk
+size.
+
+**The coefficient does not reduce, and that is the whole difference.** `c` is a property
+of the implementation's liveness pattern, not of the checkpoint:
+
+- it differs by architecture — **7.96** on Qwen3.8, **10.27** on GLM-4.1V, same units;
+- it is not readable from any config field, since what sets it is which tensors happen to
+  be alive at one instant;
+- **and it moved 35% today.** Before `e272b1784` and `2f3e2a7db` Qwen's was 12.28; after,
+  8.06. Two commits changed the constant an appliance would have hardcoded.
+
+A KV calculator survives engine upgrades because `2 x layers x kv_heads x head_dim` is a
+property of the model. A tower calculator does not, because `c` is a property of the
+engine. An appliance that pins it is pinning a number its dependency is free to change,
+and the failure mode is the quiet one: a budget that was right last release and now
+under-reserves.
+
+**So: same arithmetic, different owner.** The appliance can own the *policy* — where on
+the fidelity/context curve to sit — and the shape of the estimate. The *coefficient* has
+to come from the engine that determines it, either measured at startup (the profiler
+already runs the tower once; it could report B/row alongside the peak) or published by the
+fork per version. Hardcoding it downstream converts an engine change into a silent
+capacity bug, which is the class this project treats as outranking crashes.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `multimodal` — Actually pass an image through, and gate it
+
+**Outcome wanted:** an EXL3 checkpoint demonstrably *understanding an image*
+served through vLLM, plus a `bench/` entry that keeps it that way.
+
+The project's default position is that multimodal does not matter yet, and as a
+sequencing call that is still right. But the practice contradicts the position —
+graphs and screenshots are how people actually hand over context, this project's
+users included — so the honest version is "deferred", not "irrelevant".
+
+**Images work.** Verified 2026-08-17 through a real chat client (Jan, chosen over
+`vllm chat` because mainstream clients default to tens of thousands of tokens of
+tool preamble): **gemma-4-12B, Qwen3.6-9B and Qwen3.8** all describe images
+accurately, including fine detail like reading text in the image. That closes the
+gap this item was opened for — the vision path is not merely loading.
+
+**Still open, and now specific:**
+
+- **No gate.** All three results are hand-run. `bench/core.py`'s prompts are
+  strings, and an image entry needs the fixture committed beside the baseline,
+  since a baseline against an image that later changes is worthless. The fixture
+  buys a second thing once it exists: exllamav3 quantizes vision towers with no
+  calibration data at all, and the same image-conditioned logprob divergence
+  measures a bf16 tower against a quantized one on an otherwise identical
+  checkpoint -- no vision benchmark required. See
+  [docs/media-encoders.md](media-encoders.md).
+- **Audio is broken, probably not ours.** gemma-4-12B insists every clip is
+  chirping birds. It is a unified model with no audio encoder — sound goes into
+  the same token space as text — so there is no EXL3-quantized audio component to
+  get wrong, which makes a pipeline fault upstream of us the likely cause. Cheap
+  way to settle it rather than assume: the same clip through native exllamav3,
+  the instrument that settled Muse's text path. The other instrument is
+  gemma-4 E2B/E4B, the only model on hand with a genuinely *separate* audio
+  encoder and so the only one where a quantized audio component could be blamed
+  at all — blocked on `gemma4-e2b`.
+- **`--language-model-only` is doing more work than it looks.** It is the flag
+  reached for whenever headroom runs short, and the reason is now priced: the
+  encoder is 0.79-3.64 GiB across every checkpoint surveyed and up to **21% of
+  the package** (Qwen3-VL-8B @3.0bpw), worst on exactly the small, low-bpw
+  checkpoints picked for small cards. It should not have to be a capability trade —
+  evicting the encoder to host memory costs one PCIe pass per image and nothing at
+  all for text. **vLLM 0.29.0 can now do exactly that** (0.86 GiB verified on
+  Qwen3.8-27B), so the capability trade is gone — but the encoder cache and the
+  tower transient stay resident and are the larger cost on a small card. See
+  `encoder-offload`. → [docs/media-encoders.md](media-encoders.md)
+- **Muse-Glimmer is usable in practice now, through the Transformers backend.**
+  Reported 2026-08-25: fp8 KV works, and vLLM 0.28 ships a reasoning parser
+  (`muse_glimmer_reasoning_parser.py`) plus tool-call parsing, so the serving path
+  is complete rather than merely functional. Two things it still cannot do:
+  turboquant (sliding window -- see `turboquant-sliding-window`, where it is the
+  third family), and the **native** implementation, which fails on the quantized
+  vision adapter even with `--language-model-only`.
+- **Muse-Glimmer remains blocked on the native path**, for two unrelated reasons
+  already characterized: native vLLM cannot serve its quantized vision adapter
+  (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
+  plugin — the same class of gap as `DFlashQwen3Model.fc`, see
+  `quantized-embeddings` item 1), and the Transformers backend route is degraded on vLLM ≥ main by the
+  upstream soft-cap gap, which wrecks sampled output while leaving greedy intact.
+
+**The VRAM link, which is the reason this item is not merely nice-to-have.**
+Multimodal is where headroom runs out first: Qwen3.8 only fits an image budget under
+an explicit cap on image size, and its encoder allocation is what OOMs otherwise.
+**Do not reach for `--limit-mm-per-prompt`'s `width`/`height` to set that cap** — they
+size the profiling dummy and nothing else, so they shrink the budget while the full-size
+image still arrives, which is an OOM rather than a limit. The enforcing knob is
+`--mm-processor-kwargs '{"max_pixels": N}'`; see `encoder-offload` and
+[docs/media-encoders.md](media-encoders.md). The embedding this model
+carries is ~2 GiB — **larger by itself than the entire post-weights headroom that
+test was squeezing into**. So `quantized-embeddings` is not just a size win in the
+abstract; on a 16 GiB card it is the difference between usable and unusable image
+budgets. That makes multimodal a *beneficiary* of the embedding work rather than a
+competitor for attention.
+
+Note also that vLLM's multimodal knobs churn: `--max-num-encoder-input-tokens` has
+been removed with no obvious replacement, `--mm-processor-cache-gb 0` does *not*
+bound the encoder cache, and `--limit-mm-per-prompt` now carries feature-size as well
+as counts — but only as *profiling* hints, which is the trap above. Check flags against
+the pinned tree rather than from memory, and check what reads them, not what they are
+named.
+
+**Candidate approach for the parts still open: the instrument that already worked.**
+exllamav3 implements
+this vision path natively (`MuseGlimmerVisionModel`, `examples/imgdesc.py`), so
+the same image and prompt can go through both engines and be compared token for
+token. It is the reference the text case proved worth having, and it is the only
+one available — there is no fp16 Muse-Glimmer on hand to fall back to.
+
+**Two obstacles, both already characterized rather than guessed:**
+
+- **Native vLLM cannot serve the quantized vision adapter at all.** vLLM main
+  builds `vision_adapter.c_fc` as a plain `nn.Linear`, which never reaches
+  `get_quant_method`, so no quantization plugin can touch it. `--model-impl
+  transformers` is the only route; `--language-model-only` bypasses vision
+  entirely and is the reason this stayed invisible.
+- **The gate is text-only.** `bench/core.py`'s prompts are strings, and an image
+  entry needs a different capture shape — the fixture has to be committed with
+  the baseline, since a baseline against an image that later changes is worthless.
+
+→ [docs/transformers-backend.md](transformers-backend.md),
+[bench/README.md](../bench/README.md)
+
+### `encoder-offload` — Make vision affordable on a small card
+
+**Outcome wanted.** A multimodal EXL3 checkpoint serves on 16 GiB without the operator
+hand-picking an image cap per model. Upstream closed the part that gated everything —
+vLLM 0.29.0 offloads vision towers, verified here at 0.86 GiB on `Qwen3.8-27B` — so what
+remains is the encoder's *resident* cost, not its weights.
+
+**What it unblocks.** Vision as a default capability rather than a per-model tuning
+exercise. Today it works only with a correct `--mm-processor-kwargs '{"max_pixels": N}'`,
+and picking N wrong OOMs mid-request rather than at startup.
+
+**Candidate approach, and the sequencing matters.** Do the transient work (2) **first**,
+and treat the autosizer (1) as the fallback it is. A knob that makes it easy to choose how
+much capability to give up is still a knob for giving up capability; if chunking removes
+the need to cap resolution at all, that is strictly the better outcome and (1) should be
+skipped entirely rather than built and then made redundant. Build (1) only once (2) is
+measured and shown insufficient.
+
+1. **Fallback: derive the cap instead of asking for it.** Autosize the image budget
+   against measured
+   headroom rather than making the operator guess, the way any knob checked against a hard
+   threshold should default to that threshold. **Splits into a generic half and a small
+   per-family half**: the *quantity* is already model-agnostic — `max_tokens_per_mm_item`
+   flows through one function, `compute_mm_encoder_budget`, fed by
+   `ProcessingInfo.get_mm_max_tokens_per_item` that every multimodal model implements — so
+   costing an image needs no per-model knowledge. Only the *actuator* fragments, across
+   five families: `max_pixels`/`smart_resize` (13 model files), `max_dynamic_patch`
+   (8, InternVL), `max_num_tiles` (3), `pan_and_scan` (2, gemma3), `max_num_crops`
+   (2, phi). Fixed-resolution towers (CLIP, SigLIP, LLaVA-1.5) need nothing — their patch
+   count per image is constant, so this is a *dynamic-resolution* problem, and only 10
+   files use `smart_resize` at all. So: one sizer, plus a lookup from budget to whichever
+   kwarg the family honours.
+2. **Largely done 2026-09-12 — reassess (1) against the new numbers before building it.**
+   Two commits on the fork cut the tower transient by **32.6% on Qwen3.8** (1.728 -> 1.165
+   GiB) and **22.5% on GLM-4.1V** (1.856 -> 1.438), confirmed on a real GLM serve as KV
+   5.89 -> 6.31 GiB and context 154,480 -> 165,456 tokens. Whether that is enough to retire
+   the autosizer is now an open measurement on Qwen3.8, the model where the cap was
+   actually needed, not a question of principle.
+
+   **Start here tomorrow: auto-context sweep on Qwen3.8 @0.985 (reported 2026-09-12).**
+   Context is *unchanged from text-only* at 256K and 1M pixels (264,993 both), then falls
+   to 248,617 / 233,244 / 190,188 at 4M / 8M / unlimited. **Multimodal is free up to ~1M
+   pixels**, which is the headline this item opened against.
+   The drops track the tower peak: `Δcontext x 19,530 B/token` gives 0.31 / 0.61 / 1.43
+   GiB against a predicted tower peak of 0.28 / 0.57 / 1.13. The flat region is almost
+   certainly `max()` returning the decoder floor, not the profiler going blind -- at 1024
+   and 4096 rows the tower wants 0.03 and 0.12 GiB.
+   **The check that separates the two:** compare the logged `GiB for peak activation`
+   across limits. Identical at 256K/1M and rising from 4M means `max()` is working;
+   identical everywhere including unlimited means it really is blind.
+   *Not evidence of a leak:* an oversized image completing at a low cap is `smart_resize`
+   downscaling it to fit, not an unbudgeted allocation. The cost there is fidelity, not
+   bytes -- which makes **quality vs pixels** the curve still missing, and `bench/`'s
+   image-conditioned logprob divergence the instrument for it.
+
+   **What remains.** GLM keeps a `torch.cat([q, k])` that re-makes the copy the contiguous
+   drop saved, which is why its attention share is ~2 MiB against Qwen's 75; restructuring
+   its preamble the way `qwen2_5_vl` already does is the next increment. After that, GLM's
+   peak is dominated by `fused_add_rms_norm` temporaries — measured in the isolated rig,
+   not yet confirmed against a serve, where op dispatch may differ.
+   - ~~Try `compile_mm_encoder` first.~~ **Tested 2026-09-12 and it is worse, not free.**
+     The flag is live on this tower (28 compile passes, one per block), but it left peak
+     activation at 0.43 GiB against 0.44 — so inductor does *not* avoid materialising the
+     full-width intermediate — while adding **1.13 GiB** of resident consumed memory.
+     Net: KV halved, 2.28 -> 1.14 GiB. Do not revisit without a reason to think the
+     fusion behaviour changed. See [docs/media-encoders.md](media-encoders.md).
+   - **So: chunk the vision MLP over the token dim.** Pointwise, so chunking is
+     bit-for-bit identical; same move as TurboQuant's slabbed continuation prefill. The
+     *property* is universal — every tower MLP checked is `linear -> act -> linear` over
+     three naming conventions (Qwen3 `linear_fc1/fc2`, GLM-4V `gate_up_proj/down_proj`,
+     SigLIP/CLIP `fc1/fc2`) — but vLLM has no shared vision-MLP base, so it is N mechanical
+     edits, and it cannot be lifted to the block level because the block also holds
+     attention, which mixes across tokens. Raises the affordable image size; does not
+     remove the need for a cap.
+
+   **Premise settled analytically 2026-09-12, and Qwen3.8 is the worst case.** Whether the
+   MLP or the attention projections lead is decided by `intermediate/hidden` in
+   `vision_config`, so it reads off config.json with no weights. Across eight towers the
+   MLP leads *everywhere*, by 2.49x (Qwen3-VL / gemma-3 / SigLIP, all the so400m shape
+   1152/4304) up to 3.89x (Muse-Glimmer, 1536/8960). So chunking cuts in the right place on
+   every architecture checked, and it cuts hardest on the ones we have not measured.
+   Gated MLPs (GLM's `gate_up_proj` -> `SiluAndMul`) are worse still than the ratio
+   suggests, since the fused projection is `2 x I` wide before the activation halves it.
+   Step-3.7's `perception_encoder` states no `intermediate_size`; PE's standard mlp_ratio 4
+   would put it at 2.67x, unconfirmed.
+
+   **Reference platform: `turboderp/GLM-4.1V-9B-Thinking-exl3@5.00bpw`, verified working
+   2026-09-12.** Tower offloads at 1.66 GiB on the same `--cpu-offload-params visual`, and
+   it serves a full-resolution photo uncapped. It is the right instrument because its
+   profiled peak *is* the tower, where Qwen3.8's is decoder-dominated: measured at
+   **42,357 B per patch row with a zero intercept**, from two runs differing only in
+   profiled modality. So chunking at C rows should land at `C x 42.4 KB` and the win reads
+   straight off the `peak activation` line. Target to beat: peak 0.89 GiB / KV 7.00 GiB
+   image-only, 1.85 / 5.89 with video enabled.
+
+→ [docs/media-encoders.md](media-encoders.md),
+[docs/memory-accounting.md](memory-accounting.md)

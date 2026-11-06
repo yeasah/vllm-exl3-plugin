@@ -1,7 +1,7 @@
 # Quantized embeddings
 
 *Originally "Phase 4: quantized embeddings". Not the feasibility report's Phase 4,
-which was packaging. Tracked in TODO as `quantized-embeddings`.*
+which was packaging. Open work on tied models is TODO `tied-embeddings`.*
 
 *"Phase A" and "Phase B" below are local to this note: A is serving a tied model's
 embedding from its existing quantized head (shipped), B is producing an embedding
@@ -13,6 +13,27 @@ whole file.
 
 This note records what was established before any of it was built, so the decisions are
 auditable and the work is resumable.
+
+## Why upstream leaves the embedding dense, in their own words
+
+Worth stating before any of the measurements below, because it changes what the gap
+*is*. On the Qwen3.8-27B model card, turboderp writes that the EXL3 quant "contains
+2.4 GiB of (unquantized) embeddings, **not counted since they're not loaded into VRAM
+during inference**" ([discussion 2](https://huggingface.co/turboderp/Qwen3.8-27B-exl3/discussions/2),
+read 2026-08-28).
+
+That is true of their serving path and false of ours. exllamav3 keeps the embedding on
+the host and gathers rows there; vLLM's `VocabParallelEmbedding` is a device tensor in
+the model graph, so every byte lands in VRAM. So this is not an oversight upstream failed
+to notice — it is a decision that is correct for their deployment and simply does not
+transfer to a paged, batched, GPU-resident server.
+
+Two things follow. The bpw figures on those model cards are consistent within their own
+frame rather than misleading, and **the language elsewhere in this repo about upstream
+"mistakes" or "underperformance" on this axis is harsher than the facts warrant**. What
+is actually true is narrower and still worth the whole effort: an EXL3 checkpoint carries
+a tensor that costs us gigabytes of VRAM and costs them nothing, and nobody upstream has
+a reason to fix it.
 
 ## The prize, measured
 
@@ -248,6 +269,61 @@ Throughput cost, same checkpoint, eager, batch as noted:
 
 ~3% decode cost, on the model where the fixed per-step embedding work is amortized over
 the least layer compute it ever will be, in naive PyTorch with no kernel work.
+
+## A tied head vLLM used to throw away
+
+*2026-09-09, found by the v0.29.0 bump.* Phase A above measures
+`turboderp/Qwen3-0.6B-exl3`, whose `config.json` declares `head_bits: 6`. On
+`turboderp/Llama-3.2-1B-Instruct-exl3` the same path had **never run at all**, and
+nothing said so.
+
+Three signals tell the plugin a checkpoint stores a quantized head: the safetensors
+index, a `quantization_config.json` storage map, and `head_bits`. That checkpoint has
+none of them -- one `model.safetensors` with no index (the Hub 404s that path), no
+sidecar, and a `quantization_config` block whose keys are only `quant_method`,
+`version`, `bits` and `calibration` -- while carrying `lm_head.suh/svh/trellis` on
+disk. So `_head_storage_exists()` was False, the tie was declined, and vLLM 0.28
+discarded every `lm_head.*` weight for tied models (`skip_prefixes=["lm_head."]`).
+The trellis went on the floor, the dense `embed_tokens.weight` loaded in its place,
+and every logit was correct.
+
+**The gate recorded the fallback as the reference.** `llama-3.2-1B-3.0bpw-tied` was
+blessed at `weight_gib: 0.86`, which is 0.489 GiB of dense fp16 embedding plus ~0.37
+GiB of 3bpw layers -- the entry whose stated purpose is that the embedding is *not*
+loaded dense. A weight-bytes channel cannot catch a regression that was already
+present when the baseline was taken.
+
+vLLM 0.29 replaced the blanket skip with alias detection (`_get_tied_embedding_params`),
+which skips only `lm_head.weight` and refuses anything else unclaimed, turning a silent
+fallback into a load error. The fix reads the single file's header where there is no
+index -- the same question, asked of the only file there is.
+
+| | before | after |
+|---|---|---|
+| weight bytes | 0.86 GiB | **0.55 GiB** |
+| KV headroom | 11.42 GiB | 11.73 GiB |
+| greedy continuation | — | unchanged |
+| max abs dlogprob | — | 2.911e-01 |
+| KL max | — | 1.037e-01 |
+| argmax disagreements | — | 1 of 88 |
+
+**None of that deviation is the bump.** Held fixed at the dense embedding,
+0.29 reproduces the 0.28 baseline at *exactly* 0.000e+00 on both prompts, weight bytes
+included. The deviation is the embedding source, and it is larger than Phase A's
+because the shared tensor is coarser: Qwen3-0.6B's head is 6-bit, while this checkpoint
+declares no `head_bits` at all, so its head is quantized at the **body rate of 3.0bpw**.
+The same mechanism, four bits shallower.
+
+**Taken as-is rather than gated on depth.** A minimum-depth conditional was considered
+and rejected: head depth is what the fp8 shared-tensor plan addresses directly (*fp8 as
+the shared tensor*, above), and this entry is a baseline rather than something served,
+so the value here is having the explanation rather than a threshold nobody measured.
+
+**Declining a head is now an action, not an absence.** The same 0.29 change means an
+unclaimed trellis raises, so `get_cache_scale_mapper` has to drop `lm_head.*` explicitly
+wherever the config does not serve it. Without that, `EXL3_DENSE_EMBED=1` -- the switch
+whose whole purpose is isolating the embedding from every other change -- was the one
+setting under which a tied EXL3 checkpoint could not be loaded at all.
 
 ## Serving under torch.compile and CUDA graphs
 
@@ -566,7 +642,7 @@ the checkpoints censused here only the gemma-4 family is both tied and mid-size.
 *Both halves of that gating have since moved (2026-08-26). The kernel gate is gone -- see
 "fp8 as the shared tensor" below. And gemma-4's deployability was recorded as riding on
 the flash-attention head-dim-512 question, which was a misdiagnosis: what decides it is the
-quantized KV cache, tracked under TODO `turboquant-sliding-window`, whose walls have so far
+quantized KV cache, tracked under FUTURE.md `turboquant-sliding-window`, whose walls have so far
 reduced to one-line staleness bugs and which covers gemma-4, Laguna and Muse-Glimmer --
 every real-world candidate except Qwen. On present evidence that is more likely to be
 resolved than not, so the constituency for a shared tensor is real rather than
@@ -674,7 +750,7 @@ differ from it, mean |delta| 0.122 -- the gather is executing rather than merely
 **So: fp8 is confirmed viable, the shared tensor is deferred rather than closed, and its
 priority has gone up rather than down.** The blocker it was gated on -- no scalar-integer
 GEMM -- is genuinely gone, and the second-order gate that demoted the whole tied-model line
-was a misdiagnosis (see TODO `turboquant-sliding-window`), so
+was a misdiagnosis (see `turboquant-sliding-window` in [turboquant-kv.md](turboquant-kv.md)), so
 the constituency is real. That ordering has now resolved: the crash is fixed, the split
 *is* a 1.234 GiB baseline, and fp8's margin is therefore the marginal 0.296 GiB for 2.25x
 the divergence rather than a route to a working path. Worth having -- 0.296 GiB is real in
@@ -684,6 +760,29 @@ head path, an fp8 gather and repair-tool emission to collect. The recorded "7 or
 shared per-row" operating point is **superseded on encoding**: fp8 is the shape to build,
 if it is built.
 
+
+
+### Shipping it as a sidecar rather than a rewrite
+
+`tools/quantize_embedding.py` rewrites the shard that held the embedding, so the
+output duplicates that shard. For a single-file checkpoint that is the whole
+model: `Qwen3-8B-exl3` at 6.0bpw spent 5.62 GiB of new data to add 0.33 GiB of
+`bq_*`. `--sidecar` instead hardlinks every original shard, writes `bq_*` in a
+shard of their own, and renumbers the result into `model-0000i-of-0000N` with an
+index. The cost falls to the `bq_*` bytes, provided the source stays where the
+links can reach it — measured across the twelve local checkpoints, **67.62 GiB
+of unshared data became 5.00 GiB**, and every `bq_*` tensor came out
+byte-identical to the rewrite's.
+
+The trade is that a sidecar checkpoint is not self-contained: it depends on the
+source, and it carries *both* encodings, since the dense embedding is never
+removed. That second property is useful rather than incidental —
+`EXL3_DENSE_EMBED=1` then serves the dense copy and ignores `bq_*`, which is the
+only way to measure the two against each other on one set of weights. On
+MiniCPM5-1B that reads as identical greedy tokens with logprobs 1.5e-1 apart.
+
+Hardlinking is the whole economy, so the tool now says when it could not: across
+a filesystem boundary every shard is copied instead and the mode saves nothing.
 
 ## Choosing depths: what the repair tool should default to
 
@@ -1186,7 +1285,7 @@ other example of this exact out-of-tree architecture.
 
 ## Phase B result: the format, built and serving
 
-*Tracked in TODO as `quantized-embeddings`. Built 2026-08-17, immediately after the
+*Was TODO `quantized-embeddings`, now `tied-embeddings`. Built 2026-08-17, immediately after the
 decision above.*
 
 Untied models now serve a quantized embedding. `vllm_exl3_plugin/blockq.py` holds the
@@ -1335,6 +1434,125 @@ decoder — the reason to keep two implementations of a format that must agree.
 - **Tied models are unchanged**, and remain served from their existing quantized `lm_head`.
   The shared-tensor optimization stays deferred on the same grounds as before: it needs an
   integer GEMM for the head role, and gemma-4 is nearly its whole constituency.
+
+## On-load encoding, and paying for it once
+
+*Added 2026-09-08, at the request of the appliance project (`vllm-untwisted`).*
+
+On-load encoding, the default since 2026-11-01 (`EXL3_BLOCKQ_ON_LOAD=0` opts out), gets the saving above on a checkpoint nobody has repaired:
+the dense `embed_tokens.weight` is encoded into `bq_*` while it loads, and the fp16
+matrix is never resident. That removes the derived-artifact step entirely — no
+`tools/quantize_embedding.py` run, no second copy of the checkpoint on disk, no
+sidecar to keep in sync with the original — which is what makes it the right default
+for a system that serves whatever HF checkpoints happen to exist.
+
+Its cache is capped by `EXL3_BLOCKQ_CACHE_MAX_GB`, least recently used out, so a default-on
+cache has an owner. Two constraints shape everything below. The encode runs **on CPU**, because `blockq.encode` does not
+reproduce across devices — a GPU encode is equally accurate and produces a *different*
+model from the same weights, which would mean a model served this way disagreed with
+the same model quantized offline. And it runs **per engine start**, which is the cost
+this section is about: about 0.6–1.6 s for MiniCPM5-1B's 130560x1536, and
+proportionally more for a real vocabulary.
+
+### What the default costs
+
+"Under the noise floor" does not generalize. Simulated `blockq:32` 4-bit on the scored slices, as a
+multiple of excess KL, against what the saved bytes would buy in body bits:
+
+| model | wild 4.00 | swe 4.00 | wild 5.00 | swe 5.00 | saved | same bytes in body bits |
+|---|---|---|---|---|---|---|
+| Ornith-1.5-9B | 1.05 | 1.08 | 1.26 | 1.44 | 1.46 GB | ~6-9x lower |
+| Qwen3.8-27B | 1.01 | 1.00 | 1.04 | 1.05 | 1.83 GB | ~2.3x lower |
+
+The 9B's tax is about the size of its noise floor and 4-10x the +0.000225 measured on Qwen3.5-9B above;
+why is open. It grows with the rung because a fixed embedding error weighs more against a cleaner body.
+Text-answer recall is unchanged within CIs on both models (-0.64 to +0.05 points). So the case for the
+default is economic: the bytes are worth far more in the body than the embedding error costs.
+
+Served through vLLM, on-load matches a pre-quantized checkpoint exactly, |dlogprob| 0, at TP=1 and TP=2.
+
+### Why that cost needed removing rather than reducing
+
+Engine startup is not a one-time cost in the workload this is for. A profiling sweep
+starts an engine per configuration — per bit rate, per KV dtype, per TP width — and
+re-encodes the identical matrix every time, from identical bytes, on the CPU, while
+the GPU sits idle. The work is a pure function of the dense tensor, so the answer is
+not a faster encoder but a cache.
+
+`~/.cache/vllm-exl3-plugin/blockq-embeddings/` holds one safetensors file per encoded
+embedding, in the same three-tensor layout `tools/quantize_embedding.py` writes.
+`EXL3_BLOCKQ_CACHE=0` turns it off; `EXL3_BLOCKQ_CACHE_DIR` moves it; deleting the
+directory is always safe.
+
+### What an entry is keyed on, and why each part had to be there
+
+- **The resolved commit hash, not the revision that was asked for.** These differ in
+  the case this project sees constantly: EXL3 repos publish one branch per bit rate,
+  the thing being served is `turboderp/X-exl3@3.00bpw`, and that branch gets
+  re-pushed when the quantization is redone. An entry keyed on the branch name would
+  outlive the tensor it holds and hand a re-quantized checkpoint the previous
+  embedding — silently, since a decoded embedding of the right shape produces
+  plausible text. `hf_config._commit_hash` is what transformers actually resolved,
+  and it is the only stable name for what is loaded. If no commit resolves, nothing
+  is cached: the same refusal `_skip_hub_lookup` makes rather than substituting
+  `"main"`.
+- **The tensor's name.** One embedding per model is today's shape, not a property of
+  the format — multimodal checkpoints already carry more than one embedding matrix,
+  and the day this path serves a second one, a per-checkpoint key would hand it the
+  first one's rows. Taken from the module prefix and recorded per method rather than
+  read off `EXL3Config.embed_prefix`, which holds whichever embedding was constructed
+  last.
+- **Vocabulary, hidden size, block size and bit width.** Implied by the two above and
+  in the key regardless, so that changing `BLOCKQ_BLOCK` or `BLOCKQ_BITS` orphans old
+  entries instead of misreading them. The shapes are re-checked on read; the key is
+  what makes a mismatch a miss rather than an error.
+
+A **local directory** has no commit to key on, so it is identified by a digest of its
+own files' names, sizes and mtimes. Weaker than a hash — `touch` invalidates, and a
+rewrite preserving both size and mtime would not — but it is the property a local
+checkout actually has, and it fails toward re-encoding rather than toward a wrong
+matrix.
+
+### Entries hold the whole vocabulary, and the reader slices
+
+Encoding is row-independent (every reduction in `blockq.encode` is inside a row), so a
+rank's shard of the encoding equals the encoding of its shard. Storing the full matrix
+therefore makes one entry serve every tensor-parallel width, which is the arrangement
+that matters here: sweeping TP=1,2,4 is one encode, not three, and each rank reads only
+its own rows back out through safetensors' slicing rather than materializing the
+vocabulary.
+
+The cost is that a *cold* load at TP=N has every rank encode the full matrix to write
+the same bytes. That is once per checkpoint, and it is why the **uncached** path still
+encodes only the local rows — with nothing to amortize there is no reason to do the
+other ranks' work.
+
+### Measured
+
+Qwen3.5-9B @4.00bpw, 248320x4096 embedding, one RTX 5070 Ti, `enforce_eager`:
+
+| | model loading | resident weights |
+|---|---|---|
+| cold (encode + write the entry) | 9.99 s | 5.48 GiB |
+| warm (read the entry) | 1.96 s | 5.48 GiB |
+
+The encode was 5.8 s of the cold figure, so it accounts for most but not all of the
+8.0 s difference; the rest is the OS page cache being warm on the second run, which
+the cache gets credit for only by accident. The resident footprint being *identical*
+is the check that matters — a cache that silently fell back to the dense embedding
+would also look like a speedup.
+
+Cold and warm serve **the same token ids** (`[11751, 13, 198, 32, 13, 2912, 198,
+33]` greedy from the same prompt), checked as ids rather than as rendered text.
+Same result on MiniCPM5-1B @3.00bpw, whose smaller 130560x1536 embedding encodes in
+0.6–1.6 s.
+
+### Nothing here is allowed to be fatal
+
+A read-only or full `~/.cache`, a truncated entry, an entry written by a layout this
+version does not understand: each is a miss and a log line, never a failure to serve.
+An appliance that stopped loading models because a cache directory filled up would
+have traded a startup cost for an outage.
 
 ## What llm-compressor's embedding quantization costs, and where its menu is a trap
 
@@ -1664,4 +1882,448 @@ per-layer slice exactly, so no block straddles a layer boundary; that is luck, n
 design, and would not hold for a per-layer width that is not a multiple of 32.
 
 None of it is measurable end to end yet — exllamav3 cannot convert the
-architecture (TODO: `gemma4-e2b`).
+architecture (FUTURE.md `gemma4-e2b`).
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `repair-tool` — Repair tool for existing EXL3 checkpoints
+
+Every existing EXL3 checkpoint carries two packaging choices that cost far more in a
+GPU-resident server than they do upstream, enough to more than erase its efficiency
+advantage against other formats on total bytes: a separate output head is emitted for
+tied models (redundant once the embedding is quantized, and not small), and the
+embedding is left at full resolution. Both are rational for exllamav3, which keeps the
+embedding in system RAM and counts it against neither VRAM nor the published size --
+see [docs/embeddings.md](embeddings.md). A post-processing tool
+preserves the very large investment in computation the published EXL3 collection
+represents, rather than requiring it be redone.
+
+**Half of this now exists.** `tools/quantize_embedding.py` rewrites one checkpoint's
+embedding into the block-scaled 4-bit format the measurements chose, hardlinking every
+shard it does not touch — 12 seconds and 1.36 GiB saved on Qwen3.5-9B. What it does
+*not* do is the rest of a repair tool:
+
+- **Drop a tied model's redundant `lm_head`.** The other pipeline mistake, untouched.
+  The plugin already ignores those bytes at load, so this is purely a file-size fix —
+  which is exactly what a downloader cares about.
+- **Take a Hub repo rather than a local directory**, and write something publishable:
+  a model card noting what changed, and the revision it was derived from.
+- **Batch**, since the value is in repairing a collection, not one checkpoint.
+
+Depth stays a shipped constant (4 bits) unless something argues otherwise; an override
+is worth having, and a size-budget solver belongs to the full quantizer, where layer
+bpw is actually free rather than fixed.
+
+→ [docs/embeddings.md](embeddings.md)
+
+### `quantized-embeddings` — VRAM-efficient use of quantized embeddings
+
+Serving the embedding quantized rather than dequantizing it at load. Dequantizing at
+load proves the math and saves file storage and I/O, but leaves VRAM — the thing
+this project cares about most — completely unchanged.
+
+**Both shapes now serve, and an untied model no longer needs a derived checkpoint at
+all.** Tied models come from the checkpoint's existing quantized `lm_head`, with the
+fp16 `embed_tokens` never loaded and no tooling needed. Untied models — which have no
+quantized copy to reuse — get one either from `tools/quantize_embedding.py`, whose
+`--sidecar` mode adds `bq_*` beside the original shards instead of rewriting one, or
+from `EXL3_BLOCKQ_ON_LOAD=1`, which encodes the dense embedding during weight loading
+and reproduces the tool's output byte for byte. Either way it is the block-scaled
+4-bit format of `vllm_exl3_plugin/blockq.py`, served by `EXL3BlockQEmbeddingMethod`:
+Qwen3.5-9B goes 1940 -> 549 MiB resident, at a KLD tax at or below the model's own
+noise floor. All hooks are sanctioned vLLM extension points; nothing is monkeypatched.
+
+Three things remain, in rough order of how much they would cost to discover late.
+
+1. **Most architectures never ask for an embedding quant method**, and the fix is
+   carried in `vllm-embed-quant-config` (fork commit `c69d01e`) rather than
+   upstream. 86 of 131
+   vLLM model files omit `quant_config` when constructing their
+   `VocabParallelEmbedding`, so neither shape can serve there — silently dense for a
+   tied model, a load failure for a block-quantized one. The patch is one file
+   (default the config from `get_current_vllm_config()`), verified not to disturb
+   configs that do not quantize embeddings.
+   **Worth offering upstream**: `vllm-gguf-plugin` is blocked by exactly the same
+   thing, so it is an ecosystem fix and not only ours.
+
+   **But not as written — it breaks speculative decoding** (found 2026-08-20). A
+   drafter is built under the *target's* `quant_config`, so the patch hands the
+   drafter's embedding an EXL3 method and it is asked for a `bq_q` it never had.
+   Nothing about that is EXL3-specific; filed as-is it breaks any quantized target
+   with a differently quantized or unquantized drafter. Two candidate fixes, and the
+   choice decides what gets filed: condition the ambient default on the module
+   belonging to the model the config describes (which
+   `VocabParallelEmbedding.__init__` cannot know), or fix the drafter's config
+   instead so it stops misdescribing what is being built — a cleaner contribution
+   than an 86-file workaround, and it makes this patch safe as a side effect.
+   The same ad-hoc plumbing fails in the opposite direction too
+   (`DFlashQwen3Model.fc`, gemma-4's `vision_adapter.c_fc`): any fix worth filing
+   should be judged against both. →
+   [docs/format-and-loading.md](format-and-loading.md) "Ambient `quant_config`"
+
+2. **Tensor parallelism is written but unproven.** All three stored tensors slice on
+   dim 0, so `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row
+   Hadamard alignment rule — which is why it is a handful of lines. It has never run
+   on more than one GPU. Needs the `vast` box, alongside `moe-tp` and the TP tier of
+   `bench-suite`.
+3. **Only 4 bits is packed.** That is deliberate — one depth covers every model
+   measured, and nibbles keep both ends byte-aligned — but 3 bits is usable at ~3.5
+   bpw and would want the packing if a checkpoint ever calls for it.
+
+**A tied model with a block-quantized embedding crashes** — **FIXED 2026-08-26**
+(found 2026-08-19, observed 2026-08-25). The two predicates in
+`quantization/config.py` treated the cases as mutually exclusive —
+`embedding_is_blockq()` said so in as many words — but they answer questions
+about *different modules*: one asks whether a tied model's `lm_head.*` is being
+renamed onto the embedding, the other whether the embedding has block-quantized
+tensors of its own. A repaired tied checkpoint makes both true and both
+load-bearing.
+
+Two silent failures came out of that, and both are gone:
+
+- `EXL3TiedLMHeadMethod` read a trellis off the embedding module, which now held
+  `bq_*`. Died late, at logits time.
+- The blockq branch returned *before* `self.embed_prefix = prefix`, so the prefix
+  stayed at its `"model.embed_tokens"` default while the rename still fired —
+  routing 755 MiB of trellis to a path a nested model does not have, dropping it
+  without complaint, and serving garbage.
+
+The fix is `EXL3BlockQTiedEmbeddingMethod`: both parameter sets on the one
+module — which is the existing design, since vLLM skips a tied model's
+`lm_head.*` and those weights are already renamed onto the embedding for the head
+to borrow back — with the lookup on `bq_*` and the logits on the trellis.
+`embed_prefix` is now recorded before any branch. **No vLLM patch and no metadata
+change**: `tie_word_embeddings` stays `true`, which it is.
+
+`apply()` is overridden explicitly rather than inherited, and that was not
+cosmetic. The MRO puts the blockq method first (it must, for the gather) and its
+`apply` is a stub raising "no matmul path" — right for an untied embedding, wrong
+here. The gemma4-style two-module shape never notices because its head reaches
+the trellis through its own method; **the Qwen3-style one-module shape would have
+raised on the first token.** Caught by an MRO assertion in
+`tests/test_tied_blockq_routing.py`, not by running a model.
+
+Verified on a repaired tied `gemma-4-12B-it-exl3@3.00bpw_mul1`: loads clean,
+answers correctly, holds ~0.53 GiB more weight than the unrepaired baseline (KV
+cache 19,176 → 17,545 tokens) which is `bq_*` loading beside the trellis, and 150
+of 157 prompt logprobs differ from that baseline (mean |Δ| 0.122) — so the gather
+is executing, not merely allocated. Full suite 118 pass.
+
+`tools/quantize_embedding.py` now *supports* tied checkpoints rather than
+producing broken ones, and says at creation time that the output needs a plugin
+with this method — an older one loads it clean and serves garbage, which nothing
+downstream can detect.
+
+**Still open on this path**: tensor parallelism is unproven (both sets shard on
+dim 0, but the combination has never run on more than one GPU), and the
+Qwen3-style one-module tied shape is covered only by the MRO test, not
+end-to-end. Neither blocks the gemma-4 case.
+
+**The shared tied-model tensor's kernel blocker is gone** (2026-08-26). One tensor
+serving both roles needed a scalar-integer GEMM for the head, which exists nowhere.
+fp8-e4m3 clears that — `torch._scaled_mm` is a primitive, not a kernel project — and it
+is good enough: **+0.000669** against native, 0.38x the noise floor, better than the
+7-bit per-row point that was the recorded tied operating point. Per-channel scaling is
+required; per-tensor is 1.6x worse for nothing. So "7 or 8 bit shared per-row" is
+**superseded on encoding** — fp8 is the shape to build if it is built.
+
+**It stays deferred, and the ordering that deferred it has now resolved.** The crash
+above landed first, on correctness grounds rather than because any model demanded it,
+and that changed the baseline this has to be measured against. The blockq split is a
+real tied-model baseline as of 2026-08-26: **1.234 GiB at +0.000297**, serving gemma-4
+from `bq_*` for the lookup and the trellis for the logits.
+
+So fp8's margin is the marginal one after all: **0.296 GiB for 2.25x the divergence**,
+not the 1.641 GiB it looked like while the split was unbuilt. That margin is still
+worth something — 0.296 GiB is real in a VRAM-bound appliance, and 2.25x of 0.38x the
+noise floor is still under the floor — but it is now an optimization on top of a
+working path rather than a route to one, and it needs an fp8 head path, an fp8 gather
+and repair-tool emission to collect it.
+
+The constituency is no longer hypothetical, which is what keeps this open at all: the
+demotion gemma and every tied-model optimization inherited came from the
+head-dim-512 misdiagnosis, corrected under `turboquant-sliding-window`.
+**Revisit if a tied model ever needs that last 5%**, or if fp8 emission turns out to be
+nearly free alongside other repair-tool work.
+
+**Upstream's trellis embedding (exllamav3 1.6.4: `convert.py -eb`, `convert_embedding`, a fused
+gather) needs a plugin loader whether or not we adopt it for tied models.** If upstream-direction
+quants move to it, they stop carrying a dense table, so on-load blockq has nothing to encode, and
+fetching a reference embedding is no clean swap: the rest of such a model was calibrated against the
+quantized table. It stores `<key>.trellis` and `<key>.signs`.
+
+**It beats blockq on quality per bit** (simulated on Ornith-1.5-9B: real encode and `dequant_rows`, swapped
+into existing quants by qbench's `embed_file`, so later layers are not calibrated against it). K=4 is 4.06 bpw
+with table error 0.066 against blockq's 4.52 and 0.078. Excess KL multiples, wild/swe: at 4.00, K=4 1.03/1.07
+against blockq 1.05/1.08; at 5.00, K=4 1.17/1.35, K=5 1.03/1.10, K=6 1.01/1.01, against blockq 1.26/1.44.
+Text-answer recall is within CIs of dense at K=4 on 4.00 and K=5 on 5.00. K=4 on 5.00 is the exception at -1.70
+points [-2.64, -0.88], worse than blockq's -0.64 despite better KL, unexplained. Depth is a free parameter
+of the format, so this needs no 5-bit blockq. Encoding is about 45 s on a GPU for 248320x4096, and reproduces
+bit for bit across runs, chunk sizes, and a 5060 Ti against a 5070 Ti. Gather ties blockq at chunk sizes on a
+synthetic table, uncompiled. Still unmeasured: the 27B, a true `-eb` conversion, the served path. The reproducibility result is GPU against
+GPU only: blockq's own problem was CPU against GPU, so the two are not compared like for like.
+
+**Decided 2026-11-01: the pipeline adopts trellis by default; on-load stays blockq.** Start the ladder like the
+head's: K=4 base, K=5 at 5 bpw body and above. exllamav3 reads the format natively, so a published quant needs
+no dense copy, which is what ruled out emitting `bq_*`. On-load does not move to trellis without a much larger
+difference than this: it would tie the serving arm to the encoder and add about 45 s of GPU to a first load,
+and blockq remains a high-quality format that is easy to produce on the fly.
+
+**The plugin loader is in** (`vllm_exl3_plugin/trellis_embed.py`, `EXL3TrellisEmbeddingMethod`): plain torch,
+bit-exact against `ngram_dequant` at K=1..8. Served against a dense twin holding the same decoded table, eager
+is identical at TP=1 and TP=2. Under CUDA graphs it differs by up to 0.72 on tail logprobs, repeatably:
+compiled `gather` differs from the kernel in about 6% of elements by 1-2 fp16 ULPs, with rows following ids, and
+blockq's own eager-to-graphs gap is the same size. Compiled it is about 25x slower than blockq at 8192 tokens
+(6.5 ms against 0.26), which does not reach a served engine: decode 2409 tok/s against 2418, prefill 22021
+against 22097 on MiniCPM5-1B, inside run spread. Five `trellis` bench entries are in; `quant.py` passes
+the ladder by default (`--embed-bits`, 16 keeps it dense).
+
+**A true conversion matches the simulation** (shipping recipe, YAQA and calibration mix; conversion does calibrate
+through the quantized table). Ornith-1.5-9B: 7.31 to 5.79 GB at 4.00, 8.17 to 6.78 GB at 5.00. Excess KL 1.05/1.04
+and 1.05/1.11 wild/swe, against 1.03/1.07 and 1.03/1.10 simulated. Text-answer recall -1.06 points [-2.70, +0.47]
+and +0.06 [-1.17, +1.35]. MiniCPM5-2B: 1.73 to 1.33 GB and 1.98 to 1.61 GB. Both serve through the plugin.
+Qwen3.8-27B at 5.00: 19.90 to 18.16 GB, excess KL 1.01/0.95 wild/swe, against blockq's 1.04/1.05, text-answer recall
++0.88 [-0.10, +1.90]: no cost at all on a model whose embedding tax was already near nil.
+
+**Reconverting a rung can move recall by 4 points, with no embedding involved.** MiniCPM5-2B 5.00 dense, from the
+same measurement, reconverted here: text facts 91.5 to 87.4, -4.16 [-6.93, -1.39], against that control `-eb` is
++0.46 [-2.47, +3.24], and a K=5 table on the original body is +0.00. **Conversion is deterministic per host and
+differs between hosts:** same inputs and converter tree on a 5060 Ti, 5070 Ti and RTX 3060 give byte-identical repeats
+and three different quants (885 of 1266 tensors, 97% of trellis words), and the 3060 reproduces the original exactly.
+Same-generation cards differ, so it is not architecture alone. `EXL3_SEED_IDX_OFFSET` selects a rounding draw, for
+sampling this spread on one host. Compare recall only within one host, and across draws for small effects.
+
+**Measured over seven equivalent MiniCPM5-2B 5.00 draws:** excess KL varies 0.6% wild, 2.1% swe. Text-facts retention
+averages 91.3 with sd 1.72 and range 5.2 (640 questions), PopQA 95.7 with sd 0.47. A quarter of the facts flip between
+draws, and the paired CIs in this section cover question sampling, not this. Requiring the reference to hold the answer
+at P >= 0.7 takes sd to 0.13 and flips to 0.3%, and the 3.00 rung still reads 87.9, so it keeps seeing real damage; it
+saturates at 100 on a good 5.00 rung, so it detects damage and does not rank good quants.
+
+**Recall rows in the calibration help at 3 bpw (MiniCPM5-2B, 2026-11-03).** 15% of the 250 calibration rows replaced by
+multi-turn closed-book chats, from questions outside the scored slice (no overlap), no YAQA, one host. Over three seed
+draws each at 3.00: kept 74.6 to 77.8 on the slice, and 76.3 to 81.0 (about 2.5 standard errors) on a reworded slice whose
+instruction moves into a different system prompt, so it is not the eval's phrasing being learned. Swe excess KL +5.2%,
+wild +0.5%; confident errors show no clear change. At 4.00 it does nearly nothing (93.0 / 93.3 / 94.0 kept on the reworded
+slice at 0 / 15 / 30%). Calibration seems to shape which of the model's own knowledge survives rounding, not only fit it to
+what it will see. Qwen3.8-27B barely responds: +1.08 kept at 2.50 and +0.65 at 3.00, single draws, with swe moving -7% and +20%, so its
+ladder ships on the current calibration. Recall calibration stays a lead for small models. The 27B's 2.50 keeps 82.8 with
+2.35% confident errors, against 88.6 and 1.27% at 3.00.
+A slice without any answer instruction does not work as a format check: the reference answers in sentences and knows 27 of 888.
+
+**The card reports kept, confident errors, and kept by band.** Kept is sum min(P, Q) / sum P: of the correct answers the
+reference would give under sampling, the share the quant still gives, per question, so a gain cannot pay for a loss (a plain
+sum ratio rated the 27B's 3 bpw above 4 bpw). It stays close to binary retention, and across seven 2B draws with hosts its sd is
+0.75 against 1.72. Confident errors are the share of known questions where the quant is at P >= 0.7 on a wrong token: a low
+answer probability cannot tell a shrug from a false statement. Bands of reference probability: sure (>= 0.9), firm (0.7-0.9),
+leaning, shaky, barely (< 0.3). MiniCPM5-2B at 3 / 4 / 5 bpw: kept 75.9 / 89.5 / 95.6, confident errors 4.87 / 1.62 / 0.35%.
+Draw noise at its 3.00: kept sd 2.54, confident errors sd 1.06, band retention at most 2.0x binomial.
+
+| Qwen3.8-27B, 3059 questions | served GB | kept | confident errors |
+|---|---|---|---|
+| 4.00 one-sided | 14.12 | 96.6 | 0.33% |
+| `UD-Q4_K_M` | 16.46 | 93.4 | 0.46% |
+| plain `Q4_K_M` | 16.81 | 92.7 | 0.78% |
+| 5.00 `-eb` | 17.25 | 96.7 | 0.13% |
+| `UD-Q5_K_M` | 19.77 | 95.6 | 0.75% |
+
+YAQA at 4.00 costs kept (92.7 against 96.6) and not confident errors (0.20 against 0.33%): it weakens right answers rather
+than replacing them, which is a shrug and not a hallucination. `quant.py recall-slice`
+scores the pool (Wikidata plus PopQA, 19,684 questions) with one reference pass, then `eval/recall_select.py` keeps each
+model's known non-numeric questions, with PopQA at most 33% and one relation at most 25%, capped apart above and below P 0.7.
+It refuses under 300 confident questions before any arm is scored (`!!! RECALL SLICE TOO THIN`, exit 3, `--allow-thin`
+overrides). `qbench --slices recall` scores it, and qbench gives `recall_bands`. MiniCPM5-2B: 888 questions, 414 confident,
+7 minutes for the pass. Not in the composite. The card shows kept, confident errors and a chart by band with `quant.py`'s
+`recall_section`, and shows none of it on a thin slice. Chart bars are Wilson intervals widened 2x: draw noise reached 2.04x
+binomial in the worst band, over the 2B at 3.00 and 5.00 and the 9B at 5.00. Confident-error noise is measured on the 2B only.
+
+**It does not serve a tied head.** The earlier hope here, one tensor for head and gather, does not match the
+format: rows are rotated by random signs and a Hadamard, built for row accuracy, with no GEMM path. A tied
+model carries it beside the head's trellis, the same trade as `EXL3BlockQTiedEmbeddingMethod`, which is the accepted
+behaviour until something serves both from one tensor. fp8 was the earlier idea for that, untested.
+
+→ [docs/embeddings.md](embeddings.md)
+
+### `quantize-embeddings-pipeline` — Quantizing embeddings in the pipeline
+
+Stop shipping a full fp16 embedding, and stop emitting a redundant head for tied
+models, at conversion time rather than as a repair pass. Forward-looking: it fixes
+what gets published from here on, where `repair-tool` rescues what already exists.
+
+**Not "do for every model what is already done for tied models".** That framing
+predates the Phase 4 measurements and is wrong — it would emit a trellis, which is
+the wrong encoding for an embedding by roughly two orders of magnitude. The
+objective mismatch is the reason: the trellis optimizes `x @ W.T` against typical
+activations, which is what a *head* needs, while an embedding needs each individual
+row accurate as a vector. What to emit instead:
+
+- **Tied models**: one shared block-scaled integer tensor serving both roles.
+  Dominates both the shared trellis and any two-tensor split. Depth is set by the
+  head, which is ~60x more bit-sensitive; the embedding rides along above its own
+  requirement, and that waste is still far cheaper than a second copy of the matrix.
+- **Untied models**: a block-scaled integer embedding at a lower depth, alongside the
+  trellis head exactly as produced today. The head is already right; only the
+  embedding changes.
+
+Embedding depth is no longer per-model: 4 bits (4.5 bpw in the block-scaled layout)
+covers every model measured. The head's depth in a shared tensor is a separate
+question, and is now **answered**: a budget-neutral sweep on phi-4-mini puts the head
+optimum at 5-6 bits, with 7 costing +34% KLD and 8 costing +87% — see
+[docs/qbench.md](qbench.md), "Head bitrate: 6 is defensible". Since the shared
+tensor's depth *is* the head's, that prices the tied-model plan directly: 5-6, not
+higher.
+
+**Not urgent: `repair-tool`'s post-processing covers this today.** All this item adds
+is that checkpoints built here would be right from the start instead of needing a pass.
+Strictly as a quantization problem the embedding is the least interesting one on the
+map — a lookup with a distribution-independent optimum that measurement has already
+pinned at a flat 4 bits across every model tested. There is no allocation question here
+worth solving; depth is a constant.
+
+**The format question is no longer blocked on upstream.** It previously waited on the
+bar for proposing a storage format to exllamav3, which is higher than "serves this
+plugin's targets", plus a wrinkle: the recipe is a flat `{tensor: bits}` map, so an
+embedding needing a different *encoding* rather than a different depth cannot be
+expressed in it. Now that checkpoints are built here rather than consumed, that bar is
+just "does it work for us", and the wrinkle is nobody else's design decision to wait on.
+
+**And the serving path is no longer a blocker either — for untied models it is done.**
+`blockq` is specified ([docs/blockq-format.md](blockq-format.md)), emitted by
+`tools/quantize_embedding.py`, served by `EXL3BlockQEmbeddingMethod`, and gated by three
+`bench/` entries (eager, CUDA graphs, and throughput) that derive a fixture on every run
+and held at exactly 0.0 across both the v0.28.0 and exllamav3 v1.4.3 bumps. So for the
+untied case nothing is missing but doing it at conversion time instead of as a repair
+pass, and `repair-tool` already covers the interim.
+
+**The solver is not part of this item, and as of 2026-08-25 is not part of any.**
+Embedding depth is fixed at 4, the head measures out at 5-6, and body tensors cannot be
+allocated independently at all. Two scalars is a lookup table, not a search space — see
+[docs/qbench.md](qbench.md).
+
+**What is still blocked is the tied half, and on a different thing than this item used
+to say.** It wanted "one shared block-scaled integer tensor serving both roles", and
+`blockq` deliberately has no matmul path — decoding to dense fp16 to multiply would
+return the whole saving. That needs a scalar-integer GEMM for the head role, which does
+not exist; see `quantized-embeddings`. Tied models therefore continue to be served from
+their existing quantized `lm_head`, which is already shipped and costs nothing new.
+
+**The v1.4.3 bump changes nothing here.** Upstream's "new optimization pipeline" was
+tagged at `2398c05`, the same commit the 2026-08-23 allocation study was run against, so
+the pipeline this item would build on is the one already measured — see
+[docs/qbench.md](qbench.md).
+
+→ [docs/embeddings.md](embeddings.md)
+
+### `blockq-on-load` — Default-on since 2026-11-01; baselines still to re-bless
+
+**Decided 2026-11-01: on-load blockq becomes the default, with an LRU cap on its cache** (done:
+`EXL3_BLOCKQ_CACHE_MAX_GB`, 16 by default). The cap answers the old blocker, that nothing owned eviction.
+Not emitting `bq_*` at conversion: without the dense table a quant is unusable by exllamav3, and with it the
+quant is much larger. A checkpoint with a trellis embedding is refused by name
+(`format.check_embedding_storage`). **Flipped 2026-11-01** after the served-path soak on `bench/`: flag off
+matches every baseline; on-load equals the pre-quantized fixture exactly at TP=1 and TP=2; MoE's TP spread is
+no wider than dense. The soak found one bug, fixed: a backend-rebased embedding kept its dense `weight` beside
+`bq_*` (Muse-Glimmer, +0.71 GiB where it now saves 1.80). **Still to do: re-bless the untied baselines**, which
+needs a committed tree. The cost table below is simulation.
+
+**Judge embedding damage by economics, not an absolute threshold:** weigh it against what the same bytes buy
+elsewhere (body bits, trellis embeddings, deeper blockq). BF16 is the reference, not a candidate default: it is
+unlikely to be right for any configuration that wants EXL3.
+
+| excess KL multiple, simulated 4-bit blockq | wild 4.00 | swe 4.00 | wild 5.00 | swe 5.00 |
+|---|---|---|---|---|
+| Ornith-1.5-9B (saves 1.46 GB, worth ~6-9x in body bits) | 1.05 | 1.08 | 1.26 | 1.44 |
+| Qwen3.8-27B (saves 1.83 GB, worth ~2.3x in body bits) | 1.01 | 1.00 | 1.04 | 1.05 |
+
+Body-bit worth is log-interpolated over 4.00 to 5.00. Text-answer recall is unchanged within CIs on both models
+(-0.64 to +0.05 points). The 9B's tax is 4-10x the docs' +0.000225 for Qwen3.5-9B on the older eval, not yet
+explained. Deeper blockq at 9B 5.00: 5-bit takes wild 1.26x to 1.07x and swe 1.44x to 1.08x for 0.127 GB, which
+ties body bits on wild and beats them on swe; 6-bit adds 1.01-1.02x, which body bits beat. At 4.00 they beat a
+5th bit outright. Smaller models at 5+ bpw are a real use case, since they fit small cards, and whether this
+9B's sensitivity is general to them is open. Even so, measure a trellis embedding before any 5-bit blockq work:
+4-bit packing is easy to understand and trust, and a second depth would complicate that.
+
+The mechanism is built and opt-in behind `EXL3_BLOCKQ_ON_LOAD=1`: a stock EXL3
+checkpoint's dense embedding is encoded during weight loading, so the memory
+saving needs no derived artifact. Measured on MiniCPM5-1B, model loading falls
+0.79 -> 0.52 GiB, matching the offline tool's own 0.267 GiB saving, and the
+served result is token-identical to a pre-quantized checkpoint at
+|dlogprob| 0.000000e+00.
+
+What remains is the decision to flip the default, and it wants evidence rather
+than a change. The determinism question is settled but constrains it: encoding
+happens on CPU deliberately, because `blockq.encode` does not reproduce across
+devices -- decoded values disagree by up to 2x a quantization step (measured;
+`bq_r`, the fp32 per-row affine range, differs in 52.9% of elements from
+reduction order alone). CPU is what makes on-load agree with the tool. A GPU
+encode would be faster and equally accurate but would silently produce a
+different model from the same weights, so if load time ever becomes the
+objection, that is the trade being made.
+
+Before flipping: soak it on the models in `bench/`, and confirm the load-time
+cost on a large vocabulary is acceptable -- MiniCPM5's 130560x1536 encodes in
+about 2.4 s wall, and the models that matter are several times that. The
+fallbacks are already proven by unit test rather than by argument: an
+indivisible hidden size, an unknown one, a tied model and an explicit
+`EXL3_DENSE_EMBED` all end on the dense path.
+
+**The per-start cost is now paid once per checkpoint** (2026-09-08, asked for by
+`vllm-untwisted`, whose profiling starts an engine per configuration). The
+encoding is cached under `~/.cache/vllm-exl3-plugin/blockq-embeddings/`, keyed on
+the resolved commit hash rather than the bit-rate branch -- branches get
+re-pushed, and an entry under a branch name would hand a re-quantized checkpoint
+the previous embedding without saying so. `EXL3_BLOCKQ_CACHE=0` disables it.
+
+**The large-vocabulary number the flip was waiting on is in:** Qwen3.5-9B's
+248320x4096 encodes in **5.8 s**, taking model loading from 1.96 s to 9.99 s on
+a cold start and back to 1.96 s on every warm one, at an identical 5.48 GiB
+resident. So the objection is now specifically about *first* loads -- 5.8 s of
+CPU before a 9B model serves its first token, once per checkpoint -- rather than
+about every start. That is the number the default flip has to be argued on, and
+what remains unmeasured is a vocabulary well past 248K.
+
+→ [docs/embeddings.md](embeddings.md)
+
+### `gemma4-e2b` — Quantizing gemma-4 E2B/E4B
+
+**Outcome wanted:** an EXL3 E2B checkpoint serving through vLLM with both of its
+embeddings quantized. It is the sharpest available demonstration that the embedding
+tax is real: 54% of this model is embeddings, the pipeline as it stands saves 27% on
+a model sold as 2B, and the repaired one projects 65%.
+
+**Explicitly not a priority.** The thesis is already proven on Qwen3.5-9B with
+measured KLD; E2B makes the argument undeniable rather than more true, and the cost
+is architecture work in the exllamav3 fork — the most expensive category here, with
+no cheap gate for correctness. What would raise it: the appliance wanting a small
+vision-capable model, or the audio question under `multimodal` blocking something.
+
+**vLLM already serves it.** The BF16 model runs and describes images correctly
+(2026-08-19), so nothing is blocked on the serving side. The gap is entirely
+conversion.
+
+**The blocker chain, in order:**
+
+1. **exllamav3 refuses the architecture.** `Config.from_directory` raises
+   `NotImplementedError("Gemma4 per-layer inputs are not implemented yet")` —
+   a bare guard in `architecture/gemma4.py`, no partial implementation behind it.
+   What it is guarding is small: six tensor patterns
+   (`per_layer_model_projection`, `per_layer_projection_norm`, and per-layer
+   `per_layer_projection` / `per_layer_input_gate` / `post_per_layer_input_norm`),
+   77 MiB, 0.8% of the model.
+2. **`tools/quantize_embedding.py` handles one embedding suffix**, and this model
+   has two.
+3. **Tied + blockq crashes**, which is a live defect recorded under
+   `quantized-embeddings` rather than here. E2B is tied *and* needs blockq for its
+   per-layer tensor, so it cannot serve until that is fixed.
+
+**Text-only is the version worth building.** E2B's vision tower is a full ViT encoder
+and its audio tower a conformer with depthwise conv — both unrelated to anything
+exllamav3 handles today, and together only 0.88 GiB. Pass them through dense and
+serve with `--language-model-only`. One trap if either is ever quantized: every
+linear in both towers carries `input_max`/`input_min`/`output_max`/`output_min`
+siblings alongside `X.linear.weight`. Those are QAT ranges, not weights, and have to
+be recognized as such.
+
+→ [docs/embeddings.md](embeddings.md) "The most extreme case found"

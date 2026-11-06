@@ -32,12 +32,19 @@ from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from .. import format, ops, tp
+from .. import cpu_offload
 from ..log import init_logger
 
 logger = init_logger(__name__)
 
 #: One warning per process is enough; every layer would otherwise repeat it.
 _TP_WARNED = False
+
+
+def stored_dtype(name: str) -> torch.dtype | None:
+    """The dtype an EXL3 sub-tensor is stored in, or None for a name the format does not define."""
+    dtype = format.STORED_DTYPES.get(name)
+    return getattr(torch, dtype) if dtype else None
 
 
 class EXL3Parameter(BasevLLMParameter):
@@ -56,8 +63,18 @@ class EXL3Parameter(BasevLLMParameter):
     # than inherited so the intent survives a change to the base default.
     handles_fused_shards: bool = True
 
-    def __new__(cls, **kwargs):
-        return super().__new__(cls, data=None)
+    # Offload placement, read by `cpu_offload.place` at store time. Off unless
+    # the owning method opts in: lm_head and the embedding table build these
+    # too, and were never offloaded.
+    exl3_offloadable: bool = False
+    exl3_prefix: str = ""
+    exl3_name: str = ""
+
+    def __new__(cls, dtype: torch.dtype | None = None, **kwargs):
+        # An empty placeholder, but of the stored tensor's dtype: with data=None it would take the
+        # model dtype (bf16), and vLLM 0.32's loader warns about every trellis, scale and codebook
+        # marker loaded into it (nothing is cast; the store below keeps the loaded tensor)
+        return super().__new__(cls, data=torch.empty(0, dtype=dtype) if dtype else None)
 
     def __init__(
         self,
@@ -68,6 +85,7 @@ class EXL3Parameter(BasevLLMParameter):
         column_shard_size: int | None = None,
         row_shard_size: int | None = None,
         output_partition_sizes: list[int] | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__(data=None, weight_loader=weight_loader)
         self.num_shards = num_shards
@@ -86,7 +104,8 @@ class EXL3Parameter(BasevLLMParameter):
         index = self._shard_id_as_int(shard_id)
         # The loader hands us mmapped CPU tensors; nothing else will move these
         # onto the device, because we never allocated a device-resident param.
-        self.shards[index] = loaded_weight.to(self.exl3_device).contiguous()
+        # Offloaded tensors go from there straight to pinned host memory.
+        self.shards[index] = cpu_offload.place(self, loaded_weight)
 
     # vLLM hands every loader the *whole* checkpoint tensor and expects the
     # parameter to take its own rank's slice, at offset `tp_rank * shard_size`
@@ -207,6 +226,7 @@ class EXL3LinearMethod(LinearMethodBase):
 
         for name in self.quant_config.stored_tensor_names():
             param = EXL3Parameter(
+                dtype=stored_dtype(name),
                 num_shards=num_shards,
                 device=device,
                 weight_loader=weight_loader,
@@ -215,6 +235,10 @@ class EXL3LinearMethod(LinearMethodBase):
                 row_shard_size=input_size_per_partition,
                 output_partition_sizes=list(output_partition_sizes),
             )
+            # The dequantize path offloads its exl3_weight after load instead
+            param.exl3_offloadable = not self.quant_config.dequantize
+            param.exl3_prefix = cpu_offload.layer_prefix(layer)
+            param.exl3_name = name
             set_weight_attrs(param, extra_weight_attrs)
             layer.register_parameter(name, param)
 
@@ -281,7 +305,7 @@ class EXL3LinearMethod(LinearMethodBase):
             suh = self._shard(params, "suh", index, layer)
             svh = self._shard(params, "svh", index, layer)
 
-            bits = format.bits_from_trellis_shape(trellis.shape)
+            bits = format.bits_from_trellis_shape(trellis.shape, has_mul1)
             stored_in, stored_out = format.dims_from_trellis_shape(trellis.shape)
             self._check_shapes(
                 layer, index, stored_in, stored_out, out_size, suh, svh
@@ -293,6 +317,11 @@ class EXL3LinearMethod(LinearMethodBase):
             self._store_dense(layer, shards, has_mcg, has_mul1)
         else:
             self._store_quantized(layer, shards)
+
+        # Quantized tensors were placed as they loaded (`store`); exl3_weight
+        # only exists now, so the dequantize path offloads here.
+        if self.quant_config.dequantize:
+            cpu_offload.register_offload(layer)
 
         for param in params.values():
             param.release()

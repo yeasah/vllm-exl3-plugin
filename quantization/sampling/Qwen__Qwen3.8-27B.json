@@ -1,0 +1,12 @@
+{
+ "source": "Qwen/Qwen3.8-27B README, best-practice sampling (generation_config.json carries only the thinking set); read 2026-10-04",
+ "notes": "Keyed on thinking, not use case.",
+ "modes": {
+  "thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0},
+  "instruct": {"temperature": 0.7, "top_p": 0.80, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0}
+ },
+ "rules": [
+  {"thinking": true, "mode": "thinking"},
+  {"mode": "instruct"}
+ ]
+}

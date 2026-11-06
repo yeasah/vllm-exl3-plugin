@@ -1,0 +1,9 @@
+{
+  "source": "https://huggingface.co/ornith-ai/Ornith-1.5-9B (model card: published benchmarks)",
+  "notes": "A Qwen derivative whose published benchmarks are almost all coding or agentic, the rest reasoning. Decided 2026-10-09, after the published set (default 0.80/0.20 composite) had been scored on both slices: the basis is the publisher's choice of benchmarks, not the scores, but this is not a pre-registration. Changes the published card's composite on its next card run.",
+  "summary": "weighted toward agent sessions, as the publisher positions this model for coding and agentic work",
+  "weights": {
+    "wild": 0.3,
+    "swe": 0.7
+  }
+}

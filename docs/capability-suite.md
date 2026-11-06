@@ -2,8 +2,14 @@
 
 Evidence and rationale behind TODO `capability-suite`. qbench answers how far a
 quantized distribution sits from its reference; this note is about the separate
-question of whether the served configuration still *does the work*, and about what two
-SWE-bench runs taught us regarding how such a comparison has to be built.
+question of whether the served configuration still *does the work*, and about how such
+a comparison has to be built.
+
+The analysis code lives in [capability-suite/](../capability-suite/).
+
+Two eras of evidence. The first half is SWE-bench through `mini-swe`, 2026-08. The
+second is GPQA-Diamond through `evalscope` and through `opencode`/harbor, 2026-09,
+which is where the instrument itself turned out to be most of the measurement.
 
 ## The pilot: 23 problems, and what it could and could not show
 
@@ -118,6 +124,31 @@ instance count needed for the same number of informative pairs rises several-fol
 right choice is the most diverse suite on which the model still lands near half, not
 the hardest one available.
 
+## Context exhaustion is a harness failure, and needs its own policy
+
+*Amended 2026-09-18 for Q&A benchmarks — see "A runaway on a Q&A item is model
+behaviour". What follows holds for agentic benchmarks, where a real harness would
+compact and continue; it does not hold where running to the limit is the model failing
+to converge.*
+
+A bench with no context management measures itself as much as the model. When a request
+outgrows the window, a real agent harness would compact and continue; this one fails, and
+the failure is not even labelled consistently -- hitting the limit on the *prompt* raises
+an explicit error, while hitting it on *output* is not terminal (the agent is told to be
+less chatty and retries) and surfaces later under an unrelated category. Both are the same
+event.
+
+Scoring them as model failures is wrong on its own terms, too: spending more of the
+context window is a legitimate strategy, and "it should have finished sooner" is not a
+claim the harness is entitled to make.
+
+**The policy, for a paired comparison:** if both arms hit context on the same instance,
+it is a null result -- drop the pair, which turns it into the increased sampling error it
+actually is. If exactly one arm hits it, the pair needs manual inspection and does not
+count toward the statistic either way. Both cases must be reported with `n`, since a
+benchmark that quietly discards its hardest instances flatters whichever arm ran out
+first.
+
 ## Comparative runs on rented hardware: a preflight problem, not a procurement one
 
 `bench/` makes the operator name the platform, because a throughput number is a fact
@@ -166,3 +197,357 @@ The remaining half of the problem is not comparability but *survival*: a 33-hour
 a spot rental carries real probability of dying partway. A suite that cannot resume
 from where it stopped loses everything, and one whose instance order is unshuffled
 loses its representativeness as well.
+
+---
+
+# GPQA-Diamond, 2026-09
+
+*Three `evalscope` runs of 198 items each, `temperature 1.0`, `seed 42`, no chat
+template override: `Ornith-1.5-35B-A3B-exl3` @3.00bpw (92.4%), `Qwen3.8-27B-exl3`
+@6.00bpw (82.3%), `Qwen3.5-9B-exl3` (85.4%). Plus three `opencode`/harbor runs of the
+same dataset. Analysis scripted against the persisted per-item records, not the
+summary reports.*
+
+## Three metrics, not one: correctness, cost, indecision
+
+A rigid harness scores as failure things that are not failures. A model that meanders,
+needs compacting, and arrives at a good answer beats one that converges fast on a wrong
+one. What actually matters is **final correctness** and **wall-clock to get there** —
+and wall-clock is best estimated as total tokens in and out, because prefill and decode
+rates are facts about hardware as much as about the model.
+
+**A third axis earned its place: indecision.** The long trajectories in these runs are
+not degenerate loops. Sampling the three longest from the Ornith run, the text is
+grammatical, on-topic and self-aware throughout; one of them *converged* and answered
+correctly at 164K tokens. What the worst one does is oscillate — the phrase *"I've been
+assuming the mass fraction points to antimony, but let me reconsider whether it might
+point to a different element"* appears six times, and it ends "Final answer: B.
+Actually, wait. Let me reconsider whether the answer might be D... OK, I'll go with B."
+That is a **termination failure, not a generation failure**, and it is invisible to both
+other axes: the model is neither wrong-by-ignorance nor slow-by-difficulty.
+
+Counting reconsideration markers separates the two reasons a trajectory is long:
+
+| Ornith item | tokens | restarts | per 1K tok | correct |
+|---|---|---|---|---|
+| 127 — legitimate enumeration | 259,339 | 1,049 | **4.04** | no |
+| 81 — long but converged | 164,083 | 1,243 | 7.58 | yes |
+| 147 — oscillation | 149,054 | 2,806 | **18.83** | no |
+
+Density inverts the token ranking, which is the point: the longest item is the least
+indecisive.
+
+**As a failure predictor the raw count is marginally better than tokens; density is
+not.** AUC, P(metric ranks a wrong item above a right one):
+
+| run | tokens | restarts | density |
+|---|---|---|---|
+| Ornith-35B 3.0bpw | 0.752 | **0.781** | 0.760 |
+| Qwen3.8-27B 6.0bpw | 0.757 | **0.790** | 0.683 |
+| Qwen3.5-9B | 0.738 | **0.746** | 0.640 |
+
+So the two uses come apart: **density diagnoses an item, raw count ranks a population.**
+Two caveats worth more than the AUC figures. Restarts and tokens are not independent —
+more thinking mechanically produces more reconsiderations, and +0.03 is what survives
+that overlap. And AUC-for-failure is not the question a comparison asks: what matters is
+which metric moves most *between arms*, which needs two arms of one model and is
+untested. The marker list is hand-written and phrasing is model-specific, which would
+bias cross-model use but not the within-model comparisons this is for.
+
+**The pairing trap from the SWE-bench pilot extends to the cost axis.** Aggregate turn
+medians said the quantized model used fewer turns while the paired comparison said the
+opposite; token totals fail the same way, because a model that quits early looks cheap.
+Compute the cost delta paired, on the **correct-in-both** subset.
+
+## GPQA-Diamond as an instrument: a fixed pool, and saturation
+
+**198 items is the entire dataset.** Unlike SWE-bench there is no "budget more
+problems" lever, and the effective sample size is still the discordant count. What that
+buys, by exact McNemar:
+
+| discordance | pairs | smallest significant split (p<0.05) |
+|---|---|---|
+| 10% | 20 | 15/5 |
+| 20% | 40 | 27/13 |
+| 30% | 59 | 38/21 |
+| 40% | 79 | 49/30 |
+
+Roughly a 2:1 asymmetry, easing as discordance rises. A subtler effect is not visible at
+198 items with any amount of repeated sampling — repeated sampling reduces per-item
+measurement noise, but the between-item variance pairing already removed is where the
+leverage was. That is a pool-size problem, and the answer is a different benchmark.
+
+**And it is at or near ceiling for 30B-class reasoning models**: 92.4%, 85.4%, 82.3%.
+At 92.4% only fifteen items are wrong, so two similar arms would produce a handful of
+discordant pairs and correctness cannot discriminate. **When correctness saturates, the
+cost axis carries the signal** — it has enormous dynamic range on the same runs (median
+2,827 output tokens, mean 15,700; fourteen items own 51% of all output tokens) and
+accuracy falls monotonically with trajectory length:
+
+| output tokens | items | accuracy |
+|---|---|---|
+| <4K | 112 | 97.3% |
+| 4–16K | 44 | 93.2% |
+| 16–64K | 28 | 92.9% |
+| ≥64K | 14 | **50.0%** |
+
+## Seeded non-greedy, not greedy
+
+Greedy is the cleanest paired instrument — zero sampling noise, so every flip is
+attributable to the change under test — and it is the wrong choice anyway. It is not how
+models are operated, and it is structurally blind to the failure mode that matters here:
+greedy flips only when the argmax changes, so a model whose tail has been damaged
+decodes identically under greedy and badly under sampling. Same reason token ids beat
+rendered text.
+
+**Seeded sampling with the same seed across arms** keeps the RNG streams in lockstep
+until the first genuine divergence, so early flips mean the distributions differed rather
+than the draws did. It needs a *per-request* seed; under continuous batching a global one
+does not give that.
+
+The cost is symmetric draw-noise flips, which dilute the asymmetry. Writing A for
+one-way flips caused by a real effect and M for symmetric noise flips:
+
+| A | M=0 | M=10 | M=20 | M=40 |
+|---|---|---|---|---|
+| 12 | p<0.001 | 0.017 | 0.050 | 0.126 |
+| 18 | p<0.001 | 0.001 | 0.005 | **0.025** |
+| 25 | p<0.001 | <0.001 | <0.001 | **0.003** |
+
+A real effect worth ~18 one-way flips survives heavy noise; only a marginal one drowns.
+That failure mode is benign, because an effect too small to see past the sampler is
+usually too small to act on. Escalate with **seeds, not items** — k seeds gives per-item
+success *rates* compared with a bootstrap, which separates capability from draw noise in
+a way McNemar on binaries cannot. `evalscope` review records already carry
+`generation_index`, so the k>1 path is modelled by the harness.
+
+Match every sampling parameter, and the chat template, to what will actually be served.
+A knee measured at one temperature does not transfer to another, and changing it later
+invalidates comparisons the same way changing the context limit does.
+
+## The harness is an output-relevant field
+
+`tools/host_survey.py` formalises that GPU count changes the tokens while PCIe width only
+changes the stopwatch. **An agent harness is squarely on the tokens side**, and the
+2026-09 runs show it dominating the measurement.
+
+**Same model, same items, same default reasoning — 31 points apart.** The `Qwen3.5-9B`
+run overlaps `evalscope` on 32 items: **50.0% through `opencode`, 81.2% through
+`evalscope`**, discordant **10/0**, every disagreement in the same direction
+(McNemar p≈0.002). A capability difference flips both ways; strictly one-sided means a
+systematic failure mode. Two were found:
+
+- **Protocol compliance.** Five of sixteen failures are `✗ Error: /app/answer.txt not
+  found`. The model reasoned correctly, answered in prose, and never wrote the required
+  file — two steps, no tool call. Scored as if it got the science wrong.
+- **Reasoning volume, and it is model-dependent.** Median reasoning tokens: the 9B gets
+  **1,246** under `opencode` against **10,164** under `evalscope`, an 8.2x *suppression*;
+  the 27B gets **3,378** against **2,012**, a 1.7x *increase*. The scaffold does opposite
+  things to different models.
+
+**So an agentic harness is not merely overkill for a non-agentic benchmark, it is
+actively harmful**, and its absolute scores are not comparable to published figures or to
+a simple harness. The blend of science knowledge, tool-use compliance and reasoning
+survival differs per model, which is exactly why cross-model rankings through it fail.
+`evalscope`'s built-in harness is the better instrument for Q&A, and lighter.
+
+**Paired comparisons through it survive, though.** The `fp8` vs `tq4` KV arms below share
+scaffold, compliance and suppression, so all of it cancels in the pairing. That is what
+pairing is for; it is the *absolute* number that is uninterpretable.
+
+**A setting present in the config is not a setting that took effect.** vLLM degrades
+`reasoning_effort` to a boolean for any chat template that does not understand the graded
+form — `chat_completion/protocol.py`: `extra_kwargs["enable_thinking"] =
+self.reasoning_effort != "none"`. Only `Qwen3.8` templates carry the graded knob;
+`Qwen3.5-9B`, `Qwen3.5-35B-A3B` and `Ornith` carry only `enable_thinking`. So
+`reasoning_effort: medium` *capped* the 27B and was silently discarded for Ornith, which
+ran uncapped. The token distribution is the check, and it is the only one: the config
+states intent, the distribution states behaviour.
+
+**What a harness fingerprint has to carry**, by the same logic as the host one: agent
+name and version, harness and version, chat template, every sampling parameter, the
+context and output limits, and the effort setting *as it took effect*. Two arms under
+different fingerprints are a different experiment, not a continuation. `opencode` is a
+moving target in a way `mini-swe` was not.
+
+## A runaway on a Q&A item is model behaviour, not harness failure
+
+The policy above — drop the pair if both arms exhaust context, manual-inspect if one
+does — was written for SWE-bench, where a real agent would compact and continue and the
+event says nothing about the model. **On a multiple-choice question it says a great
+deal**: running to the context limit is a failure to converge, which is the model's, and
+it is the behaviour the indecision metric exists to catch. Score it, and report the
+**runaway rate per arm as a third number**. If one arm runs away on twelve items and the
+other on four, that is the finding, and it lives entirely in the rate — the answers
+produced on those items are near chance and carry nothing.
+
+**A hard cap is defensible, and 128K is the right level.** What each cap would cost the
+Ornith run, whose tail is the only one that reaches these lengths:
+
+| cap | items truncated | of those, were correct | accuracy |
+|---|---|---|---|
+| 32K | 27 (13.6%) | **70%** | 92.4% → 82.8% |
+| 64K | 14 (7.1%) | 50% | → 88.9% |
+| **128K** | **4 (2.0%)** | 50% | → **91.4%** |
+
+At 32K you truncate 27 items of which 70% were *correct* — genuine long deliberation
+that pays off. By 128K they are coin flips. The cap belongs above the
+productive-deliberation range, and the reason to accept the penalty is not that those
+trajectories were doomed — half of them land — but that chance-level items contribute
+symmetric flips, which is the term that dilutes a paired comparison. Truncating them
+costs ~1pp of absolute score and slightly improves discriminating power. The other two
+models lose nothing at 128K; whether a given subject reaches it is worth confirming on
+the first arm rather than assuming.
+
+## Pricing it: expected time to a correct answer
+
+The two axes are commensurable, which makes a quantization decision arithmetic rather
+than judgement. Expected time to a correct result is `tokens_to_correct x ms_per_token`:
+degradation raises the first, offload raises the second. With retry-to-success semantics,
+`E[tokens to correct] = tokens_per_attempt / P(correct)`.
+
+Worked against [cpu-offload.md](cpu-offload.md)'s measured throughput, on a 16 GiB card
+at Gen5 x16, using the `gemma-4-12B` ladder's actual scaling — body moves with bit rate
+(4.097 / 4.778 / 5.460 GB at 3.00 / 3.50 / 4.00bpw) while embed+head stays fixed at
+2.874 GB, so a 16 GiB 4bpw model is 12.8 GiB at 3bpw and fits resident:
+
+- 4bpw with 2.9 GiB offloaded: **75 tok/s**
+- 3bpw fully resident: **111 tok/s**
+- **so 4bpw is worth it only if 3bpw needs >1.48x the tokens to reach a correct answer**
+
+A 9pp correctness drop takes that threshold to 1.18x. In one-shot QA the arithmetic
+collapses — correctness dominates and throughput is nearly irrelevant — so the formula is
+for agentic use, where a wrong answer costs a retry rather than the task.
+
+**This only works if the harness persists per-item token counts.** `evalscope` does:
+`usage.input_tokens` / `output_tokens` / `reasoning_tokens` plus
+`perf_metrics.latency`/`ttft`/`tpot`, per item, with a stable `index` for pairing.
+`opencode` trajectories carry it too, but `final_metrics.total_completion_tokens`
+**excludes reasoning** — the thinking is in `steps[].metrics.extra.reasoning_tokens`, and
+reading the obvious field understates output by roughly 8x. A harness configured to log
+only pass/fail throws away the half that prices the decision.
+
+## Measured: 4-bit KV costs nothing detectable, on both axes
+
+*`Qwen3.8-27B-exl3` @3.00bpw through `opencode`, 198 paired items, `fp8` KV against
+turboquant `tq4`. Both arms at the model's default `xhigh` effort — no setting was
+passed — median peak prompt 10,204 tokens and max 66,885, against a 131,072 limit.*
+
+- correctness: 76.3% vs 74.2%; 137 both-right, 37 both-wrong, **24 discordant (14/10)**;
+  McNemar exact **p = 0.541**; bootstrap 95% CI **[-2.5, +7.1] pp**
+- cost: paired reasoning-token delta **median +1**, and **+33** on the correct-in-both
+  subset
+
+**A two-axis null.** It cannot distinguish equal from slightly worse, but it excludes
+`tq4` being worse than about 7 points — the same shape of result as the SWE-bench pilot,
+at full 198 and through a real agent. Note the mean cost delta (+93) is moved by a single
+`fp8` runaway of 45,347 tokens against `tq4`'s 35,768 while the median barely shifts;
+use the median.
+
+**The body-bit half of the comparison is unmeasured**, and it is the one that matters:
+whatever a bpw ladder produces has to be read against ≤7pp for 4-bit KV on the same
+instrument. Reported from practice, and consistent with this: 4-bit TurboQuant KV costs
+far less capability than degrading body weights past the knee.
+
+**Provenance caveat.** The `tq4` arm's `config.json` records `job_name:
+"2026-09-13__16-21-27"` while the `fp8` arm records the descriptive name, so which arm is
+which rests on the directory name alone, and the two ran a day apart. That is the harness
+fingerprint gap in miniature, on a result good enough to deserve better.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `capability-suite` — Measuring capability through the served path
+
+**Outcome wanted:** task-level numbers for a configuration as it is actually served —
+quantized weights, quantized embedding, quantized KV — so quality claims stop being
+divergence figures plus personal impressions.
+
+**Established 2026-09-18** (GPQA-Diamond via evalscope and opencode/harbor, written up in
+the doc): **4-bit TurboQuant KV costs nothing detectable on either axis** — 198 paired
+items, 14/10 discordant, p=0.541, CI [-2.5,+7.1] pp, and a median paired cost delta of
++1 token. **The agentic harness is actively harmful on a Q&A benchmark** — same model and
+items, 50.0% via opencode against 81.2% via evalscope, 10/0 one-sided, from protocol
+non-compliance plus model-dependent reasoning suppression (9B suppressed 8.2x, 27B
+*increased* 1.7x). evalscope's simple harness is the instrument for Q&A. And a third
+metric earned its place beside correctness and cost: **indecision**, counted as
+reconsideration restarts, which catches a termination failure the other two cannot see.
+
+**Open, in order.** The body-bit half is unmeasured and is the one that matters — run the
+`gemma-4-12B` bpw ladder (3.00/3.50/4.00, embed+head fixed at 2.874 GB across all three,
+so only body bits move) and read it against ≤7pp for 4-bit KV on the same instrument.
+Start with the extremes: if 3.00 vs 4.00 does not separate at 198 items, the question
+closes for the whole range and `cpu-offload`'s justification closes with it. Before that,
+a cheaper shakedown with a known-large effect: the **reasoning-effort ladder** on the 27B,
+where the knob genuinely works — one set of weights, no requantization, and it answers
+whether `xhigh` is ever worth it once tokens are counted. Also: build the harness
+fingerprint, and re-run `Qwen3.5-9B` with an effort setting so it is comparable to
+anything.
+
+**Why it is the missing instrument.** qbench answers "how far is this distribution from
+the reference", which ranks encodings well and says nothing about whether a 3.0bpw model
+with a 4-bit KV cache still writes working code, follows a long agentic trace, or recalls
+something from 40K tokens back. Those are the questions the appliance actually ships
+against, and the two newest axes — block-quantized embeddings and KV compression — are
+precisely where divergence is least informative, since KV damage surfaces as retrieval
+failure deep in the window rather than as perplexity at a position.
+
+**Candidate approach: give exllamav3's existing task harnesses a vLLM execution path.**
+`eval/` already has `mmlu.py`, `humaneval.py`, `ifbench.py`, `bbeh_mini.py`, `longctx.py`
+and `spec_decode.py`, with prompts, graders and datasets solved. But every one drives
+native exllamav3 (`model_init.init` / `Generator` / `Job`), so none can see a
+block-quantized embedding (exllamav3 cannot load the format) or vLLM-side KV
+quantization. This is the same move qbench made for scoring: keep the task definitions,
+add an engine. `longctx.py` first — it is the probe for the least understood axis, and it
+already works on whole documents with altered variants rather than synthetic needles.
+It is also the least sampling-sensitive task in the set, being a retrieval probe, so the
+engine path can land greedy-only and the tiering below can wait for `humaneval`/`ifbench`.
+
+**Sampling is an axis of the suite, not a setting.** Greedy is the primary tier, since most
+knobs are distribution-relative — `top_p` cuts at a mass threshold and quantization fattens
+the tail, so one setting admits more junk from a 3.0bpw model than from the reference, and
+part of any reported gap is then the sampler rather than the encoding; penalties are worse,
+being cumulative over a trace. But greedy alone is a known blind spot — the soft-cap gap
+under `multimodal` wrecks sampled output while leaving greedy intact — so a second tier
+runs each model's recommended parameters, which is also the tier that answers what the
+appliance ships. There, **snapshot the parameters into the suite config** with the model
+card revision and date they came from rather than reading the card at run time: cards get
+edited silently, and a baseline that follows one stops meaning what it said. Thinking and
+non-thinking are separate entries, carrying different recommendations. Whichever tier
+produced a number belongs in the artifact beside the vLLM pin.
+
+**Six design rules, established by two SWE-bench runs and painful to retrofit.**
+Evidence for each is in the note; the rules themselves are what shapes the build:
+
+- **Compare paired, never marginal** — on the same data, marginal turn medians said
+  the opposite of the paired comparison.
+- **The effective sample size is the discordant count**, not the problem count. At
+  ~17% discordance, 23 problems bought four informative pairs.
+- **Budget ~150 problems minimum, 300 for comfort.** A cloud baseline for full Lite
+  is ~$90; wall time binds, not money.
+- **Capture turns-to-failure, not only pass/fail.** A model that knows it is stuck
+  behaves differently from one that does not, and the pass/fail column cannot see it.
+- **Shuffle the instance list with a fixed seed, shared across arms.** Lite is ordered
+  by repo, so a truncated run samples one codebase — the killed cloud run's 92 results
+  are 93% django. Truncation is not an edge case, and a shuffle also composes with
+  resuming.
+- **Pick the suite where the model lands nearest 50% resolved**, not the hardest one.
+  Discordance carries the signal, so detectability peaks at half — that is the cost
+  side of choosing a harder, more diverse set.
+
+**The comparator is the weak instrument, and a controlled one needs `vast`** —
+Qwen3.8-27B is ~27 GiB even at fp8, so the same-model-unquantized arm cannot run on
+the dev card. **Comparability across rentals is a preflight problem, not a procurement one** —
+what can move tokens is GPU architecture, driver, count (via TP degree), VRAM and
+uncorrected ECC, all checkable on contact; the rest of the host moves only the
+stopwatch. `tools/host_survey.py` screens a box on arrival and classifies differences
+against a recorded one. Named instance types stay the answer for *perf*
+comparability. What remains genuinely open is survival: a multi-day run on a spot
+rental needs to resume from where it stopped.
+
+→ [docs/capability-suite.md](capability-suite.md) (the SWE-bench runs, the
+GPQA-Diamond instrument work, the three metrics and the rented-hardware problem), [docs/qbench.md](qbench.md) (scope: why
+divergence is deliberately all qbench measures),
+[docs/embeddings.md](embeddings.md)
