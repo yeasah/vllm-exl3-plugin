@@ -1096,9 +1096,23 @@ def recall_section(job, revisions):
         return None
     # Scored rather than selected: a question can fall out when the scoring pass and the choosing pass differ in the last bit
     known = next(results[r['name']]["recall_known_rows"] for r in revisions if "recall_kept" in results.get(r['name'], {}))
+    # Other published quants of this model, every scored rung: unlike the KLD comparison, not clipped to this card's
+    # size range, since where they fall off is the point of showing them
+    info = load_reference_info(job) or {"references": []}
+    sets = []
+    for ref in info["references"]:
+        for name, branches in ref["ladders"].items():
+            pts = [(results[l]["vram_gb"], results[l]["recall_kept"]) for b in branches
+                   if "recall_kept" in results.get(l := ref_label(ref["repo"], b), {})]
+            if pts:
+                sets.append({ "name": ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})",
+                              "points": sorted(pts) })
     return { "rows": rows, "questions": known, "confident": selection["confident"],
              "others": [row(r, l) for l, r in results.items() if r.get("group") == "GGUF" and "recall_kept" in r],
-             "floor": results.get("Noise floor", {}).get("recall_bands") }
+             "floor": results.get("Noise floor", {}).get("recall_bands"),
+             "ours": [(results[r['name']]["vram_gb"], results[r['name']]["recall_kept"], f"{r['bits']:0.2f}")
+                      for r in revisions if "recall_kept" in results.get(r['name'], {})],
+             "sets": sets }
 
 def plot_recall(recall, path):
     """Kept by how firmly the unquantized model held the answer, a trace per rung, which no single figure can show."""
@@ -1139,6 +1153,43 @@ def plot_recall(recall, path):
     plt.close(fig)
 
 
+OTHER_SET_COLORS = ["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"]     # other quant sets, in reference.json order
+
+def plot_recall_vs_size(recall, path):
+    """Facts kept against VRAM: this card's ladder as a line, other published quants as unconnected, unlabelled
+    points. Single conversions are noisy, and a line through them would draw one draw's dip as a feature of the set;
+    as points they read as spread, and the low rungs still show how far a quant can fall."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    SURF, INK, INK2, AXES, GRID, OURS = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555", "#eb6834"
+    fig, ax = plt.subplots(figsize=(7.2, 4.0), dpi=150)
+    fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
+    ax.grid(True, which="major", color=GRID, lw=0.8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(AXES)
+    ax.tick_params(colors=INK2, which="both")
+    xs, ys, tags = zip(*sorted(recall['ours']))
+    ax.plot(xs, [100 * y for y in ys], color=OURS, lw=2, zorder=3, label="this card")
+    ax.scatter(xs, [100 * y for y in ys], marker="D", s=30, color=OURS, edgecolor=SURF, zorder=4)
+    for x, y, t in zip(xs, ys, tags):
+        ax.annotate(t, (x, 100 * y), xytext=(0, -9), textcoords="offset points", ha="center", va="top",
+                    fontsize=6.5, color=INK)
+    for s, color in zip(recall['sets'], OTHER_SET_COLORS):
+        ax.scatter([x for x, _ in s['points']], [100 * y for _, y in s['points']], marker="o", s=40, color=color,
+                   edgecolor=SURF, linewidth=0.8, zorder=2, label=s['name'])
+    ax.set_xlabel("VRAM in vLLM (GiB, weights as served)", color=INK2)
+    ax.set_ylabel("facts kept (%)", color=INK2)
+    leg = ax.legend(frameon=False, fontsize=7.5, loc="lower right")
+    for t in leg.get_texts():
+        t.set_color(INK2)
+    fig.tight_layout()
+    fig.savefig(path, facecolor=SURF)
+    plt.close(fig)
+
+
 def plot_vs_reference(job, ref, path):
     """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal body size,
     every point labelled (our bit rate and ratio; another set's branch or quant type)."""
@@ -1148,7 +1199,7 @@ def plot_vs_reference(job, ref, path):
     import matplotlib.pyplot as plt
     SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
     OURS, BASE = "#eb6834", "#888888"
-    OTHERS = ["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"]
+    OTHERS = OTHER_SET_COLORS
     fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
@@ -1322,6 +1373,8 @@ def do_card(job, args):
     meta['recall'] = recall_section(job, meta['revisions'])
     if meta['recall']:
         plot_recall(meta['recall'], os.path.join(job.main, "recall.png"))
+        if meta['recall']['sets']:
+            plot_recall_vs_size(meta['recall'], os.path.join(job.main, "recall_vs_size.png"))
     # A quantized token embedding: conditional, because reading one needs a newer exllamav3 than the checkpoints before it
     meta['embed_quantized'] = any(json.load(open(os.path.join(job.revdir(r['name']), "calibration.json"))).get("embedding", {}).get("embed_bits", 16) < 16
                                   for r in meta['revisions'] if os.path.isfile(os.path.join(job.revdir(r['name']), "calibration.json")))

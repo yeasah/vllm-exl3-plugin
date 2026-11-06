@@ -89,7 +89,13 @@ Loss is not spread evenly. A quant holds on to what the unquantized model was su
 ![facts kept by how firmly the unquantized model held the answer](./recall.png)
 
 Bars are approximate and cover both sampling and the difference between equivalent conversions. Differences of a point or two between rungs mean little.
+{% if recall.sets %}
+Other published quants of this model, scored on the same questions, show how much is at stake at each size, and how fast facts go once a quant is small enough:
 
+![facts kept against VRAM, this card and other quants of this model](./recall_vs_size.png)
+
+Each dot is one published quant, at its VRAM as served. Each is a single conversion, and conversions with the same settings land a few points apart here, so read where the dots lie as a group rather than any one of them against this card's line.
+{% endif %}
 {% endif %}
 # More detail
 
