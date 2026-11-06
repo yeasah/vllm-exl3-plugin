@@ -464,17 +464,16 @@ def reference_section(job, qbench, floor, data):
         return float(np.exp(ly[i] + (x - xs[i]) * (ly[i + 1] - ly[i]) / (xs[i + 1] - xs[i])))
     W = composite_weights(job)[0]
     def geo(a, b, skip=()):
-        """Weighted geometric mean of per-slice excess ratios a/b over the composite's slices
-        ({slice: excess} each): every slice counts at its stated weight, whatever its absolute
-        scale (a weighted sum of excesses lets the slice with the larger excess dominate). A
-        slice where both sides sit under 2x its noise floor is left out and the rest
-        reweighted; if all are, all are used. Returns (ratio, slices left out, all near floor)."""
-        keep = [sl for sl in W if max(a[sl], b[sl]) >= 2 * floor[sl] and sl not in skip]
-        dropped = [sl for sl in W if sl not in keep and sl not in skip]
-        use = keep or list(W)
+        """Weighted geometric mean of per-slice ratios of total divergence -- excess plus the slice's noise
+        floor -- over the composite's slices ({slice: excess} each). Total, because the floor is what a user
+        sees beneath any quant: a gap far below it compresses toward 1 instead of reading as a large ratio of
+        two tiny numbers (Qwen3.8-27B 6 bpw, wild: excess 0.00040 against 0.00030 is 1.33, total 1.11), while
+        a gap well above it is nearly unchanged. Every slice counts at its weight, whatever its scale.
+        Returns (ratio, [], whether both sides are under 2x the floor on every slice)."""
+        use = [sl for sl in W if sl not in skip] or list(W)
         tw = sum(W[sl] for sl in use)
-        r = float(np.exp(sum(W[sl] / tw * np.log(max(a[sl], 1e-12) / max(b[sl], 1e-12)) for sl in use)))
-        return r, (dropped if keep else []), not keep
+        r = float(np.exp(sum(W[sl] / tw * np.log((a[sl] + floor[sl]) / (b[sl] + floor[sl])) for sl in use)))
+        return r, [], all(max(a[sl], b[sl]) < 2 * floor[sl] for sl in use)
 
     every = list(qbench)                    # raw included: TECHNICAL.md shows every slice
     ours = {r['name']: arm(r['name'], job.revdir(r['name']), every) for r in data['revisions']}
@@ -504,10 +503,9 @@ def reference_section(job, qbench, floor, data):
 
     def describe_slice(sl):
         return DESCRIBE.get(sl) or DIAG_SLICES.get(sl, sl)
-    # Ratios are geo(): per-slice ratios, geometrically weighted. A slice where both quants sit
-    # within ~2x the unquantized model's own rounding noise compares differences too small to
-    # matter (Qwen3.8-27B 6 bpw: swe excess at a third of the floor) and is left out, the row
-    # saying so; a row where every slice is is marked as noise, not dropped
+    # Ratios are geo(): per-slice ratios of total divergence, geometrically weighted, so a gap under
+    # the unquantized model's own rounding noise compresses toward 1 rather than being dropped; a row
+    # where every slice is under 2x the floor is still marked as noise
     # A slice any compared set was calibrated on is out of the worst-slice column for every row:
     # dropping it only against that set would leave the column measuring different things per row
     tainted = sorted({sl for _, rungs in ladders for x in rungs for sl in x.get('contaminated', ())})
@@ -532,7 +530,7 @@ def reference_section(job, qbench, floor, data):
         if same:
             (ratio, dropped, allnear), disp, best = max(same, key=lambda t: t[0][0])
             row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped] })
-            rel = {sl: o['excess'][sl] / best['excess'][sl] for sl in slices
+            rel = {sl: (o['excess'][sl] + floor[sl]) / (best['excess'][sl] + floor[sl]) for sl in slices
                    if sl not in tainted and sl in o['excess'] and sl in best['excess']}
             worst = max(rel, key=rel.get)
             d = o['total'] - best['total']
@@ -552,7 +550,7 @@ def reference_section(job, qbench, floor, data):
                              'dropped': [describe_slice(sl) for sl in dropped] })
                 # the worst slice against the same equal-size interpolation (a GGUF ladder is
                 # always compared this way, so without it the column would never cover one)
-                rel = {sl: o['excess'][sl] / v for sl in slices if sl not in tainted
+                rel = {sl: (o['excess'][sl] + floor[sl]) / (v + floor[sl]) for sl in slices if sl not in tainted
                        if (v := interp(rungs, o['body'], sl))}
                 if rel:
                     worst = max(rel, key=rel.get)
@@ -1181,7 +1179,7 @@ def plot_vs_reference(job, ref, path):
     ax.set_ylim(lo - pad, hi + pad)
     ax.margins(x=0.08)
     ax.set_xlabel("transformer body (GiB; no output head, input embeddings, encoder or MTP)", color=INK2)
-    ax.set_ylabel("excess KLD relative to\nuncalibrated EXL3 at equal size", color=INK2)
+    ax.set_ylabel("KLD incl. rounding noise, relative\nto uncalibrated EXL3 at equal size", color=INK2)
     if any_ext:
         ax.scatter([], [], marker="o", s=36, facecolor=SURF, edgecolor=INK2, linewidth=1.5,
                    label="hollow: past the baseline's sizes, extrapolated")
