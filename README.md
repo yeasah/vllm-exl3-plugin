@@ -11,6 +11,11 @@ batching, prefix caching, CUDA graphs, tensor parallelism and quantized KV cache
 stay quantized in VRAM, and exllamav3's kernels do the work; the plugin builds no kernels of
 its own.
 
+This README focuses on the details of setting up and using the system. For a higher-level
+overview of the system, an introduction to vLLM, and some practical recommendations
+on its use with this plugin, see the [usage notes](usage-notes.md)
+
+
 **Part 1, using it:** [Requirements](#requirements) · [Install](#install) ·
 [Differences from plain vLLM](#how-it-differs-from-plain-vllm) ·
 [vLLM changes beyond EXL3](#vllm-changes-beyond-exl3) ·
