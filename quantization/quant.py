@@ -2046,9 +2046,14 @@ def published_generation_config(job):
         return None, None
     with open(prof) as f:
         p = json.load(f)
-    mode_name = next((r["mode"] for r in p.get("rules", []) if set(r) == {"mode"}), None)
-    if mode_name is None:
+    # Only on the profile's explicit word. Its rules say how eval traces are sampled, and the catch-all there is a
+    # fallback (a thinking model's non-thinking requests), not the model's default: reading it as one replaced
+    # Qwen3.8-27B's thinking defaults with its instruct set. The base model's choice stands unless the profile names
+    # a mode to publish and why: no generation_config.json at all, or defaults matching nothing its card recommends.
+    publish = p.get("publish")
+    if not publish:
         return None, None
+    mode_name = publish["mode"]
     mode = {k: v for k, v in p["modes"][mode_name].items() if k in GC_SAMPLING_KEYS}
     base = None
     if HfApi().file_exists(job.base_repo, "generation_config.json"):
@@ -2059,9 +2064,9 @@ def published_generation_config(job):
     else:
         changed = [k for k in mode if base.get(k) != mode[k]]
         if not changed:
-            return base, {"action": "unchanged", "mode": mode_name, "source": p["source"], "values": mode, "prior": {}}
+            return base, {"action": "unchanged", "mode": mode_name, "source": p["source"], "values": mode, "prior": {}, "why": publish["why"]}
         action, prior, gc = "modified", {k: base.get(k) for k in changed}, {**base, **mode, "do_sample": True}
-    return gc, {"action": action, "mode": mode_name, "source": p["source"], "values": mode, "prior": prior}
+    return gc, {"action": action, "mode": mode_name, "source": p["source"], "values": mode, "prior": prior, "why": publish["why"]}
 
 def recipe_floor_args(meas):
     """sc_optimize --floor_fit for a MoE measurement (grouped expert targets carry "members"): routing

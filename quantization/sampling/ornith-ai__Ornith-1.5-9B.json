@@ -8,5 +8,6 @@
  "rules": [
   {"slice": "swe", "mode": "coding"},
   {"mode": "general"}
- ]
+ ],
+ "publish": {"mode": "general", "why": "the base model ships no generation_config.json, so servers fall back to untruncated temperature 1.0"}
 }

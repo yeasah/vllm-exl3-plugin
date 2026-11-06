@@ -6,5 +6,6 @@
  },
  "rules": [
   {"mode": "general"}
- ]
+ ],
+ "publish": {"mode": "general", "why": "the base model's generation_config.json matches none of the settings its card recommends"}
 }
