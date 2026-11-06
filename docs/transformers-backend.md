@@ -2,7 +2,7 @@
 
 *EXL3 through vLLM's Transformers backend (`--model-impl transformers`), which
 builds a model from the transformers modelling definition when vLLM has no native
-implementation of the architecture. Tracked in TODO as `transformers-backend`.*
+implementation of the architecture. What remains is FUTURE.md `transformers-backend`.*
 
 **Status: it works.** An EXL3 checkpoint served through the Transformers backend is
 token-for-token identical to the same checkpoint served through vLLM's native
@@ -54,7 +54,7 @@ been passed through it: every result in this note, and the `bench/` entries buil
 from them, uses text-only prompts. That is the same assumption that made this
 model's *text* path look healthy while it emitted confident garbage — see
 [What the backend drops](#what-the-backend-drops), where loading was likewise not
-working. Tracked as TODO `multimodal`.
+working. Tracked as TODO `vision-serving`.
 
 ## The one blocker: `ReplicatedLinear` has no `weight_loader_v2`
 
@@ -278,3 +278,56 @@ it (`ForConditionalGeneration.forward`) or **inside a layer it substitutes**
 (the embedding, the norms, the linears) is at risk of being dropped. It is dropped
 silently whenever the missing arithmetic carries no weights, because weight-loading
 is the only thing that checks.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `transformers-backend` — Serving models vLLM does not implement
+
+**Mostly answered: it works.** Serving through vLLM's Transformers backend
+(`--model-impl transformers`) is token-for-token identical to the native path on
+MiniCPM5-1B, and — with three vLLM patches — to *native exllamav3* on
+Muse-Glimmer-30B, a model vLLM has no implementation for, vision tower included.
+Model coverage therefore moves from "what vLLM implements natively" to
+approximately "what transformers implements".
+
+Text-only models on plain architectures need nothing. Beyond that the backend needs
+patching, and the reason is always the same: it runs the model's *base* module
+graph, so arithmetic living above it or inside a layer it substitutes gets dropped
+— silently, whenever that arithmetic carries no weights.
+
+→ [docs/transformers-backend.md](transformers-backend.md)
+
+**What remains open:**
+
+- **Upstreaming — now half a patch, and the feared cost did not materialize.**
+  Settled at the v0.28.0 bump (2026-08-25). Upstream closed most of it: the
+  postprocess patch is retired outright, and the softcap patch reduces to its
+  `output_multiplier` half plus the fold-into-cap identity, since `causal.py`
+  passes `soft_cap` but still reads only `logit_scale` and still applies its
+  scale *after* the cap. That half is what remains worth offering.
+
+  **The seam survives**, which was the open worry: upstream does not stop using
+  `VocabParallelEmbedding`, it *rebases the model's embedding class onto it*
+  (`type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})`), and
+  `replace_embedding_class` passes `quant_config` into
+  `VocabParallelEmbedding.__init__` — so a quantized embedding still attaches on
+  this path. Confirmed by the gate, not by reading: the two Transformers-backend
+  entries capture at 0.000e+00 across the bump.
+
+  `vllm-replicated-linear-weight-loader-v2.patch` remains untouched upstream;
+  check the `RowvLLMParameter`-narrowing edge noted in the doc before offering
+  it.
+- **Auditing rather than waiting.** Both Muse-Glimmer defects were found by reading
+  the transformers modelling file against what the backend substitutes, and both
+  would have stayed invisible on any metric short of a token-level comparison
+  against another engine. The same read is worth doing per architecture before
+  trusting the backend on it, and a cheap generic version — diffing a model's
+  `ForCausalLM.forward` against the backend's `compute_logits`, and each
+  substituted layer class against its replacement — would catch the whole family.
+- **Breadth.** Three architectures tested through the backend, one of them
+  multimodal and generating correctly — on *text* prompts only; no image has been
+  passed through any of it, see `multimodal`. Still no MoE and no TP through the
+  backend.

@@ -724,3 +724,456 @@ behind it":
   them grew with prompt length once the continuation prefill stopped allocating by
   context. The logprobs adversarial test above is still outstanding and is a different
   shape of risk: request-sized, not context-sized.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `mtp-turboquant` — Zero draft acceptance, and output that does not survive it
+
+The outcome wanted is either a working MTP drafter on a TurboQuant KV cache, or a
+refusal at startup. What happens today is the third thing: it runs, drafts at ~90
+tok/s, accepts **nothing**, and the output is degenerate.
+
+It unblocks the appliance's only speculative-decoding option on the model it most
+wants one for. Qwen3.8-27B at 3.00bpw with a 4-bit KV cache is the configuration the
+16 GiB card is built around, and MTP is the one draft method the checkpoint ships.
+
+**Measured 2026-09-10**, serving `turboderp/Qwen3.8-27B-exl3@3.00bpw` with
+`--kv-cache-dtype turboquant_4bit_nc` and `--speculative-config
+'{"method":"mtp","num_speculative_tokens":3,"revision":"3.00bpw"}'`, one-line prompt:
+
+- **0.0% acceptance across 912 drafted tokens**, per-position 0.000/0.000/0.000, after
+  2.9% (0.047/0.034/0.007) in the first window. Position 0 is the draft that depends
+  on nothing but the target's own hidden state, so 4.7% falling to 0.000 says the
+  drafter is wrong from its first proposal rather than degrading down the chain. (A
+  useful MTP head is far higher than that; we have no measured figure of our own for
+  this checkpoint, which is itself worth fixing before tuning anything.)
+- **Degenerate output**: an unclosed thinking block that generates forever with
+  nothing reaching the client. With 0% acceptance a correct implementation would
+  reproduce the target model's own output exactly, so *something beyond the drafter
+  is affected*. **The draft model is required for it**: dropping `--speculative-config`
+  and resizing the KV cache to a comparable size gives a correct short story, same
+  model, same `turboquant_4bit_nc`, same context budget (2026-09-10). So the quantized
+  KV path alone is fine at this context and the fault is in the draft/verify cycle.
+- vLLM says so itself at startup: `Fused multi-step draft decode is not supported by
+  attention backend(s) TURBOQUANT; falling back to rebuilding attention metadata
+  between draft steps` (`speculator.py`). The backend declares
+  `_init_reorder_batch_threshold(1, supports_spec_as_decode=False)`, so a 4-query
+  verification step is classified as a *prefill* rather than a decode.
+
+**The 2x2 is complete, and both controls point the same way.** TQ without spec decode
+is correct, so the KV path alone is fine; fp8 *with* MTP is correct on the same 0.29
+install, so the drafter and the verification machinery are fine. Only the crossing
+fails. The question is no longer whether the draft cycle is at fault, nor whether MTP
+is broken generally -- it is what TurboQuant does that fp8 does not, during
+verification.
+
+**Two readings of the code, one of which kills the obvious hypothesis.** The path a
+4-token verification batch takes is the small-continuation branch of
+`TurboQuantAttentionImpl.forward`, and it *does* handle causality: each query token is
+issued as its own decode request with an incrementing synthetic `seq_len`
+(`_arange_cache[cached_len + 1 : seq_len + 1]`), so token `j` attends to exactly
+`cached_len + j + 1` keys. "The verification batch is unmasked" was the first guess and
+it is wrong. Note the precondition stated in the comment above it, though: the branch
+assumes `do_kv_cache_update` has already written all `q_len` tokens to the cache -- so
+during verification, *rejected drafts are in the KV cache before they are rejected*.
+That is the seam worth probing next. Against it: the store takes a per-token
+`slot_mapping` and the metadata region is indexed per slot, so a rejected token's slot
+should be cleanly reusable rather than poisoning a block-shared scale -- which is the
+mechanism one would reach for first, and it does not obviously hold here.
+
+**Do not take a clean `bench/` capture as evidence either way.** Speculative decoding
+is output-preserving by construction, so a broken drafter and a working one produce
+identical tokens; `qwen3.8-27B-3.0bpw-blockq-MTP-tq4` captured cleanly for exactly that
+reason and its note claimed too much for years. Any measurement here has to read
+acceptance rate, which means `disable_log_stats=False`.
+
+*A second finding from the same run, worth separating*: `--speculative-config` on a
+hybrid model silently switches Mamba-state checkpointing to **dense**
+(`arg_utils.py`: "Hybrid model with EAGLE speculative decoding: defaulting
+prefix_cache_retention_interval to dense checkpointing"), because EAGLE's tail-block
+drop makes the sparse retention unreachable. That is what puts KV occupancy at 40.6%
+for a one-line prompt on a 53,040-token context, and it is a large hidden cost of
+turning MTP on for this architecture regardless of whether acceptance is ever fixed.
+
+### `kv-nvfp4` — 4-bit KV without TurboQuant's costs
+
+**Outcome:** NVFP4 KV (`--kv-cache-dtype nvfp4`, FlashInfer with XQA decode on SM12x since vLLM
+0.32) measured against `turboquant_4bit_nc` on KL and on capacity, and against TurboQuant's
+limitations: the boundary-layer tax, sliding-window models, FA3, TP and spec decode.
+
+**Unblocks:** possibly ~4-bit KV at TurboQuant-like quality on the paths TurboQuant refuses or
+taxes. Upstream's own test case is Qwen3.8-27B at TP=2 (GQA 6, head_dim 256), our local config.
+
+**Candidate:** the existing TurboQuant comparison harness (docs/turboquant-kv.md) with one more
+arm, on the 0.6B and the 9B; then the 27B at TP=2. UltraQuant (`ultraquant_4bit`, FP4 with
+power-of-two group scales and rotated keys) is the ROCm-only sibling; its Triton paths are
+portable if NVFP4 disappoints.
+
+### `turboquant-sliding-window` — TurboQuant KV cache for sliding-window models
+
+*Written up in [docs/turboquant-kv.md](turboquant-kv.md), Part 1. What follows is
+the diagnostic history, kept because two of the three walls were misdiagnosed on the
+way.*
+
+**Status 2026-08-29: Laguna serves, patched.** The three fixes are in
+[`vllm-tq-01-sliding-window-kv-pages`](../patches.md)
+and the measurement is at the end of this item. Still open: the quality question
+(`qbench` on tq4), gemma-4 and Muse-Glimmer (neither fits the local card), and
+reporting any of it upstream. The history below is kept because it is what the
+diagnosis cost, and because two of the three walls were misdiagnosed on the way.
+
+`TurboQuantAttentionBackend` never overrides `supports_sliding_window`, so it takes
+the base class's `return False` and is rejected for any model with a sliding window.
+That is **gemma-4, Laguna and Muse-Glimmer** — one reason, three families.
+Muse-Glimmer is 39 sliding / 13 full at a 2048 window with `head_dim` 128, so like
+Laguna it carries no head-dim triton pin and is blocked on the sliding window alone.
+
+**And the rejection is a fix, not merely an obstacle.** Reported 2026-08-25: Muse
+*used* to be accepted with a turboquant cache dtype and is not any more. It could
+never have been correct — the model has been sliding-window throughout — so
+whatever ran before was serving wrong attention silently. 0.28 refusing it is the
+gate upstream should always have had, which is worth remembering when arguing for
+the sliding-window support: the ask is to make it work, not to relax the check.
+
+**Bigger than the FA miss it was mistaken for.** Closing the head-dim-512 gap would
+have bought gemma-4 a flash-attention path and nothing else (retired, see
+[docs/kernels.md](kernels.md)); this buys gemma-4 *and* Laguna a quantized KV
+cache, which on a 16 GiB card decides whether the context is usable.
+
+**The economics are better than the layer count suggests**, which is what makes it
+worth pursuing rather than filing as impossible. gemma-4 is mostly sliding layers
+(12B: 40 sliding / 8 full; 26B-A4B: 25 / 5), so compressing only the full-attention
+layers sounds like giving up most of the prize. It is not: a sliding layer's cache is
+capped at `sliding_window` (1024) while a full-attention layer grows with context, so
+the five-or-eight full layers *dominate* KV bytes exactly where pressure is real —
+~62% of KV at 8k on the 26B, ~86% at 32k, ~96% at 128k. Compressing only those
+reaches ~65% total KV reduction at 32k against ~75% for compressing everything.
+
+**There is precedent for the approach, and it is bypass rather than support.** The
+external `turboquant-vllm` project ([alberto.codes,
+2026-03-31](https://alberto.codes/blog/2026-03-31-from-one-model-to-seven-making-turboquant-model-portable))
+reached Gemma-2/Gemma-3 by *declining to compress* sliding layers — "compressing a
+sliding window layer's cache breaks the eviction semantics" — keeping layer indices
+aligned with `None` padding. Not teaching the cache sliding window; detecting sliding
+layers and leaving them alone. **vLLM already has that mechanism**:
+`--kv-cache-dtype-skip-layers` takes the literal keyword `sliding_window`
+(`layers/attention/attention.py:306`) and sets those layers to `kv_cache_dtype="auto"`.
+
+**Measured 2026-08-24 on gemma-4-12B@3.00bpw_mul1, and it does not currently work:**
+
+- **Unforced, the failure looks FA-related and is not.** `TRITON_ATTN is not valid
+  ... ['kv_cache_dtype not supported']` — gemma-4 is pinned to triton by head dim
+  512, triton rejects the turboquant dtype, and nothing mentions sliding window. This
+  is the message that produced the original wrong diagnosis.
+- **`--kv-cache-dtype-skip-layers sliding_window` crashes**, and it is one line:
+  turboquant merges its own boundary skips with `sorted(existing | set(boundary),
+  key=int)` (`engine/arg_utils.py:1985`), so the documented keyword raises
+  `ValueError: invalid literal for int() with base 10: 'sliding_window'`. The exact
+  invocation implementing the blog's approach cannot be typed.
+- **Skipping the same layers by numeric index changes nothing**, because backend
+  selection is global: vLLM picks one backend for the model and that backend must
+  accept the configuration. Per-layer dtype skipping cannot route around it.
+- **Forced to turboquant, three blockers, not one:** `['kv_cache_dtype not
+  supported', 'partial multimodal token full attention not supported', 'sliding
+  window not supported']`. The third is the known one. The second is
+  multimodal-specific and means gemma-4 needs more than sliding-window support. **The
+  first is unexplained** — `supports_kv_cache_dtype` returns true for anything
+  `turboquant_*` and the full `turboquant_4bit_nc` reaches the backend. Suspicion, not
+  a finding: turboquant auto-adds boundary layers to the skip list, those become
+  `"auto"`, and global selection then validates turboquant against a native-dtype
+  group. **Settle this before reporting anything upstream.**
+
+So the `key=int` collision is a real, small, reportable bug on the path that matters,
+but fixing it alone would not get gemma-4 to turboquant — the multimodal blocker sits
+behind it.
+
+**Laguna is the better playground, and it gets furthest.** Text-only (no multimodal
+blocker), `head_dim` 128 (no triton pin, so no head-dim confound), and 10 full / 30
+sliding layers at a 512-token window — half gemma's. That layout makes the bypass
+*more* attractive, not less: the ten full-attention layers are 73% of KV bytes at 4k,
+84% at 8k, **95.5% at 32k** and 98.8% at 128k, so compressing only them captures ~95%
+of the theoretical maximum.
+
+Measured 2026-08-24 on `Laguna-XS-2.1-exl3@3.00bpw`:
+
+- `--kv-cache-dtype turboquant_4bit_nc` alone: `No valid attention backend found for
+  cuda` — turboquant is the only backend accepting the dtype and it rejects the
+  sliding window, so nothing is left.
+- **Skipping the 30 sliding layers by index passes backend selection** and fails much
+  deeper, in KV cache group construction:
+  `get_kv_cache_groups -> unify_kv_cache_spec_page_size -> assert
+  self.page_size_padded >= self.unpadded_page_size_bytes` (`kv_cache_utils.py:1118`,
+  `kv_cache_interface.py:207`).
+
+**That first wall is a one-line staleness bug, confirmed by patching it.** The unifier
+scales `block_size` by the ratio via `replace(layer_spec, block_size=new_block_size)`
+and leaves `page_size_padded` untouched; turboquant sets that field for its packed
+`slot_size_aligned` layout, so the recomputed `unpadded_page_size_bytes` overtakes the
+stale padded value. Scaling both cleared it.
+
+**Behind it is a second wall that is not small.** With the assert gone, the same run
+fails on a full-attention (turboquant) layer:
+
+    NotImplementedError: Layer model.layers.4.self_attn.attn: page size is not
+    divisible by the maximum page size and cannot be padded.
+
+Padding is gated on `indexes_kv_by_block_stride`, which is *derived* from the
+backend's `get_kv_cache_stride_order()` (`gpu_model_runner.py:7833`) — a property of
+the memory layout, not a flag to set. TurboQuant packs K+V into a single interleaved
+slot per head per position, so its page size is neither divisible into a native
+layer's nor paddable to match it.
+
+**So the accurate statement is narrower than "TurboQuant cannot do sliding window" and
+wider than "one function":** TurboQuant's packed KV page layout cannot currently
+coexist with native-dtype layers in one cache. That is precisely the bookkeeping the
+external project wrote by hand *outside* vLLM, and it is the thing any bypass approach
+has to solve — the sliding-window rejection is only the first gate.
+
+**And upstream has already restructured it, after our pin.** vLLM's
+`[N/N] KV-Cache Layout Refactor` series has parts 1-3 in v0.27.0 and parts **4 and 5
+landing after it**:
+
+- `61874f9842` [4/N] Promote local KV cache specs via a class-changing replace helper
+  (#51612) — rewrites `kv_cache_utils.py`, the file holding the unifier.
+- `57bd0ed441` [5/N] Backend-published KV packing via `customize_spec` (#51704) —
+  touches `turboquant_attn.py` directly, and **deletes `TQFullAttentionSpec`**.
+
+TurboQuant stops being a special spec class carrying an opaque `page_size_padded` and
+becomes an ordinary `FullAttentionSpec` publishing `state_content_bytes =
+slot_size_aligned` through a backend hook. Page size then computes as
+`num_heads * storage_block_size * state_content_size_bytes` — a **per-cell** quantity,
+so it scales linearly with `block_size` where the old padded value did not.
+
+**Re-run on v0.28.0, 2026-08-25, and the prediction was half right.** TurboQuant does
+stop setting `page_size_padded` — it publishes `state_content_bytes` only. But the
+walls did not dissolve, and 0.28 turns out to have built *first-class machinery for
+this exact case* with a gap in it:
+
+- **Stages 1 and 2 fail exactly as on 0.27.0** — bare dtype gives no valid backend, the
+  `sliding_window` keyword still raises `ValueError: invalid literal for int()`.
+- **Stage 3 progresses further, then hits the same assert** (`page_size_padded >=
+  unpadded_page_size_bytes`), now reached through cudagraph memory profiling rather
+  than direct KV init. The staleness bug moved rather than vanishing: in 0.28 it is the
+  *sliding* spec that carries a padded page (`page_size_padded=shared_page`) while the
+  unifier's block-scaling branch still leaves it stale. Same one-line fix, different
+  spec.
+- **With that patched, the divisibility wall returns**, and instrumenting the unifier
+  says why — there are **three** page-size classes, not two:
+
+```
+layer 0: FullAttentionSpec   block=32 page=131072 padded=None   content=None quant=0
+layer 1: SlidingWindowSpec   block=16 page=65536  padded=65536  content=None quant=0
+layer 4: FullAttentionSpec   block=32 page=34304  padded=None   content=134  quant=7
+max_page_size=131072  distinct=[34304, 65536, 131072]
+```
+
+Layer 0 is *native full attention* because TurboQuant auto-adds its own boundary skip
+layers (`get_boundary_skip_layers`, first/last N) on top of the operator's list. So the
+pool holds native-full, native-sliding and turboquant-full, and 34304 does not divide
+131072.
+
+**`--kv-cache-dtype-skip-layers` is a supported configuration in 0.28**, not a hack:
+`CacheConfig.skip_page_size_padded` is documented as "the page size of layers skipped
+from KV cache quantization ... so unquantized skip layers pad up to the quantized
+primary's page", and `Platform._align_..._block_size` bumps `block_size` so the primary
+page covers the padded one. It handles **one** padded class. Upstream marked the gap
+itself, twice, in that same function:
+
+```python
+# To add the first/last-N sibling:
+#   padded_pages.append(per_token_page_bytes(<sibling_dtype>, "auto"))
+# To add the first/last-N sibling:
+#   cache_config.sibling_page_size_padded = shared_page
+```
+
+The first/last-N sibling *is* TurboQuant's boundary protection. So what blocks Laguna
+is a case upstream has already identified and left unimplemented, plus the block-scaling
+staleness bug — two narrow, reportable things rather than a missing capability.
+
+**The boundary-protection question is filed separately** as
+`turboquant-boundary-tax` below: the patch here keeps that protection working, so
+removing it is an independent optimization across all TurboQuant models rather than
+anything this item depends on.
+
+**Answered 2026-08-29, and Laguna serves.** The answer to the bounded question was
+yes, but the two known fixes were not the load-bearing one. See
+[`vllm-tq-01-sliding-window-kv-pages`](../patches.md)
+for all three.
+
+- **The primary page was priced by the wrong backend.**
+  `_align_heterogeneous_kv_block_size` prices the quantized primary through
+  `backend_cls`, which `_find_non_ssm_backend` defines as the backend of the *first*
+  attention layer — with skip layers, an unquantized one on FLASH_ATTN, whose
+  `customize_spec` is a no-op for TurboQuant's packing. So the primary was priced as
+  dense uint8 (2·hd bytes/head, 2048/token) instead of packed (hd+6, 1072/token). Since
+  `2·hd/(hd+6)` is never an integer — 1.91 at hd 128, 1.95 at hd 256 — the shared page
+  could never be a multiple of the real primary page, and no amount of sibling work
+  would have fixed that. The sibling function `_align_hybrid_block_size` already
+  special-cases TurboQuant for this exact reason and says so in its own comment.
+  Resolving the backend that serves the primary dtype moves block_size 32 → 64 and the
+  shared page 65536 → 68608, which is the packed page exactly.
+- **The sibling then does what upstream's comments say**, with two gates: only when the
+  native page is not an integer multiple of the primary's (nvfp4 is exactly 2× and
+  keeps its block-scaling path), and only when some layer is sliding-window or the model
+  is hybrid. The second gate matters — an all-full-attention model never reaches
+  `unify` at all (`UniformTypeKVCacheSpecs` takes it first) and packs differing page
+  sizes more tightly than padding does. Ungated, the sibling cost **2.0% of KV tokens on
+  dense TurboQuant**, which is a real regression on the path that already worked.
+- **The `page_size_padded` staleness one-liner is real but no longer on the path.**
+  Applied alone against the baseline it clears the assert and exposes the divisibility
+  wall behind it, reproducing the history recorded above; with the other two fixes the
+  pages reconcile and `unify` returns before the scaling branch.
+
+Measured on `Laguna-XS-2.1-exl3@3.00bpw`, `turboquant_4bit_nc`, 30 sliding layers
+skipped by index, RTX 5070 Ti / vLLM 0.28.0. All three page classes reconcile to 68608
+— turboquant layers exact at block 64, native full and sliding padded from 65536 at
+block 16 (4.5% waste) — and the model generates. **Boundary protection is intact**: the
+first/last-N layers keep native KV, so nothing was traded for this. Dense TurboQuant
+(MiniCPM5-1B) is unchanged at 909,888 vs 909,920 KV tokens, and both models still serve
+with an unquantized cache.
+
+**Not yet shown on the other two families.** gemma-4 and Muse-Glimmer do not fit the
+16 GiB card (Muse OOMs during load; its native path additionally fails earlier on an
+unrelated `vision_adapter.c_fc.mul1` weight-loading error, and it is served through
+`--model-impl transformers` here). Both need the vast box. gemma-4 also still has the
+multimodal blocker in front of it, which this does not touch.
+
+The `key=int` crash on the literal `sliding_window` keyword (`arg_utils.py:2022`) is
+untouched and still stands — the runs above skip layers by numeric index.
+
+**There is an upstream tracking issue for the gemma-4 half of this**, found 2026-08-29:
+[vllm-project/vllm#41403](https://github.com/vllm-project/vllm/issues/41403), "TurboQuant
++ Gemma 4 multimodal: 5-gate blocker stack" (open). Same destination, four gates in
+common, and it is worth reading before writing anything upstream.
+
+What it gives us:
+
+- **The multimodal blocker has a workaround.** `--hf-overrides
+  '{"text_config":{"use_bidirectional_attention":null}}'` clears
+  `partial multimodal token full attention not supported` at the cost of vision
+  quality. That is the blocker filed here as sitting behind everything else, and it
+  turns out to be steppable for a text-only measurement.
+- Two pieces of trivia that will cost an afternoon otherwise: TurboQuant's triton
+  kernels need `ninja` on the path, and an installed external `turboquant-vllm` plugin
+  collides with the in-tree API (`TQ4FullAttentionSpec.__init__() got an unexpected
+  keyword argument 'tq_slot_size'`).
+- Their Gate 2 is our boundary-skip question, and their workaround is exactly the one
+  considered here: monkeypatch `get_boundary_skip_layers` to return `[]`. So the
+  approach has independent users, and our patch is the alternative that keeps the
+  protection rather than trading it away.
+
+Where we are ahead: their Gate 5 stops at `NotImplementedError ... cannot unify by
+adjusting block_size` and attributes it to gemma's heterogeneous head_dim. That is a
+real second cause, but it is not the one that stops Laguna — the mispriced primary page
+is, and it is invisible from the error message. Their Gate 2 diagnosis ("needs per-layer
+attention backend routing") is also stale for 0.28: per-layer routing already happens
+here, FLASH_ATTN for the skip layers and TURBOQUANT for the rest, which is precisely how
+the aligner ends up asking the wrong backend for the primary's packing.
+
+**And gemma is harder than Laguna in a way this item had not recorded.** Its full and
+sliding layers do not share a KV geometry: `head_dim` 256 with 8 KV heads on the sliding
+layers, `global_head_dim` **512** with `num_global_key_value_heads` **1** on the global
+ones (plus `attention_k_eq_v: true`). So natively the two layer types are 8192 and 2048
+bytes/token — the heterogeneity the issue names, and a *fourth* page class that the fix
+above does not address: `padded_pages` computes one native per-token page from
+`model_config.get_num_kv_heads()`, which cannot be right for both. The Laguna fix is
+necessary but not sufficient for gemma.
+
+It also re-prices gemma's prize, favourably: the global layers are only 2048 bytes/token
+against 8192 for sliding, so the fixed sliding cost is ~335 MiB total (capped at the
+1024 window) while the global layers are what grows — 2.1 GiB at 128k, which tq4 takes
+to ~540 MiB. That is the same number the issue arrives at independently for the 31B.
+
+Worth pairing with the quality question before investing: tq4 on a trellis-quantized
+model has field experience and a capability-benchmark lower bound behind it, but no
+`qbench` numbers. That is the measurement that decides whether this is *practical*
+rather than merely running.
+
+**This item now carries the gemma-4 dependency, and its odds have improved enough to
+change downstream priorities** (2026-08-26). Two things moved. First, the blocker was
+misidentified: it was filed as a likely-insurmountable flash-attention gap (head dim
+512, since retired -- see [docs/kernels.md](kernels.md)), and it is actually this — a KV-cache layout problem whose walls have so
+far all reduced to one-line staleness bugs, one of them already cleared by patching.
+Second, the scope is three families and not one: gemma-4, Laguna and Muse-Glimmer are
+all sliding-window, which is **every real-world candidate except Qwen**. A fix is
+therefore load-bearing for most of the candidate pile rather than for one demoted
+family, and it is now better read as *more likely to be resolved than not*. (Resolved
+for Laguna on 2026-08-29; see the measurement above.)
+
+What that unblocks: gemma-4 goes back to being a genuine serving candidate, so the
+shared embed+head tensor deferred under `quantized-embeddings` has a **real
+constituency rather than a hypothetical one**. The severe priority demotion that both
+gemma and every tied-model optimization inherited was downstream of the misdiagnosis,
+and should be unwound with it. The divisibility wall — the remaining unknown when this
+was written — turned out to be three narrow bugs and is cleared. What is left is the
+quality question below, and whether gemma-4's multimodal blocker yields.
+
+**`bench/` does not cover this, and the 0.29 bump showed what that costs.** Every
+TurboQuant entry in the matrix is MiniCPM5-1B, which has no sliding window, so the
+page-geometry patch is verified only by hand against the `unsloth/gemma-3-1b-it`
+reproducer in the note. That model is the reason to fix it rather than an obstacle:
+1.86 GiB, ungated, text-only, `Gemma3ForCausalLM` on stock vLLM, and it fails loudly
+on an unpatched tree — so an entry holding the 22 sliding layers native gates the
+patch, and appending full-attention layer 5 gates the first/last-N sibling, which
+nothing exercises today. Cheap enough for the `fast` tier.
+
+→ [docs/kernels.md](kernels.md)
+
+### `turboquant-boundary-tax` — What TurboQuant's first/last-N protection costs, and when it pays
+
+Split out of `turboquant-sliding-window` on 2026-08-29: that item is a correctness fix
+and is answered, this is an optimization across every TurboQuant model including dense
+ones, and nothing depends on it — the sibling patch keeps boundary protection working.
+
+**Measurements are written up in
+[docs/turboquant-kv.md](turboquant-kv.md)** (Part 2), with the harness in
+[tools/gsm8k_kv.py](../tools/gsm8k_kv.py) and per-item results in
+[docs/data/turboquant-kv/](data/turboquant-kv). In short, on Qwen3-4B at n=1319:
+
+- The docstring's claim **reproduces exactly** — k3v4_nc loses 29.80 points against its
+  "~30 points on Qwen3-4B". 4-bit is not exempt either: −6.52, p=5e-08.
+- **Layer 0 is the whole effect.** Protecting `{34,35}` is indistinguishable from
+  protecting nothing (p=0.79 / 0.92); protecting `{0}` alone is indistinguishable from
+  full stock protection (p=0.17) at 18% fewer bytes.
+- **Both aggressive presets are dominated as they ship.** `3bit_nc` is beaten by
+  `4bit_nc` protecting only layer 0 by five points *at fewer bytes*.
+- **None of the better configurations can be expressed** — the flag only ever adds to
+  the automatic skip list.
+- Laguna shows none of it, and that anomaly is unexplained.
+
+Open:
+
+- **Long context.** Everything measured is ~700-1300 token prompts. The reason to
+  compress KV is long context, and both KV damage and any first-layer effect plausibly
+  grow with length. This is the measurement that should decide any default change, and
+  it does not exist yet.
+- **A second dense model**, to know whether "layer 0 only" is a property of Qwen3-4B or
+  of transformers. The attention-sink explanation predicts it generalises.
+- **TurboQuant's throughput cost is unmeasured here, and it is large.** Every number in
+  this project is KV *capacity*; none is tokens/s. vLLM's own study — already cited in
+  the note — measures 66-80% of bf16 throughput depending on preset and model, with
+  latency overhead to 68%, because TurboQuant dequantizes to bf16 before attention and
+  that cost grows with the KV accessed. It also shows the trade is not one-dimensional:
+  P99 TTFT under burst *improves* 5x over bf16. For an appliance that trade is the whole
+  decision, and we have no local number on either axis. Cheap to add to the harness.
+- **And whether it generalises across *quantizers*, not just models.** If attention
+  sinks are the mechanism, the effect is a property of the model and constrains any KV
+  compression scheme — which makes the finding worth more than one vLLM patch. E8-lattice
+  KV caches claiming ~2 bits are now shipping from at least two other projects
+  (see the field notes); none of the public claims say what they hold native at layer 0.
+- **Why Laguna is flat** — one full-attention layer at stake versus four, or 30 of 40
+  layers native regardless? Cheaply separable by compressing Laguna's sliding layers too
+  once that path exists, or by testing a dense model of Laguna's depth.
+- **The upstream lever is drafted** as
+  [`vllm-tq-02-boundary-lever`](../patches.md): the
+  `key=int` fix plus `boundary:N` in `--kv-cache-dtype-skip-layers`, default unchanged
+  at 2. Verified end to end. What is left is filing it — as a reachability gap rather
+  than a defaults change, with the Qwen3-4B frontier as the motivation.
+- **Tell [vllm#41403](https://github.com/vllm-project/vllm/issues/41403)** that
+  monkeypatching `get_boundary_skip_layers` to `[]` is not free — it presents that as a
+  costless gemma workaround, and on a dense model it costs 6.5 points at 4 bits.
+
+→ [docs/turboquant-kv.md](turboquant-kv.md)

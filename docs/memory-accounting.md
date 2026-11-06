@@ -792,3 +792,152 @@ knob to set per configuration, not a default to change.
   figure is from one model at one chunk size. Worth knowing before offering upstream a
   reset, because "reset peak stats after compile" is only correct if nothing the compiler
   allocates is still live when the measured forward runs.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `kv-budget-margin` — Make `gpu_memory_utilization` mean what it says
+
+The outcome wanted is a utilization knob that is safe to turn: a declared context that
+the engine can keep, on any attention backend, without the operator discovering the
+ceiling by OOMing at first inference.
+
+**Why eliminating the unseen terms beats padding them.** `gpu_memory_utilization` does two
+jobs: claiming a share of the card, which is legitimately a ratio, and buying insurance
+against the profiler's blind spots, which is the more common use and is not a ratio at all
+— a deployment that wants ~1 GiB of insurance needs a different percentage on every card
+size, so the number does not transfer between machines. Fixing that conflation in vLLM is
+not this item; it is the reason the target is to shrink what the profiler cannot see rather
+than to find the utilization that survives. If a margin turns out to be unavoidable, it
+gets its own knob **in bytes**, defaulted from the measured requirement. Reaching the
+benchmark in every configuration is explicitly not required — the remaining work is priced
+by effort.
+
+`turboquant-prefill-transient` went first and took the largest single term with it.
+What remains is the general case — the mechanism is backend-independent, and FlashInfer
+carries 0.385 GiB of it with no TurboQuant in sight.
+
+**The milestone that sets the price of not doing this** (2026-09-12): the 27B at 3.00bpw
+serves its full declared 262144 context on the 16 GiB card — a 257,549-token prompt
+completes, so this is service and not just a declaration — but only at 0.975, and only
+with a warm or disabled torch.compile cache. A cold cache costs 0.59 GiB of *profiled peak
+activation*, which is 35K tokens of declared context, because `profile_run()` compiles
+inside the profiling window and the compiler's high-water mark becomes the activation
+term. That is a fourth consumer, it is a bug rather than a missing declaration, and no
+backend hook can cover it — see [docs/memory-accounting.md](memory-accounting.md)
+"The payoff, and the term that was hiding behind it". Two non-findings from the same
+matrix, so nobody re-tests them: `VLLM_ENABLE_V1_MULTIPROCESSING` does not move the budget
+at all, and `--max-num-batched-tokens` moves it by 3,075 tokens for a 4x change.
+
+**The accounting is done** (2026-09-12,
+[docs/memory-accounting.md](memory-accounting.md)): every byte on the card is
+attributed, the budget's printed arithmetic balances exactly, and the gap is entirely
+static attention-backend workspace allocated *after* the profiling window closes. Do not
+re-open the hypotheses the note records as retired — in particular the
+`--kv-cache-memory=` recommendation line is **not** an instrument for overshoot, it
+reads a deliberate 150 MiB offset, and the "budget overshoots what was asked for"
+premise this item used to rest on was an artifact of double-counting the CUDA-graph
+estimate.
+
+**The benchmark, and the model that says the item is closable** (2026-09-12). The target
+is `gpu_memory_utilization = free/total` at startup — **0.9852** on the 16 GiB card, since
+vLLM sizes the budget as `total x util`. Each backend's ceiling is then
+`(free_at_startup - unseen_post_window) / total`, and that predicts all three observed
+ceilings: Triton 0.9852 (starts at 0.985), TurboQuant 0.9791 (0.975 serves, 0.98 OOMs),
+FlashInfer 0.9568 (0.96 serves, 0.975 OOMs in `allocate_kv_cache`, asking 4.07 GiB with
+4.03 free). **The model's residual is ≤0.05 GiB — 0.3 utilization points** — so the
+outcome is a declaration plus a margin in the tens of MiB, not a few hundred MiB of slack.
+Measurements in [docs/memory-accounting.md](memory-accounting.md) "The ceiling is
+predictable".
+
+**Candidate approach, in the order the measurements now support.**
+
+1. ~~**Declare TurboQuant's 96 MiB.**~~ **Done 2026-09-12**,
+   [`6ac849972`](../patches.md): `AttentionBackend.get_reserved_workspace_bytes`, default
+   zero, subtracted before auto-fit, with TurboQuant pricing the same reservation sets its
+   builder hands to the workspace manager. Safe ceiling 0.975 → **0.98**, declared context
+   unchanged at 264,993 tokens (the 96 MiB comes out of unused headroom, not context), and
+   an 80,793-token prompt serves. It landed as the general hook rather than a special case
+   because sharing the expression was the only way to keep the declaration from drifting
+   from the allocation — so (2) is now about *other* backends implementing it.
+
+2. **The general hook, for backends beyond the two that implement it.** TurboQuant and
+   FlashInfer declare today; the ones worth checking next are FLASH_ATTN (it uses the
+   workspace manager for DCP context) and HPC_ATTN, since `grep -l workspace` over
+   `v1/attention/backends/` finds only those two plus ROCm's, and the MLA family — most of
+   the 37-entry backend registry is ROCm, XPU, CPU or MLA-sparse and cannot arise here.
+   The shape, for whoever implements it next: `AttentionBackend.get_workspace_bytes(vllm_config)`, returning what
+   `_reserve_workspace` (or FlashInfer's `_get_workspace_buffer`) is about to allocate —
+   TurboQuant 96 MiB, FlashInfer 0.385 GiB, Triton zero. The hard parts are already built:
+   the backends compute the expression today, and
+   [`_estimate_max_model_len_from_groups`](../deps/vllm/vllm/v1/core/kv_cache_utils.py#L2087)
+   already binary-searches candidate context lengths by *asking for sizes* rather than
+   profiling — twenty iterations of arithmetic, no forward passes, no interpolation, no
+   linearity assumption. It simply never asks the attention backend. Summing the hook into
+   `_max_memory_usage_bytes_from_groups` puts backends inside it, and the `round_up` step
+   comes along for free.
+
+3. ~~**Check whether FlashInfer needs both of its workspaces.**~~ **Answered 2026-09-12:
+   yes, both are live**, so there is no deletion to take. A live engine after a real request
+   holds `_workspace_buffer` at 394 MiB with `_prefill_wrapper` set, and the module-global
+   `trtllm_workspace_buffer` at 394 MiB — the two are split by phase, prefill through the
+   wrapper and decode through trtllm. FlashInfer costs 788 MiB, and
+   [`f8f66be1b`](../patches.md) now declares the half the budget could not see, which makes
+   0.985 safe but is capacity-neutral against the hand-found 0.96 it replaces.
+
+   **What is recoverable instead is the floor.** Both buffers sit at
+   `VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE`'s 394 MiB default while the estimate this fork
+   computes for the same config is 48 MiB; a 96 MiB floor gives **+20,401 tokens (+18%)**
+   and serves a 121,448-token prompt. It is a per-configuration knob rather than a default
+   to change — FlashInfer hard-errors instead of growing when a workspace is too small, and
+   the estimate scales to 768 MiB at an 8192-token chunk. Worth deciding per appliance
+   profile; see [docs/memory-accounting.md](memory-accounting.md).
+
+4. **Demoted: lifting the 150 MiB `redundancy_buffer_memory` into the utilization path.**
+   It exists in the recommendation path
+   ([gpu_worker.py:818](../deps/vllm/vllm/v1/worker/gpu_worker.py#L818)) and was the cheapest
+   candidate until the per-backend figures came in. It over-reserves for TurboQuant by 54
+   MiB, under-reserves for FlashInfer by 235, and costs Triton 150 MiB it does not need —
+   so it belongs as the default for backends that decline to declare, not as the fix.
+
+**The benchmark is reached on TurboQuant** (2026-09-12). The last 0.5 points were ours:
+with the reserve declared, 0.985 started and then died in the plugin's reconstruct path,
+whose scratch was 46 MiB of a 107 MiB transient peak re-requested every call. Pooling it
+([`0184007`](../vllm_exl3_plugin/ops.py)) converts that into two long-lived buffers the
+profiler sees, and `gpu_memory_utilization=0.985` — `free/total` on this card — now serves
+262144 declared context, 264,993 tokens of cache, 242,420 tokens of prompt in 355.1 s. The
+invariant that makes pooling sound rather than merely cheaper: the high-water mark is
+bounded by `max_num_batched_tokens`, which the profile run uses, so the pool cannot grow
+after profiling.
+
+**What is left is other backends, and applying a number that is already printed.**
+FlashInfer carries 0.385 GiB it does not declare and is the default; nothing but TurboQuant
+implements the hook. So (2) and (3) below are the whole item on the engine side.
+
+Separately, the *ceiling itself* needs no discovery: every startup prints `Free memory on
+device (15.28/15.51 GiB)`, and that ratio is the maximum, identical across 15 runs here
+spanning three backends, two KV dtypes and both engine modes. Nothing computes it, so the
+operator retypes what is already on the screen — either `gpu_memory_utilization=auto` from
+the init snapshot (a fork patch, and the obligation that follows) or the appliance reading
+NVML before launch (free, and the right home for a single-tenant policy).
+
+**Out of scope for any workspace hook**, and worth stating because the ideal outcome is
+"no OOM in any configuration": non-torch context growth after the snapshot (JIT kernel
+loading — not a tensor, so nothing can declare it; a margin or a pre-warm covers it) and
+request-shaped allocations (a logprobs request at capacity, against a profiling window 512
+tokens wide — that is admission control, not a budget term).
+
+**The gate breakage is a symptom, and its fix is still not this item's fix.** One 27B
+entry still dies at first inference on the 16 GiB card (`blockq-MTP-fp8`; its sibling
+runs, see `bench-cache-control`); `bench/` should lower its pinned
+`gpu_memory_utilization=0.95` and re-bless, because a gate exists to be runnable. What
+is new is that there is now a principled figure to lower it *to*: subtract the backend's
+static workspace from the budget — **96 MiB** for TurboQuant, 0.385 GiB for
+FlashInfer, which on a 15.51 GiB card is 0.6 and 2.5 points of utilization
+respectively.
+
+→ [docs/memory-accounting.md](memory-accounting.md), and
+[docs/kernels.md](kernels.md) "What the 0.29 bump did to the budget" for how the
+same missing term showed up as a re-bless moving KV headroom on 14 of 14 entries.

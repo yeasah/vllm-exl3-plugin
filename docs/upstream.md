@@ -252,7 +252,7 @@ was not:
 4. the trellis lands nowhere, **nothing objects**, and the tied head is left with no
    weights — hence plausible-looking garbage rather than an error.
 
-That is verbatim the hazard TODO `quantized-embeddings` predicted: *"`get_cache_scale_mapper`
+That is verbatim the hazard the `quantized-embeddings` item ([embeddings.md](embeddings.md)) predicted: *"`get_cache_scale_mapper`
 still fires with `embed_prefix` at its `model.embed_tokens` default, routing 755 MiB of
 trellis to a module path that does not exist on a nested model, and nothing objects — so
 the silent weight loss wants a guard of its own."* This run is the first observation of
@@ -929,3 +929,35 @@ is verified or replaced.
   — the evidence-gathering is most of the cost.
 - If it is a report rather than a patch, is the thing we do not understand stated as
   such rather than smoothed over?
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `upstream-queue` — Findings other projects should hear about
+
+Eleven items across vLLM, llm-compressor and exllamav3: two patches ready to offer, one
+blocked on a design decision that is not ours, seven reports, and one question we cannot
+yet phrase honestly. They were scattered across TODO items, patch headers and subject
+notes, which made the queue invisible *as* a queue -- what is ready, what is blocked,
+what is worth doing first.
+
+**The whole inventory, with evidence, framing and a priority order, is in
+[docs/upstream.md](upstream.md).** This item exists so the work has a slug; it
+deliberately does not duplicate the contents.
+
+**What is next**, per that note's ordering: llm-compressor's `strategy: "channel"`
+default (finished evidence, purely their benefit, nothing to negotiate), then
+TurboQuant's `key=int` collision, then the halved softcap patch. The encoder-offload
+report is **closed unsent** — upstream fixed it in 0.29.0, found by checking before
+writing rather than before sending.
+
+**One reproduction is missing and blocks the highest-value item.**
+`vllm-embed-quant-config` cannot be filed until the speculative-decoding breakage it
+introduces has a demonstration, and the two MTP entries in `bench/` do not provide one:
+an MTP drafter shares the target's embedding, so the mismatch never arises. It wants an
+*external* drafter against a quantized target -- `turboderp/Qwen3.6-27B-DFlash-exl3` is
+the checkpoint, and it would make a good `full`-tier entry regardless.
+
+→ [docs/upstream.md](upstream.md)

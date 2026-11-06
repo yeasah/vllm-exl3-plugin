@@ -1496,7 +1496,7 @@ this is in TODO `recipe-value`. Work: `quant_work/_moe_chaos`, `/home/archive/yp
 support, so it cannot be the `reference` group with `noise_floor` left at its
 default. vLLM's decoder layers are not at a predictable, engine-version-stable
 location the way `TransformersBackend`'s forward-hook approach needs one. Tracked
-as TODO `qbench-noise-floor`.
+as FUTURE.md `qbench-noise-floor`.
 
 **No GGUF through `vllm-gguf-plugin`**, as above.
 
@@ -2243,3 +2243,272 @@ rather than averaging it away.
 Scratch tooling used here, not in the repo: `agentic_trace.py` (captured session ->
 trace), `bootstrap.py` (row bootstrap from the cache's per-position KL), both under
 `/home/bulk/ypell/quant_work/_ctxtrace/`.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `category-bits` — Bit allocation for the tensor categories the body null does not cover
+
+Whether the two scalars the allocation question reduced to are actually constants.
+`head-bits` answered the head on **one model at one budget** (phi-4-mini, 3.0 bpw
+body): optimum 5-6, with 7 costing +34% and 8 costing +87%. What it did not
+establish is that 5-6 travels. Published checkpoints disagree with it in both
+directions — `Qwen3-0.6B-exl3` ships a `2.75bpw_H5` arm, and upstream's Qwen3.8
+self-calibrated recipe uses a heuristic of body bits + 1 over a 3-6 range, which at
+a 3.0 bpw body is head 4. Neither is known to be backed by measurement.
+
+Three questions, in the order they are worth asking:
+
+0. ~~**Is the budget-neutral framing even the right one for `-hb`?**~~
+   **Settled 2026-09-20**: head, MTP and vision are `aux_targets` in
+   `allocation.py` and sit *outside* `max_bits`, so `-hb` is a free promotion, not
+   an exchange against the body. Both questions are legitimate — budget-neutral
+   when size-constrained, free promotion when choosing a `-hb` — and the 5x4 grid
+   on Ornith-1.5-35B-A3B answers the second: byte-matched, **head 5 below body 4
+   and head 6 at and above**, with the crossover robust to the native/composed
+   bias. Two things stay open there: the grid stops at H6 while the gradient is
+   still steep (38.5% at body 6), so the optimum for a 1.4%-head MoE may be higher;
+   and the calibration-context control is unrun. See
+   [docs/qbench.md](qbench.md) "Head bitrate against body bitrate: the 5x4
+   grid".
+
+1. **Does the head optimum move with body bitrate, or with the head's share of
+   quantizable weights?** The phi-4-mini result is an exchange rate — each head bit
+   cost 0.19 body bits because the head was 16% of quantizable weights.
+   **This now gates publishing.** A 35B-A3B MoE puts the head at 1.4% of
+   quantizable weights, 13x cheaper per head bit, so the +34%/+87% penalties that
+   closed the question at 7 and 8 bits do not transfer and `-hb 5` is the
+   conservative end of an untested range; a dense 9B at 11.8% is near the tested
+   regime. Budget-neutral sweeps at two very different head shares separate "5-6 is
+   the answer" from "5-6 is what a 16% head gives you". Composed head arms carry
+   their source body's calibration context, so run the K=6 control first. See
+   [docs/qbench.md](qbench.md) "Head share is the hidden variable".
+2. ~~**Non-routed tensors in an MoE model.**~~ **Answered 2026-09-20, in `-hq`'s
+   favour.** A matched pair on Ornith-1.5-35B-A3B (same pipeline, commit and
+   calibration, differing only in `-hq`) cuts excess KLD **44.4%** for +0.0835 bpw,
+   which is **-38.7% against the budget-matched control** — the comparison that had
+   never been run. The promoted 4.18% of weights carries 49.1% of the KLD, **11.8x**
+   average sensitivity against a 2.47x bar, and Ornith's top-8-of-256 routing gives
+   a 32x duty-cycle gap that accounts for it. `select_hq_bits = 2` is right here even
+   though the dense result argues against it. See [docs/qbench.md](qbench.md)
+   "`-hq` beats its budget-matched control". Original framing kept below for the
+   reasoning that got there:
+
+   **Non-routed tensors in an MoE model.** Upstream can boost everything that is not
+   a routed expert, and KLD supported it when introduced — measured on older
+   checkpoints, so not confounded with the SC work. `turboderp/Laguna-XS-2.1-exl3`
+   at 3.00bpw ships it (routed experts K=3, `shared_expert` K=5). This is the one
+   live challenge to the per-tensor composability null: that null was measured over
+   body tensors that are all doing the same job, and routed-vs-shared is a
+   categorically different split, so the compensation argument that explains the
+   null may simply not apply across it. The operation also differs: `-hq` clamps
+   *after* the budget loop and is never checked against it, so the boost overshoots
+   the target rather than paying for itself (Laguna ships as `3.00bpw` recording
+   `bits: 3.01`). Its KLD win was therefore against a smaller model. **The
+   budget-matched comparison is the open one**: the same 0.24% of bytes spent on
+   the routed experts instead. Do not frame this as "promotion is exempt" — exl3's
+   ordinary fractional allocation is promotion-only from `floor(bpw)` and is taxed
+   anyway. See [docs/moe.md](moe.md) "How exllamav3 actually spends bits on
+   experts" and [docs/qbench.md](qbench.md) "What the null is about, and what
+   the pipeline actually does".
+3. **Vision and MTP towers**, which exllamav3 already treats as separate knobs
+   (`vision_bits`, `mtp_bits`) and which no measurement here covers at all.
+
+4. **A promotion-only body recipe — now the most promising item here.** Answered in
+   part 2026-09-20: extra-budget promotion *does* compose (max 0.9% prediction error
+   across five arms, against +65% for the budget-neutral recipe), the dense body has
+   an **8.9x** sensitivity spread, and `k_proj +1, v_proj +1` on Qwen3-0.6B is worth
+   **-16.5%** against spending the same bytes uniformly. The rule that falls out is
+   **spread bits at +1 rather than concentrate at +2** — the bar is 1.76x average
+   sensitivity for the first bit and 2.74x for the second — which makes
+   `select_hq_bits = 2` the wrong default. Next: validate an imatrix-derived ranking
+   against the seven ground-truth per-role sensitivities before building anything
+   then source `select_hq_bits` from a map rather than architecture literals — the
+   mechanism is already extra-budget and already per-module.
+
+   **Both shortcuts for *finding* the tensor are now closed** (2026-09-20). A GGUF
+   imatrix does not contain the ranking — Spearman **0.04** on the planned proxy,
+   0.36 on the best of four reductions, and q_proj ranks first under every one when
+   it is last in truth. The reason is structural: an imatrix is an input-side
+   statistic and allocation sensitivity is an output-side property. And k_proj is
+   not a portable rule either: 3.96x on Qwen3-0.6B but **1.30x** on Llama-3.2-3B and
+   2.5x on Qwen3-8B, neither clearing its bar, with no monotonicity in GQA or scale.
+   The third shortcut, turboderp's published `kld_table.json` (measured per-tensor S for
+   Qwen3.8-27B), turned out to be roughly right once scored on-template (2026-09-21).
+   Its top-60 promotion measures a 22.5% cut against a predicted 26.5%, not the 4.4%
+   measured off-template. But it is break-even against uniform spending (P = 0.40), and
+   the +1 variants do no better. So dense promotion does not pay on that model either
+   way, and +1 vs +2 (K+1) is closed for dense as moot. The "published ladders are not
+   a controlled series" caution is withdrawn: under render the published Qwen3.8 arms
+   are smooth and monotone (slopes 1.48/1.41/1.09), and the old alternation was
+   off-template scoring. (Both render-mode readings on Qwen3.8 are worth re-checking on
+   the conversational slices before relying on a few-percent gap — render turned out to
+   be a regime of its own, [docs/qbench.md](qbench.md) "Conversational trace
+   slices".) **The live path is still MoE**, where `-hq`'s boundary is
+   categorical and needs no ranking. See [docs/qbench.md](qbench.md) "A published
+   per-tensor sensitivity table" and "Published bitrate ladders behave".
+
+**Candidate approach: compose, do not convert.** `tools/compose_checkpoint.py`
+builds each arm out of published checkpoints — `--take head` for (1),
+`--take all --keep experts` for (2), `--take vision` for (3) — so an arm costs
+seconds and one rewritten shard instead of hours of GPU time, and the arms share a
+byte-identical body, which converting separately cannot guarantee. The limit is that
+the available bit widths are whatever someone published: it makes the *comparisons*
+cheap, not the grid dense, and filling a gap still needs a conversion. Score with
+qbench as `head-bits` did, and watch the metric blind spots recorded there.
+
+→ [docs/qbench.md](qbench.md) "Head bitrate: 6 is defensible", and
+"Per-tensor bit allocation does not compose" for the null this tests the edge of.
+
+### `card-composite` — Cards that answer "which size?", and justify a duplicate only when there is one
+
+**Outcome wanted:** `quant.py`'s card generation emits two sections. **Always:** the card's
+own checkpoints on a single composite fidelity metric — one plot of excess KLD vs size,
+and a table of size, composite KLD, Δ perplexity and raw-text KLD — answering which
+quality/size tradeoff suits the reader, with no comparison. **Only when a reference ladder
+exists** (a published set we chose to duplicate): excess KLD relative to the reference at
+equal size, and a worst-slice table showing no eval slice got worse.
+
+**What it unblocks:** publishing cards whose headline does not depend on a reference that
+often does not exist (the Ornith pair, the Qwen3.6 MoE), while a duplicated model still
+carries its case. One set of quants per model — our best effort — not parallel calibration
+variants, unless some calibration is shown to be strongly better in a domain.
+
+**Decided (2026-09-27):**
+- Composite = the independent eval tier only: WildChat prompts 0.80, real coding-agent
+  sessions (`swe`, 40 from Open-SWE-Traces) 0.20. turboderp's self-generated trace is left out by the same razor as our own
+  calibration/eval separation (it shares SC's generator); the content it embodies is
+  already represented by the constructed own-voice slice.
+- Render is off the card entirely; it is a pipeline diagnostic.
+- Perplexity goes in the table, not on a second y-axis: on these traces it moves ~0.5% at
+  4 bpw, and a dual axis makes crossings look meaningful.
+- Worst slice = the largest ratio of the arm's excess to the reference arm's at the same
+  bitrate, over every non-render slice (normalizing by the headline gain instead flags
+  slices that merely improved less).
+
+**Open option (2026-09-29):** an uncalibrated quant (`convert.py --uncalibrated`) as a
+reference that always exists — it sits a steady 1.7x above the default calibration at 2-4
+bpw on Ornith-9B and preserves calibration differences under normalization (log axis).
+Not decided; docs/calibration.md "An uncalibrated reference".
+
+**Sections 1 and 2 are done** (2026-10-02/03, `quant.py card`, `qbench --reference`; first card:
+Ornith-1.5-9B against the published default-calibrated set). Still open: the
+uncalibrated-reference option above.
+
+**For Qwen3.8-27B (decided 2026-10-03), where the reference repo holds several ladders:**
+- *Ladders, not a repo:* turboderp/Qwen3.8-27B-exl3 has a plain ladder (2.00-6.00) and an
+  SC ladder (1.40-6.00, head bits H3 -> H6 along it), plus `_V*` twins of each SC rung that
+  differ only in the quantized vision tower. Group branches into named ladders by pattern
+  (explicit `NAME=regex` when the default guesses wrong), drop the `_V*` twins by name (the
+  publisher's naming implies identical text weights), and keep only rungs in our size range
+  (~2 bpw and up) unless asked. Built 2026-10-03 (`quant.py baseline`, repeatable
+  `qbench --reference`); checked on Ornith-1.5-9B and Qwen3-0.6B.
+- *Plot:* every ladder, ours included, as a trace of excess KLD relative to the uncalibrated
+  ladder at equal body size -- each rung at its own size, each set's draw noise visible, none
+  drawn as a perfect line. One uncalibrated draw per rung: it is no steadier than a
+  calibrated draw (lottery test, 2026-10-03: ~1.5-2% composite sd either way), but its noise
+  is common-mode -- every trace at a given size shares the same denominator, so ladders keep
+  their order and gaps and only each curve's shape across bitrates wobbles. Section 1, with
+  no baseline, is the one for choosing a size; section 2 is for comparing ladders.
+- *Table:* per revision of ours, the most competitive same-bitrate rung across all ladders
+  (lowest composite), named; interpolation (asterisked) only where no ladder has that rate.
+- *Cost:* ~29 arms of a 27B across 8 slices, ~270 GB of reference downloads. Score reference
+  ladders on the composite slices (+ raw) and the diagnostic slices only for the rungs the
+  table pairs with. Likely worth renting hardware for -- once the mix is final (agentic slice,
+  shares), not before.
+
+**Candidate approach:** port the rest of `/home/bulk/ypell/quant_work/_ctxtrace/card_mockup2.py` into
+the card code; the traces become per-model pipeline artifacts, generated by bf16, or FP8
+where bf16 does not fit (the 27B's existing traces came from turboderp's 6bpw and get
+regenerated; docs/calibration.md "An uncalibrated reference").
+
+→ [docs/qbench.md](qbench.md) "Conversational trace slices"
+
+**Per-model weights (2026-10-09):** `quantization/composite/<org>__<model>.json` overrides the
+0.80 wild / 0.20 swe default. Qwen3.8-27B is 0.30 / 0.70: its publisher leads with "excels at
+coding, agentic workflows, and office automation tasks". Weights are decided from the
+publisher's positioning before swe is scored, never chosen from results; 0.30 / 0.70 is a
+reasonable default for any similarly agent-first model. The card states the weighting.
+
+**Fixed in code 2026-10-18:** `quantization/eval_self_prompts.json` is now 30 prompts written for evaluation (text, disjoint from `CONVERSATIONS`); each model's `eval_self.json` needs regenerating and its `self` slice rescoring before its card loses the warning. **Was:** **Own-voice eval prompts collide with SC's calibration (2026-10-10).** The `self` eval slice
+holds out 30 prompts from `sc_trace.py`'s `CONVERSATIONS`, and turboderp's SC calibration uses
+that whole list, so SC is scored in-sample there (all 30 found in his Qwen3.8-27B
+`cal_trace.json`). Cards now detect this (`main/contamination.json`), drop the slice from the
+worst-slice column for every row and warn prominently in TECHNICAL.md. The fix: a fresh
+own-voice eval prompt set disjoint from `CONVERSATIONS` (our calibration's self slice can keep
+using the list), which restores SC's own-voice comparison, likely one of its real strengths.
+Diagnostic only, so not urgent.
+
+**The size axis with more than one fixed-bit category (2026-10-10).** Comparisons are computed
+at equal *body* size, excluding the output head, because interpolating total size across a
+ladder whose head bits change (turboderp's 2.75bpw_H5 -> 3.0bpw) kinks the curve: head bytes buy
+far less KLD than body bytes. The cost is that a set with a bigger head gets that quality
+uncharged, which TECHNICAL.md states (material only where the head is a big share: ~37% of a
+0.6B's quantized bytes). Head bits are deliberately not annotated anywhere, ours or theirs: an
+optimization detail users shouldn't need. That holds while the head is the only such category.
+Qwen3.8-Next (and likely Qwen4) add an n-gram embedding that exllamav3 quantizes as another
+fixed-bit category, also varied across bit rates; with two, body-only credits both and total
+size kinks on both. Revisit when a model of that family is small enough to card: candidates are
+interpolating total size piecewise between rungs with matching category bits, or pricing each
+category's bytes at its own marginal KLD rate. Not label annotations.
+
+### `gguf-our-imatrix` — GGUF quantized from our calibration: is the gap the data or the format?
+
+**Outcome wanted:** for one model with a GGUF reference ladder, llama.cpp quants (Q4_K_M,
+Q6_K at least) built from an imatrix computed on our calibration mix, scored beside
+bartowski's on every slice. Splits our lead over the GGUF ladder into what the calibration
+data buys and what the format buys.
+
+**What it unblocks:** a sentence on the card or in docs/calibration.md about whether the mix
+transfers to other quantizers, which bears on publishing it as a corpus.
+
+Context, 2026-10-10 (Qwen3-0.6B, wild): bartowski's quants already carry an imatrix
+(`calibration_datav3`, 137 chunks, in the GGUF metadata). The K-quants use it; Q8_0 ignores it.
+On the wild plot the imatrix GGUF ladder sits no better than our *uncalibrated* EXL3 ladder. llama.cpp's
+logits move ~1e-3 KL with the shape of the last 512-token batch (about the bf16 noise floor),
+but bf16 parity is within the noise floor on every slice (llama.cpp's bf16 path is clean), so
+that wobble belongs to the quantized path (activation quantization) and stays in the GGUF numbers.
+`--gguf-parity` is off by default since: it tests the bench against llama.cpp, not a model's
+quants. Run it once on a larger model (a 9B with its bf16 GGUF) to confirm parity holds beyond
+0.6B, then only when llama.cpp or the bench changes.
+
+Which imatrix varies by upload: the 0.6B used bartowski's generic `calibration_datav3`; newer
+uploads (Ornith-1.5-9B) use calibration-v6, rendered through the model's chat template with
+special tokens, 63% tool-calling/reasoning conversations, and publish the rendered corpus and
+the imatrix in the repo. Against v6 the experiment is closer to a like-for-like data comparison,
+and the published corpus needs the contamination check (`contamination_map`) before any card
+compares against it.
+
+### `gemma4-recipe` — Recipes wreck gemma-4: random-noise measurement misses its early layers
+
+**Outcome:** a recipe ladder for gemma-4 that beats a uniform ladder at equal size, or a guard that
+keeps the recipe away from tensors the measurement cannot see. **Fallback in hand:** uniform bits with
+our calibration (BOS-fixed) score 0.55x the uncalibrated baseline at 4 bpw on wild and 0.51x on swe,
+ahead of turboderp's default-corpus ladder (0.60x) -- so gemma quants ship without a recipe.
+
+**Unblocks:** recipe ladders for gemma-4 31B and the 26B MoE, for which 12B is the proxy.
+
+**What is known** (2026-10-25/26, 12B at 4 bpw; the full account is in
+[docs/qbench.md](qbench.md) "KL floors, flat scaling, and where recipes stop paying"): the
+early-layer cost the measurement sees is numerical chaos, not sensitivity. It comes from measurement
+windows cut mid-conversation after BOS. Rows realigned to a turn opening fall to the bf16 floor, and
+layer 1's real 4 bpw cost is ~0.0001 above it. BOS-opened rows (`aa2c6ce`) and `--floor_fit` had cut
+the recipe's deficit from 4.9x a uniform rung to 1.76x (wild). The calibration is unaffected by the
+same framing ([docs/calibration.md](calibration.md) "Row framing does not reach the quantizer").
+
+**Candidate next steps:** (1) turn-aligned measurement rows for BOS models: `pack_rows` with windows
+opening at a turn, as `quant_work/_calpack/build_cal.py --mode turn` does for calibration. Re-measure
+the 12B, then re-run the recipe A/B against uniform, with `sc_optimize --floor` from a tiny-rfn pass
+for whatever floor remains. (2) If it still loses, gemma ships uniform. Work dir: `quant_work/_gemma`.
+
+### `qbench-noise-floor` — Self-noise-floor support for qbench's `vllm` engine
+
+The `vllm` engine cannot be the `reference` group with `noise_floor` at its default,
+because it has no noise injection: vLLM's decoder layers are not at a predictable,
+engine-version-stable location the way `TransformersBackend`'s forward-hook approach
+needs one. Every cross-format comparison run through the served path therefore has
+to borrow a noise floor from another engine.
+
+→ [docs/qbench.md](qbench.md)

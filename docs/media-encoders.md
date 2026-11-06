@@ -800,3 +800,207 @@ to come from the engine that determines it, either measured at startup (the prof
 already runs the tower once; it could report B/row alongside the peak) or published by the
 fork per version. Hardcoding it downstream converts an engine change into a silent
 capacity bug, which is the class this project treats as outranking crashes.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `multimodal` — Actually pass an image through, and gate it
+
+**Outcome wanted:** an EXL3 checkpoint demonstrably *understanding an image*
+served through vLLM, plus a `bench/` entry that keeps it that way.
+
+The project's default position is that multimodal does not matter yet, and as a
+sequencing call that is still right. But the practice contradicts the position —
+graphs and screenshots are how people actually hand over context, this project's
+users included — so the honest version is "deferred", not "irrelevant".
+
+**Images work.** Verified 2026-08-17 through a real chat client (Jan, chosen over
+`vllm chat` because mainstream clients default to tens of thousands of tokens of
+tool preamble): **gemma-4-12B, Qwen3.6-9B and Qwen3.8** all describe images
+accurately, including fine detail like reading text in the image. That closes the
+gap this item was opened for — the vision path is not merely loading.
+
+**Still open, and now specific:**
+
+- **No gate.** All three results are hand-run. `bench/core.py`'s prompts are
+  strings, and an image entry needs the fixture committed beside the baseline,
+  since a baseline against an image that later changes is worthless. The fixture
+  buys a second thing once it exists: exllamav3 quantizes vision towers with no
+  calibration data at all, and the same image-conditioned logprob divergence
+  measures a bf16 tower against a quantized one on an otherwise identical
+  checkpoint -- no vision benchmark required. See
+  [docs/media-encoders.md](media-encoders.md).
+- **Audio is broken, probably not ours.** gemma-4-12B insists every clip is
+  chirping birds. It is a unified model with no audio encoder — sound goes into
+  the same token space as text — so there is no EXL3-quantized audio component to
+  get wrong, which makes a pipeline fault upstream of us the likely cause. Cheap
+  way to settle it rather than assume: the same clip through native exllamav3,
+  the instrument that settled Muse's text path. The other instrument is
+  gemma-4 E2B/E4B, the only model on hand with a genuinely *separate* audio
+  encoder and so the only one where a quantized audio component could be blamed
+  at all — blocked on `gemma4-e2b`.
+- **`--language-model-only` is doing more work than it looks.** It is the flag
+  reached for whenever headroom runs short, and the reason is now priced: the
+  encoder is 0.79-3.64 GiB across every checkpoint surveyed and up to **21% of
+  the package** (Qwen3-VL-8B @3.0bpw), worst on exactly the small, low-bpw
+  checkpoints picked for small cards. It should not have to be a capability trade —
+  evicting the encoder to host memory costs one PCIe pass per image and nothing at
+  all for text. **vLLM 0.29.0 can now do exactly that** (0.86 GiB verified on
+  Qwen3.8-27B), so the capability trade is gone — but the encoder cache and the
+  tower transient stay resident and are the larger cost on a small card. See
+  `encoder-offload`. → [docs/media-encoders.md](media-encoders.md)
+- **Muse-Glimmer is usable in practice now, through the Transformers backend.**
+  Reported 2026-08-25: fp8 KV works, and vLLM 0.28 ships a reasoning parser
+  (`muse_glimmer_reasoning_parser.py`) plus tool-call parsing, so the serving path
+  is complete rather than merely functional. Two things it still cannot do:
+  turboquant (sliding window -- see `turboquant-sliding-window`, where it is the
+  third family), and the **native** implementation, which fails on the quantized
+  vision adapter even with `--language-model-only`.
+- **Muse-Glimmer remains blocked on the native path**, for two unrelated reasons
+  already characterized: native vLLM cannot serve its quantized vision adapter
+  (`vision_adapter.c_fc` is a plain `nn.Linear`, unreachable by any quantization
+  plugin — the same class of gap as `DFlashQwen3Model.fc`, see
+  `quantized-embeddings` item 1), and the Transformers backend route is degraded on vLLM ≥ main by the
+  upstream soft-cap gap, which wrecks sampled output while leaving greedy intact.
+
+**The VRAM link, which is the reason this item is not merely nice-to-have.**
+Multimodal is where headroom runs out first: Qwen3.8 only fits an image budget under
+an explicit cap on image size, and its encoder allocation is what OOMs otherwise.
+**Do not reach for `--limit-mm-per-prompt`'s `width`/`height` to set that cap** — they
+size the profiling dummy and nothing else, so they shrink the budget while the full-size
+image still arrives, which is an OOM rather than a limit. The enforcing knob is
+`--mm-processor-kwargs '{"max_pixels": N}'`; see `encoder-offload` and
+[docs/media-encoders.md](media-encoders.md). The embedding this model
+carries is ~2 GiB — **larger by itself than the entire post-weights headroom that
+test was squeezing into**. So `quantized-embeddings` is not just a size win in the
+abstract; on a 16 GiB card it is the difference between usable and unusable image
+budgets. That makes multimodal a *beneficiary* of the embedding work rather than a
+competitor for attention.
+
+Note also that vLLM's multimodal knobs churn: `--max-num-encoder-input-tokens` has
+been removed with no obvious replacement, `--mm-processor-cache-gb 0` does *not*
+bound the encoder cache, and `--limit-mm-per-prompt` now carries feature-size as well
+as counts — but only as *profiling* hints, which is the trap above. Check flags against
+the pinned tree rather than from memory, and check what reads them, not what they are
+named.
+
+**Candidate approach for the parts still open: the instrument that already worked.**
+exllamav3 implements
+this vision path natively (`MuseGlimmerVisionModel`, `examples/imgdesc.py`), so
+the same image and prompt can go through both engines and be compared token for
+token. It is the reference the text case proved worth having, and it is the only
+one available — there is no fp16 Muse-Glimmer on hand to fall back to.
+
+**Two obstacles, both already characterized rather than guessed:**
+
+- **Native vLLM cannot serve the quantized vision adapter at all.** vLLM main
+  builds `vision_adapter.c_fc` as a plain `nn.Linear`, which never reaches
+  `get_quant_method`, so no quantization plugin can touch it. `--model-impl
+  transformers` is the only route; `--language-model-only` bypasses vision
+  entirely and is the reason this stayed invisible.
+- **The gate is text-only.** `bench/core.py`'s prompts are strings, and an image
+  entry needs a different capture shape — the fixture has to be committed with
+  the baseline, since a baseline against an image that later changes is worthless.
+
+→ [docs/transformers-backend.md](transformers-backend.md),
+[bench/README.md](../bench/README.md)
+
+### `encoder-offload` — Make vision affordable on a small card
+
+**Outcome wanted.** A multimodal EXL3 checkpoint serves on 16 GiB without the operator
+hand-picking an image cap per model. Upstream closed the part that gated everything —
+vLLM 0.29.0 offloads vision towers, verified here at 0.86 GiB on `Qwen3.8-27B` — so what
+remains is the encoder's *resident* cost, not its weights.
+
+**What it unblocks.** Vision as a default capability rather than a per-model tuning
+exercise. Today it works only with a correct `--mm-processor-kwargs '{"max_pixels": N}'`,
+and picking N wrong OOMs mid-request rather than at startup.
+
+**Candidate approach, and the sequencing matters.** Do the transient work (2) **first**,
+and treat the autosizer (1) as the fallback it is. A knob that makes it easy to choose how
+much capability to give up is still a knob for giving up capability; if chunking removes
+the need to cap resolution at all, that is strictly the better outcome and (1) should be
+skipped entirely rather than built and then made redundant. Build (1) only once (2) is
+measured and shown insufficient.
+
+1. **Fallback: derive the cap instead of asking for it.** Autosize the image budget
+   against measured
+   headroom rather than making the operator guess, the way any knob checked against a hard
+   threshold should default to that threshold. **Splits into a generic half and a small
+   per-family half**: the *quantity* is already model-agnostic — `max_tokens_per_mm_item`
+   flows through one function, `compute_mm_encoder_budget`, fed by
+   `ProcessingInfo.get_mm_max_tokens_per_item` that every multimodal model implements — so
+   costing an image needs no per-model knowledge. Only the *actuator* fragments, across
+   five families: `max_pixels`/`smart_resize` (13 model files), `max_dynamic_patch`
+   (8, InternVL), `max_num_tiles` (3), `pan_and_scan` (2, gemma3), `max_num_crops`
+   (2, phi). Fixed-resolution towers (CLIP, SigLIP, LLaVA-1.5) need nothing — their patch
+   count per image is constant, so this is a *dynamic-resolution* problem, and only 10
+   files use `smart_resize` at all. So: one sizer, plus a lookup from budget to whichever
+   kwarg the family honours.
+2. **Largely done 2026-09-12 — reassess (1) against the new numbers before building it.**
+   Two commits on the fork cut the tower transient by **32.6% on Qwen3.8** (1.728 -> 1.165
+   GiB) and **22.5% on GLM-4.1V** (1.856 -> 1.438), confirmed on a real GLM serve as KV
+   5.89 -> 6.31 GiB and context 154,480 -> 165,456 tokens. Whether that is enough to retire
+   the autosizer is now an open measurement on Qwen3.8, the model where the cap was
+   actually needed, not a question of principle.
+
+   **Start here tomorrow: auto-context sweep on Qwen3.8 @0.985 (reported 2026-09-12).**
+   Context is *unchanged from text-only* at 256K and 1M pixels (264,993 both), then falls
+   to 248,617 / 233,244 / 190,188 at 4M / 8M / unlimited. **Multimodal is free up to ~1M
+   pixels**, which is the headline this item opened against.
+   The drops track the tower peak: `Δcontext x 19,530 B/token` gives 0.31 / 0.61 / 1.43
+   GiB against a predicted tower peak of 0.28 / 0.57 / 1.13. The flat region is almost
+   certainly `max()` returning the decoder floor, not the profiler going blind -- at 1024
+   and 4096 rows the tower wants 0.03 and 0.12 GiB.
+   **The check that separates the two:** compare the logged `GiB for peak activation`
+   across limits. Identical at 256K/1M and rising from 4M means `max()` is working;
+   identical everywhere including unlimited means it really is blind.
+   *Not evidence of a leak:* an oversized image completing at a low cap is `smart_resize`
+   downscaling it to fit, not an unbudgeted allocation. The cost there is fidelity, not
+   bytes -- which makes **quality vs pixels** the curve still missing, and `bench/`'s
+   image-conditioned logprob divergence the instrument for it.
+
+   **What remains.** GLM keeps a `torch.cat([q, k])` that re-makes the copy the contiguous
+   drop saved, which is why its attention share is ~2 MiB against Qwen's 75; restructuring
+   its preamble the way `qwen2_5_vl` already does is the next increment. After that, GLM's
+   peak is dominated by `fused_add_rms_norm` temporaries — measured in the isolated rig,
+   not yet confirmed against a serve, where op dispatch may differ.
+   - ~~Try `compile_mm_encoder` first.~~ **Tested 2026-09-12 and it is worse, not free.**
+     The flag is live on this tower (28 compile passes, one per block), but it left peak
+     activation at 0.43 GiB against 0.44 — so inductor does *not* avoid materialising the
+     full-width intermediate — while adding **1.13 GiB** of resident consumed memory.
+     Net: KV halved, 2.28 -> 1.14 GiB. Do not revisit without a reason to think the
+     fusion behaviour changed. See [docs/media-encoders.md](media-encoders.md).
+   - **So: chunk the vision MLP over the token dim.** Pointwise, so chunking is
+     bit-for-bit identical; same move as TurboQuant's slabbed continuation prefill. The
+     *property* is universal — every tower MLP checked is `linear -> act -> linear` over
+     three naming conventions (Qwen3 `linear_fc1/fc2`, GLM-4V `gate_up_proj/down_proj`,
+     SigLIP/CLIP `fc1/fc2`) — but vLLM has no shared vision-MLP base, so it is N mechanical
+     edits, and it cannot be lifted to the block level because the block also holds
+     attention, which mixes across tokens. Raises the affordable image size; does not
+     remove the need for a cap.
+
+   **Premise settled analytically 2026-09-12, and Qwen3.8 is the worst case.** Whether the
+   MLP or the attention projections lead is decided by `intermediate/hidden` in
+   `vision_config`, so it reads off config.json with no weights. Across eight towers the
+   MLP leads *everywhere*, by 2.49x (Qwen3-VL / gemma-3 / SigLIP, all the so400m shape
+   1152/4304) up to 3.89x (Muse-Glimmer, 1536/8960). So chunking cuts in the right place on
+   every architecture checked, and it cuts hardest on the ones we have not measured.
+   Gated MLPs (GLM's `gate_up_proj` -> `SiluAndMul`) are worse still than the ratio
+   suggests, since the fused projection is `2 x I` wide before the activation halves it.
+   Step-3.7's `perception_encoder` states no `intermediate_size`; PE's standard mlp_ratio 4
+   would put it at 2.67x, unconfirmed.
+
+   **Reference platform: `turboderp/GLM-4.1V-9B-Thinking-exl3@5.00bpw`, verified working
+   2026-09-12.** Tower offloads at 1.66 GiB on the same `--cpu-offload-params visual`, and
+   it serves a full-resolution photo uncapped. It is the right instrument because its
+   profiled peak *is* the tower, where Qwen3.8's is decoder-dominated: measured at
+   **42,357 B per patch row with a zero intercept**, from two runs differing only in
+   profiled modality. So chunking at C rows should land at `C x 42.4 KB` and the win reads
+   straight off the `peak activation` line. Target to beat: peak 0.89 GiB / KV 7.00 GiB
+   image-only, 1.85 / 5.89 with video enabled.
+
+→ [docs/media-encoders.md](media-encoders.md),
+[docs/memory-accounting.md](memory-accounting.md)

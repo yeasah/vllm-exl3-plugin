@@ -434,3 +434,42 @@ reproduces the pre-5.15 values exactly: `head_dim` max(256, 512) = 512, and
 Worth expecting again: Laguna already has per-layer head counts, and Muse
 Glimmer has per-layer rope theta and layer types. Heterogeneous configs are
 becoming normal, and this class of break will recur.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `exl3-metadata` — Improving the metadata situation
+
+exllamav3 plays fast and loose with checkpoint metadata; important things are
+missing or misleading. Low-hanging fruit, and restoring some trust in the stored
+data would be useful — significantly tempered by the fact that existing checkpoints
+keep their incomplete metadata regardless, unless we repair and republish them
+(license permitting).
+
+**Candidate approach: declare rules, not instances.** `tensor_storage` enumerates one
+entry per module, which is why it is untrustworthy — absence is ambiguous between "not
+quantized" and "we failed to record it", and `Muse-Glimmer-30B-exl3` omits 303
+quantized modules with no way to tell from the file. compressed-tensors solves the
+same problem with `config_groups`: named groups whose `targets` are regexes over
+module names, plus an explicit `ignore` list for exceptions. Two regexes describe a
+whole mixed-precision 35B MoE where our map needs 667 entries for gemma-4-12B, and a
+rule cannot omit a module because it is not listing them. Worth recording `provider`
+and a format name alongside, as that checkpoint does — knowing which quantizer and
+version produced a file is free and we do not store it.
+
+**What it unblocks, which is the reason to care.** Per-module bit width becomes
+knowable at `create_weights` time, reliably and for every module. That is the exact
+precondition `cpu-offload` had to reject the AWQ preallocate-and-mutate pattern over
+— see that item, and [docs/format-and-loading.md](format-and-loading.md) "CPU
+offload", where the objection is recorded.
+
+**It reaches existing checkpoints too, via `repair-tool`.** A rule map can be
+*derived* from a checkpoint's actual tensor shapes at repair time rather than trusted
+from its config, so the published collection gains the property as it is repaired
+instead of waiting on re-quantization. That is also a cheap consistency check on the
+metadata already there: derive the groups, compare against `tensor_storage`, and any
+disagreement is a bug in one of them.
+
+→ [docs/format-and-loading.md](format-and-loading.md)

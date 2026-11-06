@@ -11,7 +11,7 @@ process isolation plus a timeout contains.
 
 The `full` tier is not yet populated -- MoE, `mul1`, the Transformers backend and
 TP all need entries, and they get added against a gate that is already working
-rather than as part of standing it up. See TODO `bench-suite`.
+rather than as part of standing it up. See TODO `bench-gaps`.
 """
 
 from __future__ import annotations
@@ -221,7 +221,7 @@ ENTRIES: list[Entry] = [
         "this project's low end -- it is what makes a long context fit beside a "
         "2-3bpw model on 16 GiB -- and because this model can host it at all: "
         "MiniCPM5-1B has no sliding window, which is the one thing TurboQuant "
-        "cannot serve (see TODO `turboquant-sliding-window`, where gemma-4 and "
+        "cannot serve (see FUTURE.md `turboquant-sliding-window`, where gemma-4 and "
         "Laguna are both blocked on exactly that)",
     ),
     # ---- full tier: the surfaces the fast tier cannot reach on a 16 GiB card

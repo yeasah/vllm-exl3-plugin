@@ -453,3 +453,101 @@ far less capability than degrading body weights past the knee.
 "2026-09-13__16-21-27"` while the `fp8` arm records the descriptive name, so which arm is
 which rests on the directory name alone, and the two ran a day apart. That is the harness
 fingerprint gap in miniature, on a result good enough to deserve better.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `capability-suite` — Measuring capability through the served path
+
+**Outcome wanted:** task-level numbers for a configuration as it is actually served —
+quantized weights, quantized embedding, quantized KV — so quality claims stop being
+divergence figures plus personal impressions.
+
+**Established 2026-09-18** (GPQA-Diamond via evalscope and opencode/harbor, written up in
+the doc): **4-bit TurboQuant KV costs nothing detectable on either axis** — 198 paired
+items, 14/10 discordant, p=0.541, CI [-2.5,+7.1] pp, and a median paired cost delta of
++1 token. **The agentic harness is actively harmful on a Q&A benchmark** — same model and
+items, 50.0% via opencode against 81.2% via evalscope, 10/0 one-sided, from protocol
+non-compliance plus model-dependent reasoning suppression (9B suppressed 8.2x, 27B
+*increased* 1.7x). evalscope's simple harness is the instrument for Q&A. And a third
+metric earned its place beside correctness and cost: **indecision**, counted as
+reconsideration restarts, which catches a termination failure the other two cannot see.
+
+**Open, in order.** The body-bit half is unmeasured and is the one that matters — run the
+`gemma-4-12B` bpw ladder (3.00/3.50/4.00, embed+head fixed at 2.874 GB across all three,
+so only body bits move) and read it against ≤7pp for 4-bit KV on the same instrument.
+Start with the extremes: if 3.00 vs 4.00 does not separate at 198 items, the question
+closes for the whole range and `cpu-offload`'s justification closes with it. Before that,
+a cheaper shakedown with a known-large effect: the **reasoning-effort ladder** on the 27B,
+where the knob genuinely works — one set of weights, no requantization, and it answers
+whether `xhigh` is ever worth it once tokens are counted. Also: build the harness
+fingerprint, and re-run `Qwen3.5-9B` with an effort setting so it is comparable to
+anything.
+
+**Why it is the missing instrument.** qbench answers "how far is this distribution from
+the reference", which ranks encodings well and says nothing about whether a 3.0bpw model
+with a 4-bit KV cache still writes working code, follows a long agentic trace, or recalls
+something from 40K tokens back. Those are the questions the appliance actually ships
+against, and the two newest axes — block-quantized embeddings and KV compression — are
+precisely where divergence is least informative, since KV damage surfaces as retrieval
+failure deep in the window rather than as perplexity at a position.
+
+**Candidate approach: give exllamav3's existing task harnesses a vLLM execution path.**
+`eval/` already has `mmlu.py`, `humaneval.py`, `ifbench.py`, `bbeh_mini.py`, `longctx.py`
+and `spec_decode.py`, with prompts, graders and datasets solved. But every one drives
+native exllamav3 (`model_init.init` / `Generator` / `Job`), so none can see a
+block-quantized embedding (exllamav3 cannot load the format) or vLLM-side KV
+quantization. This is the same move qbench made for scoring: keep the task definitions,
+add an engine. `longctx.py` first — it is the probe for the least understood axis, and it
+already works on whole documents with altered variants rather than synthetic needles.
+It is also the least sampling-sensitive task in the set, being a retrieval probe, so the
+engine path can land greedy-only and the tiering below can wait for `humaneval`/`ifbench`.
+
+**Sampling is an axis of the suite, not a setting.** Greedy is the primary tier, since most
+knobs are distribution-relative — `top_p` cuts at a mass threshold and quantization fattens
+the tail, so one setting admits more junk from a 3.0bpw model than from the reference, and
+part of any reported gap is then the sampler rather than the encoding; penalties are worse,
+being cumulative over a trace. But greedy alone is a known blind spot — the soft-cap gap
+under `multimodal` wrecks sampled output while leaving greedy intact — so a second tier
+runs each model's recommended parameters, which is also the tier that answers what the
+appliance ships. There, **snapshot the parameters into the suite config** with the model
+card revision and date they came from rather than reading the card at run time: cards get
+edited silently, and a baseline that follows one stops meaning what it said. Thinking and
+non-thinking are separate entries, carrying different recommendations. Whichever tier
+produced a number belongs in the artifact beside the vLLM pin.
+
+**Six design rules, established by two SWE-bench runs and painful to retrofit.**
+Evidence for each is in the note; the rules themselves are what shapes the build:
+
+- **Compare paired, never marginal** — on the same data, marginal turn medians said
+  the opposite of the paired comparison.
+- **The effective sample size is the discordant count**, not the problem count. At
+  ~17% discordance, 23 problems bought four informative pairs.
+- **Budget ~150 problems minimum, 300 for comfort.** A cloud baseline for full Lite
+  is ~$90; wall time binds, not money.
+- **Capture turns-to-failure, not only pass/fail.** A model that knows it is stuck
+  behaves differently from one that does not, and the pass/fail column cannot see it.
+- **Shuffle the instance list with a fixed seed, shared across arms.** Lite is ordered
+  by repo, so a truncated run samples one codebase — the killed cloud run's 92 results
+  are 93% django. Truncation is not an edge case, and a shuffle also composes with
+  resuming.
+- **Pick the suite where the model lands nearest 50% resolved**, not the hardest one.
+  Discordance carries the signal, so detectability peaks at half — that is the cost
+  side of choosing a harder, more diverse set.
+
+**The comparator is the weak instrument, and a controlled one needs `vast`** —
+Qwen3.8-27B is ~27 GiB even at fp8, so the same-model-unquantized arm cannot run on
+the dev card. **Comparability across rentals is a preflight problem, not a procurement one** —
+what can move tokens is GPU architecture, driver, count (via TP degree), VRAM and
+uncorrected ECC, all checkable on contact; the rest of the host moves only the
+stopwatch. `tools/host_survey.py` screens a box on arrival and classifies differences
+against a recorded one. Named instance types stay the answer for *perf*
+comparability. What remains genuinely open is survival: a multi-day run on a spot
+rental needs to resume from where it stopped.
+
+→ [docs/capability-suite.md](capability-suite.md) (the SWE-bench runs, the
+GPQA-Diamond instrument work, the three metrics and the rented-hardware problem), [docs/qbench.md](qbench.md) (scope: why
+divergence is deliberately all qbench measures),
+[docs/embeddings.md](embeddings.md)

@@ -133,8 +133,20 @@ is pinned by the submodule; check one out in a scratch clone to run it.
 Kept as history because the reasons are still instructive; both are described
 where they are referenced.
 
-- `vllm-gemma4-transformers-5.15-per-layer.patch` — upstream landed a generic
-  equivalent; retired at v0.28.0. See [README.md](README.md).
+- `vllm-gemma4-transformers-5.15-per-layer.patch` — upstream landed generic per-layer arch
+  config; retired at v0.28.0. `Gemma4Config.verify_and_update_config` now reads
+  `model_config.model_arch_config` and indexes `arch_config[i].head_size`.
+- `vllm-transformers-backend-embedding-postprocess.patch` — retired at v0.28.0 by a *better*
+  mechanism than ours. Upstream no longer substitutes the input embedding; it **rebases its
+  class** (`type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})`), so a model's own
+  `forward` (MuseGlimmer's `embed_norm`) survives by construction rather than by our detection
+  heuristic. The quantized-embedding seam survives too: `replace_embedding_class` passes
+  `quant_config` into `VocabParallelEmbedding.__init__`, so our methods still attach. Both 0.28
+  retirements were confirmed by the gate: the Muse-Glimmer entry exercising both paths captured
+  at `0.000e+00` against its pre-bump baseline.
+- At the 0.29 bump, **nothing** retired: all seven commits then carried were still needed, and
+  two needed conflict resolution (see *What the 0.29 bump actually cost* in
+  [docs/upstream.md](docs/upstream.md)).
 - `exllamav3-sm90-barrier.patch` — folded into our exllamav3 fork's history when
   we started tracking it. See [docs/exllamav3-arch.md](docs/exllamav3-arch.md).
 - *chat-template revision* — never a `.patch`, only ever an uncommitted edit in

@@ -672,3 +672,215 @@ put that in `exercises`, because it is the argument for keeping it when the suit
 gets slow and the first thing to read when it fails. If the entry encodes a
 *prediction* — as the Muse-Glimmer one does about what 0.27.2 will break — put
 that there too. A prediction a gate will test is worth more than one in a doc.
+
+
+## Moved from TODO.md (2026-11-05)
+
+*The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
+
+### `bench-cache-control` — The gate cannot see its own inputs
+
+The outcome wanted is a bump gate whose result is a fact about the code. Today it is a
+fact about the code *and* about five caches nobody records, so a green run and a red run
+can differ by nothing that is committed anywhere.
+
+What it unblocks: every dependency decision the gate is supposed to inform. On
+2026-09-10 the exllamav3 v1.4.9 bump failed 12 of 16 entries with two changed greedy
+continuations, which reads as "upstream rewrote the kernels" — and the same build,
+re-run with only `~/.cache/exllamav3/autotune/coop_autotune_v1.bin` deleted, moved the
+output *further* than six upstream releases had, greedy change included. The bump was
+one experiment away from being reported as a numerics regression and escalated to a
+fork-or-not decision, on the strength of a 4 KB file.
+
+**The mechanism generalizes past the one cache we caught.** `bench.core.environment()`
+records 14 keys — versions, git provenance, GPU, driver, torch, CUDA — and not one
+describes cache state. Five stores on the dev box can steer kernel selection or fusion:
+
+| cache | why it matters |
+|---|---|
+| `exllamav3/autotune` | **proven** to change greedy output; `COOP_AUTOTUNE_VERSION` is XORed into the key, so upstream bumps invalidate it silently |
+| `vllm/torch_compile_cache` | inductor fusion decisions; already known to be keyed on `vllm.__version__`; and **measured 2026-09-12 to move KV headroom by 0.59 GiB** — cold compiles inside the profiling window, so a cold entry is handed 35K fewer tokens of context than a warm one ([docs/memory-accounting.md](../docs/memory-accounting.md)) |
+| `triton/cache` | JIT'd kernels |
+| `vllm/flashinfer_autotune_cache` | kernel selection, and observed saving 0 configs under memory pressure |
+| `flashinfer` JIT store | JIT'd kernels |
+
+`vllm-exl3-plugin/blockq-embeddings` is the one that is safe, and it shows the shape of
+the answer: a deterministic encode keyed by commit hash.
+
+**Built 2026-09-10** — recording, redirection, cold mode, a committed autotune fixture
+and a drift detector; see [bench/README.md](README.md) *Cache policy*. The finding
+that shaped it: clearing the autotune cache does not give reproducibility, it gives fresh
+nondeterminism, because kernel choice is timed and therefore follows the clocks. Three
+cold runs with an empty cache spread 0.156–0.230 nats with argmax flips and an
+intermittent greedy change — as large as the version difference the gate was asked to
+measure. Two seeded from a frozen blob agree to every digit.
+
+**What remains.**
+
+1. **Generate the real fixture**: `freeze-tune --tier all`, then commit it. The blob is
+   per-device and must cover every entry the gate runs; a partial one is worse than none,
+   since it seeds some shapes and tunes the rest live.
+2. **Re-baseline everything under the policy.** No committed baseline was taken this way,
+   so none is a clean reference. That is the bill for the whole finding: `bless` at
+   v1.4.3-32 (a rebuild), then at v1.4.9, and only then is the exllamav3 bump decidable.
+3. **`force_shape_idx` is the untaken option**, kept in reserve: `exl3_gemm.cu` disables
+   autotune outright when it is positive, which would give determinism *across* versions
+   where a frozen blob cannot, at the cost of benchmarking a kernel no deployment would
+   choose. A flag, never a default, and only if cross-version comparison proves to need it.
+4. **flashinfer's autotune is the same class and is not yet frozen** — it lives under
+   `VLLM_CACHE_ROOT` so cold mode empties it, which by the argument above makes it
+   *freshly* nondeterministic rather than fixed. It has not been shown to move our numbers;
+   that is an assumption, not a measurement.
+
+**A second instance, 2026-09-12, and this one is not the autotune cache.** The first
+full-tier run since the 1.4.9 re-bless fails `qwen3.8-27B-3.0bpw-blockq-tq4` — the
+served configuration — with 1/58 and 2/105 argmax disagreements, |dlogprob| 3.282e-01
+and KL 7.567e-02, against a baseline blessed at commit `2f642f9`. Everything the env
+block records is identical: same vLLM commit, same exllamav3 commit (`v1.4.9-33-gdc36e3b`),
+same torch/CUDA/driver, same `pkg.digest`, same `weight_gib` and `kv_cache_gib`.
+
+Two things make it worth its own line rather than being folded into the finding above:
+
+- **`tune_drift` is `None`**, so the committed fixture covered every shape this entry
+  needs and was not written during the run. The one cache that was frozen is ruled out;
+  what is left is the four that are not — `torch_compile_cache`, `triton/cache`,
+  flashinfer's autotune store and its JIT store.
+- **It is stable, not flaky.** Run on the pre-fix vLLM commit and on the one after it,
+  the numbers agree to every digit. So this is not live retuning; it is a machine state
+  that has settled somewhere other than where bless left it, which the gate cannot see.
+
+It was found while verifying `turboquant-prefill-transient` and is not caused by it —
+that is what the pre-fix arm establishes. Until it is explained, the full tier does
+not gate the 27B entries, which is the tier's whole reason for existing.
+
+Also stale in the note below: *two* 27B entries were said to die at first inference.
+`blockq-MTP-fp8` still does (it is `known_broken`); `blockq-tq4` runs to completion on
+both sides of the fix.
+
+**2026-10-23, the move to the 5060 Ti.** Every committed baseline was the 5070 Ti's, blessed
+there and never on this card, and all 9 fast entries plus the full-tier MoE failed `check`
+here. Cleared as code: with a fixture frozen for this card (`1a04b49`) and cold caches, the
+09-10 code (plugin `32b5622`, vLLM `1a736c073e`, exllamav3 `dc36e3b`) and today's capture 8 of
+10 entries bit-identically; the failures were the card plus live tuning. Re-blessed on this
+host. **What the fixture does not fix:** `minicpm5-1B blockq graphs` and the MoE entry are not
+bit-reproducible run to run even seeded and cold (1 of 3 and 1 of 6 runs of identical code
+differed on one prompt: KL max 0.009-0.018, 2-3 argmax flips, greedy unchanged). They carry
+`RUN_TO_RUN_FLIPS` in bench/suite.py until the source is found; torch.compile for the first
+and an order-dependent reduction in the MoE path are the suspects, neither traced.
+
+**MoE at TP=2 on vLLM 0.32 is bimodal, and blocks its entry.** `qwen3.5-35B-A3B 2.0bpw MoE tp2`
+lands in one of two *reproducible* states: one at KL max ~0.05 against TP=1 on the same
+build, the other with one position at 0.257-0.275 (|dlogprob| 0.283, greedy changed on prompt
+0), identical to every printed digit across runs; 2 of 3 runs on 0.32 took the second. The
+MoE's eager-vs-graphs floor at TP=1 is 0.157, so the spike is past it, and the entry has no
+0.32 baseline (the 0.29 one is kept). Two deterministic outcomes point at a per-process choice
+between computation paths; NCCL picking its all-reduce algorithm per run (changing the bf16
+summation order, which can flip a 2-bit model's expert routing) is the first suspect, testable
+by pinning `NCCL_ALGO=Ring` and capturing a few times.
+
+*Do not* re-bless anything against a build whose caches were re-tuned mid-run until this
+is at least recorded — that is how a cache artifact becomes the committed definition of
+correct.
+
+→ [bench/README.md](README.md) "It is a finding now, and it is bigger than one
+intermittent"
+
+### `bench-suite` — A TP tier for the bump gate
+
+`bench/` gates vLLM and exllamav3 bumps on token ids, per-position logprobs and
+resident weight bytes, against baselines committed for the current pin. Two tiers
+are populated: `fast` (~15 min) covers uniform K=3, mixed-in-layer bit widths,
+`mcg`, tied and untied, both execution modes, and the Transformers backend on a
+text-only model; `full` adds MoE, `mul1` with the gemma4-style tie, and the
+multimodal Transformers backend.
+
+**Two holes the gate has on this box, both found 2026-09-12 and both cheap.**
+
+- **No entry chunks its prefill**, so `_continuation_prefill` is unreachable from the
+  gate — `bench/core.py`'s two prompts are ~30 and ~280 characters and nothing pins
+  `max_num_batched_tokens`. `turboquant-prefill-transient` rewrote that path with no
+  gate coverage at all, relying on unit tests and a within-build A/B instead. Closing
+  it needs an `Entry` field for `max_num_batched_tokens`, a per-entry long prompt, and
+  a name filter on `bless` — today `cmd_bless` rewrites every baseline in a tier, so
+  adding one entry would re-bless the nine that are currently green, which is exactly
+  what `bench-cache-control` says not to do.
+- **No entry records a VRAM profile.** `weight_gib` and `kv_cache_gib` are captured;
+  peak and per-prefill growth are not, so a change that costs a gigabyte at 100K
+  context passes every entry. That is the axis the appliance is actually bounded on,
+  and the one `turboquant-prefill-transient` moved by 1580 MiB without the gate
+  noticing either direction.
+
+**This is the next `vast` trip, and everything else TP rides along with it**
+(sequenced 2026-08-26). Nothing TP-shaped outranks the gate tier, because until the
+per-degree baselines exist every other TP result is unrepeatable. So the tier goes
+first and the rest slot into the same rental rather than earning trips of their own:
+
+| rides along | what it needs there | slug |
+|---|---|---|
+| blockq embedding at TP>1 | written, never run multi-GPU. All three tensors slice on dim 0, so `tp.ROLE_VOCAB` is a row slice with none of the trellis path's 128-row Hadamard rule | `quantized-embeddings` |
+| tied+blockq at TP>1 | `EXL3BlockQTiedEmbeddingMethod` (2026-08-26) carries two parameter sets on one module; both shard on dim 0, but the *combination* is unproven | `quantized-embeddings` |
+| MoE+TP remainder | TP=3/5/6/7 (an 8-card box covers these by using fewer cards); a second checkpoint at TP=8, which needs a download arranged **before** the rental starts | `moe-tp` |
+| Transformers backend | no MoE and no TP has ever gone through it | `transformers-backend` |
+| comparator arm | Qwen3.8-27B unquantized is ~27 GiB and cannot run on the dev card at all | `comparator` |
+
+**Three things to arrange before the meter starts**, all of which otherwise waste
+rental time: the second TP=8 checkpoint has to be downloaded ahead (nothing on hand
+clears preflight); `tools/host_survey.py` should run on contact, since GPU
+architecture, driver, card count, VRAM and uncorrected ECC are what move tokens and
+are all checkable before any real work; and **the wheel builder no longer runs**.
+`~/podman/vast-vllm/build.sh` still pins `VLLM_VERSION=v0.27.0` and applies
+`patches/vllm-*.patch`, so it fails at `git apply` against a directory that has not
+existed since both deps became submodules (vLLM now on `appliance/v0.28.0`). Fixing
+it is a bench, not a rental, task -- discovering it on a metered box is the expensive
+way. Note also that it lives outside version control entirely, and is the only copy.
+When it is fixed, it has to **fetch the submodule's tags before building** -- a submodule
+is cloned without them and setuptools-scm freezes `git describe`'s answer into the
+installed version at build time, so a tagless build calls itself `0.1.dev<N>` and that
+string is what lands in `bench/`'s env block. This is the box whose perf baselines are
+per-machine, so it is the worst place to bake it in; see *Installing it* in
+[patches.md](../patches.md).
+
+**Explicitly not a `vast` item:** the Laguna TP=4 `exl3_mgemm` performance bug. It is
+narrowed to two exact kernel instantiations with both autotuners ruled out, so closing
+it needs someone reading kernel source against per-tensor quantization parameters —
+more GPU time buys nothing. Listed under `moe-tp` and stays there.
+
+**What remains is TP**, which is the one axis the dev card cannot reach. It wants
+its own tier rather than an entry in `full`, because `bless` needs the 8×3090 box
+(`vast`) and the baselines are per-degree. TP=2/4/8 are the degrees already
+validated by hand in [docs/tensor-parallel.md](../docs/tensor-parallel.md), so those
+are what a tier should pin; `tools/tp_compare.py` already shares the numerics and
+its eager-vs-graphs floor workflow is the model for setting the tolerance.
+
+**Carry a hub-prefetch subcommand with it.** A tier is only runnable on a box that
+already holds its checkpoints, and the TP tier's boxes are short-lived cloud
+rentals where a `bless` that discovers a missing 14 GiB repo halfway through has
+wasted the rental. `bench/run.py deps --tier tp` should print `repo@revision` per
+entry, with `--fetch` doing the download. Both forms rather than one: the listing
+is what you want before committing to 50 GiB and in any planning or CI context,
+the fetch is what you want on a fresh box, and the two differ by a flag. The
+entries already carry `model`/`revision`, so this reads the matrix rather than
+duplicating it.
+
+**No longer hypothetical.** On 2026-08-20 the local cache lost
+`Muse-Glimmer-30B-exl3@2.00bpw`, replaced by `2.50bpw` for unrelated reasons, while
+`full` still pins the 2.00 baseline. Nothing broke — `bench` fetches by revision and
+the branch is still published — but the next run would have discovered a multi-GiB
+download midstream. `deps` is what turns that into a line of output beforehand, and
+the failure it prevents is not confined to rental boxes.
+
+Throughput is gated separately (`perf-check`/`perf-bless`), reproducing
+`docs/kernels.md`'s workload shape so that note's table stays live. Perf
+baselines are per-machine — `bench/expected/perf/<platform>/`, with the tag
+supplied by the operator — because a perf number is a fact about a machine as
+well as about the build. Only `rtx5070ti-dev` is populated.
+
+A TP tier wants perf entries too, and inherits that: `vast` needs its own bless,
+and rentals that are not the same machine need distinct tags. There the
+interesting number is also not raw throughput but how it *scales* with degree —
+a collective-path regression shows up as a scaling change while each degree's
+absolute number still looks plausible against its own baseline. That comparison
+is cross-entry rather than against a baseline, so it needs something
+`perf-check` does not currently do.
+
+→ [bench/README.md](README.md)
