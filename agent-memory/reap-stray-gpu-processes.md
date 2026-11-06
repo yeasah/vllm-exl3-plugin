@@ -27,3 +27,6 @@ safe forms are a bracketed pattern (`pkill -f '[v]llm_gen'`) or `ps` plus
 explicit PID filtering — and see [[pkill-self-kill-wrapper]] for why the
 unbracketed form is hazardous from a tool call. Related:
 [[verify-across-execution-modes]].
+
+**reap sweeps every GPU, including jobs you meant to keep.** On 2026-11-05 a cleanup after one failed serve on GPU 1 killed a 27B baseline conversion running on GPU 0, which can't resume, so an hour was lost. While anything you want kept is running, don't use reap: start a test in its own session (`setsid`) and kill that process group, or kill by PID.
+

@@ -25,7 +25,9 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
 - `recall-pool-growth` — Thin domains (medicine, chemistry, computing, non-numeric history) limit small models'
   recall slices; growing the pool there is cheap now that arms score only each model's slice. [docs/recall.md](docs/recall.md)
 - `high-rung-own-voice` — Our lead over SC shrinks with rate fastest on own voice and chat; at 5.00 the gap is real
-  (3x the floor). A calibration with own voice raised to ~37% is under test on Qwen3.8-27B 5.00. [docs/calibration.md](docs/calibration.md)
+  (3x the floor). Raising own voice to ~37% of calibration rows on Qwen3.8-27B 5.00 (one draw): wild -5.1%, own
+  voice -7.0%, multilingual -3.1%, swe +10.0%. The same chat-for-agentic trade as the calibration mix, not free
+  headroom; it would take SC's 5.00 wild edge from 1.12 to about 1.06. [docs/calibration.md](docs/calibration.md)
 
 ## New directions
 
