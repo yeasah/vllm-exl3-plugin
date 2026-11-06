@@ -37,7 +37,7 @@ Each bitrate is available as a separate revision of this repository. When planni
 
 - BPW: Average bits per weight across tensors (not including input embeddings, encoders, MTP draft layers, or output head)
 - Size on disk: Total aggregate size of tensors in checkpoint, in GiB
-- VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB (blockq embeddings, offloaded/omitted encoders, no MTP draft layers)
+- VRAM (vLLM): Total VRAM consumption as typically used in vLLM, in GiB ({{ 'the quantized embedding as stored' if embed_quantized else 'blockq embeddings' }}, offloaded/omitted encoders, no MTP draft layers)
 {% if composite %}- Excess KLD: how far each quant's next-token distribution is from the unquantized model's, minus the unquantized model's own rounding noise, so 0 would be indistinguishable from the original (lower is better)
 {% if show_ppl %}- Δ perplexity: change in perplexity on the same text, same weights (lower is better)
 {% endif %}{% else %}- Raw-text excess KLD: how far each quant's next-token distribution is from the unquantized model's on plain web text, minus the unquantized model's own rounding noise (lower is better). This model has no chat template, so raw text is the distribution it was trained on.

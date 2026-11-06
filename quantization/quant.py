@@ -262,7 +262,9 @@ def collect_metadata(job, qbench):
               # The MTP draft: off by default in both engines (exllamav3 loads it only as a separate
               # draft model), and an external draft model is often the better choice where supported
               'mtp_bytes': sizes.get('mtp', 0),
-              'blockq_bytes': int(sizes['embed'] / 16 * 4.5),
+              # What vLLM holds for the embedding: a stored trellis or bq_* table as it is, a dense one encoded
+              # to blockq on load. Shrinking an already quantized table again understated VRAM by 0.43 GiB a rung
+              'blockq_bytes': sizes['embed'] if embedding_stored_quantized(job.revdir(rev)) else int(sizes['embed'] / 16 * 4.5),
               'excess': excess,
               'raw_excess': excess.get('raw'),
               'raw_ppl': qb['raw']['ppl'] if 'raw' in qb else None }
@@ -1472,7 +1474,7 @@ def qbench_project(job, args, slice_, arms, results=None):
                             { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
                                 "options": { "n_gpu_layers": 999 } } if path.endswith(".gguf") else
                             { "label": label, "group": "EXL3", "engine": "exllamav3",
-                              "source": os.path.abspath(path) } for label, path in arms ],
+                              "source": os.path.abspath(path), **served_embedding(path) } for label, path in arms ],
                 "output": { "results": os.path.abspath(results or os.path.join(job.main, f"qb_{slice_}.json")) } }
     if slice_ == "raw":
         # A guard, not a target: raw web text framed as nothing matches no real use
@@ -2005,6 +2007,34 @@ SAMPLING_DIR = os.path.join(HERE, "sampling")
 #: Sampling keys a published generation_config.json carries (all of them read by vLLM's server defaults)
 GC_SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "frequency_penalty",
                     "repetition_penalty")
+
+def served_embedding(path):
+    """qbench options that score an EXL3 checkpoint's embedding as vLLM serves it. A dense embedding is
+    encoded to blockq on load by default, so scoring it at BF16 credited every dense checkpoint (ours,
+    references and baselines alike) with an embedding nobody serving through the plugin gets, while a
+    checkpoint storing a quantized one was scored as stored. A hidden size blockq cannot divide stays
+    dense, as the plugin falls back to it."""
+    if embedding_stored_quantized(path):
+        return {}
+    try:
+        with open(os.path.join(path, "config.json")) as f:
+            cfg = json.load(f)
+        hidden = (cfg.get("text_config") or cfg)["hidden_size"]
+    except (OSError, KeyError, ValueError):
+        return {}
+    if hidden % 32:
+        return {}
+    return { "options": { "embed_quant": { "bits": 4, "granularity": "blockq:32" } } }
+
+def embedding_stored_quantized(path):
+    """Whether a checkpoint stores its token embedding quantized (exllamav3's trellis or the plugin's bq_*), by tensor name."""
+    import struct
+    for f in globmod.glob(os.path.join(path, "*.safetensors")):
+        with open(f, "rb") as fh:
+            header = json.loads(fh.read(struct.unpack("<Q", fh.read(8))[0]))
+        if any(k.endswith((".embed_tokens.trellis", ".embed_tokens.bq_q")) for k in header):
+            return True
+    return False
 
 def published_generation_config(job):
     """(generation_config.json to publish with each revision, record for the card), or (None, None).
