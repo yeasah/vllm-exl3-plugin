@@ -2755,9 +2755,9 @@ YAQA_OWNVOICE_ROWS = 85     # rows asked of each pass; ctx_trace fills a shortfa
 YAQA_BLEND = 0.5            # own-voice share of the blended factor, each side normalized to unit trace
 YAQA_DONE = "DONE.json"     # provenance, written last: a factor directory without it is incomplete
 
-def yaqa_ready(job):
-    """The blended factor directory if `yaqa` finished it, else None."""
-    d = os.path.join(job.hess, "blend")
+def yaqa_ready(job, source="blend"):
+    """A finished factor directory: the blend, or one side of it (--yaqa-source), else None."""
+    d = os.path.join(job.hess, source)
     return d if os.path.isfile(os.path.join(d, YAQA_DONE)) else None
 
 def ownvoice_rows(job, args, path, env):
@@ -2940,11 +2940,17 @@ def do_quantize(job, args):
               f"the measurements, own-voice share {share}" + (" (default)" if args.ownvoice_share is None else "")) + " ===")
     elif args.recipe and not measured:
         print("=== uniform bits: no measurements (run `measure` for a per-tensor recipe) ===")
-    hess = yaqa_ready(job) if args.yaqa else None
+    hess = yaqa_ready(job, args.yaqa_source) if args.yaqa else None
+    if args.yaqa and args.yaqa_source != "blend" and not hess:
+        # Naming a factor is asking for it: quietly converting one-sided instead made two arms of an experiment
+        # byte-identical to the control (2026-11-03), which nothing downstream could tell apart from a null result
+        print(f"=== --yaqa-source {args.yaqa_source}: no finished factor at {os.path.join(job.hess, args.yaqa_source)}; not converting ===")
+        return False
     if hess:
         with open(os.path.join(hess, YAQA_DONE)) as f:
             rounding = {"method": "two-sided LDLQ (YAQA output-side factor, convert.py -hess)", **json.load(f)}
         rounding.pop("written", None)
+        rounding["source"] = args.yaqa_source
         print(f"=== two-sided LDLQ: output factor from {hess} ===")
     elif args.yaqa:
         print("=== one-sided LDLQ: no `yaqa` output factor (run `yaqa` for two-sided rounding) ===")
@@ -3158,6 +3164,9 @@ def main():
     cmd_quantize.add_argument('--yaqa', default=True, action=argparse.BooleanOptionalAction,
                               help="two-sided LDLQ with `yaqa`'s blended output factor when it exists (default); "
                                    "--no-yaqa converts one-sided as before")
+    cmd_quantize.add_argument('--yaqa-source', default='blend',
+                              help="which output factor, a directory under _hess: the blend (default), ownvoice or cal "
+                                   "alone, or any other finished one, to compare them")
     cmd_quantize.add_argument('--recipe', default=True, action=argparse.BooleanOptionalAction,
                               help='per-tensor recipe from `measure`\'s measurements when present (--no-recipe: uniform bits)')
     cmd_quantize.add_argument('--ownvoice-share', type=float, default=None,
