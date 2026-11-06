@@ -123,11 +123,13 @@ checkpoint, so `--quantization` is not needed. The main differences:
   `--cpu-offload-gb N --cpu-offload-params visual`. `--language-model-only` drops it. An
   image-heavy request on a small card may still need a pixel cap through
   `--mm-processor-kwargs`. See [docs/media-encoders.md](docs/media-encoders.md).
-- **`--cpu-offload-gb` offloads EXL3 weights, with limits.** Prefill is slow, since offloaded
-  weights cross PCIe for every token; it cannot offload more than fits in VRAM, because loading
-  peaks at the full checkpoint; and MoE experts are offloaded naively. An offload built around
-  an MoE expert cache, which addresses all three, is in development
-  ([docs/cpu-offload.md](docs/cpu-offload.md)).
+- **`--cpu-offload-gb` runs MoE experts through a VRAM expert cache.** Offloaded experts load
+  straight to host memory, so a checkpoint bigger than VRAM loads. The most-used experts are kept
+  in VRAM slots, sized automatically against what KV needs at `--max-model-len`, and prefill copies
+  a layer's experts in bulk instead of crossing PCIe per token. Without `--cpu-offload-params`, the
+  vision tower is offloaded first, then experts; dense EXL3 weights move only with an explicit
+  selector, and are then read over PCIe every token. `TP>1` is not validated yet. See
+  [docs/expert-cache.md](docs/expert-cache.md).
 - **MoE works,** through vLLM's `FusedMoE` with exllamav3's `exl3_mgemm`, CUDA graphs included.
   See [docs/moe.md](docs/moe.md).
 - **Drive models through their chat template.** Some checkpoints (gemma-4 among them) put
@@ -240,7 +242,8 @@ inexplicable turns up on hardware other than Blackwell.
 | note | subject |
 |---|---|
 | [format-and-loading.md](docs/format-and-loading.md) | on-disk format, driving vLLM's loader, quantized `lm_head` |
-| [cpu-offload.md](docs/cpu-offload.md) | why vLLM's offloaders skip EXL3, what a PCIe round trip per token actually costs, why prefill pays it per token too, why *which* experts you offload cannot matter, and why llama.cpp's `-ot` recipes mean something else |
+| [cpu-offload.md](docs/cpu-offload.md) | why vLLM's offloaders skip EXL3, what a PCIe round trip per token actually costs, why prefill paid it per token, and why llama.cpp's `-ot` recipes mean something else; the first design, superseded in part by expert-cache.md |
+| [expert-cache.md](docs/expert-cache.md) | the offload design for high-bpw MoEs on small cards: measured routing locality, WDDM oversubscription, and each phase's results |
 | [kernels.md](docs/kernels.md) | fused kernels, reconstruct threshold, CUDA graphs, bf16, benchmarks |
 | [tensor-parallel.md](docs/tensor-parallel.md) | Hadamard-block-128 sharding, what each TP degree admits, hardware results |
 | [moe.md](docs/moe.md) | `exl3_mgemm` behind `FusedMoE`, the Laguna scale factor, the sm_90+ barrier hang |

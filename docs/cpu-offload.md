@@ -10,6 +10,17 @@ registers finished EXL3 tensors with vLLM's UVA offloader from
 `process_weights_after_loading`. It works, it saturates the link it runs on, and it
 has no tests and no bench presence. Open work is under TODO `cpu-offload`.
 
+**Superseded in part, 2026-11-01; see [expert-cache.md](expert-cache.md).** Routing was measured
+and is strongly bursty, so "dynamic paging buys nothing" and index-invariance below no longer hold.
+exllamav3 now has CPU kernels for mul1 experts, and bigger-than-VRAM loads that appear to work on
+WSL2 are WDDM oversubscription, not a fix.
+
+**Mechanism replaced, 2026-11-03.** Placement is now decided at store time (phase 1 of
+expert-cache.md): offloaded tensors go from the checkpoint straight to pinned host memory, and
+routed experts into one pinned block per layer and projection. `register_offload` survives only
+for the `EXL3_DEQUANTIZE=1` reference path. What follows about registration from
+`process_weights_after_loading` describes the old mechanism; the cost measurements still hold.
+
 **What offload is for, and it is not capacity.** It trades PCIe bandwidth for bits
 per weight, so it is a quality lever rather than a fallback. The ordering against
 block-quantized embeddings is settled and offload loses: per byte freed, blockq costs
@@ -733,7 +744,9 @@ model KV is cheap — `full_attention_interval=4` and `num_key_value_heads=2` gi
 
 ## Open questions
 
-Tracked under TODO `cpu-offload`.
+Tracked under TODO `cpu-offload`. Two are answered by [expert-cache.md](expert-cache.md): routing is
+measured and strongly bursty (its "Routing" section), and prefill staging runs under compile and CUDA
+graphs (phases 2 and 3). They are kept below as they were asked.
 
 **Is routing skewed, or is the offload path?** The 2.8% index effect says routing is not
 uniform, but throughput is an indirect instrument. One `topk_ids` histogram discriminates
@@ -757,3 +770,264 @@ integration questions are not answered.
 
 **What the 2026-08-20 MoE reporting shortfall was** — UVA's claim inflated ~9x on a
 routed MoE while honest on dense models.
+
+## Moved from TODO.md (2026-11-07)
+
+*The working record of the `cpu-offload` item as it stood when the expert cache merged, kept verbatim. Much of it is superseded by [expert-cache.md](expert-cache.md): loading at store time, prefill staging and the routing measurements answer its loading, prefill and skew questions. Open work is in TODO.md under `cpu-offload`.*
+
+### `cpu-offload` — CPU offload for EXL3 weights
+
+**Implemented, measured, and unit-tested; not gated, not committed.**
+`vllm_exl3_plugin/cpu_offload.py` registers finished EXL3 tensors with vLLM's UVA
+offloader from `process_weights_after_loading`, with a `re:` extension to vLLM's
+parameter selectors. Background, the cost model, backend choice and the measured
+numbers are in [docs/cpu-offload.md](docs/cpu-offload.md) — this item is open work
+only.
+
+**Plan as of 2026-11-01: [docs/expert-cache.md](docs/expert-cache.md)**, phases and gates there,
+work on branch `cpu-offload`. It settles the layout, staging and load path below in one design,
+and supersedes the routing-uniformity reasoning further down this item. **Phase 1, pin at
+store, and phase 2, prefill staging, are done (2026-11-03)**. **Phase 3, slots and the
+controller, is built** (`expert_cache.py`, opt-in via `EXL3_EXPERT_SLOTS`): ~89% hit at 40% slots,
+1.74x on `cuda`, output identical. On the 3060 at gemma 4.10bpw mcg it tops out near 32 t/s, 1.43x
+on greedy, 1.15x on the cold static set; Laguna 4.00bpw mul1 reaches 43 t/s, 1.39x on greedy. See
+expert-cache.md, Phase 3 results. **Phase 4a–4c are done:** mixed-batch routing, the concurrency
+grid (slots ≈ 0.4 + 0.1·log2(streams) of experts), and autosizing from `--cpu-offload-gb`,
+`--max-model-len` and `EXL3_KV_RESERVE`. 4d and 4e are done but for `TP>1`, which
+waits for the main system: default selectors are towers plus experts, the tower keeps first claim
+and is reported apart, and offloading it costs nothing per image while buying slots (+36% decode
+on the 3060). Next: `TP>1`, then cheaper misses.
+
+**Prefill is now bound by the MoE kernel, not the link.** `exl3_moe_mm` runs one row per
+(token, expert) slot at every batch size, so a 1024-token chunk decodes each expert's trellis
+~64 times. That is 90% of prefill time resident or staged. Two levers, both outside the cache:
+
+- **mul1 checkpoints.** The turboderp gemma quants are mcg, whose prefill kernel is 3.7x
+  mul1's at K=4 (450 against 122 ms per layer at 1024 tokens, `stage_bench.py`). Staged on the
+  3060, gemma 4.10bpw mcg prefills at ~70 t/s, and Laguna-XS 4.00bpw mul1 at ~335 t/s. A mul1
+  gemma quant is only needed for same-model comparisons; cuda can make one.
+- **exllamav3's large-batch tiers** (`block_sparse_mlp.py` `forward`): sort slots by expert,
+  fused kernel for light experts, reconstruct-and-GEMM for heavy ones, one count readback per
+  layer. Prefill is eager, so the sync is affordable. Reconstructing reads each expert once,
+  so it could also read offloaded experts over UVA with no staging window.
+
+**Startup headroom on small cards.** Two allocations after weight load are missing from vLLM's
+memory profile, and on a tight card they, not the weights, decide whether a model serves:
+
+- flashinfer autotune's dummy batch after KV sizing, where the EXL3 embedding op's `had_left`
+  allocated 352 MiB (gemma-4-26B, 1024 batched tokens);
+- inductor's ~1.9 GiB transient compiling Ornith-9B, about one vocab × hidden matrix.
+
+Measured in expert-cache.md's phase 1 results. Shrink the embedding op's scratch, or make
+the profile cover both.
+
+**Design these together, not one at a time.** There are now five open levers, and
+each one changes the premises of the others:
+
+- load-time pin-at-store changes where tensors live;
+- prefill staging needs VRAM carved out of what offload frees, and a pointer-table
+  swap;
+- expert packing wants a host layout, and the same pointer-table trick;
+- spread placement decides which layers every prefill step must copy;
+- the backend question is now "UVA for decode, bulk copy for prefill", which neither
+  vLLM backend offers.
+
+One host layout could serve both packing and prefill staging, for example per-layer
+contiguous with experts packed inside it. A pass that settles the layout, the staging
+buffer and the load path at once is likely cheaper than three sequential reworks.
+
+**Done 2026-09-17** (review pass, `tests/test_cpu_offload.py`, 15 tests, GPU-free):
+scale vectors excluded by component policy rather than by selector; null-match
+warning; per-layer log demoted to `debug` with a `report_once()` summary carrying
+tensors as well as bytes; pointer table rebuilt only when something moved and against
+a device captured before offload; matcher extracted to a pure `_matches()`. Every new
+guard was verified by reintroducing the defect and watching it fail.
+
+The summary is emitted from a wrapper around the module-level
+`process_weights_after_loading` (`plugin._patch_offload_summary`), **not** from
+`apply()` — that sits inside the `torch.compile` region, where Dynamo refuses
+`logging.Logger` calls and kills the engine at startup (gb0291). Cost one failed
+serve to find; a test now pins `apply()` free of it.
+
+**Bench presence needs a new axis, not a new case.** Offload trades VRAM for
+throughput, and the gate cannot see VRAM (`bench-suite`), so bolting it on records the
+throughput loss as a regression and the capacity gain as nothing.
+
+**Why is `suh`/`svh` worth 2.6% in one configuration and 12.5% in another?** Same
+model, same host, same ~4.9 MB/token of expert scale vectors: removing them is
+19.1 → 19.6 tok/s when only experts are offloaded, but 8.0 → 9.0 when dense trellis is
+offloaded too. Both exceed what their bytes can pay for, which granularity explains;
+the 10x gap between the two is not explained by anything yet. The policy is right
+either way — they are 1.9% of expert bytes, so excluding them is never worse — but the
+mechanism would say whether transfer granularity is a lever worth pulling elsewhere,
+e.g. whether batching small reads or reordering them against the trellis stream is
+worth anything.
+
+**Report reachable bytes, not just offloaded ones.** `report_once()` says what moved;
+it does not say what *could* have. Two accounting errors have already been caught by
+hand — `--cpu-offload-gb 10` exceeding the 8.21 GB of eligible experts, and 0.936 GB of
+unquantized `weight` counted as offloadable dense bytes when `register_offload` never
+sees it. Both looked like physics violations until the checkpoint was consulted. A
+by-category reachable-vs-offloaded line would have made each obvious at run time.
+
+**Top item: prefill pays offload per token, not per step.**
+Found 2026-09-21. `exl3_mgemm` runs one single-row product per (token, expert) slot, so
+a P-token prefill reads offloaded experts over PCIe P times. On the Gen3 host a 15K
+prefill goes 32.5 → 348 s with 3.75 GiB of experts off, which is +21 ms per prompt
+token and exactly the link. On Gen5 a 15K request goes 23.4 → 76 s. That is worse than
+the decode tax, and vLLM's logged prompt throughput hides it completely. **Offload is
+not usable in practice for long prompts until this is fixed.** That is why it ranks
+above bigger-than-VRAM loading: making offload work in more cases buys little while
+every long prompt pays this. Measurements and mechanism are in [docs/cpu-offload.md](docs/cpu-offload.md).
+
+**Candidate:** when a step's slot reads exceed one bulk copy of the layer (about 32
+tokens at top-8/256), copy the layer's offloaded experts into a VRAM staging buffer and
+point the kernel's pointer tables at it. Decode stays on UVA. The projection is ~5 s
+instead of 315 s here, and ~0.75 s instead of ~50 s on Gen5.
+
+Open questions:
+- the staging buffer's size, and double-buffering, against the freed bytes;
+- the side-stream copy under the compiled region and CUDA graphs, especially mixed
+  prefill+decode batches;
+- whether to copy only the active experts, which needs a `topk_ids` host sync.
+
+**Acceptance:** TTFT measured as `first_token_ts - scheduled_ts`, never the logged
+throughput line. Prefill overhead should scale with number of steps, not tokens.
+
+**Second: offload cannot load a model bigger than VRAM.** It is the difference between working and not for a primary goal (medium MoE at 4.0bpw in
+16 GiB), where packing is a 1.12-1.27x on something that already works. Registering from
+`process_weights_after_loading` runs after the whole checkpoint has landed on the
+accelerator, so today's offload delivers KV headroom and cannot deliver weight capacity —
+the wrong way round, since 4-bit KV is cheap and body bits are not. Confirmed from a real
+OOM 2026-09-18; mechanism, the three steps vLLM uses to stay bounded, and the projected
+16-30 GiB band it costs are all in [docs/cpu-offload.md](docs/cpu-offload.md).
+
+**Fix shape:** `linear.py:90` and `fused_moe.py:125` are the *only* two sites where
+checkpoint tensors reach the accelerator, and all four `load_*` entry points funnel
+through one `EXL3Parameter.store` — pin-and-view there instead of at finalisation.
+Bounded peak, and the selector would match real checkpoint names rather than
+reconstructed ones. Watch for `_interm_divisor` reading `suh` values (fine, scale vectors
+stay resident) and `EXL3_DEQUANTIZE=1` needing the trellis on device. Unverified: whether
+anything downstream of `store()` assumes the shard is device-resident, and how it
+interacts with TP sharding, which happens in `_take_column`/`_take_row` *before* the
+store.
+
+**Acceptance check: the saving has to reach the KV budget under both allocators.** Today's
+offload-after-load strands the freed trellis pages. The loss is 0.71 of 4 GiB with the
+classic allocator and all 4 GiB with `expandable_segments:True` (2026-09-21, table in
+[docs/cpu-offload.md](docs/cpu-offload.md)). "Model loading took" hides this, because it
+counts live allocations. Check `reserved - allocated` after load, or the "weights +
+non-torch" line, with expandable segments on and off. The rework should bring both to
+the no-offload residual (~0.03 GiB).
+
+**Worth trying first:** `EXL3_BLOCKQ_ON_LOAD=1` never materialises the dense embedding,
+so only `bq_*` reaches the GPU — on a 248K-vocab model ~1-2 GB traded for ~0.3-0.5 GB.
+Did not clear the 2026-09-18 case (that run already had it on), but it is the cheap lever
+for a checkpoint whose embedding is still dense.
+
+**Gating test passed 2026-09-17: transfer size is the cap.** Same spread selector
+against `2.00bpw` (256 KiB trellis) and `3.00bpw` (uniform 384 KiB, same 30720 tensors)
+of the same checkpoint, everything else fixed, both baselines measured (136.7 / 129.1):
+**29.41 GB/s against 32.92**. So the cap is per-request overhead, not memory-level
+parallelism in the decode kernel, and packing is worth building — but a 1.5x larger
+tensor buys only 1.12x, where the microbenchmark implied ~1.20x. Fitting `t = L + S/B`
+gives 2.85 µs per transfer and a 43.2 GB/s asymptote.
+
+**Then: pack each expert's three trellis tensors contiguously — worth ~1.55x, untested.**
+A correctly spread offload is already saturated, but not against the link: one
+expert-projection trellis is exactly 256 KiB, and on the Gen5 host 256 KiB transfers get
+22.9 GB/s on the UVA path against 49.9 for 16 MiB. Measured offload runs at 29.4 GB/s,
+right where that granularity predicts, on a link that does 52. Gate/up/down are always
+read together, so packing them into one 768 KiB buffer is projected at 37.4 GB/s —
+**63 → ~71 tok/s** on full expert offload, or ~67 if `down` stays separate. An earlier
+version of this item said ~79 on a 1.55x; that used an estimated 3bpw baseline of ~118
+tok/s, and the measured 129.1 roughly halves the payoff to **1.12–1.27x**. Unlike
+stacking all experts into one `[num_experts, ...]` tensor, which `_pointers` rejects for
+doubling peak load memory, this needs one 768 KiB buffer at a time and the pointer table
+can hold three views into it — the kernel dereferences per-tensor addresses and does not
+care that they are adjacent. A distant third behind prefill and loading, **conditional on the
+bpw test above**. Note also that `down` is read after the activation, not with gate/up,
+so a 768 KiB buffer may behave as 512 + 256; on the measured curve that is ~1.23x rather
+than ~1.55x. And bit widths differ per projection (`exl3_gate_bits` vs
+`exl3_down_bits`), so the buffer size is per-group, not three equal thirds.
+
+**Spread across all layers, and correct two claims that were wrong.** The Gen5 sweep
+(2026-09-17) settled it: layer *coverage* is the placement variable, not experts per
+layer. Varying experts-per-layer 7.5x at constant coverage does nothing — 29.4 ± 1.7
+GB/s flat from 13% to 100% of experts, including the `everything` row. So cost is
+**linear** in bytes touched, and two earlier claims in this item were wrong: that the
+lever decays to zero at full offload, and that cost is superlinear. Both were inferred
+from the 1 GiB greedy row, which is slow because it touches 5.3 layers, not because it
+offloads every expert in them. Full expert offload on Gen5 x16 is 63.0 tok/s against a
+136.7 baseline — a 54% cost, not the ~77% projected. Plain `experts` is only wrong for
+*partial* offload, where greedy fill concentrates; at full offload it covers every layer
+anyway. The spread expert count is `budget / (num_layers * bytes_per_expert)` and should
+be computed rather than hand-written as a regex.
+
+**Re-measure where the link is not the bottleneck.** Everything measured to date is on
+a Gen3 x8 host at 6.5 GB/s, where the implementation already runs at 87–98% of the link
+and no code change can recover bandwidth. The Gen5 x16 box is ~7.7x. Note
+`cpu_offload_bytes` is per-process, so `--cpu-offload-gb N` under TP>1 offloads N GB
+*per rank*; the 2026-09-17 table is TP=1, so its labels are honest, but a TP tier will
+need the distinction spelled out.
+
+**Spread placement is a ~7% lever and should probably be the default.** Confirmed
+2026-09-17: at 1 GiB, naive `experts` (which fills greedily by layer and concentrates
+at 8-of-8 routed) gives 66.4 tok/s, while 34 experts spread across all 40 layers
+(1.07 of 8) gives 70.9 — **+6.8% for the same offloaded bytes**. Apparent bandwidth
+rises from 6.27 to 7.63 GB/s, the latter 17% *above* the pinned-DMA ceiling, so part of
+the transfer is overlapping with compute rather than serialising. Nothing measured is
+sparser than 1.07/layer and the trend has not flattened, so there may be more.
+
+The expert count that spans every layer is a function of budget and checkpoint
+(`budget / (num_layers * bytes_per_expert)`), so it should be computed rather than
+written by hand as a regex — the same argument as autosizing any knob against the
+threshold it is checked against. Worth checking whether the effect survives
+`--enforce-eager`; an overlap explanation predicts it should not change much.
+
+**Routing is NOT uniform, and the placement question is open again.** Two patterns with
+identical geometry — 34 experts, 40 layers, 4080 tensors, 1.00 GiB, same concentration —
+differ by 2.8%: experts 0–33 give 70.9 tok/s against 69.0 for experts 222–255. The
+earlier `experts 0-59` (68.8) vs `experts 200-255` (67.7) pair points the same way,
+despite 0–59 carrying the worse concentration. The cost ratio implies experts 222–255
+are routed ~8.8% more often than 0–33.
+
+Everything in [docs/cpu-offload.md](docs/cpu-offload.md) that rests on uniform routing —
+index invariance, LRU-equals-static — was explicitly conditional on a premise that now
+looks false. The original sweep could not have caught it, because its index ranges were
+confounded with concentration; it took controlling concentration to expose it.
+
+**One histogram, to rule out a cause we control — not a calibration programme.** The
+2.8% has two candidate mechanisms: routing skew, or something physical about which
+tensors were offloaded (host allocation order, pinned-page locality, NUMA placement).
+The second would be a defect in this code and fixable here; the first would not. Log
+`topk_ids` once over a normal workload and count per-expert frequency: if 222–255 is
+~8.8% hotter than 0–33, it is routing and the question closes; if the counts are flat,
+the 2.8% belongs to the offload path and is worth chasing.
+
+**Out of scope deliberately:** whether the skew is a workload property or a model
+property, and frequency-ranked placement built on it. Exploiting it needs per-model
+calibration, which is a different project — and one WiSP is already the reference for.
+Note this weakens the LRU-equals-static dismissal in the doc: under skew an LRU cache
+gets the frequency ranking for free, which is exactly when dynamic paging earns its
+keep. 2.8% still does not pay for WiSP's per-layer host syncs and eager-only execution,
+but the argument against it was made on a premise that no longer holds. Note also that
+0–33 and 222–255 are arbitrary windows rather than the extremes of the distribution, so
+2.8% bounds the exploitable spread from *below*.
+
+**Control for the expert window in every future offload A/B.** This is the part that is
+actionable here regardless of cause: two patterns that differ only in which expert
+indices they select differ by up to ~3%. The original sweep missed the concentration
+lever precisely because index and concentration moved together and partly cancelled.
+Hold the window fixed, or the next comparison will misattribute the difference.
+
+**Unexplained from 2026-08-20:** UVA's reported offload figure was inflated ~9x on a
+routed MoE while honest on dense models across three quantization methods. Mechanism
+never established; the obvious name-matching explanation is wrong. Worth pinning down
+before relying on the claim, since MoE is where offload is most attractive.
+
+**Reference design, before picking this back up:** exllamav3 1.6.4's CPU-MoE offload (its own
+runtime, not vLLM's) -- a pinned arena for zero-copy streamed prefill (#341, ~2x long-context
+prefill), hot/cold expert rankings persisted across instances, immediate promotion of missed
+experts with spare GPU slots, split-K CPU GEMV with work stealing across L3 domains. Commits
+`893199c1`, `c48bb5f8`, `e4a928f9`, `82cebdf1`, `21cfd60f`.

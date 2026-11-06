@@ -63,6 +63,13 @@ class EXL3Parameter(BasevLLMParameter):
     # than inherited so the intent survives a change to the base default.
     handles_fused_shards: bool = True
 
+    # Offload placement, read by `cpu_offload.place` at store time. Off unless
+    # the owning method opts in: lm_head and the embedding table build these
+    # too, and were never offloaded.
+    exl3_offloadable: bool = False
+    exl3_prefix: str = ""
+    exl3_name: str = ""
+
     def __new__(cls, dtype: torch.dtype | None = None, **kwargs):
         # An empty placeholder, but of the stored tensor's dtype: with data=None it would take the
         # model dtype (bf16), and vLLM 0.32's loader warns about every trellis, scale and codebook
@@ -97,7 +104,8 @@ class EXL3Parameter(BasevLLMParameter):
         index = self._shard_id_as_int(shard_id)
         # The loader hands us mmapped CPU tensors; nothing else will move these
         # onto the device, because we never allocated a device-resident param.
-        self.shards[index] = loaded_weight.to(self.exl3_device).contiguous()
+        # Offloaded tensors go from there straight to pinned host memory.
+        self.shards[index] = cpu_offload.place(self, loaded_weight)
 
     # vLLM hands every loader the *whole* checkpoint tensor and expects the
     # parameter to take its own rank's slice, at offset `tp_rank * shard_size`
@@ -227,6 +235,10 @@ class EXL3LinearMethod(LinearMethodBase):
                 row_shard_size=input_size_per_partition,
                 output_partition_sizes=list(output_partition_sizes),
             )
+            # The dequantize path offloads its exl3_weight after load instead
+            param.exl3_offloadable = not self.quant_config.dequantize
+            param.exl3_prefix = cpu_offload.layer_prefix(layer)
+            param.exl3_name = name
             set_weight_attrs(param, extra_weight_attrs)
             layer.register_parameter(name, param)
 
@@ -306,12 +318,10 @@ class EXL3LinearMethod(LinearMethodBase):
         else:
             self._store_quantized(layer, shards)
 
-        # Sibling of the two stores above: hand the finished trellis/suh/svh
-        # tensors (or exl3_weight) to the active weight offloader now that they
-        # exist at final shape. The offloader saw the construction-time
-        # placeholders only, so this is the only moment it can see the real
-        # weights. See cpu_offload.register_offload.
-        cpu_offload.register_offload(layer)
+        # Quantized tensors were placed as they loaded (`store`); exl3_weight
+        # only exists now, so the dequantize path offloads here.
+        if self.quant_config.dequantize:
+            cpu_offload.register_offload(layer)
 
         for param in params.values():
             param.release()
