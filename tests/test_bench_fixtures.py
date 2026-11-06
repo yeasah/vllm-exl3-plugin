@@ -55,12 +55,12 @@ class TestFixtureKey(unittest.TestCase):
         reads and leaves the tree untouched.
         """
         before = fixtures.key("blockq", MODEL, REVISION)
-        original = fixtures.BLOCKQ_SOURCES
+        sources, args = original = fixtures.RECIPES["blockq"]
         try:
-            fixtures.BLOCKQ_SOURCES = original + ("tools/quantize_embedding.py",)
+            fixtures.RECIPES["blockq"] = (sources + ("tools/quantize_embedding.py",), args)
             after = fixtures.key("blockq", MODEL, REVISION)
         finally:
-            fixtures.BLOCKQ_SOURCES = original
+            fixtures.RECIPES["blockq"] = original
         self.assertNotEqual(before, after)
         self.assertEqual(fixtures.key("blockq", MODEL, REVISION), before)
 
@@ -76,7 +76,7 @@ class TestFixtureKey(unittest.TestCase):
     def test_unknown_recipe_is_refused(self):
         """Rather than producing a plausible key for a recipe nobody implements."""
         with self.assertRaises(SystemExit):
-            fixtures.key("trellis", MODEL, REVISION)
+            fixtures.key("fp8", MODEL, REVISION)
 
 
 class TestFixtureRoot(unittest.TestCase):
