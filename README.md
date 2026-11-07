@@ -36,7 +36,7 @@ on its use with this plugin, see the [usage notes](usage-notes.md)
   sm_90+ barrier fix: MoE hangs on Hopper and Blackwell against unpatched upstream.
 - float16 or bfloat16 activations. The kernels are fp16 and cast at the boundary, so bf16
   models keep a bf16 residual stream.
-- Python 3.10+.
+- Python 3.10+, with python development headers (often provided by `python3-devel` or `python3-dev`)
 - For more than one GPU on PyTorch up to 2.14.1, a rebuilt `libc10_cuda.so`
   (`tools/torch-c10cuda-fix.sh`): exllamav3 turns on expandable segments, and with them stock
   torch can unmap memory another GPU is still writing. See [docs/upstream.md](docs/upstream.md)
