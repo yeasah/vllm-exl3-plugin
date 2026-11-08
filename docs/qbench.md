@@ -2481,6 +2481,20 @@ the imatrix in the repo. Against v6 the experiment is closer to a like-for-like 
 and the published corpus needs the contamination check (`contamination_map`) before any card
 compares against it.
 
+**A second GGUF lever, allocation (2026-11-07).** [Andy5k/Qwen3.5-0.8B-hand-quant](https://huggingface.co/Andy5k/Qwen3.5-0.8B-hand-quant)
+claims 0.0157 mean KL at 498 MB against UD-Q3_K_XL's 0.0925 at the same size, and beats UD-Q4_K_XL (559 MB),
+in stock llama.cpp formats. The method is per-tensor types from a measured sensitivity map under a byte budget
+(IQ4_XS / Q5_K / Q6_K), plus activation-weighted rounding written outside llama-quantize. Most of the margin
+looks like allocation. The tied `token_embd` is 34% of the weights and doubles as the head; storing it at
+IQ4_XS buys Q5_K/Q6_K nearly everywhere else (their own attribution: the embedding is about 0.010 of the 0.0157).
+Two discounts before reading it as format headroom: its judging set is held out from its tuning text but likely
+from the same distribution, and UD recipes may simply not be tuned for models this small. Unverified here.
+For this experiment it means **an imatrix-only arm undercounts what a GGUF can do**: add an arm whose
+per-tensor types follow our measured recipe (`llama-quantize --tensor-type`, `--token-embedding-type`,
+`--output-tensor-type`) at the same bytes, so the split is data, allocation and format rather than data and
+format. A cheap first check is that file and the UD ladder on our slices against Qwen3.5-0.8B BF16, text
+neither tuned on.
+
 ### `gemma4-recipe` — Recipes wreck gemma-4: random-noise measurement misses its early layers
 
 **Outcome:** a recipe ladder for gemma-4 that beats a uniform ladder at equal size, or a guard that

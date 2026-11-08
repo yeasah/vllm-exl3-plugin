@@ -11,11 +11,15 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
 - `mtp-turboquant` — Zero MTP draft acceptance under TurboQuant KV, and output that does not survive it. [docs/turboquant-kv.md](docs/turboquant-kv.md)
 - `kv-nvfp4` — 4-bit KV without TurboQuant's costs: NVFP4 KV on cards that support it. [docs/turboquant-kv.md](docs/turboquant-kv.md)
 - `transformers-backend` — Serving models vLLM does not implement: it works; what is left is offering the remaining half-patch upstream. [docs/transformers-backend.md](docs/transformers-backend.md)
-- `gemma4-e2b` — Quantizing gemma-4 E2B/E4B, tied and PLE-carrying. Shares ground with `engram-ple`. [docs/embeddings.md](docs/embeddings.md)
-- `gguf-our-imatrix` — GGUF quantized from our calibration: is the gap to EXL3 the data or the format? [docs/qbench.md](docs/qbench.md)
+- `gemma4-e2b` — Quantizing gemma-4 E2B/E4B, tied and PLE-carrying. Shares ground with `engram-ple`. exllamav3 PR #527 adds partial support (open, 2026-11-07). [docs/embeddings.md](docs/embeddings.md)
+- `gguf-our-imatrix` — GGUF quantized from our calibration: is the gap to EXL3 the data, the allocation or the format? A measured per-tensor GGUF claims large gains on a 0.8B (2026-11-07). [docs/qbench.md](docs/qbench.md)
 - `gemma4-recipe` — Recipes wreck gemma-4. The noted next step (BOS) has been tried; no evident lead. [docs/qbench.md](docs/qbench.md)
 - `turboquant-sliding-window` — Laguna serves with TurboQuant KV, patched. Left: tq4 quality on qbench, gemma-4 and Muse-Glimmer, and reporting upstream. [docs/turboquant-kv.md](docs/turboquant-kv.md)
 - `turboquant-boundary-tax` — TurboQuant's first/last-layer protection: layer 0 is the whole effect on Qwen3-4B. Left: long context, a second dense model, throughput. Nothing depends on it. [docs/turboquant-kv.md](docs/turboquant-kv.md)
+- `sm75-serving` — The plugin serves on Turing: Qwen3-0.6B on a GTX 1650 with an sm_75 image (2026-11-07). Left:
+  a card that can run something useful (a T4), KV quantization without FP8, and the README's 8.0+ claim. [docs/pre-ampere.md](docs/pre-ampere.md)
+- `yaqa-vram-pr` — exllamav3 PR #395 cuts the YAQA factor pass's VRAM (the 27B's needed 4x48 GB). Try it before it
+  merges when the quant pipeline next probes new models. [docs/yaqa.md](docs/yaqa.md)
 
 ## Leads from results
 
@@ -31,6 +35,15 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
 
 ## New directions
 
+- `metadata-refresh` — Ship a base model's metadata fix (chat template, tokenizer config, generation config) without a
+  full re-run. The template shapes everything downstream (calibration, measurements, YAQA rows, eval traces), so a
+  representative update is a re-do; the compromise is to copy the newer files into each branch only when the weight and
+  `config.json` blobs are identical to the pinned commit, record weights and metadata commits apart, and add a card
+  note that the quants were made and measured with the earlier metadata, saying whether rendering changed (eval
+  prompts rendered both ways, token ids compared). Files we override
+  (`generation_config.json` under a sampling profile's `publish`) need their own check: a base update can fix what the
+  override worked around (Ornith-9B gaining a config, the MoE's starting to match its card), so the profile's reason is
+  re-tested against the new file rather than the override carried forward. The appliance can offer the same for anyone's quants at serve time.
 - `vllm-lora` — Loading and serving existing LoRAs against EXL3 quants through vLLM's `--lora-modules`; then
   quantized LoRA.
 - `vllm-omni` — EXL3 quantization through vllm-omni, starting with its Transformers-compatible components (often a
