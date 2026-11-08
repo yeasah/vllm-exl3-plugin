@@ -500,6 +500,38 @@ def _out_features(trellis: torch.Tensor) -> int:
     return trellis.shape[1] * TILE
 
 
+_FORWARD_STREAM: list = [None, None]   # (forward context, raw stream) of the last launch
+
+
+def _one_stream(x: torch.Tensor) -> None:
+    """Refuse an exllamav3 GEMM or MoE launch on a second stream within one forward.
+
+    Both kernels spin-wait across blocks (`group_barrier` in the MoE kernel, the split-K
+    `barrier_acquire` lock in the GEMM) and size their grids to what the runtime reports as
+    resident on an otherwise idle GPU. Two of them in flight at once can each hold the SMs the
+    other needs to make progress, and both spin forever: GPU at 100%, VRAM traffic near zero,
+    the host waiting on the step's output event. vLLM overlaps work on side streams by design
+    (shared experts on `aux_stream()`, 2026-11-08 on a 3060 under WSL); the plugin switches off
+    the overlaps it knows of (`plugin._patch_kernel_overlap`), and this catches any it does not,
+    at graph capture or the first eager step rather than hours into a session. Graph replays
+    never reach here, and capture covers every decode batch size."""
+    from vllm.forward_context import get_forward_context, is_forward_context_available
+
+    if not x.is_cuda or not is_forward_context_available():
+        return
+    ctx = get_forward_context()
+    stream = torch._C._cuda_getCurrentRawStream(x.device.index)
+    last_ctx, last_stream = _FORWARD_STREAM
+    if last_ctx is ctx and last_stream != stream:
+        raise RuntimeError(
+            "exllamav3 kernels were launched on two CUDA streams within one forward pass. They "
+            "spin-wait across blocks and deadlock when they overlap (GPU at 100%, no progress), so "
+            "vLLM features that run model compute on a side stream cannot be used with EXL3. The "
+            "plugin disables the ones it knows (shared-expert overlap, microbatching); this one is "
+            "new. See docs/moe.md, \"Overlapped kernels deadlock\".")
+    _FORWARD_STREAM[0], _FORWARD_STREAM[1] = ctx, stream
+
+
 def _exl3_mm(
     x: torch.Tensor,
     trellis: torch.Tensor,
@@ -508,6 +540,7 @@ def _exl3_mm(
     mcg: bool,
     mul1: bool,
 ) -> torch.Tensor:
+    _one_stream(x)
     n = _out_features(trellis)
     k = trellis.shape[0] * TILE
     out_shape = x.shape[:-1] + (n,)
@@ -728,6 +761,7 @@ def _exl3_moe_mm(
     mul1: bool,
     activation: str,
 ) -> torch.Tensor:
+    _one_stream(x)
     e = ext()
     out_dtype = x.dtype
     num_tokens, hidden = x.shape

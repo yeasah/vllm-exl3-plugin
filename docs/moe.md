@@ -306,6 +306,47 @@ buffer is, and does nothing for an occupancy problem.
 - `force_num_sms` is **not** a grid override. `num_sms = tiles` overwrites it
   immediately; it only gates whether the autotuner runs.
 
+## Overlapped kernels deadlock
+
+**Fixed 2026-11-08.** The barrier above is one instance of a general rule: **exllamav3's GEMM and MoE
+kernels assume the GPU to themselves.** The MoE kernel synchronizes with `group_barrier` on every
+architecture, and its grid is sized to what `cudaOccupancyMaxActiveBlocksPerMultiprocessor` reports for
+an idle device (`exl3_moe.cu`, "the grid is co-resident by design (group barriers spin)"). The dense
+GEMM's split-K blocks wait on each other through `barrier_acquire`. If two of these are in flight at
+once, each can hold SMs the other needs to make progress, and both spin forever.
+
+vLLM overlaps work by design. For batches up to `VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD` (256, so
+every decode step), `SharedExperts` runs an MoE layer's shared experts on `aux_stream()` while the routed
+experts run on the main stream. With EXL3 that is a GEMM beside an MoE kernel.
+
+**How it presented.** Qwen3.6-35B-A3B 4.00bpw with the expert cache on an RTX 3060 under WSL: after a
+long prefill, decode stopped mid-stream, deep into the response. The GPU sat at 99% utilization with 1-2%
+memory utilization (spinning, not working), and the engine waited in `AsyncOutput.get_output` on the
+step's output event. Never garbage, in 47 runs. Rare per step, so it needed long decodes, and timing
+decided it:
+
+| configuration | result |
+|---|---|
+| expert cache off | ran, including a 10K-token generation |
+| `--enforce-eager` | hung |
+| `CUDA_LAUNCH_BLOCKING=1` (streams serialized) | ran |
+| promotion copies on the main stream | hung |
+| PyTorch sampler instead of FlashInfer's | hung |
+| `VLLM_DISABLE_SHARED_EXPERTS_STREAM=1` | **ran** |
+
+Memory pressure was ruled out first (WDDM's shared-memory cap, VRAM overcommit at 0.70). The expert cache
+mattered only through timing: with experts read over UVA the routed kernel is far longer, which moves
+the interleaving. The 5060 Ti host never showed it, but nothing about it is specific to WSL or Ampere.
+
+**The fix, in three layers.** `plugin._patch_kernel_overlap` returns `NO_OVERLAP` from
+`SharedExperts._determine_shared_experts_order` when the shared-expert module holds EXL3 linears (its
+`_layer` is the shared MLP, not the MoE layer; the first version checked the wrong module and the
+detector below caught it). Other quantizations keep their overlap. Microbatch overlap (`--enable-dbo`,
+`ubatch_size > 1`) is refused at load. And `ops._one_stream` refuses any exllamav3 launch on a second
+stream within one forward: graph capture covers every decode batch size, so a new vLLM overlap fails at
+startup by name rather than hanging a session. It was watched failing on the unpatched shared-expert
+path. vLLM's other side streams only copy.
+
 ## CUDA graphs are worth 1.9x to 4.9x
 
 Llama-3.2-1B, identical work: 312 tok/s captured versus 163 eager. Laguna-XS is

@@ -28,6 +28,7 @@ def register() -> None:
     _patch_moe_trellis_rank()
     _patch_offload_summary()
     _patch_offload_defaults()
+    _patch_kernel_overlap()
     _REGISTERED = True
 
 
@@ -115,6 +116,47 @@ def _patch_offload_summary() -> None:
 
     base_loader.process_weights_after_loading = process_weights_after_loading
     base_loader._exl3_offload_summary_patched = True
+
+
+def _patch_kernel_overlap() -> None:
+    """Never run an EXL3 MoE layer's shared experts on vLLM's side stream.
+
+    For batches up to ``VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD`` (256, so every decode
+    step) vLLM runs the shared experts on ``aux_stream()`` while the routed experts run on
+    the main stream. exllamav3's MoE and GEMM kernels spin-wait across blocks and assume the
+    GPU to themselves, so the two can deadlock: found 2026-11-08 as a decode hang on a 3060
+    under WSL, rare per step and so only deep into long decodes, and confirmed by
+    ``VLLM_DISABLE_SHARED_EXPERTS_STREAM=1`` curing it. Per layer, so other quantizations
+    keep their overlap; `ops._one_stream` refuses any overlap this does not cover.
+    """
+    try:
+        from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+            SharedExperts,
+            SharedExpertsOrder,
+        )
+    except ImportError:
+        return
+    if getattr(SharedExperts, "_exl3_overlap_patched", False):
+        return
+    original = SharedExperts._determine_shared_experts_order
+
+    @wraps(original)
+    def _determine_shared_experts_order(self, hidden_states):
+        # `_layer` is the shared-expert MLP, not the MoE layer: refuse the overlap if it runs
+        # EXL3 linears, which is what would launch our GEMM on the side stream. Decided once.
+        exl3 = getattr(self, "_exl3_shared", None)
+        if exl3 is None:
+            from .quantization.linear import EXL3LinearMethod
+
+            exl3 = any(isinstance(getattr(m, "quant_method", None), EXL3LinearMethod)
+                       for m in self._layer.modules())
+            self._exl3_shared = exl3
+        if exl3:
+            return SharedExpertsOrder.NO_OVERLAP
+        return original(self, hidden_states)
+
+    SharedExperts._determine_shared_experts_order = _determine_shared_experts_order
+    SharedExperts._exl3_overlap_patched = True
 
 
 def _patch_offload_defaults() -> None:

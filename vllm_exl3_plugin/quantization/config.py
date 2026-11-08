@@ -67,6 +67,24 @@ _CODEBOOK_TENSORS = {
 }
 
 
+def _refuse_microbatching() -> None:
+    """Microbatch overlap (``--enable-dbo``, ``ubatch_size > 1``) runs two batches' model
+    compute on separate streams; exllamav3's spin-waiting kernels deadlock when they overlap
+    (`ops._one_stream`, docs/moe.md "Overlapped kernels deadlock"). Refused at load, by name,
+    rather than left to the runtime check."""
+    from vllm.config import get_current_vllm_config
+
+    try:
+        parallel = get_current_vllm_config().parallel_config
+    except Exception:
+        return
+    if getattr(parallel, "use_ubatching", False):
+        raise ValueError(
+            "EXL3 checkpoints cannot be served with microbatch overlap (--enable-dbo or "
+            "--ubatch-size > 1): exllamav3's kernels deadlock when two run at once. Serve "
+            "without it.")
+
+
 class EXL3Config(QuantizationConfig):
     """Config class for EXL3."""
 
@@ -897,6 +915,7 @@ class EXL3Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
+        _refuse_microbatching()
         from vllm.model_executor.layers.vocab_parallel_embedding import (
             ParallelLMHead,
             VocabParallelEmbedding,
