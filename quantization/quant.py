@@ -250,7 +250,7 @@ def cal_generator(job, args):
     '{"tensor_parallel_size": 1}' runs it on one GPU."""
     return ["--backend", "vllm", "--vllm", args.cal_vllm_args] if args.cal_backend == "vllm" else []
 
-def collect_metadata(job, qbench):
+def collect_metadata(job, qbench, gguf_kld=False):
     """qbench: {slice: results list}. Excess KLD is each quant's KLD minus the slice's noise
     floor (bf16 rounding noise), so slices with different floors add up meaningfully."""
     data = { 'this_model': job.repo,
@@ -306,7 +306,7 @@ def collect_metadata(job, qbench):
                                   for sl in composite)
         revs.append(r)
     data['revisions'] = sorted(revs, key=lambda x: x['bits'])
-    data['reference'] = reference_section(job, qbench, floor, data) if data['composite'] else None
+    data['reference'] = reference_section(job, qbench, floor, data, gguf=gguf_kld) if data['composite'] else None
     data['thresholds'] = []
     for t in load_thresholds(job):
         qb = {sl: parse_qbench(res, threshold_label(t["repo"])) for sl, res in qbench.items()}
@@ -441,7 +441,7 @@ def contamination_map(job, info, slices):
 
 CONTAMINATED = 0.05     # share of a slice's prompts found in a competitor's calibration
 
-def reference_section(job, qbench, floor, data):
+def reference_section(job, qbench, floor, data, gguf=False):
     """Section 2 of the card. Plot: every ladder -- this card's and each reference's -- as excess
     KLD relative to the uncalibrated baseline at equal body size, so no ladder is drawn as a
     perfect line and all share one denominator (its draw noise is common-mode: order and gaps
@@ -515,7 +515,10 @@ def reference_section(job, qbench, floor, data):
     lo = min(v['body'] for v in ours.values()) * 0.9; hi = max(v['body'] for v in ours.values()) * 1.1
     contam = contamination_map(job, info, every)
     ladders = []   # (display name, [rungs])
-    for ref in info["references"]:
+    # GGUF sets are out of the KLD comparison unless the card asks (--gguf-kld): they are scored for recall,
+    # and against EXL3 on KLD they mostly stretch the scale. A per-model call
+    compared = [ref for ref in info["references"] if gguf or ref.get("type") != "gguf"]
+    for ref in compared:
         named = [n for n in ref["ladders"]]
         for name, branches in ref["ladders"].items():
             rungs = [arm(ref_label(ref["repo"], b), p, every) for b, p in branches.items()]
@@ -609,7 +612,7 @@ def reference_section(job, qbench, floor, data):
                     pts.append((x['body'], geo(x['excess'], b)[0], not bl * 0.995 <= x['body'] <= bh * 1.005, lab))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
-    return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in info["references"]],
+    return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in compared],
              'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices],
              'ladders': ladders, 'ours': ours, 'base': base,
              'tainted': [{'slice': describe_slice(sl), 'by': tainted_by[sl]} for sl in tainted],
@@ -1402,7 +1405,7 @@ def do_card(job, args):
         print("=== no qbench results: run qbench first ===")
         return False
     record_slice_stats(job)
-    meta = collect_metadata(job, qbench)
+    meta = collect_metadata(job, qbench, gguf_kld=args.gguf_kld)
     plot_quality_vs_size(job, meta, os.path.join(job.main, "quality_vs_size.png"))
     meta['traces_published'] = publish_traces(job)
     note = os.path.join(job.dir, "card_note.md")      # per-job text under the card's intro, e.g. a superseded release
@@ -3405,6 +3408,9 @@ def main():
 
     cmd_card = subparsers.add_parser('card', help="the model card and TECHNICAL.md from the qbench results")
     cmd_card.add_argument('--template', default='templates/model_card.jinja')
+    cmd_card.add_argument('--gguf-kld', action='store_true',
+                          help="put scored GGUF sets in the KLD comparison too (plot, table, per-slice plots); by "
+                               "default they appear only in the recall plot")
     # Raw-text perplexity is meaningless for some models (gpt-oss: ~3600 even for
     # the unquantized reference, on every engine); KLD stays valid, so drop only PPL.
     cmd_card.add_argument('--ppl', default=True,
