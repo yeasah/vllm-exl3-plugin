@@ -81,7 +81,6 @@ Quantization can leave a model fluent but wrong about facts, which KLD does not 
 |bpw|Facts kept|Confident errors|
 |---|---|---|
 {% for r in recall.rows %}|{{ r.label }}|{{ '{0:0.1f}'.format(100 * r.kept) }}%|{{ '{0:0.2f}'.format(100 * r.errors) }}%|
-{% endfor %}{% for r in recall.others %}|{{ r.label }}|{{ '{0:0.1f}'.format(100 * r.kept) }}%|{{ '{0:0.2f}'.format(100 * r.errors) }}%|
 {% endfor %}
 - Facts kept: of the correct answers the unquantized model would give when sampling, the share this quant still gives.
 - Confident errors: questions where this quant puts at least 70% on a wrong token, so it states something false rather than hesitating.

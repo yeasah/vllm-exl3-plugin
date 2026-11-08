@@ -678,7 +678,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
                      'body_axis': bool(ladders) })
     return out
 
-def plot_slice(sc, path):
+def plot_slice(sc, path, styles):
     """One slice: every ladder's excess KLD by size, log scale, the region under 2x the slice's
     noise floor shaded (differences there are within the unquantized model's own rounding noise)."""
     import matplotlib
@@ -686,7 +686,6 @@ def plot_slice(sc, path):
     import matplotlib.pyplot as plt
     SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
     OURS, BASE = "#eb6834", "#888888"
-    OTHERS = iter(["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"])
     fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
@@ -702,9 +701,9 @@ def plot_slice(sc, path):
             continue
         xs, ys = zip(*pts); ys_all += ys
         base = name.startswith("uncalibrated")
-        color = OURS if ours else BASE if base else next(OTHERS)
+        color, mk = (OURS, "D") if ours else (BASE, None) if base else styles.get(name, (INK2, "o"))
         ax.plot(xs, ys, color=color, lw=2, ls=(0, (2, 2)) if base else "-", zorder=3 if ours else 2,
-                marker="D" if ours else None if base else "o", markersize=5, markeredgecolor=SURF, label=name)
+                marker=mk, markersize=5, markeredgecolor=SURF, label=name)
     ax.set_yscale("log")
     thr = [(n, v) for n, v in sc.get('thresholds', []) if v and v > 0]
     for name, v in thr:
@@ -1140,11 +1139,10 @@ def recall_section(job, revisions):
                 sets.append({ "name": ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})",
                               "points": sorted(pts) })
     return { "rows": rows, "questions": known, "confident": selection["confident"],
-             "others": [row(r, l) for l, r in results.items() if r.get("group") == "GGUF" and "recall_kept" in r],
              "floor": results.get("Noise floor", {}).get("recall_bands"),
              "ours": [(results[r['name']]["vram_gb"], results[r['name']]["recall_kept"], f"{r['bits']:0.2f}")
                       for r in revisions if "recall_kept" in results.get(r['name'], {})],
-             "sets": sets }
+             "sets": sets, "styles": other_set_styles(job) }
 
 def plot_recall(recall, path):
     """Kept by how firmly the unquantized model held the answer, a trace per rung, which no single figure can show."""
@@ -1185,7 +1183,21 @@ def plot_recall(recall, path):
     plt.close(fig)
 
 
-OTHER_SET_COLORS = ["#2a78d6", "#3fb27f", "#b07fd6", "#d6b12a"]     # other quant sets, in reference.json order
+# Other quant sets, in reference.json order. Chosen for the dark card surface so every pair stays apart under
+# protanopia and deuteranopia (worst Machado-2009 OKLab dE 15+, normal vision 17+; the first four 22+ and 27):
+# the old blue and violet were dE 6.5 apart for a protan reader. Mostly separated by lightness, which survives
+# colour blindness where hue does not; each set also gets its own marker, so identity never rests on colour alone.
+OTHER_SET_COLORS = ["#4e68ce", "#49cffc", "#eee354", "#c22d6d"]
+OTHER_SET_MARKERS = ["o", "s", "^", "v"]
+
+def other_set_styles(job):
+    """{set display name: (color, marker)}, fixed by the set's place in reference.json, so a set keeps its colour
+    on every plot of the card whichever others a plot leaves out."""
+    info = load_reference_info(job) or {"references": []}
+    names = [ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})"
+             for ref in info["references"] for name in ref["ladders"]]
+    return {n: (OTHER_SET_COLORS[i % len(OTHER_SET_COLORS)], OTHER_SET_MARKERS[i % len(OTHER_SET_MARKERS)])
+            for i, n in enumerate(names)}
 
 def plot_recall_vs_size(recall, path):
     """Facts kept against VRAM: this card's ladder as a line, other published quants as unconnected, unlabelled
@@ -1209,8 +1221,9 @@ def plot_recall_vs_size(recall, path):
     for x, y, t in zip(xs, ys, tags):
         ax.annotate(t, (x, 100 * y), xytext=(0, -9), textcoords="offset points", ha="center", va="top",
                     fontsize=6.5, color=INK)
-    for s, color in zip(recall['sets'], OTHER_SET_COLORS):
-        ax.scatter([x for x, _ in s['points']], [100 * y for _, y in s['points']], marker="o", s=40, color=color,
+    for s in recall['sets']:
+        color, mk = recall['styles'][s['name']]
+        ax.scatter([x for x, _ in s['points']], [100 * y for _, y in s['points']], marker=mk, s=40, color=color,
                    edgecolor=SURF, linewidth=0.8, zorder=2, label=s['name'])
     ax.set_xlabel("VRAM in vLLM (GiB, weights as served)", color=INK2)
     ax.set_ylabel("facts kept (%)", color=INK2)
@@ -1231,7 +1244,6 @@ def plot_vs_reference(job, ref, path):
     import matplotlib.pyplot as plt
     SURF, INK, INK2, AXES, GRID = "#1f1f1f", "#ffffff", "#aaaaaa", "#555555", "#555555"
     OURS, BASE = "#eb6834", "#888888"
-    OTHERS = OTHER_SET_COLORS
     fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
@@ -1244,11 +1256,10 @@ def plot_vs_reference(job, ref, path):
     ys_all = [1.0]
     any_ext = False
     labels = []     # (x, y, text, color, ours)
-    others = iter(OTHERS)
+    styles = other_set_styles(job)
     for ti, t in enumerate(ref['traces']):
         xs, ys, ext, labs = zip(*t['points']); ys_all += ys
-        color = OURS if t['ours'] else next(others)
-        mk = "D" if t['ours'] else "o"
+        color, mk = (OURS, "D") if t['ours'] else styles[t['name']]
         ax.plot(xs, ys, color=color, lw=2, zorder=3 if t['ours'] else 2, label=t['name'])
         ax.scatter([x for x, e in zip(xs, ext) if not e], [y for y, e in zip(ys, ext) if not e],
                    marker=mk, s=36, color=color, edgecolor=SURF, zorder=4)
@@ -1435,7 +1446,7 @@ def do_card(job, args):
     # The companion: what each eval slice is, every slice compared, calibration, reproducing
     slices = slice_comparisons(job, qbench, meta['floor'], meta, meta['reference'])
     for sc in slices:
-        plot_slice(sc, os.path.join(job.main, sc['plot']))
+        plot_slice(sc, os.path.join(job.main, sc['plot']), other_set_styles(job))
     calib = {}
     for r in meta['revisions']:
         path = os.path.join(job.revdir(r['name']), "calibration.json")
