@@ -729,6 +729,28 @@ per request:
 
 **4c results: autosizing.** The cache is on by default whenever experts are offloaded.
 
+**The sizing contract** (stated 2026-11-08; the code follows it from then):
+
+- The cache takes the minimum it needs to operate.
+- A `--max-model-len` the user set comes first: it says how much context their application needs.
+  The reserve is `EXL3_KV_RESERVE` (default 1.0) such requests, not `--max-num-seqs` of them; the
+  multiplier is the concurrency the user wants to plan for. The cache takes the rest.
+- `--max-model-len auto` licenses the cache to favour speed: slots grow up to the share that held
+  decode within ~10% of resident for that concurrency (4b's rule, `target_share`), the rest goes to
+  context, and at least 4096 tokens of context are always kept. Until 2026-11-08, auto let slots take
+  everything past those 4096 tokens: on a 16 GiB card, Qwen3.5-35B-A3B 2.00bpw now keeps 103 slots
+  (40%) and 6.91 GiB of KV, so its full 262,144-token length fits.
+- `--cpu-offload-gb` caps the host memory experts take (below).
+
+*Changed 2026-11-08: `--cpu-offload-gb` now caps what is hosted.* As first built, placement hosted every
+matching expert whatever the flag said, and the flag set a floor on VRAM slots ("experts give up at most this
+much VRAM"). That is not what vLLM documents ("GiB to offload to CPU"), and on WSL it pinned past the WDDM
+budget for GPU-visible system memory (about half of physical RAM, across all processes): Qwen3.6-35B-A3B 4.00bpw
+on the 3060 pinned 14.2 GiB on a 31.9 GB host whatever the flag, and a smaller flag only starved KV (114 slots,
+0.04 GiB of KV at `--cpu-offload-gb 8`). Now each layer hosts the same share of its experts up to the flag,
+after what the towers spent; the rest are resident, and slots cache only the hosted ones. `--cpu-offload-gb 99`
+still means everything. The bullets below describe the first version where they mention the flag.
+
 - **Placement.** Every expert matching the selectors goes to the host. If host RAM is short, each
   layer gets the same share (`MemAvailable` less the larger of 4 GiB and 10% of RAM, split
   across local ranks). Hosted experts do not spend vLLM's budget. With no selector, dense EXL3

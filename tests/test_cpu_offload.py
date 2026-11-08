@@ -264,12 +264,12 @@ def test_staged_tables_address_each_offloaded_expert_in_the_window(offload):
                 f"staged {label} {e} points at the wrong rows"
 
 
-def test_cache_mode_hosts_every_matching_expert_outside_the_budget(offload, monkeypatch):
-    """With the cache on, slots give VRAM back, so the budget caps what is freed rather than
-    what is hosted: every matching expert goes to the host and none of it spends the budget."""
+def test_cache_mode_hosts_matching_experts_without_spending_the_counter(offload, monkeypatch):
+    """With the cache on and a budget that covers them, every matching expert is hosted, and
+    the hosted bytes are tracked apart from vLLM's counter (the quota already held them to it)."""
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
-    loader = offload(_Loader({r"re:experts\.[1357]\."}, max_bytes=512))
+    loader = offload(_Loader({r"re:experts\.[1357]\."}))
     cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
     param = _Collector()
     for e in range(8):
@@ -277,6 +277,41 @@ def test_cache_mode_hosts_every_matching_expert_outside_the_budget(offload, monk
     assert param.exl3_blocks["gate"].rows == {1: 0, 3: 1, 5: 2, 7: 3}
     assert loader.cpu_offload_bytes == 0
     assert cpu_offload._STATS["expert_bytes"] == 4 * 512
+
+
+def _two_layer_cache(offload, monkeypatch, loader):
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    offload(loader)
+    for l in (3, 4):
+        cpu_offload.declare_moe_layer(f"m.layers.{l}.mlp.experts")
+    param = _Collector()
+    for e in range(8):
+        cpu_offload.place_expert(param, _expert_tensor(e), "gate", e)
+    return param.exl3_blocks["gate"].rows
+
+
+def test_cache_mode_budget_caps_what_is_hosted(offload, monkeypatch):
+    """--cpu-offload-gb is a cap on host memory, as vLLM documents it: 2 layers x 8 experts x 3
+    projections x 512 bytes = 24 KiB of experts against a 12 KiB budget hosts half of each layer,
+    and the rest stay resident. It used to host everything and treat the flag as a floor on VRAM
+    slots, which on WSL pinned past the WDDM budget whatever the flag said."""
+    rows = _two_layer_cache(offload, monkeypatch, _Loader({"experts"}, max_bytes=12 << 10))
+    assert rows == {0: 0, 1: 1, 2: 2, 3: 3}
+
+
+def test_cache_mode_budget_rounds_down(offload, monkeypatch):
+    """A share that is not a whole expert never hosts more than the budget."""
+    rows = _two_layer_cache(offload, monkeypatch, _Loader({"experts"}, max_bytes=(12 << 10) - 1))
+    assert rows == {0: 0, 1: 1, 2: 2}
+
+
+def test_cache_mode_towers_spend_the_budget_first(offload, monkeypatch):
+    """vLLM offloads towers before any expert, into the same counter: experts get what is left."""
+    loader = _Loader({"experts"}, max_bytes=18 << 10)
+    loader.cpu_offload_bytes = 6 << 10
+    rows = _two_layer_cache(offload, monkeypatch, loader)
+    assert rows == {0: 0, 1: 1, 2: 2, 3: 3}
 
 
 def test_cache_mode_spreads_what_host_ram_allows(offload, monkeypatch):
@@ -313,21 +348,38 @@ def test_cache_mode_leaves_dense_tensors_alone_without_a_selector(offload, monke
 
 
 @pytest.mark.parametrize(
-    "available,reserve,hosted,may_free,expect",
+    "available,reserve,hosted,expect",
     [
-        (100, 30, 200, 1000, 7),  # slots take what the reserve leaves: 70 // (2 * 5)
-        (100, 30, 40, 1000, 4),   # never more than the hosted experts: 40 // 10
-        (100, 30, 200, 120, 8),   # the budget frees at most 120, so slots >= 80 even past the reserve
-        (100, 150, 200, 1000, 0),  # the reserve takes everything
-        (50, 0, 200, 0, 5),       # a budget floor beyond what is available is clipped to it
+        (100, 30, 200, 7),   # slots take what the reserve leaves: 70 // (2 * 5)
+        (100, 30, 40, 4),    # never more than the hosted experts: 40 // 10
+        (100, 150, 200, 0),  # the reserve takes everything
+        (50, 0, 200, 5),     # never more than what is available
     ],
 )
-def test_size_slots(available, reserve, hosted, may_free, expect):
+def test_size_slots(available, reserve, hosted, expect):
     from vllm_exl3_plugin import expert_cache
 
-    got = expert_cache.size_slots(available, reserve, hosted, may_free, slot_bytes=5, layers=2,
+    got = expert_cache.size_slots(available, reserve, hosted, slot_bytes=5, layers=2,
                                   per_layer_max=100)
     assert got == expect
+
+
+def test_size_slots_auto_cap_leaves_the_rest_to_kv():
+    """--max-model-len auto: slots stop at the target and the remainder is KV's, however much
+    VRAM there is; without the cap they would take everything past the reserve."""
+    from vllm_exl3_plugin import expert_cache
+
+    args = dict(available=1000, reserve=30, hosted=2000, slot_bytes=5, layers=2, per_layer_max=100)
+    assert expert_cache.size_slots(**args) == 97
+    assert expert_cache.size_slots(**args, cap=40) == 40
+    assert expert_cache.size_slots(**{**args, "available": 300}, cap=40) == 27, "the cap is a ceiling, not a floor"
+
+
+@pytest.mark.parametrize("streams,share", [(1, 0.4), (0.5, 0.4), (2, 0.5), (8, 0.7), (64, 1.0)])
+def test_target_share_follows_the_measured_rule(streams, share):
+    from vllm_exl3_plugin import expert_cache
+
+    assert expert_cache.target_share(streams) == pytest.approx(share)
 
 
 def test_dense_place_respects_opt_in_component_and_budget(offload):

@@ -29,10 +29,14 @@ Sizing (phase 4c). On by default whenever experts are offloaded; ``EXL3_EXPERT_S
 is "auto" (the default), 0 for off, or a fixed count per layer (a fraction of the
 layer's experts if it contains a dot). Auto sizes at vLLM's ``determine_available_memory``,
 after the memory profile and before KV and graph capture: KV keeps
-``EXL3_KV_RESERVE`` (1.0) times what one ``--max-model-len`` request needs, slots
-take the rest, and ``--cpu-offload-gb`` caps how much VRAM experts give up. With
-``--max-model-len auto`` the reserve is for 4096 tokens and vLLM fits the length to
-what is left. See `size_slots`. ``EXL3_PROMOTE_PER_STEP`` (32) bounds
+``EXL3_KV_RESERVE`` (1.0) times what one ``--max-model-len`` request needs, and slots
+take the rest: a length the user set is what their application needs, so it comes
+first. ``EXL3_KV_RESERVE`` is also the concurrency the cache sizes for. With
+``--max-model-len auto`` the user has left the trade to us: the reserve is a floor of
+4096 tokens, slots stop at the share of experts in VRAM that measured within ~10% of
+resident decode for that concurrency (`target_share`), and the rest goes to context,
+which vLLM fits the length to. ``--cpu-offload-gb`` caps what is hosted
+(`cpu_offload._host_quota`). See `size_slots`. ``EXL3_PROMOTE_PER_STEP`` (32) bounds
 promotions per step across all layers, whatever the batch: growing it with decode rows
 thrashed, measured at 2-16 streams (docs/expert-cache.md, 4b). ``EXL3_CACHE_STATS``
 logs hit rates every that many steps.
@@ -40,6 +44,7 @@ logs hit rates every that many steps.
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy
@@ -63,21 +68,29 @@ def _slots_per_layer(experts: int) -> int:
     return int(float(spec) * experts) if "." in spec else int(spec)
 
 
-def size_slots(available: int, reserve: int, hosted: int, may_free: int, slot_bytes: int,
-               layers: int, per_layer_max: int) -> int:
+def target_share(streams: float) -> float:
+    """Share of a layer's experts in VRAM that kept decode within ~10% of resident at this
+    many concurrent streams: ~0.4 at 1, +0.1 per doubling (docs/expert-cache.md, 4b)."""
+    return min(1.0, 0.4 + 0.1 * math.log2(max(streams, 1.0)))
+
+
+def size_slots(available: int, reserve: int, hosted: int, slot_bytes: int,
+               layers: int, per_layer_max: int, cap: int | None = None) -> int:
     """Slots per layer for the auto mode.
 
     `available` is the KV memory vLLM measured with every hosted expert off the device,
-    `reserve` the KV to keep, `hosted` the hosted experts' bytes, `may_free` how much VRAM
-    the budget lets experts give up, and `slot_bytes` one slot across its projections.
+    `reserve` the KV to keep, `hosted` the hosted experts' bytes, and `slot_bytes` one slot
+    across its projections.
 
-    Slots take what the reserve leaves. The budget is a floor on slots: experts never give
-    up more than it allows, even if KV then falls short of the reserve. Nothing beyond the
-    hosted experts, and nothing beyond what is available.
+    Slots take what the reserve leaves: nothing beyond the hosted experts, and nothing
+    beyond what is available. --cpu-offload-gb is not a floor here; it already capped what
+    is hosted (`cpu_offload._host_quota`), and experts it left out are resident. `cap`, per
+    layer, stops slots at a target (--max-model-len auto), leaving the rest to KV.
     """
     want = max(available - reserve, 0)
-    floor = max(hosted - may_free, 0)
-    target = min(max(want, floor), hosted, available)
+    target = min(want, hosted, available)
+    if cap is not None:
+        return min(per_layer_max, cap, target // max(slot_bytes * layers, 1))
     return min(per_layer_max, target // max(slot_bytes * layers, 1))
 
 
@@ -477,16 +490,18 @@ def build(layers: list, available: int, worker) -> int:
                      for b in first.exl3_host_blocks.values())
     per_layer_max = max(max(len(b.rows) for b in l.exl3_host_blocks.values()) for l in layers)
     hosted = cpu_offload._STATS["expert_bytes"]
-    loader = cpu_offload._uva_loader()
-    may_free = (max(loader.cpu_offload_max_bytes - loader.cpu_offload_bytes, 0)
-                if loader is not None else hosted)
     if cpu_offload.cache_mode() == "fixed":
         slots, how = min(_slots_per_layer(E), per_layer_max), "fixed by EXL3_EXPERT_SLOTS"
         reserve = None
     else:
         reserve, how = _kv_reserve(worker)
-        slots = size_slots(available, reserve, hosted, may_free, slot_bytes, len(layers),
-                           per_layer_max)
+        cap = None
+        if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
+            # auto: slots up to the target share, counting the experts that stayed resident
+            streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
+            cap = max(math.ceil(target_share(streams) * E) - (E - per_layer_max), 0)
+            how += f"; slots stop at {100 * target_share(streams):.0f}% of experts for {streams:g} stream(s)"
+        slots = size_slots(available, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
     if slots <= 0:
         logger.warning(
             "expert cache: no VRAM left for slots after the KV reserve (%s); experts are "
@@ -527,10 +542,4 @@ def build(layers: list, available: int, worker) -> int:
         "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1
         else "fewer than 1 (single-stream decode will be slower)",
     )
-    if reserve is not None and available - used < reserve:
-        logger.warning(
-            "expert cache: --cpu-offload-gb keeps more experts in VRAM than the KV reserve "
-            "allows (%.2f GiB of KV against %.2f reserved). Raise --cpu-offload-gb to give "
-            "KV its reserve.", (available - used) / (1 << 30), reserve / (1 << 30),
-        )
     return used

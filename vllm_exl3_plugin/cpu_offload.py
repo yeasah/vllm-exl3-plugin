@@ -173,8 +173,8 @@ def _uva_loader():
 
 def _count(loader, prefix: str, nbytes: int, tensors: int = 1, budget: bool = True) -> None:
     """Record an offloaded tensor. With `budget` False (experts under the cache) it does
-    not spend vLLM's budget: slots return VRAM, so the budget caps what is freed, not
-    what is hosted. See `expert_cache.size_slots`."""
+    not spend vLLM's counter: `_host_quota` already holds the hosted experts to the
+    budget, once, from what the towers left."""
     if budget:
         loader.cpu_offload_bytes += nbytes
     else:
@@ -315,21 +315,29 @@ _HOST_MARGIN = 4 << 30
 
 
 def _host_quota(experts: int, nbytes: int) -> int:
-    """How many experts per layer and projection the host can hold, decided once.
+    """How many experts per layer and projection the host holds, decided once.
 
-    Every expert of every declared layer, if host RAM allows; otherwise the same share of
-    each layer, so placement stays even. Assumes the three projections' trellises are the
-    same size, which holds for gate, up and down (k x n either way)."""
+    As many as --cpu-offload-gb allows, after what the towers took (they are offloaded
+    first and spend the same budget), and as host RAM allows; the same share of every
+    layer, so placement stays even. The rest stay resident. The flag is a cap on host
+    memory, as vLLM documents it: on WSL that memory is pinned against a system-wide WDDM
+    budget, so hosting more than asked is not free. Assumes the three projections'
+    trellises are the same size, which holds for gate, up and down (k x n either way)."""
     if _STATS["quota"] is None:
         layers = max(len(_STATS["moe_layers"]), 1)
         want = layers * experts * 3 * nbytes
         free = _mem_available() // _local_ranks() - max(_HOST_MARGIN, _mem_total() // 10)
-        share = 1.0 if want <= free else max(free, 0) / want
-        _STATS["quota"] = math.ceil(share * experts)
+        loader = _uva_loader()
+        budget = (max(loader.cpu_offload_max_bytes - loader.cpu_offload_bytes, 0)
+                  if loader is not None else want)
+        room = max(min(free, budget), 0)
+        share = 1.0 if want <= room else room / want
+        _STATS["quota"] = math.floor(share * experts)
         if share < 1.0:
             logger.warning(
-                "cpu-offload: host RAM holds %.2f of %.2f GiB of routed experts; offloading "
-                "%d of %d per layer for the expert cache", max(free, 0) / (1 << 30),
+                "cpu-offload: %s holds %.2f of %.2f GiB of routed experts; offloading %d of %d "
+                "per layer for the expert cache, the rest stay in VRAM",
+                "--cpu-offload-gb" if budget <= free else "host RAM", room / (1 << 30),
                 want / (1 << 30), _STATS["quota"], experts,
             )
     return _STATS["quota"]
