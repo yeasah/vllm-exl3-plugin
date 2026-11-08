@@ -4,7 +4,9 @@
 
 # EXL3 quantizations of [{{ base_model }}](https://huggingface.co/{{ base_model }})
 
-These quantizations can be used with [exllamav3](https://github.com/turboderp-org/exllamav3) or vLLM via [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
+{% if base_revision %}Made from commit [`{{ base_revision[:8] }}`](https://huggingface.co/{{ base_model }}/tree/{{ base_revision }}) of the base model.
+
+{% endif %}These quantizations can be used with [exllamav3](https://github.com/turboderp-org/exllamav3) or vLLM via [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
 {% if embed_quantized %}
 The token embedding is quantized too, which needs exllamav3 1.6.4 or later.
 {% endif %}{% if composite %}

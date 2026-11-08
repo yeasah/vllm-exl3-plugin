@@ -24,6 +24,8 @@ class Job:
     """
     def __init__(self, args):
         self.base_repo = args.model
+        self._base_arg = getattr(args, "base_revision", None)
+        self._base_rev = None
         self.name = f"{args.model.split('/')[1]}-exl3"
         self.repo = f"{args.org}/{self.name}"
         self.dir = os.path.join(args.workdir, self.name)
@@ -57,6 +59,36 @@ class Job:
         return sorted(r for r in os.listdir(self.dir)
                       if r not in ('main', 'logs') and not r.startswith('_')
                       and os.path.isdir(self.revdir(r)))
+
+    # The base model's commit this job works from: <job>/base.json. Resolving the repo unpinned followed
+    # whatever `main` was that day, so one job's quants, baselines and references could come from different
+    # commits (Qwen3.8-27B: three in two weeks, here README and template only, and nothing flagged it).
+    # First use records what `main` is now; --base-revision moves the record, and says so.
+    def base_revision(self, record=True):
+        """The pinned commit, or 'main' when record=False and nothing is recorded (card paths never record)."""
+        if self._base_rev:
+            return self._base_rev
+        path = os.path.join(self.dir, "base.json")
+        rec = json.load(open(path)) if os.path.isfile(path) else None
+        rev = rec and rec["revision"]
+        if self._base_arg and (not rec or not rec["revision"].startswith(self._base_arg)):
+            rev = os.path.basename(snapshot_download(repo_id=self.base_repo, revision=self._base_arg,
+                                                     allow_patterns=["config.json"]).rstrip("/"))
+            print(f"=== base revision of {self.base_repo}: {rec['revision'][:8] if rec else 'unrecorded'} -> {rev[:8]} ===")
+        elif not rec:
+            if not record:
+                return "main"
+            rev = os.path.basename(snapshot_download(repo_id=self.base_repo, allow_patterns=["config.json"]).rstrip("/"))
+            print(f"=== base revision of {self.base_repo}: recorded {rev[:8]}, its main today ===")
+        if not rec or rev != rec["revision"]:
+            os.makedirs(self.dir, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump({"repo": self.base_repo, "revision": rev, "recorded": stamp()}, f, indent=1)
+        self._base_rev = rev
+        return rev
+
+    def base_snapshot(self, **kw):
+        return snapshot_download(repo_id=self.base_repo, revision=self.base_revision(), **kw)
 
     def baseline_revisions(self):
         if not os.path.isdir(self.baseline):
@@ -204,7 +236,7 @@ def eval_generator(job, args):
     """(model path, backend args) for the eval traces. Never an EXL3 checkpoint: eval text from a
     quant scores one calibration against another quant's sampled text (docs/calibration.md)."""
     src = args.eval_generator or job.base_repo
-    path = src if os.path.isdir(src) else snapshot_download(repo_id=src)
+    path = src if os.path.isdir(src) else snapshot_download(repo_id=src) if args.eval_generator else job.base_snapshot()
     qc = json.load(open(os.path.join(path, "config.json"))).get("quantization_config") or {}
     if qc.get("quant_method") == "exl3" or os.path.isfile(os.path.join(path, "quantization_config.json")):
         raise SystemExit(f"--eval-generator {src} is an EXL3 checkpoint; eval traces must come from the base model or an FP8/bf16 release")
@@ -224,7 +256,7 @@ def collect_metadata(job, qbench):
     data = { 'this_model': job.repo,
              'base_model': job.base_repo }
 
-    base_sizes = tensor_survey_remote(job.base_repo, 'main')
+    base_sizes = tensor_survey_remote(job.base_repo, job.base_revision(record=False))
     data['base_disk_bytes'] = base_sizes['total']
     data['multimodal'] = base_sizes['encoder'] > 0
 
@@ -386,7 +418,7 @@ def contamination_map(job, info, slices):
         with open(cache) as f:
             return json.load(f)
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(job.base_repo)
+    tok = AutoTokenizer.from_pretrained(job.base_repo, revision=job.base_revision(record=False))
     snippets = {sl: sn for sl in slices if (sn := eval_prompt_snippets(job, sl, tok))}
     out = {}
     for ref in info.get("references", []):
@@ -820,7 +852,7 @@ def tensor_survey_remote(repo, revision):
                 yield name, b - a
     return tensor_survey(tensors())
     
-def has_chat_template(repo):
+def has_chat_template(job):
     """Does the base repo ship a chat template (standalone file or inline)?
 
     Base models often do not (meta-llama/Llama-3.2-3B), and qbench's `render` mode
@@ -829,7 +861,7 @@ def has_chat_template(repo):
     """
     # From the local snapshot, which every stage downloads anyway: no Hub API call, so it
     # works under HF_HUB_OFFLINE=1 and on a host whose route to the Hub is flaky
-    path = snapshot_download(repo_id=repo)
+    path = job.base_snapshot()
     if any(os.path.isfile(os.path.join(path, f)) for f in ("chat_template.jinja", "chat_template.json")):
         return True
     tc = os.path.join(path, "tokenizer_config.json")
@@ -1375,6 +1407,14 @@ def do_card(job, args):
         plot_recall(meta['recall'], os.path.join(job.main, "recall.png"))
         if meta['recall']['sets']:
             plot_recall_vs_size(meta['recall'], os.path.join(job.main, "recall_vs_size.png"))
+    # The base commit each revision declares it was made from: the card names it, and a ladder made from different
+    # commits is refused rather than published as one
+    bases = {json.dumps(json.load(open(p)).get("base"), sort_keys=True)
+             for r in meta['revisions'] if os.path.isfile(p := os.path.join(job.revdir(r['name']), "calibration.json"))}
+    bases.discard("null")
+    if len(bases) > 1:
+        raise SystemExit(f"=== revisions declare different base commits ({', '.join(sorted(bases))}): requantize or fix the records ===")
+    meta['base_revision'] = json.loads(bases.pop())["revision"] if bases else None
     # A quantized token embedding: conditional, because reading one needs a newer exllamav3 than the checkpoints before it
     meta['embed_quantized'] = any(json.load(open(os.path.join(job.revdir(r['name']), "calibration.json"))).get("embedding", {}).get("embed_bits", 16) < 16
                                   for r in meta['revisions'] if os.path.isfile(os.path.join(job.revdir(r['name']), "calibration.json")))
@@ -1519,7 +1559,7 @@ def qbench_project(job, args, slice_, arms, results=None):
                 "logit_cache": { "dir": logit_cache_dir(job, args),
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
-                              "repo": job.base_repo, "options": { "streaming": True } } ] +
+                              "repo": job.base_repo, "revision": job.base_revision(), "options": { "streaming": True } } ] +
                           [ { "label": label, "group": "threshold", "engine": "transformers", "source": os.path.abspath(path),
                               "options": { "streaming": True } } if label.startswith("thr:") else
                             { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
@@ -1530,7 +1570,7 @@ def qbench_project(job, args, slice_, arms, results=None):
     if slice_ == "raw":
         # A guard, not a target: raw web text framed as nothing matches no real use
         project["test_data"] = dict(RAW_SPEC)
-        project["tokenizer"] = { "repo": job.base_repo, "template": False }
+        project["tokenizer"] = { "repo": job.base_repo, "revision": job.base_revision(), "template": False }
     else:
         project["test_trace"] = os.path.abspath(job.eval_trace(slice_))
     return project
@@ -2109,8 +2149,9 @@ def published_generation_config(job):
     mode_name = publish["mode"]
     mode = {k: v for k, v in p["modes"][mode_name].items() if k in GC_SAMPLING_KEYS}
     base = None
-    if HfApi().file_exists(job.base_repo, "generation_config.json"):
-        with open(hf_hub_download(job.base_repo, "generation_config.json")) as f:
+    rev = job.base_revision(record=False)
+    if HfApi().file_exists(job.base_repo, "generation_config.json", revision=rev):
+        with open(hf_hub_download(job.base_repo, "generation_config.json", revision=rev)) as f:
             base = json.load(f)
     if base is None:
         action, prior, gc = "added", {}, {**mode, "do_sample": True}
@@ -2162,11 +2203,11 @@ def resolve_sampling_profile(job, args, path):
 
 def trace_setup(job, args):
     """(base path, sampling args, tries) shared by both trace commands, or None to stop."""
-    if not has_chat_template(job.base_repo):
+    if not has_chat_template(job):
         print(f"=== {job.base_repo} has no chat template: conversational traces do not apply; "
               f"quantize with --calibration default ===")
         return None
-    path = snapshot_download(repo_id=job.base_repo)
+    path = job.base_snapshot()
     os.makedirs(job.traces, exist_ok=True)
     profile = resolve_sampling_profile(job, args, path)
     print(f"=== sampling: {profile or 'exllamav3 default (explicitly requested)'} ===")
@@ -2180,7 +2221,7 @@ def do_recall_slice(job, args):
     reference pass, so that a model too thin for the metric is refused before any arm is scored. Each step is skipped
     when its output exists, and the reference's logits stay cached for `qbench --slices recall`."""
     x = args.exllamav3dir
-    path = snapshot_download(repo_id=job.base_repo)
+    path = job.base_snapshot()
     pool = job.eval_trace(RECALL_POOL)
     os.makedirs(os.path.dirname(pool), exist_ok=True)
     if not os.path.isfile(pool):
@@ -2432,7 +2473,7 @@ def do_baseline(job, args):
     uncalibrated 8bpw (for models with a chat template). One task pool, spread over -d. A rung or
     generator already present (made earlier, or brought by `fetch --uncalibrated`) is kept if the
     current converter made it. Uncalibrated jobs cannot resume; a failed one restarts."""
-    path = snapshot_download(repo_id=job.base_repo)
+    path = job.base_snapshot()
     specs = bit_specs(args.bits)
     present = [os.path.join(job.baseline, rev) for rev, _, _ in specs
                if os.path.isfile(os.path.join(job.baseline, rev, "quantization_config.json"))]
@@ -2442,7 +2483,7 @@ def do_baseline(job, args):
             return False
     if refuse_converter_mismatch(present, args, "baseline"):
         return False
-    gen_wanted = args.generator and has_chat_template(job.base_repo)
+    gen_wanted = args.generator and has_chat_template(job)
     if gen_wanted and os.path.isfile(os.path.join(job.generator, "quantization_config.json")):
         for p, why in converter_mismatches([job.generator], args).items():
             # traces only; no comparison runs against it, so a note rather than a refusal
@@ -2618,7 +2659,7 @@ def do_measure(job, args):
     from safetensors.torch import load_file, save_file
     if not os.path.isfile(job.cal_data):
         print("=== no calibration (run traces first) ==="); return False
-    path = snapshot_download(repo_id=job.base_repo)
+    path = job.base_snapshot()
     os.makedirs(category_dir(job), exist_ok=True)
     cal = load_file(job.cal_data)["input_ids"]
     hess = cal[:MEASURE_H_ROWS]
@@ -3000,7 +3041,7 @@ def embed_bits_for(bits, choice):
 
 
 def do_quantize(job, args):
-    path = snapshot_download(repo_id=job.base_repo)
+    path = job.base_snapshot()
     if args.calibration == "mix" and not os.path.isfile(job.cal_data):
         print(f"=== no calibration trace at {job.cal_data}: run `traces` first "
               f"(or --calibration default for the bundled corpus) ===")
@@ -3110,6 +3151,7 @@ def do_quantize(job, args):
             if hess:
                 rec["rounding"] = rounding
             rec["embedding"] = { "embed_bits": embed_bits_for(bits, args.embed_bits) }
+            rec["base"] = { "repo": job.base_repo, "revision": job.base_revision() }
             with open(os.path.join(revdir, "calibration.json"), "w") as f:
                 json.dump(rec, f, indent=1)
             return True
@@ -3124,6 +3166,9 @@ def main():
     parser.add_argument('-x', '--exllamav3dir', default='../deps/exllamav3')
     parser.add_argument('-w', '--workdir', default='work')
     parser.add_argument('-m', '--model', required=True)
+    parser.add_argument('--base-revision', default=None,
+                        help="pin the base model to this commit (recorded in <job>/base.json); without it, a job "
+                             "uses its recorded commit, or records `main` on first use")
     parser.add_argument('-o', '--org', default='yeasah')
     subparsers = parser.add_subparsers()
 
