@@ -1579,7 +1579,10 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     """One slice over several GPUs: the bf16 reference and noise floor first, alone (two scorers
     missing the cache together would each compute it), then the quants split across the GPUs
     reading it from the shared cache, then their results merged into qb_<slice>.json in arm
-    order. The reference and floor come from the reference pass; every part recomputes neither."""
+    order. The reference and floor come from the reference pass; every part recomputes neither.
+    GGUF arms are not split: llama.cpp holds a model whole, and a 27B Q4_K_M (16 GB) fills more than one
+    16 GiB card where exllamav3 streams it. They run last, in one part that sees every GPU, as
+    qbench_parity runs a bf16 GGUF."""
     part_dir = os.path.join(job.main, "_qbench_parts")
     os.makedirs(part_dir, exist_ok=True)
     def part(name, part_arms, slot):
@@ -1594,8 +1597,10 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     if ref is None:
         report_failures(["reference"], f"qbench {sl}", {"reference": job.log(f"qbench-{sl}-ref")})
         return False
-    k = min(len(slots), len(sl_arms))
-    groups = [sl_arms[i::k] for i in range(k)]                # round-robin: neighbouring bitrates spread
+    split = [a for a in sl_arms if not a[1].endswith(".gguf")]
+    whole = [a for a in sl_arms if a[1].endswith(".gguf")]
+    k = min(len(slots), len(split))
+    groups = [split[i::k] for i in range(k)]                  # round-robin: neighbouring bitrates spread
     results = {}
     def task(i):
         def run(slot, echo):
@@ -1606,6 +1611,13 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     failed = run_jobs(tasks, slots[:k], "qbench")
     if not report_failures(failed, "qbench", {name: job.log(f"qbench-{sl}-p{i}") for i, (name, _) in enumerate(tasks)}):
         return False
+    if whole:
+        print(f"=== qbench {sl}: {len(whole)} GGUF quants on gpu {','.join(slots)} ===", flush=True)
+        results[k] = part("gguf", whole, ",".join(slots))
+        if results[k] is None:
+            report_failures([f"{sl} GGUF part"], "qbench", {f"{sl} GGUF part": job.log(f"qbench-{sl}-gguf")})
+            return False
+        k += 1
     with open(ref) as f:
         merged = [r for r in json.load(f) if r.get("group") in ("reference", "noise_floor")]
     by_label = {}
@@ -1619,7 +1631,7 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     merged += [by_label[label] for label, _ in sl_arms]
     with open(out or os.path.join(job.main, f"qb_{sl}.json"), "w") as f:
         json.dump(merged, f, indent=2)
-    print(f"=== qbench {sl}: {len(sl_arms)} quants over {k} GPUs, merged ===", flush=True)
+    print(f"=== qbench {sl}: {len(sl_arms)} quants over {len(slots)} GPUs, merged ===", flush=True)
     return True
 
 def qbench_parity(job, args, sl, parity_arms, slots, script):
@@ -1817,7 +1829,10 @@ def do_qbench(job, args):
         with open(qbench_file, "w") as f:                        # the whole slice, as run (or as merged)
             yaml.safe_dump(qbench_project(job, args, sl, sl_arms, results=None if out == final else out), f, sort_keys=False)
         if len(slots) == 1 or len(sl_arms) < 2:
-            rc = run_logged([ "python3", script, qbench_file, "-d", "0" ], job.log(f"qbench-{sl}"), gpu_env(slots[0]))
+            # a lone GGUF arm still gets every GPU given: llama.cpp holds it whole (see qbench_parallel)
+            gguf = any(p.endswith(".gguf") for _, p in sl_arms)
+            rc = run_logged([ "python3", script, qbench_file, "-d", "0" ], job.log(f"qbench-{sl}"),
+                            gpu_env(",".join(slots) if gguf else slots[0]))
             if rc:
                 print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
                 return False
@@ -2007,8 +2022,9 @@ def device_slots(spec):
     return [d.strip() for d in str(spec).split(",") if d.strip()]
 
 def gpu_env(slot):
-    """Each job sees only its own GPU, as device 0 -- one device per process, so nothing here ever
-    runs a multi-GPU context (pytorch#196258 aside, there is nothing to share). PCI order, so
+    """Each job sees only its own GPU, as device 0 -- one device per process, so nothing here
+    runs a multi-GPU torch context (pytorch#196258 aside, there is nothing to share). A GGUF part
+    passes several ("0,1"): llama.cpp splits across them, while torch keeps to device 0. PCI order, so
     the indices are nvidia-smi's."""
     return {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": slot}
 
