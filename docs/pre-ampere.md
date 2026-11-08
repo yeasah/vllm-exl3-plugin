@@ -16,6 +16,9 @@ being acted on, recorded so the question does not get reopened cold.** Nothing
 below is a task; if it ever becomes one, the entry point is "Recommended order"
 and step 1 is the only cheap step.
 
+**Update (2026-11-07): upstream did the Turing kernel work.** See
+[Since then](#since-then-2026-11-07) at the end; Volta is still not a task.
+
 ## The toolchain is the wall, not the kernels
 
 CUDA 13.0 removed offline compilation for Maxwell, Pascal and Volta. Measured on
@@ -163,3 +166,23 @@ the two in `CUDA_SUPPORTED_ARCHS`. Not useful — the pair has no capacity story
 and the slower card sets the pace — but it is evidence that vLLM's TP path
 tolerates a mixed-architecture group further than the build config suggests.
 Recorded as an observation, not a direction.
+
+## Since then (2026-11-07)
+
+- **exllamav3 builds for sm_75 upstream,** already in our fork. Step 2 of "Recommended order" is
+  therefore upstream's work, not ours. Which of the three blockers above it solved, and how (the
+  `cp.async` and `m16n8k16` fallbacks, the 90 KiB shared-memory request against Turing's 64), is
+  unverified here. The plugin's own requirement ("compute capability 8.0+" in README.md and
+  `install.sh`) stands until something serves on a Turing card. First recon: a serving image built
+  with sm_75 in the architecture list, on a GTX 1650 (4 GiB, ~3 free beside a desktop), with
+  Qwen3-0.6B. Turing has no bf16, so it serves in fp16, and models that overflow there are out.
+  **It serves (2026-11-07):** a serving image built with sm_75 runs Qwen3-0.6B at 2.75 bpw on the
+  GTX 1650, with output as expected of a 600M model at that rate. The card cannot test MoE or TP,
+  and sm_75 lacks FP8 and FlashAttention; whether any KV cache quantization works there is open.
+  FUTURE `sm75-serving`.
+- **Volta has an open upstream PR** (exllamav3 #404), so the kernel side may also arrive without
+  us. The toolchain wall above is unchanged: current vLLM and PyTorch do not support sm_70. The
+  actively maintained sm_70 vLLM fork is 1Cat-vLLM (above), pinned to torch 2.10 and an older CUDA toolkit, and
+  may lack what this plugin relies on (our vLLM patches, KV cache quantization). Performance on
+  sm_70 would be poor even if it all worked. Not a task, and not on FUTURE.md: recorded so the
+  question is not reopened cold.

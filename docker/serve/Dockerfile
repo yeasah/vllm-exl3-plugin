@@ -16,7 +16,7 @@ RUN apt-get update --yes && \
 # environment
 ENV HOME=/root
 ENV CUDA_HOME=/usr/local/cuda
-ENV TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"
+ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0 10.0 12.0"
 ENV VIRTUAL_ENV=$HOME/.venv
 RUN python -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$CUDA_HOME/bin:$PATH"

@@ -182,9 +182,9 @@ class EXL3Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # exllamav3's kernels are inline-PTX mma.sync + cp.async; sm_80 floor,
-        # and there is no ROCm support at all.
-        return 80
+        # exllamav3 supports down to sm_75, partially tested.
+        # ROCm exists, untested.
+        return 75
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
