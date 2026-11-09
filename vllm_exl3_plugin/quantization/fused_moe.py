@@ -251,6 +251,7 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        cpu_offload.drain_host_copies()   # host rows are written asynchronously during load
         projections = {"gate": ("w13_", _GATE), "up": ("w13_", _UP),
                        "down": ("w2_", _DOWN)}
         bits = {}

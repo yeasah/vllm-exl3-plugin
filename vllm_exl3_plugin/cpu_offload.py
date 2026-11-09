@@ -45,6 +45,7 @@ for what offload costs and how to choose what to give it.
 
 from __future__ import annotations
 
+import collections
 import ctypes
 import functools
 import math
@@ -259,7 +260,7 @@ def place(param, t: torch.Tensor) -> torch.Tensor:
         return t.to(param.exl3_device).contiguous()
 
     host = _pinned(t.shape, t.dtype)
-    host.copy_(t)
+    _host_copy(host, t)
     _count(loader, param.exl3_prefix, host.numel() * host.element_size())
     return get_accelerator_view_from_cpu_tensor(host)
 
@@ -389,8 +390,46 @@ def place_expert(param, t: torch.Tensor, label: str, expert_id: int) -> torch.Te
             f"shape {list(t.shape)}, others {list(block.host.shape[1:])}; exl3_mgemm "
             "takes one shape per call"
         )
-    block.host[row].copy_(t)
+    _host_copy(block.host[row], t)
     return block.view[row]
+
+
+#: Host copies in flight: (future, src, dst), the tensors held until the bytes land
+_COPIES: collections.deque = collections.deque()
+_COPY_POOL = None
+
+
+def _host_copy(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """dst.copy_(src) into pinned host memory, as memmoves on the plugin's own copy threads.
+
+    Not torch's copy_: it parallelizes a CPU copy this size over its OpenMP pool, whose threads spin-wait
+    between copies (libgomp's default). At one copy per expert a dozen-plus threads sat at ~90% CPU and
+    starved the loader: each 0.5 MiB copy took ~640 us instead of ~46 (Qwen3.6-35B-A3B 4.00bpw, hosted
+    copies 32-37 s of a 62-68 s load). OMP_WAIT_POLICY=PASSIVE cures that, but libgomp reads it once, as
+    torch loads, before the plugin registers. A single-threaded memmove fixed the fast host and slowed a
+    WSL host (2 -> 3 s per layer): first touches of the mapped checkpoint are dear there, and parallelism
+    is what paid. So: memmove (it releases the GIL) on EXL3_HOST_COPY_THREADS threads that sleep when
+    idle, asynchronous, drained by `drain_host_copies` before anything reads the rows."""
+    global _COPY_POOL
+    if src.device.type != "cpu" or src.dtype != dst.dtype or not src.is_contiguous() or src.numel() != dst.numel():
+        dst.copy_(src)
+        return
+    if _COPY_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        n = int(os.environ.get("EXL3_HOST_COPY_THREADS", str(min(8, os.cpu_count() or 1))))
+        _COPY_POOL = ThreadPoolExecutor(max_workers=max(1, n), thread_name_prefix="exl3-host-copy")
+    fut = _COPY_POOL.submit(ctypes.memmove, dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size())
+    _COPIES.append((fut, src, dst))
+    # bounded: a loader faster than the copies must not hold an unbounded backlog of source tensors
+    while len(_COPIES) > 64 * _COPY_POOL._max_workers:
+        _COPIES.popleft()[0].result()
+
+
+def drain_host_copies() -> None:
+    """Wait for every host copy in flight; called wherever offloaded rows are first read."""
+    while _COPIES:
+        _COPIES.popleft()[0].result()
 
 
 #: Batches of more than this many tokens stage a layer's offloaded experts into
@@ -427,6 +466,7 @@ def build_staging() -> None:
     counted as model memory. Tables are static, since the window never moves, so
     a captured graph can hold them.
     """
+    drain_host_copies()
     if not _HOSTED:
         return
     plans, size = [], 0
@@ -564,6 +604,7 @@ def report_once() -> None:
     selector with a typo in it matches nothing, offloads nothing, logs nothing
     and serves at full speed, which in a placement sweep reads as a result.
     """
+    drain_host_copies()
     if _STATS.get("reported"):
         return
     _STATS["reported"] = True

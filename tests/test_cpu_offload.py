@@ -435,6 +435,7 @@ def test_dense_place_respects_opt_in_component_and_budget(offload):
     cpu_offload.place(Param("suh"), torch.ones(8, dtype=torch.half))
     assert loader.cpu_offload_bytes == 0, "a scale vector was offloaded"
     host = cpu_offload.place(Param("trellis"), t)
+    cpu_offload.drain_host_copies()  # host copies are asynchronous; the load path drains before reading
     assert loader.cpu_offload_bytes == 1024 and torch.equal(host, t)
     assert host.data_ptr() != t.data_ptr(), "offload must copy out of the checkpoint mmap"
     cpu_offload.place(Param("trellis"), t)
