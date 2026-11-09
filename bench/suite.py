@@ -319,32 +319,25 @@ ENTRIES: list[Entry] = [
         "testing the backend at this bump",
     ),
     Entry(
-        label="muse-glimmer-30B 2.0bpw native",
-        model="turboderp/Muse-Glimmer-30B-exl3",
-        revision="2.00bpw",
+        label="muse-glimmer-30B 2.5bpw native",
+        model="yeasah/Muse-Glimmer-30B-exl3",
+        revision="2.50bpw-H5",
         tier="full",
         model_impl="auto",
         gpu_memory_utilization=0.92,
-        known_broken="vLLM's native MuseGlimmer builds the vision adapter as a "
-        "plain `nn.Linear` (`muse_glimmer.py`: `self.c_fc = nn.Linear(...)`), "
-        "which never reaches `get_quant_method`, so the checkpoint's trellis "
-        "tensors have nowhere to land. Measured at v0.28.0: `ValueError: There "
-        "is no module or parameter named 'vision_adapter.c_fc.mul1' in "
-        "MuseGlimmerForCausalLM. The available parameters belonging to "
-        "vision_adapter.c_fc (Linear) are: {'vision_adapter.c_fc.weight'}`.",
-        exercises="the native implementation of a checkpoint the matrix already "
-        "serves through the Transformers backend -- the pair the MiniCPM "
-        "entries make for a text-only model, which nothing makes for a "
-        "multimodal one.\n\n"
-        "It is kept as a known failure rather than dropped because the failure "
-        "is the coverage: the day upstream builds that adapter as a vLLM linear, "
-        "this entry starts capturing and `check` says so. That is how the fix "
-        "gets noticed, and it is cheaper than remembering to retest.\n\n"
-        "**`--language-model-only` does not bypass it** -- an obvious-looking "
-        "workaround, tested 2026-08-25 and reported still failing, so the entry "
-        "is not merely un-run for want of the right flag. An earlier version of "
-        "this text offered that flag as a second way the entry might start "
-        "capturing; it is not one",
+        # 2.50bpw plus a dense vision tower, profiled on a max-size dummy image, needs more than 16 GiB;
+        # the native language model is what this entry is for, and the backend entry covers vision
+        language_model_only=True,
+        exercises="the native implementation of a multimodal checkpoint, the pair the MiniCPM entries make "
+        "for a text-only model, beside the Transformers-backend Muse entry above.\n\n"
+        "On our checkpoint since 2026-11-09. It stood as a known failure on turboderp's 2.00bpw, whose "
+        "vision adapter is quantized: vLLM's native MuseGlimmer builds that adapter as a plain `nn.Linear` "
+        "(`self.c_fc = nn.Linear(...)`), which never reaches `get_quant_method`, so the trellis tensors had "
+        "nowhere to land (`There is no module or parameter named 'vision_adapter.c_fc.mul1'`, measured at "
+        "v0.28.0; `--language-model-only` does not bypass it). Ours keeps the whole vision path unquantized "
+        "(the adapter is two BF16 linears), which is also how the plugin recommends serving vision, so the "
+        "native path now runs. What this entry no longer watches for is upstream building that adapter as "
+        "a vLLM linear: the Transformers-backend entry still exercises a quantized vision tower.",
     ),
     Entry(
         label="qwen3.8-27B 3.0bpw blockq tq4",
