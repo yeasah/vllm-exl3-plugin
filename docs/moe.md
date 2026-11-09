@@ -347,6 +347,54 @@ stream within one forward: graph capture covers every decode batch size, so a ne
 startup by name rather than hanging a session. It was watched failing on the unpatched shared-expert
 path. vLLM's other side streams only copy.
 
+## Prefill groups assignments by expert (2026-11-09)
+
+`exl3_moe_mm` used to run every (token, expert) assignment as its own one-row product (`exl3_mgemm`),
+so at prefill each expert's trellis was decoded once per row it served: ~32 times per projection at
+1024 tokens, top-8 over 256 experts. exllamav3's own runtime groups by expert instead, and the plugin
+now does the same for batches of `EXL3_MOE_GROUPED_MIN` (48) tokens or more run outside graph capture
+(`ops._moe_grouped`): sort the assignments by expert, read the counts back once, run `exl3_moe` over
+every expert up to 256 rows in 16/32/64-row tiles, run hotter experts through exllamav3's batched
+reconstruct tier (`moe_batch_recon.BatchReconLayer`, dequantized once per group, strided-batched GEMMs),
+and sum each token's slots in fixed order (`exl3_moe_gather`). Both tiers run from our pointer tables, so
+expert-cache slots and the staging window work unchanged. Decode, captured batches, smaller batches and
+activations the fused kernel lacks keep the per-row path.
+
+Real routing is skewed: at 2.7K tokens the hottest expert took 500-800 rows in most layers, so the
+reconstruct tier is not optional. With only the fused tier, end-to-end prefill rose 1.15-1.8x; with both,
+on Qwen3.6-35B-A3B:
+
+| | per-row | grouped |
+|---|---|---|
+| one MoE layer, 2048 tokens (exllamav3 native: 8.4 ms) | 92 ms | 7.8 ms |
+| 2.00bpw prefill, 2.7K / 8.5K / 14K tokens | 523 / 518 / 515 t/s | 4089 / 4414 / 4326 |
+| Qwen3.5-35B-A3B 2.00bpw offloaded (partial hosting) | 487-491 | 3201-3796 |
+| 4.00bpw, TP=2 | 745-775 | 4031-4517 |
+
+**With offload, staging became the cost, so it moved into the op and went on demand.** Staging used to
+copy every hosted expert of a layer into the window at each prefill step, about 15 GB per step on
+Qwen3.6-35B-A3B 4.00bpw with all experts hosted, whatever the chunk size; once the MoE kernel was
+grouped, `--max-num-batched-tokens 512` was link-bound (1 s per 512-token step). The op now takes the
+layer's staging index; after the count readback the grouped path copies only the experts this batch
+routes to that are not already in VRAM (`cpu_offload.stage_routed`), in coalesced runs of adjacent rows.
+Batches the grouped path does not take stage everything as before, inside the op. Same model,
+`--cpu-offload-gb 16`, utilization 0.98, 70-79% of experts in slots, one 3.9K-token prompt:
+
+| `--max-num-batched-tokens` | per-row, full staging | grouped, full staging | grouped, on demand |
+|---|---|---|---|
+| 512 | 294 t/s | 655 | 1761 |
+| 2048 | | 1831 | 3109 |
+| 8192 | 429 | 2662 | 3665 |
+
+Short prompts after a cached prefix gain the most: full staging was a fixed floor on every prefill
+step over 32 tokens. The compiled forward no longer contains staging copies in any configuration.
+
+Numerics change at the rounding level and stay deterministic: on two 7-9K-token documents mean NLL moved
+by +0.0009 / -0.0004 (TP=2: -0.0018 / -0.0006), and per-token log-probabilities differ by as much as
+re-chunking the old path's own prefill does (mean 0.057, p99 0.37 both). The expert cache stays
+token-identical to resident in eager mode. The bench's two Qwen3.5-35B-A3B MoE entries change on their
+63-token prompt (KL max 0.31 / 0.48, greedy unchanged), which takes a re-bless.
+
 ## CUDA graphs are worth 1.9x to 4.9x
 
 Llama-3.2-1B, identical work: 312 tok/s captured versus 163 eager. Laguna-XS is

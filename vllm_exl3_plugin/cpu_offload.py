@@ -442,7 +442,7 @@ def build_staging() -> None:
     base = window.data_ptr()
 
     for layer, offsets in plans:
-        copies, tables = [], []
+        copies, tables, plan = [], [], {}
         for label in ("gate", "up", "down"):
             table = getattr(layer, f"exl3_{label}_trellis_ptrs")
             block = layer.exl3_host_blocks.get(label)
@@ -451,12 +451,16 @@ def build_staging() -> None:
                 row_bytes = nbytes // block.host.shape[0]
                 dst = window[offsets[label]:offsets[label] + nbytes]
                 copies.append((dst, block.host.view(-1).view(torch.uint8)))
+                plan[label] = (dst, row_bytes)
                 table = table.cpu()
                 for e, row in block.rows.items():
                     table[e] = base + offsets[label] + row * row_bytes
                 table = table.to(device)
             tables.append(table)
         layer.exl3_stage = (copies, tuple(tables))
+        layer.exl3_stage_plan = plan
+        layer.exl3_stage_idx = len(STAGED)
+        STAGED.append(layer)
     # Strong reference: the staged tables hold raw addresses into it
     _STATS["window"] = window
     logger.info(
@@ -470,21 +474,66 @@ def build_staging() -> None:
     _HOSTED.clear()
 
 
-def expert_tables(layer, tokens: int):
-    """The gate, up and down trellis pointer tables for a batch of `tokens`.
+#: Hosted layers by staging index (`exl3_stage_idx`), which the MoE op is passed: the op stages,
+#: not the compiled forward, so the copies can depend on the batch's routing and the cache's state
+STAGED: list = []
 
-    Over the threshold, issues this layer's staging copies on the current stream
-    and returns the tables into the window; the GEMM that follows in the same
-    stream reads them after they land. No sync, and the decision is on the
-    batch's shape, so it holds for a whole captured graph.
-    """
-    if layer.exl3_stage is None or tokens <= STAGE_MIN_TOKENS:
-        return (layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs,
-                layer.exl3_down_trellis_ptrs)
+
+def stage_all(idx: int):
+    """Copy all of a layer's offloaded experts into the window and return the tables into it, or
+    None if the layer no longer stages (the cache holds every hosted expert). For batches the
+    grouped path does not take: on the current stream, no sync, capturable."""
+    layer = STAGED[idx]
+    if layer.exl3_stage is None:
+        return None
     copies, tables = layer.exl3_stage
     for dst, src in copies:
         dst.copy_(src, non_blocking=True)
     return tables
+
+
+def stage_routed(idx: int, counts: list[int], tables: tuple) -> tuple:
+    """Copy into the window only the offloaded experts this batch routes to that are not already in
+    VRAM, and return the decode tables with those experts pointed at the window.
+
+    `counts` is the grouped path's per-expert readback. Copying every hosted expert per prefill step
+    cost a fixed ~15 GB on Qwen3.6-35B-A3B 4.00bpw whatever the chunk, which, once the MoE kernel was
+    grouped, made 512-token chunks link-bound. Experts in an expert-cache slot or resident keep their
+    VRAM addresses; unrouted ones are never read. Rows go to their usual window offsets in coalesced
+    runs, so the staged tables (`exl3_stage`) give their addresses."""
+    layer = STAGED[idx]
+    if layer.exl3_stage is None:
+        return tables
+    from . import expert_cache
+
+    in_vram = expert_cache.in_vram(layer)
+    out = []
+    for j, label in enumerate(("gate", "up", "down")):
+        block = layer.exl3_host_blocks.get(label)
+        if block is None:
+            out.append(tables[j])
+            continue
+        moved = [(row, e) for e, row in block.rows.items()
+                 if counts[e] > 0 and not (in_vram is not None and in_vram[e])]
+        if not moved:
+            out.append(tables[j])
+            continue
+        moved.sort()
+        dst, row_bytes = layer.exl3_stage_plan[label]
+        src = block.host.view(-1).view(torch.uint8)
+        i = 0
+        while i < len(moved):
+            k = i
+            while k + 1 < len(moved) and moved[k + 1][0] == moved[k][0] + 1:
+                k += 1
+            a, b = moved[i][0] * row_bytes, (moved[k][0] + 1) * row_bytes
+            dst[a:b].copy_(src[a:b], non_blocking=True)
+            i = k + 1
+        mask = torch.zeros(tables[j].numel(), dtype=torch.bool)
+        mask[[e for _, e in moved]] = True
+        mask = mask.pin_memory().to(tables[j].device, non_blocking=True)
+        out.append(torch.where(mask, layer.exl3_stage[1][j], tables[j]))
+    return tuple(out)
 
 
 def register_offload(layer) -> int:

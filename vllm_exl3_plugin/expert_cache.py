@@ -396,6 +396,18 @@ _PENDING: list = []
 _STATIC: "ExpertCache | None" = None
 
 
+def in_vram(layer):
+    """Per expert of a hosted layer, whether its decode entry points into VRAM (a slot), as a numpy bool
+    array; None when there is no cache (every hosted expert is read from the host)."""
+    if CACHE is None:
+        return None
+    idx = getattr(CACHE, "_index", None)
+    if idx is None:
+        idx = CACHE._index = {id(l): i for i, l in enumerate(CACHE.layers)}
+    i = idx.get(id(layer))
+    return None if i is None else CACHE.live[i]
+
+
 def prepare(layers: list) -> None:
     """Called at the end of load with the layers that hold host blocks. The cache is built
     at vLLM's `determine_available_memory`, once the memory profile says what is free."""

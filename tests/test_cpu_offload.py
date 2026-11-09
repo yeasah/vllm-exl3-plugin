@@ -222,11 +222,12 @@ def test_mismatched_expert_shape_is_refused(offload):
         cpu_offload.place_expert(param, torch.zeros((4, 2, 48), dtype=torch.int16), "gate", 1)
 
 
-def test_staged_tables_address_each_offloaded_expert_in_the_window(offload):
+def _staged_layer(offload, monkeypatch):
     import types
 
     import torch
 
+    monkeypatch.setattr(cpu_offload, "STAGED", [])
     offload(_Loader({r"re:experts\.[135]\.gate", "down_proj"}))
     params = {"gate": _Collector(), "down": _Collector()}
     placed = {label: [cpu_offload.place_expert(p, _expert_tensor(e), label, e)
@@ -242,26 +243,59 @@ def test_staged_tables_address_each_offloaded_expert_in_the_window(offload):
     window = cpu_offload._STATS["window"]
     assert window.numel() == 3 * 512 + 8 * 512
     window.zero_()
+    rows = {label: params[label].exl3_blocks[label].rows for label in params}
+    return layer, window, rows
 
-    small = cpu_offload.expert_tables(layer, cpu_offload.STAGE_MIN_TOKENS)
-    assert all(a is b for a, b in zip(
-        small, (layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs,
-                layer.exl3_down_trellis_ptrs))), "small batches must read in place"
-    assert not window.any(), "a small batch staged"
 
-    gate, up, down = cpu_offload.expert_tables(layer, cpu_offload.STAGE_MIN_TOKENS + 1)
+def _check_staged(table, resident, rows, window, label, e):
+    import torch
+
+    off = int(table[e]) - window.data_ptr()
+    assert 0 <= off and off % 256 == 0 and off + 512 <= window.numel()
+    assert bool((window[off:off + 512].view(torch.int16) == e).all()), \
+        f"staged {label} {e} points at the wrong rows"
+
+
+def test_full_staging_addresses_each_offloaded_expert_in_the_window(offload, monkeypatch):
+    layer, window, rows = _staged_layer(offload, monkeypatch)
+    gate, up, down = cpu_offload.stage_all(layer.exl3_stage_idx)
     assert up is layer.exl3_up_trellis_ptrs, "a projection with no host block changed"
     for label, table in (("gate", gate), ("down", down)):
         resident = getattr(layer, f"exl3_{label}_trellis_ptrs")
-        rows = params[label].exl3_blocks[label].rows
         for e in range(8):
-            off = int(table[e]) - window.data_ptr()
-            if e not in rows:
+            if e not in rows[label]:
                 assert table[e] == resident[e], f"resident {label} {e} was redirected"
-                continue
-            assert 0 <= off and off % 256 == 0 and off + 512 <= window.numel()
-            assert bool((window[off:off + 512].view(torch.int16) == e).all()), \
-                f"staged {label} {e} points at the wrong rows"
+            else:
+                _check_staged(table, resident, rows[label], window, label, e)
+
+
+def test_routed_staging_copies_only_routed_experts_not_in_vram(offload, monkeypatch):
+    """The grouped path's staging: of the hosted experts, only the ones this batch routes to and the
+    cache does not already hold in a slot are copied in and redirected; every other entry is left as
+    the decode table had it, and nothing else lands in the window."""
+    import numpy
+    import torch
+
+    from vllm_exl3_plugin import expert_cache
+
+    layer, window, rows = _staged_layer(offload, monkeypatch)
+    slotted = numpy.zeros(8, dtype=bool)
+    slotted[5] = True                                   # gate 5 sits in a slot
+    monkeypatch.setattr(expert_cache, "in_vram", lambda l: slotted)
+    counts = [0, 0, 1, 2, 0, 3, 0, 0, 0]                # experts 2, 3 and 5 routed
+    decode = (layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs, layer.exl3_down_trellis_ptrs)
+    gate, up, down = cpu_offload.stage_routed(layer.exl3_stage_idx, counts, decode)
+    assert up is layer.exl3_up_trellis_ptrs
+    want = {"gate": {3}, "down": {2, 3}}                # gate hosts 1, 3, 5; down hosts all eight
+    for label, table, dec in (("gate", gate, decode[0]), ("down", down, decode[2])):
+        for e in range(8):
+            if e in want[label]:
+                _check_staged(table, dec, rows[label], window, label, e)
+            else:
+                assert table[e] == dec[e], f"{label} {e} was redirected"
+    copied = int((window.view(torch.int16) != 0).sum())
+    nonzero_experts = sum(len(v - {0}) for v in want.values())  # expert 0's rows are zeros anyway
+    assert copied == nonzero_experts * 256, "something other than the routed, non-VRAM rows was copied"
 
 
 def test_cache_mode_hosts_matching_experts_without_spending_the_counter(offload, monkeypatch):

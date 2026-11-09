@@ -30,6 +30,8 @@ from functools import lru_cache
 from typing import Optional
 
 import torch
+
+from . import cpu_offload
 from torch.library import Library
 
 from . import env
@@ -502,6 +504,9 @@ def _out_features(trellis: torch.Tensor) -> int:
     return trellis.shape[1] * TILE
 
 
+#: Batches at least this large, outside graph capture, run grouped by expert (`_moe_grouped`)
+_GROUPED_MIN_TOKENS = int(os.environ.get("EXL3_MOE_GROUPED_MIN", "48"))  # crossover on Qwen3.6-35B-A3B (256 x top-8)
+
 _FORWARD_STREAM: list = [None, None]   # (forward context, raw stream) of the last launch
 
 
@@ -743,35 +748,11 @@ def exl3_mm(
 # for it (size_n_list's absence is what gates c_ptrs off too).
 
 
-def _exl3_moe_mm(
-    x: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    gate_trellis: torch.Tensor,
-    gate_suh: torch.Tensor,
-    gate_svh: torch.Tensor,
-    up_trellis: torch.Tensor,
-    up_suh: torch.Tensor,
-    up_svh: torch.Tensor,
-    down_trellis: torch.Tensor,
-    down_suh: torch.Tensor,
-    down_svh: torch.Tensor,
-    gate_bits: float,
-    down_bits: float,
-    intermediate: int,
-    num_experts: int,
-    mcg: bool,
-    mul1: bool,
-    activation: str,
-    route: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    _one_stream(x)
-    if route is not None:
-        # The expert cache's routing capture (expert_cache.py), done here rather than in `apply`: a
-        # second consumer of `topk_ids` in the compiled forward changed how Inductor fused the router,
-        # so a cached run's numbers drifted from resident at the ULP level in graph mode
-        rows = min(x.shape[0], route.shape[0])
-        route[:rows].copy_(topk_ids[:rows])
+def _moe_per_row(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh,
+                 down_trellis, down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg, mul1,
+                 activation):
+    """Every (token, expert) assignment as its own one-row product (`exl3_mgemm`). Capturable, and the
+    right shape for decode; at prefill each expert's trellis is decoded once per row it serves."""
     e = ext()
     out_dtype = x.dtype
     num_tokens, hidden = x.shape
@@ -826,6 +807,202 @@ def _exl3_moe_mm(
     return y.to(out_dtype) if out_dtype != torch.half else y
 
 
+#: exl3_moe's activation indices (exl3_moe_common.cuh); others take the per-row path
+_MOE_ACT = {"silu": 0, "gelu": 1}
+_MOE_SCRATCH: dict = {}
+
+
+def _moe_fused_buffers(device, rows: int, hidden: int, intermediate: int):
+    """exl3_moe's per-launch staging, sized for its row capacity at the kernel's concurrency: shared by
+    every layer of a shape, as exllamav3 shares them (g_tensor_cache)."""
+    key = (device, rows, hidden, intermediate)
+    if key not in _MOE_SCRATCH:
+        c = ext().exl3_moe_max_concurrency(device.index)
+        _MOE_SCRATCH[key] = (torch.empty((c, rows, hidden), dtype=torch.half, device=device),
+                             torch.empty((c, rows, hidden), dtype=torch.half, device=device),
+                             torch.empty((c, rows, intermediate), dtype=torch.half, device=device),
+                             torch.empty((c, rows, intermediate), dtype=torch.half, device=device))
+    return _MOE_SCRATCH[key]
+
+
+def _moe_recon(gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh, down_trellis, down_suh, down_svh,
+               hidden, intermediate, gate_bits, down_bits, mcg, mul1, activation, device):
+    """exllamav3's batched reconstruct tier (`moe_batch_recon.BatchReconLayer`) over our pointer tables:
+    hot experts are dequantized once per group and run as strided-batched GEMMs. Built per call (a few
+    attributes); its folded mode wants per-expert scale addresses, which are exactly our suh/svh tables."""
+    from exllamav3.modules import moe_batch_recon as mbr
+
+    r = mbr.BatchReconLayer.__new__(mbr.BatchReconLayer)
+    r.gated = True
+    r.dims_g = r.dims_u = (hidden, intermediate, gate_bits)
+    r.dims_d = (intermediate, hidden, down_bits)
+    r.cb_g = r.cb_u = r.cb_d = (mcg, mul1)
+    r.act_call = mbr._ACT_CALLS_GATED[activation]
+    r.act_limit = 0.0
+    r.device = device
+    r.cap = mbr.batch_cap(r.dims_g, r.dims_u, r.dims_d)
+    r.max_rows = mbr.max_group_rows(r.dims_u, r.dims_d)
+    r.ptr_tables = (gate_trellis, up_trellis, down_trellis)
+    r.folded = True
+    r.interm_fp32 = False
+    r.scales = {}
+    r.scale_ptrs = {"g": (gate_suh, gate_svh), "u": (up_suh, up_svh), "d": (down_suh, down_svh)}
+    return r
+
+
+def _moe_grouped(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh,
+                 down_trellis, down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg, mul1,
+                 activation, stage: int = -1):
+    """Assignments grouped by expert, as exllamav3's own runtime runs prefill (`BlockSparseMLP.forward`):
+    one readback of the per-expert counts, then `exl3_moe` over every expert within its row capacity, in
+    16/32/64-row tiles, so each expert's trellis is decoded per tile rather than per row (4-11x faster per
+    layer at 256-2048 tokens on Qwen3.6-35B-A3B). Deterministic: each assignment gets a scratch slot and
+    one gather sums a token's slots in a fixed order. Experts over the fused capacity (256 rows), common
+    at real prefill (routing is skewed: 500-800 rows for the hottest at 2.7K tokens), take exllamav3's
+    batched reconstruct tier into the same slots; only an expert past that tier's 16K-row cap takes the
+    per-row path. Not capturable (the readback), so used only outside graph capture."""
+    from exllamav3.modules.block_sparse_mlp import FUSED_ROWS_WIDE, MTILE, MTILE_T1, MTILE_T2, TEMP_ROWS_FUSED
+    from exllamav3.modules.moe_batch_recon import plan_groups
+
+    e = ext()
+    M, H = x.shape
+    K = topk_ids.shape[1]
+    E = num_experts
+    dev = x.device
+    xh = x if x.dtype == torch.half else x.to(torch.half)
+    wide = bool(MTILE) and mul1
+    R = FUSED_ROWS_WIDE if wide else TEMP_ROWS_FUSED
+    tsg, tsu, tig, tiu = _moe_fused_buffers(dev, R, H, intermediate)
+
+    flat_e = topk_ids.reshape(-1).to(torch.long)
+    flat_w = topk_weights.reshape(-1).to(torch.half)
+    flat_t = torch.arange(M, device=dev).repeat_interleave(K)
+    order = flat_e.argsort()
+    token_sorted = flat_t[order]
+    weight_sorted = flat_w[order]
+    count = torch.bincount(flat_e, minlength=E + 1)
+    counts = count.tolist()
+    if stage >= 0:
+        # offloaded experts: only the routed ones not already in VRAM are copied in (cpu_offload.stage_routed)
+        gate_trellis, up_trellis, down_trellis = cpu_offload.stage_routed(
+            stage, counts, (gate_trellis, up_trellis, down_trellis))
+
+    recon = _moe_recon(gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh, down_trellis, down_suh,
+                       down_svh, H, intermediate, gate_bits, down_bits, mcg, mul1, activation, dev)
+    heavy = [i for i, c in enumerate(counts[:E]) if R < c <= recon.max_rows]
+    groups = plan_groups(heavy, lambda i: counts[i], recon.cap) if heavy else []
+
+    base = [0] * (E + 1)
+    kind = [0] * (E + 1)
+    starts = [0] * (E + 1)
+    n_slots = acc = 0
+    for i, c in enumerate(counts):
+        starts[i] = acc
+        acc += c
+        if i < E and 0 < c <= R:
+            base[i], kind[i] = n_slots, 1
+            n_slots += c
+    group_slots = []
+    for grp in groups:
+        cmax = max(counts[i] for i in grp)
+        group_slots.append(n_slots)
+        for b, i in enumerate(grp):
+            base[i], kind[i] = n_slots + b * cmax, 2
+        n_slots += len(grp) * cmax
+    tables = torch.tensor([base, starts, kind], dtype=torch.long).pin_memory().to(dev, non_blocking=True)
+    inv_order = torch.empty_like(order).scatter_(0, order, torch.arange(order.numel(), device=dev))
+    scratch = torch.empty((max(n_slots, 1), H), dtype=torch.float, device=dev)
+    out = torch.zeros((M, H), dtype=torch.float, device=dev)
+    act = _MOE_ACT[activation]
+
+    def run(num_active, lo, hi, m_tile):
+        e.exl3_moe(xh, out, count, token_sorted, weight_sorted, tsg, tsu, tig, tiu, act,
+                   gate_bits, gate_bits, down_bits, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh,
+                   down_trellis, down_suh, down_svh, mcg, mul1, mcg, mul1, mcg, mul1, 0.0, num_active,
+                   scratch, tables[0], lo, hi, m_tile)
+
+    fused = [c for c in counts[:E] if 0 < c <= R]
+    if fused:
+        t1 = sum(1 for c in fused if MTILE_T1 < c <= MTILE_T2)
+        t2 = sum(1 for c in fused if c > MTILE_T2)
+        if wide and (t1 or t2):
+            if t2:
+                run(t2, MTILE_T2 + 1, R, 64)
+            if t1:
+                run(t1, MTILE_T1 + 1, MTILE_T2, 32)
+            if len(fused) - t1 - t2:
+                run(len(fused) - t1 - t2, 1, MTILE_T1, 16)
+        else:
+            run(len(fused), 1, R, 16)
+    if groups:
+        y_ext = torch.cat([xh, xh.new_zeros((1, H))])
+        tok_ext = torch.cat([token_sorted, token_sorted.new_full((1,), M)])
+        w_ext = torch.cat([weight_sorted, weight_sorted.new_zeros((1,))])
+        for grp, slot in zip(groups, group_slots):
+            cmax = max(counts[i] for i in grp)
+            recon.run_group(y_ext, out, tok_ext, w_ext, grp, [starts[i] for i in grp], [counts[i] for i in grp],
+                            out_slab=scratch[slot: slot + len(grp) * cmax])
+    if fused or groups:
+        e.exl3_moe_gather(out, scratch, flat_e, inv_order, tables[1, :E], tables[0, :E], tables[2, :E],
+                          weight_sorted)
+
+    for i in (i for i, c in enumerate(counts[:E]) if c > recon.max_rows):
+        rows = slice(starts[i], starts[i] + counts[i])
+        toks = token_sorted[rows]
+        part = _moe_per_row(xh.index_select(0, toks), topk_ids.new_full((counts[i], 1), i),
+                            weight_sorted[rows].unsqueeze(1), gate_trellis, gate_suh, gate_svh, up_trellis, up_suh,
+                            up_svh, down_trellis, down_suh, down_svh, gate_bits, down_bits, intermediate, E, mcg,
+                            mul1, activation)
+        out.index_add_(0, toks, part.float())
+    return out.to(x.dtype)
+
+
+def _exl3_moe_mm(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_trellis: torch.Tensor,
+    gate_suh: torch.Tensor,
+    gate_svh: torch.Tensor,
+    up_trellis: torch.Tensor,
+    up_suh: torch.Tensor,
+    up_svh: torch.Tensor,
+    down_trellis: torch.Tensor,
+    down_suh: torch.Tensor,
+    down_svh: torch.Tensor,
+    gate_bits: float,
+    down_bits: float,
+    intermediate: int,
+    num_experts: int,
+    mcg: bool,
+    mul1: bool,
+    activation: str,
+    route: Optional[torch.Tensor] = None,
+    stage: int = -1,
+) -> torch.Tensor:
+    _one_stream(x)
+    if route is not None:
+        # The expert cache's routing capture (expert_cache.py), done here rather than in `apply`: a
+        # second consumer of `topk_ids` in the compiled forward changed how Inductor fused the router,
+        # so a cached run's numbers drifted from resident at the ULP level in graph mode
+        rows = min(x.shape[0], route.shape[0])
+        route[:rows].copy_(topk_ids[:rows])
+    num_tokens = x.shape[0]
+    if num_tokens == 0:
+        return torch.empty((0, x.shape[1]), dtype=x.dtype, device=x.device)
+    args = (x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh, down_trellis,
+            down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg, mul1, activation)
+    if (num_tokens >= _GROUPED_MIN_TOKENS and activation in _MOE_ACT
+            and not torch.cuda.is_current_stream_capturing()):
+        return _moe_grouped(*args, stage=stage)
+    if stage >= 0 and num_tokens > cpu_offload.STAGE_MIN_TOKENS:
+        staged = cpu_offload.stage_all(stage)
+        if staged is not None:
+            args = (*args[:3], staged[0], *args[4:6], staged[1], *args[7:9], staged[2], *args[10:])
+    return _moe_per_row(*args)
+
+
+
 #: `silu_and_mul` and friends compute `act(x[:d]) * x[d:]` -- the activation
 #: applies to the *gate* half. vLLM's own comment says "gate x activation(up)",
 #: which reads the other way round; `SiluAndMul`'s docstring and the kernels are
@@ -868,6 +1045,7 @@ def _exl3_moe_mm_fake(
     mul1: bool,
     activation: str,
     route: Optional[torch.Tensor] = None,
+    stage: int = -1,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 

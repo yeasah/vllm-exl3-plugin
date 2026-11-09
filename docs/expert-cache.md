@@ -913,8 +913,9 @@ beside it), so anything that changes the compiled forward's structure changes ro
   differently. Fixed: the capture is inside the MoE op, and every EXL3 MoE layer passes a routing buffer,
   cache or not, so cached and resident runs compile the same forward. All-hosted cache is now token-identical
   to resident in graph mode.
-- **Prefill staging** compiles one copy per hosted expert row into the forward, so partial hosting (fewer
-  rows) compiles a different graph. Not fixed: it would take an opaque op every configuration calls.
+- **Prefill staging** compiled one copy per hosted expert row into the forward, so partial hosting (fewer
+  rows) compiled a different graph. Fixed 2026-11-09 as a side effect: staging now happens inside the MoE
+  op, on demand for prefill (docs/moe.md, "Prefill groups assignments by expert").
 - **A residual** (Qwen3.5-35B-A3B 2.00bpw, one prompt at token 113 of 256) separates frozen slots from
   promoting ones although both read identical bytes through an identical kernel. Not in the MoE path, not KV
   capacity; most likely the runs' different allocation histories steering kernel selection elsewhere. Closed

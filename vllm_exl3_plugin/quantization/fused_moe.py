@@ -346,7 +346,7 @@ class EXL3MoEMethod(FusedMoEMethodBase):
 
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
-        gate, up, down = cpu_offload.expert_tables(layer, flat.shape[0])
+        gate, up, down = layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs, layer.exl3_down_trellis_ptrs
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,
@@ -369,6 +369,8 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             self.activation_name(layer),
             # the leading rows' routing, for the expert cache's controller; see expert_cache.py
             layer.exl3_route,
+            # prefill staging happens in the op, against this layer's host rows (cpu_offload.STAGED)
+            getattr(layer, "exl3_stage_idx", -1),
         )
         # Restore the magnitude the checkpoint's pre-scaled up projection gave
         # away, *outside* the kernel. Folding it into the routing weights
