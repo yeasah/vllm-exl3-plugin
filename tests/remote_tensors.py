@@ -63,6 +63,38 @@ def _header(url: str) -> tuple[dict, int]:
     return header, 8 + n
 
 
+def _from_local_cache(repo: str, revision: str, key: str, device) -> dict | None:
+    """The module's tensors from the local Hugging Face cache, if this revision's shard is there.
+
+    The range requests cost the Hub's speed on every run: 188 MiB for Llama-3.2-1B's lm_head took 58 s at
+    3.2 MiB/s one afternoon, enough to stretch the suite from ~2.5 to 12 minutes. The bench keeps these
+    models in the cache anyway, so a cached shard is read locally; anything else falls back to the Hub."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        from safetensors import safe_open
+    except ImportError:
+        return None
+    index = try_to_load_from_cache(repo, "model.safetensors.index.json", revision=revision)
+    if isinstance(index, str):
+        with open(index) as f:
+            shard = json.load(f)["weight_map"].get(f"{key}.trellis")
+        if shard is None:
+            return None
+    else:
+        shard = "model.safetensors"
+    path = try_to_load_from_cache(repo, shard, revision=revision)
+    if not isinstance(path, str):
+        return None
+    prefix = key + "."
+    out = {}
+    with safe_open(path, framework="pt") as f:
+        for name in f.keys():
+            suffix = name[len(prefix):] if name.startswith(prefix) else None
+            if suffix and "." not in suffix:
+                out[suffix] = f.get_tensor(name).to(device)
+    return out if "trellis" in out else None
+
+
 def fetch_module_tensors(repo: str, revision: str, key: str, device="cuda:0") -> dict:
     """Every tensor named `<key>.<suffix>`, keyed by suffix.
 
@@ -71,6 +103,9 @@ def fetch_module_tensors(repo: str, revision: str, key: str, device="cuda:0") ->
     """
     import torch
 
+    local = _from_local_cache(repo, revision, key, device)
+    if local is not None:
+        return local
     shard = _shard_for(repo, revision, f"{key}.trellis")
     url = _resolve(repo, revision, shard)
     header, data_start = _header(url)
