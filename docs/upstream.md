@@ -338,9 +338,11 @@ side owns the contract.
 **Plain `nn.Linear` modules are unreachable by any quantization plugin.** vLLM's native
 MuseGlimmer builds its vision adapter as `self.c_fc = nn.Linear(...)`, which never
 reaches `get_quant_method`, so a checkpoint with a quantized adapter cannot be served on
-the native path at all. `DFlashQwen3Model.fc` is the same shape. Gated as
-`bench/` entry `muse-glimmer-30B-2.0bpw-native`, whose `known_broken` reason carries the
-measured error. *This is the general form of the `embed-quant-config` problem*, and a
+the native path at all. `DFlashQwen3Model.fc` is the same shape. Was gated as a
+known-broken `bench/` entry on turboderp's 2.00bpw; since 2026-11-09 that entry
+(`muse-glimmer-30B-2.5bpw-native`) runs our checkpoint, which keeps the vision path
+unquantized, and its description keeps the measured error. Nothing now watches for
+upstream fixing it. *This is the general form of the `embed-quant-config` problem*, and a
 fix worth filing should be judged against both.
 
 **A cold torch.compile costs 35K tokens of declared context, permanently** (measured
