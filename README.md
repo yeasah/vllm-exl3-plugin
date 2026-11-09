@@ -128,7 +128,7 @@ checkpoint, so `--quantization` is not needed. The main differences:
   in VRAM slots, sized automatically against what KV needs at `--max-model-len`, and prefill copies
   a layer's experts in bulk instead of crossing PCIe per token. Without `--cpu-offload-params`, the
   vision tower is offloaded first, then experts; dense EXL3 weights move only with an explicit
-  selector, and are then read over PCIe every token. `TP>1` is not validated yet. See
+  selector, and are then read over PCIe every token. Validated at TP=2, where the flag is per GPU, as vLLM documents it. See
   [docs/expert-cache.md](docs/expert-cache.md).
 - **MoE works,** through vLLM's `FusedMoE` with exllamav3's `exl3_mgemm`, CUDA graphs included.
   See [docs/moe.md](docs/moe.md).

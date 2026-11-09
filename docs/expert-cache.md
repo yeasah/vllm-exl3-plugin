@@ -795,7 +795,11 @@ thing to check when a WSL number looks low.
 **Gate:** pass. The 3060 lands 5% above the hand-tuned best, and `cuda` matches resident when
 everything fits.
 
-**4d results: accounting.** `TP>1` is still open; it needs the main system.
+**4d results: accounting.** `TP>1` closed 2026-11-09 on the 2x5060 Ti host, Qwen3.6-35B-A3B 4.00bpw at TP=2.
+`--cpu-offload-gb` is per GPU, as vLLM documents it: at 4, each rank hosts 4.00 of its 7.50 GiB shard
+(136 of 256 experts per layer) and sizes its own slots; the ranks promote in lockstep, since routing is
+replicated, and reach ~92% VRAM hit. Eager output is token-identical to resident. Single-stream decode:
+resident 80-83 t/s; 52 slots (67% in VRAM) 76-77, ~94%; every hosted expert slotted 82, ~100%.
 
 - **Default selectors.** `--cpu-offload-gb` without `--cpu-offload-params` now means towers plus
   experts. `plugin._patch_offload_defaults` wraps `UVAOffloader.wrap_modules`: with no selector,
@@ -893,6 +897,30 @@ there, since higher bitrates are the point of this work.
 residency ([kv-pager.md](kv-pager.md) stands, and Strata disables its equivalent on WSL).
 
 ---
+
+## Verifying the cache: eager identity, not graph identity (2026-11-09)
+
+"Output identical to resident" holds in **eager mode**, at TP=1 and TP=2, for all-hosted and partial hosting:
+every live slot matches its host row byte for byte, table entries point where they should, and the MoE
+kernel gives bit-identical results reading an expert from a slot or from host memory, eagerly or replayed
+from a captured graph, at every batch size tried. That is the acceptance test.
+
+In graph mode the same comparison can differ by a few tokens in a few hundred, deterministically, without
+anything being wrong. The MoE kernel is not batch-invariant (a row's output moves by ~4e-6 with the rows
+beside it), so anything that changes the compiled forward's structure changes rounding:
+
+- **Routing capture** gave the router's `topk_ids` a second consumer, and Inductor fused the router
+  differently. Fixed: the capture is inside the MoE op, and every EXL3 MoE layer passes a routing buffer,
+  cache or not, so cached and resident runs compile the same forward. All-hosted cache is now token-identical
+  to resident in graph mode.
+- **Prefill staging** compiles one copy per hosted expert row into the forward, so partial hosting (fewer
+  rows) compiles a different graph. Not fixed: it would take an opaque op every configuration calls.
+- **A residual** (Qwen3.5-35B-A3B 2.00bpw, one prompt at token 113 of 256) separates frozen slots from
+  promoting ones although both read identical bytes through an identical kernel. Not in the MoE path, not KV
+  capacity; most likely the runs' different allocation histories steering kernel selection elsewhere. Closed
+  as numerics.
+
+So graph-mode identity is a bonus where the compiled graph is the same, and eager identity is the test.
 
 ## Reproducing
 

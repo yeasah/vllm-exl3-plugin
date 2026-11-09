@@ -48,7 +48,7 @@ Eviction, in order:
 Never reuse a retired slug for different work.
 -->
 
-**Now:** the TP>1 part of `cpu-offload`. **Next:** the MoE pipeline questions it makes pressing (`recipe-value`, `exl3-1.6.4-defaults`,
+**Now:** the rest of `cpu-offload` (prefill cost, startup headroom). **Next:** the MoE pipeline questions it makes pressing (`recipe-value`, `exl3-1.6.4-defaults`,
 `moe-tp`), and the `engram-ple` survey. Lower-priority and speculative items live in [FUTURE.md](FUTURE.md).
 
 ## `kv-budget-margin` — Make `gpu_memory_utilization` mean what it says
@@ -205,17 +205,17 @@ resident speed at its expected concurrency.
 **Where it stands:** the expert cache is merged and on whenever experts are offloaded. Experts load
 straight to pinned host memory, VRAM slots are sized against KV at `--max-model-len`, prefill stages
 a layer at a time, and towers take the budget first (phases 1 to 4e of
-[docs/expert-cache.md](docs/expert-cache.md)). Output matches resident everywhere it was measured.
+[docs/expert-cache.md](docs/expert-cache.md)). TP=2 is validated (per-GPU budget, ~94-100% of resident
+decode). Output matches resident token for token in eager mode, the cache's acceptance test.
 
 **Candidate, in order:**
 
-1. **`TP>1`.** `cpu_offload_bytes` is per process, so `--cpu-offload-gb N` means N per rank; sizing,
-   host-RAM shares and the summary need checking under TP=2 on the main system. The last part of 4d.
-2. **Cheaper misses and prefill.** Prefill is bound by `exl3_moe_mm`'s one row per (token, expert)
-   slot, not the link. Candidates: mul1 checkpoints (mcg's prefill kernel is 3.7x slower), and
-   exllamav3's large-batch tiers (sort by expert, reconstruct heavy experts once, which could also
-   read offloaded ones over UVA).
-3. **Startup headroom.** Two allocations after weight load are missing from vLLM's memory profile
+1. **Cheaper misses and prefill.** Prefill is bound by `exl3_moe_mm`'s one row per (token, expert)
+   slot, not the link. Candidate: exllamav3's large-batch tiers (sort by expert, reconstruct heavy
+   experts once, which could also read offloaded ones over UVA). mul1 is assumed throughout: mcg
+   (3.7x slower at prefill) survives only in old checkpoints, like the gemma-4 quants this was
+   developed on, that today's pipeline would improve on anyway.
+2. **Startup headroom.** Two allocations after weight load are missing from vLLM's memory profile
    (the embedding op's `had_left` scratch in flashinfer's autotune, 352 MiB; inductor's ~1.9 GiB
    transient on Ornith-9B) and decide whether a tight card serves at all.
 
