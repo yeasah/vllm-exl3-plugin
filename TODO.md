@@ -210,11 +210,9 @@ decode). Output matches resident token for token in eager mode, the cache's acce
 
 **Candidate, in order:**
 
-1. **Cheaper misses and prefill.** Prefill is bound by `exl3_moe_mm`'s one row per (token, expert)
-   slot, not the link. Candidate: exllamav3's large-batch tiers (sort by expert, reconstruct heavy
-   experts once, which could also read offloaded ones over UVA). mul1 is assumed throughout: mcg
-   (3.7x slower at prefill) survives only in old checkpoints, like the gemma-4 quants this was
-   developed on, that today's pipeline would improve on anyway.
+1. **Cheaper misses.** Prefill is solved (grouped by expert, ~8x, [docs/moe.md](docs/moe.md) "Prefill
+   groups assignments by expert"); a miss at decode still reads the expert over the link. Candidates
+   are phase 5's (double-buffered promotion, a CPU tail), each on its own evidence.
 2. **Startup headroom.** Two allocations after weight load are missing from vLLM's memory profile
    (the embedding op's `had_left` scratch in flashinfer's autotune, 352 MiB; inductor's ~1.9 GiB
    transient on Ornith-9B) and decide whether a tight card serves at all.
