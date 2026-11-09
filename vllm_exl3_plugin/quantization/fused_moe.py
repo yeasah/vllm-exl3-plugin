@@ -298,6 +298,13 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             label: getattr(layer, prefix + "trellis").exl3_blocks.get(label)
             for label, (prefix, _) in projections.items()
         })
+        # Every layer passes a routing buffer to the MoE op, cache or not: whether the op carries
+        # one changes how Inductor fuses the router, so a cached run and a resident one compile the
+        # same forward only if both do (the cache's numbers then match resident in graph mode too).
+        # A few hundred bytes; the cache swaps in views of its own buffer.
+        layer.exl3_route_own = torch.zeros((cpu_offload.STAGE_MIN_TOKENS, layer.top_k), dtype=torch.int32,
+                                           device=layer.exl3_gate_suh_ptrs.device)
+        layer.exl3_route = layer.exl3_route_own
         for prefix in ("w13_", "w2_"):
             for name in self.quant_config.stored_tensor_names():
                 getattr(layer, prefix + name).release()
@@ -340,10 +347,6 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         orig_shape = x.shape
         flat = x.reshape(-1, orig_shape[-1])
         gate, up, down = cpu_offload.expert_tables(layer, flat.shape[0])
-        if layer.exl3_route is not None:
-            # The leading rows' routing, for the expert cache's controller; see expert_cache.py
-            rows = min(flat.shape[0], layer.exl3_route.shape[0])
-            layer.exl3_route[:rows].copy_(topk_ids[:rows])
         out = ops.exl3_moe_mm(
             flat,
             topk_ids,
@@ -364,6 +367,8 @@ class EXL3MoEMethod(FusedMoEMethodBase):
             self.mcg,
             self.mul1,
             self.activation_name(layer),
+            # the leading rows' routing, for the expert cache's controller; see expert_cache.py
+            layer.exl3_route,
         )
         # Restore the magnitude the checkpoint's pre-scaled up projection gave
         # away, *outside* the kernel. Folding it into the routing weights

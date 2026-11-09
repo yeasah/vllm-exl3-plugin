@@ -409,7 +409,7 @@ _ALIGN = 256
 def register_experts(layer, blocks: dict) -> None:
     """Note a MoE layer's trellis host blocks, by projection label, for staging."""
     layer.exl3_stage = None
-    layer.exl3_route = None  # set by expert_cache.build when slots are on
+    layer.exl3_route = None  # the layer's own buffer is set after this; the cache's views replace it
     blocks = {label: b for label, b in blocks.items() if b is not None}
     if blocks:
         layer.exl3_host_blocks = blocks

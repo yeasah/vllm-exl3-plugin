@@ -518,7 +518,7 @@ def build(layers: list, available: int, worker) -> int:
         window = cpu_offload._STATS.pop("window", None)
         for layer in layers:
             layer.exl3_stage = None
-            layer.exl3_route = None
+            layer.exl3_route = layer.exl3_route_own   # nothing reads it now, but the graph keeps its shape
         freed = window.numel() if window is not None else 0
         del window
         torch.cuda.empty_cache()  # back to the driver, so KV's allocation can use it

@@ -27,6 +27,8 @@ import math
 import os
 from functools import lru_cache
 
+from typing import Optional
+
 import torch
 from torch.library import Library
 
@@ -681,6 +683,7 @@ def _register_ops() -> None:
     direct_register_custom_op(
         op_name="exl3_moe_mm",
         op_func=_exl3_moe_mm,
+        mutates_args=["route"],
         fake_impl=_exl3_moe_mm_fake,
         target_lib=_EXL3_LIB,
     )
@@ -760,8 +763,15 @@ def _exl3_moe_mm(
     mcg: bool,
     mul1: bool,
     activation: str,
+    route: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     _one_stream(x)
+    if route is not None:
+        # The expert cache's routing capture (expert_cache.py), done here rather than in `apply`: a
+        # second consumer of `topk_ids` in the compiled forward changed how Inductor fused the router,
+        # so a cached run's numbers drifted from resident at the ULP level in graph mode
+        rows = min(x.shape[0], route.shape[0])
+        route[:rows].copy_(topk_ids[:rows])
     e = ext()
     out_dtype = x.dtype
     num_tokens, hidden = x.shape
@@ -857,6 +867,7 @@ def _exl3_moe_mm_fake(
     mcg: bool,
     mul1: bool,
     activation: str,
+    route: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
