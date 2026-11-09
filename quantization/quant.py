@@ -296,7 +296,7 @@ def collect_metadata(job, qbench, gguf_kld=False):
               'mtp_bytes': sizes.get('mtp', 0),
               # What vLLM holds for the embedding: a stored trellis or bq_* table as it is, a dense one encoded
               # to blockq on load. Shrinking an already quantized table again understated VRAM by 0.43 GiB a rung
-              'blockq_bytes': sizes['embed'] if embedding_stored_quantized(job.revdir(rev)) else int(sizes['embed'] / 16 * 4.5),
+              'blockq_bytes': sizes['embed'] if embedding_stored_quantized(job.revdir(rev)) else int(sizes['embed'] / 16 * BLOCKQ_EMBED_BITS),
               'excess': excess,
               'raw_excess': excess.get('raw'),
               'raw_ppl': qb['raw']['ppl'] if 'raw' in qb else None }
@@ -1134,10 +1134,19 @@ def recall_section(job, revisions):
     # size range, since where they fall off is the point of showing them
     info = load_reference_info(job) or {"references": []}
     sets = []
+    sizes = info.get("sizes", {})
+    def served_gb(label, path):
+        """VRAM as the plugin serves the arm: qbench's figure counts the embedding as stored, so a dense
+        one the plugin encodes to blockq on load (and qbench scored that way, `served_embedding`) is
+        charged at blockq size, as the card's VRAM column charges it."""
+        gb = results[label]["vram_gb"]
+        if label in sizes and isinstance(path, str) and served_embedding(path):
+            gb -= sizes[label]["embed"] * (1 - BLOCKQ_EMBED_BITS / 16) / 1024**3
+        return gb
     for ref in info["references"]:
         for name, branches in ref["ladders"].items():
-            pts = [(results[l]["vram_gb"], results[l]["recall_kept"]) for b in branches
-                   if "recall_kept" in results.get(l := ref_label(ref["repo"], b), {})]
+            pts = [(served_gb(l, branches[b] if isinstance(branches, dict) else None), results[l]["recall_kept"])
+                   for b in branches if "recall_kept" in results.get(l := ref_label(ref["repo"], b), {})]
             if pts:
                 sets.append({ "name": ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})",
                               "points": sorted(pts) })
@@ -2129,6 +2138,8 @@ SAMPLING_DIR = os.path.join(HERE, "sampling")
 GC_SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "frequency_penalty",
                     "repetition_penalty")
 
+BLOCKQ_EMBED_BITS = 4.5    # bits per weight of a blockq:32 4-bit embedding, scales included
+
 def served_embedding(path):
     """qbench options that score an EXL3 checkpoint's embedding as vLLM serves it. A dense embedding is
     encoded to blockq on load by default, so scoring it at BF16 credited every dense checkpoint (ours,
@@ -2499,8 +2510,9 @@ def bit_specs(spec, suffix=None):
 def do_baseline(job, args):
     """The uncalibrated sweep that card section 2 measures every ladder against: the same bit
     rates as `quantize`, converted with --uncalibrated (no calibration of any kind, so it favors
-    no ladder), into <model>-exl3/_baseline; and the calibration generator `traces` uses, an
-    uncalibrated 8bpw (for models with a chat template). One task pool, spread over -d. A rung or
+    no ladder), into <model>-exl3/_baseline; and with --generator, the uncalibrated 8bpw that
+    `traces --generator uncalibrated` writes calibration with (off by default: traces default to the
+    bf16 model, and build the 8bpw themselves when asked for it). One task pool, spread over -d. A rung or
     generator already present (made earlier, or brought by `fetch --uncalibrated`) is kept if the
     current converter made it. Uncalibrated jobs cannot resume; a failed one restarts."""
     path = job.base_snapshot()
@@ -3208,8 +3220,9 @@ def main():
     cmd_baseline.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
-    cmd_baseline.add_argument('--generator', default=True, action=argparse.BooleanOptionalAction,
-                              help='also the uncalibrated 8bpw calibration generator `traces` uses (models with a chat template)')
+    cmd_baseline.add_argument('--generator', default=False, action=argparse.BooleanOptionalAction,
+                              help='also the uncalibrated 8bpw calibration generator (models with a chat template); '
+                                   'only `traces --generator uncalibrated` uses it, and builds it itself if missing')
     cmd_baseline.add_argument('--allow-converter-mismatch', action='store_true',
                               help='reuse rungs a different (or unrecorded) converter made, this run only')
     cmd_baseline.add_argument('--adopt-converter', action='store_true',
