@@ -531,6 +531,26 @@ observed 19 t/s. Prefill at 29 t/s is 34 ms per prompt token.
 | expert suh + svh | 0.08 |
 | vision (skipped by `--language-model-only`) | 1.07 |
 
+### Chunk size against residency (2026-11-09)
+
+RTX 3060 under WSL at 0.87, 131072 `--max-model-len`, nvfp4 KV, one 46917-token prompt, varying only
+`--max-num-batched-tokens`. A bigger chunk's activation peak comes out of the expert slots (60 MiB per slot
+over 40 layers):
+
+| chunk | slots | in VRAM | prefill | decode |
+|---|---|---|---|---|
+| 512 | 92 | 43% | 521 t/s | 41 t/s |
+| 1024 | 91 | 43% | 782 | 40 |
+| 2048 | 90 | 42% | 869 | 40 |
+| 4096 | 85 | 40% | 998 | 40 |
+| 8192 | 73 | 36% | 552 | 30 |
+
+Prefill nearly doubles from 512 to 4096 at no decode cost, then both collapse once residency drops below the
+single-stream target of 0.4 (`target_share`). The startup line switched to "fewer than 1 (single-stream decode
+will be slower)" at 8192 and only there, so the warning fires where the knee is. Each doubling costs more slots
+than the last (7 slots from 512 to 4096, 12 from 4096 to 8192), so the best chunk is the largest one that keeps
+residency at the target, which the slot sizing already knows how to compute.
+
 ---
 
 ## Prior art, and what to take from each
