@@ -551,6 +551,33 @@ will be slower)" at 8192 and only there, so the warning fires where the knee is.
 than the last (7 slots from 512 to 4096, 12 from 4096 to 8192), so the best chunk is the largest one that keeps
 residency at the target, which the slot sizing already knows how to compute.
 
+### Speculative decoding against residency (2026-11-10)
+
+Qwen3.6-35B-A3B 4.00bpw, MTP with 3 tokens, one stream, graphs on, slots fixed by `EXL3_EXPERT_SLOTS`, two
+greedy prompts (prose, code), 512 tokens each. Decode tok/s, no spec → MTP:
+
+| in VRAM | this host (5060 Ti, 28.7 GB/s link) | godel (3060, WSL, 23.7 GB/s) |
+|---|---|---|
+| 20% | | 39.6, 33.7 → 40.1, 37.9 |
+| 30% | | 48.9, 42.5 → 53.8, 50.8 |
+| 35% | | 51.2, 45.3 → 59.2, 56.7 |
+| 40% | 63.1, 57.5 → 77.0, 75.7 | 52.0, 46.3 → 61.2, 57.8 |
+| 45% | 63.8, 59.4 → 79.5, 81.5 | |
+| 50% | 64.9, 61.0 → 83.1, 86.8 | |
+| 55% | 65.3, 62.4 → 85.7, 92.4 | |
+
+No knee in either range: the drafter pays from 30% up on godel and at every share here, and its gain grows
+with residency. The first model, that a verify step routes 1 + k rows and so costs like that many streams,
+predicted a loss below ~60% and was wrong. The link was not the separator either (the two hosts differ by
+~18%, memcpy and mapped reads alike).
+
+The loss seen on godel in serving (31 against ~40 tok/s) was **nvfp4 KV on Ampere**: FlashInfer, the only
+backend for it there, treats a verify batch as a decode only with its TRT-LLM decode kernel, which sm_86 lacks,
+so every verify step takes the prefill path and rebuilds its metadata. Godel at 35%: default KV (FLASH_ATTN)
++16%/+25%, nvfp4 −15%/+11%; long context widens it. With nvfp4 and MTP at 40%, KV did not fit one 8192-token
+request at 0.87 (FlashInfer's undeclared workspace, see docs/memory-accounting.md). Peak device memory stayed
+under the card in every run, Windows' ~1.5 GiB included, so none of this was WSL paging.
+
 ---
 
 ## Prior art, and what to take from each

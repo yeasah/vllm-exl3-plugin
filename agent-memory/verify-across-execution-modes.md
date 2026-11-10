@@ -27,3 +27,10 @@ One run per cell first for breadth, repeats only where a cell fails. Record
 per-cell `token_ids[0]` and tok/s alongside pass/fail — a hang and a silently
 degenerate first token are both invisible in decoded text. See
 [[reap-stray-gpu-processes]] for cleaning up between cells.
+
+The converse trap (2026-11-10): an identity *failure* can come from the reference, not the change. Under
+speculative decoding with async scheduling on, step timing picks the verify batch shapes, and the MoE kernel
+is not batch-invariant, so anything that slows steps (cache promotions, link contention from another GPU's
+offloaded run, cold autotune) moves greedy output, deterministically enough to look like a race. Turn async
+scheduling off for spec-decode identity tests, and before chasing a divergence check whether the reference
+itself moves under the same perturbation.

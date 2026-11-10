@@ -221,13 +221,15 @@ decode). Output matches resident token for token in eager mode, the cache's acce
 2. **Startup headroom.** Two allocations after weight load are missing from vLLM's memory profile
    (the embedding op's `had_left` scratch in flashinfer's autotune, 352 MiB; inductor's ~1.9 GiB
    transient on Ornith-9B) and decide whether a tight card serves at all.
-3. **Size residency for verify rows.** A drafter only pays when the share of experts in VRAM covers the
-   verify step: a verify routes 1 + `num_speculative_tokens` rows per request, so it costs like that many
-   streams. MTP with 3 tokens won at 61% here (88 against 53 tok/s eager) and lost at 40% on godel's 12 GiB
-   card (31 against ~40), whose ceiling at 4.00bpw is ~42-44%. Split `EXL3_KV_RESERVE`: the KV reserve counts
-   requests, the residency target rows per step (requests x (1 + k), an upper bound, since one request's
-   consecutive tokens likely share experts). Warn at startup when a drafter is configured and the row target
-   is out of reach. Locate the verify-row knee at fixed slot shares first.
+3. **Size slots from a measured link, and say when a drafter will not pay.** `target_share` is gemma
+   on the old Skylake host (6.5 GB/s); a startup burst (pinned copy and a mapped read, ~1 s) should scale it
+   (this host 28.7 GB/s, godel's 3060 under WSL 23.7). Drafters need less than first thought: MTP with 3
+   tokens on Qwen3.6-35B-A3B 4.00bpw gained at every share tried, from +1-13% at 20% of experts in VRAM to
+   +18-25% at 40% on godel and +31-48% at 55% here, with no knee. What lost was nvfp4 KV on Ampere:
+   FlashInfer runs verify batches as prefills without its TRT-LLM decode kernel (-15%/+11% against
+   +16%/+25% with the default KV, godel at 35%). Warn at startup for that combination; the slot target's
+   verify-row term needs its own measurement once the link term is in. Data:
+   [docs/expert-cache.md](docs/expert-cache.md), "Speculative decoding against residency".
 4. **The chunk size picks itself.** With experts offloaded and no `--max-num-batched-tokens` given, take
    the largest chunk that keeps residency at `target_share`. On the 3060 that is 4096, ~2x the prefill
    of 512 at no decode cost, and 8192 falls off the knee ([docs/expert-cache.md](docs/expert-cache.md),
