@@ -551,6 +551,10 @@ will be slower)" at 8192 and only there, so the warning fires where the knee is.
 than the last (7 slots from 512 to 4096, 12 from 4096 to 8192), so the best chunk is the largest one that keeps
 residency at the target, which the slot sizing already knows how to compute.
 
+Not pursued (2026-11-10): with prefill prefetch (docs/moe.md, "Prefetching the next layer's experts") the
+copy cost that made chunk size matter is mostly hidden, and vLLM's 2048-token default comes within 11-14% of
+4096 on both hosts measured. Close enough to leave the default alone.
+
 ### Speculative decoding against residency (2026-11-10)
 
 Qwen3.6-35B-A3B 4.00bpw, MTP with 3 tokens, one stream, graphs on, slots fixed by `EXL3_EXPERT_SLOTS`, two

@@ -230,12 +230,6 @@ decode). Output matches resident token for token in eager mode, the cache's acce
    +16%/+25% with the default KV, godel at 35%). Warn at startup for that combination; the slot target's
    verify-row term needs its own measurement once the link term is in. Data:
    [docs/expert-cache.md](docs/expert-cache.md), "Speculative decoding against residency".
-4. **The chunk size picks itself.** With experts offloaded and no `--max-num-batched-tokens` given, take
-   the largest chunk that keeps residency at `target_share`. On the 3060 that is 4096, ~2x the prefill
-   of 512 at no decode cost, and 8192 falls off the knee ([docs/expert-cache.md](docs/expert-cache.md),
-   "Chunk size against residency"). The catch is ordering: vLLM profiles activation at the chunk size
-   before the cache sizes, so choosing it needs a predicted activation slope per token or a re-profile.
-   Needs a second card and model before it becomes a default.
 
 Phase 5 (embedding table on host, saved slot state, double-buffered staging, a CPU tail) waits on its
 own evidence. Smaller open questions are in [docs/cpu-offload.md](docs/cpu-offload.md), "Open questions".
