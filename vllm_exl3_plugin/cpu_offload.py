@@ -448,13 +448,22 @@ def _host_copy(dst: torch.Tensor, src: torch.Tensor) -> None:
     _COPIES.append((fut, src, dst))
     # bounded: a loader faster than the copies must not hold an unbounded backlog of source tensors
     while len(_COPIES) > 64 * _COPY_POOL._max_workers:
-        _COPIES.popleft()[0].result()
+        _land(_COPIES.popleft())
+
+
+def _land(entry) -> None:
+    """Wait for one queued copy, holding its tensors until it has landed. Not `popleft()[0].result()`:
+    that drops the popped tuple, and with it the last reference to the source, before the wait, so a copy
+    still queued read freed memory -- about 2% of rows when stressed (2026-11-10)."""
+    fut, src, dst = entry
+    fut.result()
+    del src, dst
 
 
 def drain_host_copies() -> None:
     """Wait for every host copy in flight; called wherever offloaded rows are first read."""
     while _COPIES:
-        _COPIES.popleft()[0].result()
+        _land(_COPIES.popleft())
 
 
 #: Batches of more than this many tokens stage a layer's offloaded experts into

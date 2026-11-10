@@ -157,6 +157,30 @@ def _on_host(param, label, t):
                                      for r in block.rows.values())
 
 
+def test_host_copies_land_before_their_sources_are_released(offload):
+    """Placement copies to host rows asynchronously, and the drain (or the backlog bound) must hold a
+    copy's source until it lands. `popleft()[0].result()` dropped it first, so a copy still queued read
+    freed memory: ~2% of rows corrupt under this load, starting at the allocator's free-list pointer.
+    Fresh sources each time and a drain mid-flight are what expose it."""
+    import torch
+
+    offload(_Loader({"experts"}))
+    bad = 0
+    for trial in range(100):
+        cpu_offload._reset_stats()
+        params = []
+        for n in range(4):
+            param = _Collector(prefix=f"m.layers.{n}.mlp.experts")
+            for e in range(8):
+                cpu_offload.place_expert(param, torch.full((4, 2, 32), e + 10 * n, dtype=torch.int16), "gate", e)
+            params.append(param)
+        cpu_offload.drain_host_copies()
+        for n, param in enumerate(params):
+            block = param.exl3_blocks["gate"]
+            bad += sum(not bool((block.host[r] == e + 10 * n).all()) for e, r in block.rows.items())
+    assert bad == 0, f"{bad} of 3200 host rows were corrupted by copies that outlived their sources"
+
+
 def test_scale_vectors_never_reach_the_loader(offload):
     import torch
 
