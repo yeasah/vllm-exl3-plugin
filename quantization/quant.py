@@ -3216,7 +3216,7 @@ def main():
 
     cmd_baseline = subparsers.add_parser('baseline', help="uncalibrated conversions: the card's baseline ladder and "
                                          "the calibration generator (single-GPU jobs, spread over -d)")
-    cmd_baseline.add_argument('-b', '--bits', default='3:5,3.5:5,4,5,6')
+    cmd_baseline.add_argument('-b', '--bits', default='2.5:5,3:5,3.5:5,4,5,6')
     cmd_baseline.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
@@ -3320,7 +3320,7 @@ def main():
     cmd_yaqa.set_defaults(func=do_yaqa)
 
     cmd_quantize = subparsers.add_parser('quantize', help="the calibrated ladder")
-    cmd_quantize.add_argument('-b', '--bits', default='3:5,3.5:5,4,5,6')
+    cmd_quantize.add_argument('-b', '--bits', default='2.5:5,3:5,3.5:5,4,5,6')
     cmd_quantize.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_quantize.add_argument('--calibration', default='mix', choices=['mix', 'default'],
@@ -3390,7 +3390,7 @@ def main():
     # The best GGUF per byte at each size: below ~3.5 bpw the lattice-codebook I-quants (EXL3's
     # nearest relatives; K-quants are scalar), IQ4_XS's non-linear grid at 4, scalar K-quants above.
     # No Q8_0: ~8.5 real bpw is outside any card's comparison window, so it would be scored and dropped
-    cmd_qbench.add_argument('--gguf-quants', default='IQ3_XXS,IQ3_M,IQ4_XS,Q5_K_M,Q6_K',
+    cmd_qbench.add_argument('--gguf-quants', default='IQ2_M,IQ3_XXS,IQ3_M,IQ4_XS,Q4_K_M,Q5_K_M',
                             help='quant types to take from each --reference-gguf repo (a type the repo lacks is left out)')
     # Off by default: it checks the bench's relationship to llama.cpp, not this model's quants
     # (within the noise floor on every slice, Qwen3-0.6B 2026-10-10), and a bf16 GGUF is the most
