@@ -412,6 +412,39 @@ def test_out_of_order_staging_drops_the_prefetch_and_stays_correct(offload, monk
     _assert_staged_all(layers[1], gate1, 1)
 
 
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="streams and events need CUDA")
+def test_dropping_prefetch_folds_every_layer_onto_one_window(offload, monkeypatch):
+    """When the expert cache gives the second window's bytes to slots, odd layers' staged tables and
+    copy plans move to the first window, and staging still lands each layer's own rows where its tables
+    point. Before graph capture, so only these tables ever held the old addresses."""
+    import torch
+
+    monkeypatch.setattr(cpu_offload, "PREFETCH_MODE", "auto")
+    layers = _prefetch_layers(offload, monkeypatch, [0, 1, 2, 3])
+    assert cpu_offload.prefetch_window_bytes() > 0
+    freed = cpu_offload.drop_prefetch()
+    assert freed > 0 and len(cpu_offload._STATS["windows"]) == 1
+    assert not cpu_offload.PREFETCH and cpu_offload.prefetch_window_bytes() == 0
+    window = cpu_offload._STATS["windows"][0]
+    for n in range(4):
+        assert layers[n].exl3_stage_window == 0
+        window.zero_()   # each path must fill the window itself: the copy list and the copy plan both moved
+        gate, _, _ = cpu_offload.stage_all(layers[n].exl3_stage_idx)
+        torch.cuda.synchronize()
+        _assert_staged_all(layers[n], gate, n)
+        window.zero_()
+        gate, _, _ = cpu_offload.stage_routed(layers[n].exl3_stage_idx, [1] * 9, _decode(layers[n]))
+        torch.cuda.synchronize()
+        _assert_staged_all(layers[n], gate, n)
+
+
+def test_forced_prefetch_is_not_droppable(offload, monkeypatch):
+    monkeypatch.setattr(cpu_offload, "PREFETCH_MODE", "on")
+    _prefetch_layers(offload, monkeypatch, [0, 1])
+    assert len(cpu_offload._STATS["windows"]) == 2
+    assert cpu_offload.prefetch_window_bytes() == 0
+
+
 def test_cache_mode_hosts_matching_experts_without_spending_the_counter(offload, monkeypatch):
     """With the cache on and a budget that covers them, every matching expert is hosted, and
     the hosted bytes are tracked apart from vLLM's counter (the quota already held them to it)."""

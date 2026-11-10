@@ -510,6 +510,7 @@ def build(layers: list, available: int, worker) -> int:
                      for b in first.exl3_host_blocks.values())
     per_layer_max = max(max(len(b.rows) for b in l.exl3_host_blocks.values()) for l in layers)
     hosted = cpu_offload._STATS["expert_bytes"]
+    given_back = 0   # bytes freed here that KV would otherwise not have had
     if cpu_offload.cache_mode() == "fixed":
         slots, how = min(_slots_per_layer(E), per_layer_max), "fixed by EXL3_EXPERT_SLOTS"
         reserve = None
@@ -522,12 +523,29 @@ def build(layers: list, available: int, worker) -> int:
             cap = max(math.ceil(target_share(streams) * E) - (E - per_layer_max), 0)
             how += f"; slots stop at {100 * target_share(streams):.0f}% of experts for {streams:g} stream(s)"
         slots = size_slots(available, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
+        extra = cpu_offload.prefetch_window_bytes()
+        if extra:
+            # the second staging window (prefill prefetch) is dropped only when it is what takes
+            # residency below the target; under it either way, prefill keeps its 20-39%
+            target = target_share(float(os.environ.get("EXL3_KV_RESERVE", "1.0")))
+            freed_slots = size_slots(available + extra, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
+            kept, freed = (E - per_layer_max + slots) / E, (E - per_layer_max + freed_slots) / E
+            if kept < target <= freed:
+                dropped = cpu_offload.drop_prefetch()
+                available += dropped
+                given_back += dropped
+                slots = freed_slots
+                logger.info(
+                    "expert cache: prefill prefetch off; its second staging window (%.0f MiB) would have left "
+                    "%.0f%% of experts in VRAM, under the %.0f%% target (EXL3_STAGE_PREFETCH=1 keeps it)",
+                    dropped / (1 << 20), 100 * kept, 100 * target,
+                )
     if slots <= 0:
         logger.warning(
             "expert cache: no VRAM left for slots after the KV reserve (%s); experts are "
             "read from host every token. Lower EXL3_KV_RESERVE or --max-model-len.", how,
         )
-        return 0
+        return -given_back
     cache = ExpertCache(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
     used = sum(t.numel() * t.element_size() for d in cache.slot_tensors for t in d.values())
     if cache.holds_everything:
@@ -548,7 +566,7 @@ def build(layers: list, available: int, worker) -> int:
             "Offload was not needed at this --max-model-len and EXL3_KV_RESERVE.",
             slots, used / (1 << 20), (available - used + freed) / (1 << 30),
         )
-        return used - freed
+        return used - freed - given_back
     CACHE = cache
     _patch_runners()
     in_vram = (E - per_layer_max + slots) / E
@@ -562,4 +580,4 @@ def build(layers: list, available: int, worker) -> int:
         "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1
         else "fewer than 1 (single-stream decode will be slower)",
     )
-    return used
+    return used - given_back

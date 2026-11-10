@@ -477,7 +477,13 @@ STAGE_MIN_TOKENS = int(os.environ.get("EXL3_STAGE_MIN_TOKENS", "32"))
 #: WSL (2026-11-10: 2.07 s of 10.2 at 4096-token chunks, 3.65 of 12.6 at 2048), since each chunk copies
 #: most of every layer again. Copies run on the copy engine, not SMs, so they cannot meet exllamav3's
 #: spin-waiting kernels the way an overlapped kernel did (plugin._patch_kernel_overlap).
-PREFETCH = os.environ.get("EXL3_STAGE_PREFETCH", "0") == "1"
+#: ``EXL3_STAGE_PREFETCH``: "auto" (default) allocates both windows and lets the expert cache drop the
+#: second when keeping it would take residency below its target (`drop_prefetch`); "1" keeps it
+#: whatever that costs, "0" never allocates it.
+PREFETCH_MODE = {"1": "on", "0": "off"}.get(
+    os.environ.get("EXL3_STAGE_PREFETCH", "auto").strip().lower() or "auto",
+    os.environ.get("EXL3_STAGE_PREFETCH", "auto").strip().lower() or "auto")
+PREFETCH = PREFETCH_MODE != "off"
 
 #: MoE layers with host blocks, waiting for `build_staging` at the end of load.
 _HOSTED: list = []
@@ -675,6 +681,51 @@ def stage_routed(idx: int, counts: list[int], tables: tuple) -> tuple:
         moved = _wanted_rows(layer, lambda e: counts[e] > 0)
         _copy_rows(layer, moved)
     return _point_at_window(layer, moved, tables)
+
+
+def prefetch_window_bytes() -> int:
+    """Bytes of the second staging window, which `drop_prefetch` can give back; 0 if there is none or
+    prefetch was forced on."""
+    windows = _STATS.get("windows") or []
+    return windows[1].numel() if len(windows) == 2 and PREFETCH_MODE == "auto" else 0
+
+
+def drop_prefetch() -> int:
+    """Fold every layer back onto the first window, free the second, and stop prefetching; returns the
+    bytes freed. Only before graph capture: captured tables would keep the old addresses."""
+    global PREFETCH
+    windows = _STATS.get("windows") or []
+    if len(windows) < 2:
+        return 0
+    first, second = windows
+    delta = first.data_ptr() - second.data_ptr()
+    for layer in STAGED:
+        if getattr(layer, "exl3_stage_window", 0) != 1 or layer.exl3_stage is None:
+            continue
+        moved = {}
+        for label, (dst, row_bytes) in layer.exl3_stage_plan.items():
+            off = dst.data_ptr() - second.data_ptr()
+            moved[id(dst)] = first[off:off + dst.numel()]
+            layer.exl3_stage_plan[label] = (moved[id(dst)], row_bytes)
+        copies, tables = layer.exl3_stage
+        copies = [(moved[id(dst)], src) for dst, src in copies]
+        tables = list(tables)
+        for j, label in enumerate(("gate", "up", "down")):
+            block = layer.exl3_host_blocks.get(label)
+            if block is None:
+                continue   # that entry is the decode table itself, not a staged copy of it
+            table = tables[j].cpu()
+            for e in block.rows:
+                table[e] += delta
+            tables[j] = table.to(tables[j].device)
+        layer.exl3_stage = (copies, tuple(tables))
+        layer.exl3_stage_window = 0
+    _STATS["windows"] = [first]
+    freed = second.numel()
+    del second, windows
+    PREFETCH = False
+    torch.cuda.empty_cache()
+    return freed
 
 
 def prefetch_next(idx: int) -> None:
