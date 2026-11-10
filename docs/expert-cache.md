@@ -943,6 +943,18 @@ beside it), so anything that changes the compiled forward's structure changes ro
 
 So graph-mode identity is a bonus where the compiled graph is the same, and eager identity is the test.
 
+**Under speculative decoding, eager identity needs async scheduling off** (2026-11-10, Qwen3.6-35B-A3B
+4.00bpw, MTP with 3 tokens, two greedy prompts). With async scheduling on, step timing can change the verify
+batch shapes, and the kernel's batch variance then flips greedy near-ties. Promotion copies, link contention
+from another offloaded process, and live autotuning all shift that timing. Cache on against cache off diverged
+at tokens 45 and 100, deterministically and identically under each of those perturbations, which looked like
+a promotion race. It is not one: cache off alone diverges at the same tokens between async on and off, and
+the "wrong" output is the one cache off produces with async off. With `async_scheduling=False`, cache on
+(alone and contended) is token-identical to cache off. Before this, the controller counted only one-token
+requests as decodes, so under spec decoding it learned from almost no steps; counting each decode's
+verify rows (`decode_rows`) took eager decode from 49 tok/s (frozen slots) to 88, against 20 with the cache
+off, at 61% of experts in VRAM.
+
 ## Reproducing
 
 ```

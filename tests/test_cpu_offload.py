@@ -369,6 +369,22 @@ def test_drafter_load_is_marked():
         base_loader._exl3_offload_summary_patched = saved_flag
 
 
+def test_decode_rows_count_speculative_verify_rows():
+    """Under speculative decoding a decode schedules its token plus its drafts, and every one of
+    them is routed through the target; counting one-token requests only read each such step as
+    decode-free, so the cache never learned. A prefill chunk is still not a decode."""
+    from types import SimpleNamespace
+
+    from vllm_exl3_plugin import expert_cache
+
+    plain = SimpleNamespace(num_scheduled_tokens={"a": 1, "b": 1, "p": 512},
+                            scheduled_spec_decode_tokens={})
+    assert expert_cache.decode_rows(plain) == 2
+    spec = SimpleNamespace(num_scheduled_tokens={"a": 4, "b": 4, "p": 512},
+                           scheduled_spec_decode_tokens={"a": [1, 2, 3], "b": [4, 5, 6]})
+    assert expert_cache.decode_rows(spec) == 8
+
+
 def _two_layer_cache(offload, monkeypatch, loader):
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)

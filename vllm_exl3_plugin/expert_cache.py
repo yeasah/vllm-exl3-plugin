@@ -353,6 +353,16 @@ class ExpertCache:
             self.window_steps = self.decode_steps = self.staged_steps = 0
 
 
+def decode_rows(scheduler_output) -> int:
+    """How many of the step's leading rows are decodes (vLLM sorts decodes first; see the module
+    docstring). Under speculative decoding a decode is its token plus the drafts being verified,
+    all routed through the target model, so a request counts as many rows as it scheduled. Counting
+    only one-token requests there read every step as decode-free, and the cache never learned."""
+    spec = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
+    return sum(n for r, n in scheduler_output.num_scheduled_tokens.items()
+               if n == 1 + len(spec.get(r, ())))
+
+
 def _patch_runners() -> None:
     """Run the controller around every real step of either model runner.
 
@@ -382,9 +392,7 @@ def _patch_runners() -> None:
                 cache.step_begin()
             out = _original(self, scheduler_output, *args, **kwargs)
             if tokens:
-                # decode rows lead the batch (vLLM sorts them first); see the module docstring
-                decodes = sum(n == 1 for n in scheduler_output.num_scheduled_tokens.values())
-                cache.step_end(tokens, decodes)
+                cache.step_end(tokens, decode_rows(scheduler_output))
             return out
 
         cls.execute_model = execute_model
