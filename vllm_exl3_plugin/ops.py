@@ -874,6 +874,9 @@ def _moe_grouped(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up
     R = FUSED_ROWS_WIDE if wide else TEMP_ROWS_FUSED
     tsg, tsu, tig, tiu = _moe_fused_buffers(dev, R, H, intermediate)
 
+    if stage >= 0:
+        # before the readback below, so the next layer's copy is already queued behind this layer's work
+        cpu_offload.prefetch_next(stage)
     flat_e = topk_ids.reshape(-1).to(torch.long)
     flat_w = topk_weights.reshape(-1).to(torch.half)
     flat_t = torch.arange(M, device=dev).repeat_interleave(K)

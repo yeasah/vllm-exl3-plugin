@@ -535,12 +535,12 @@ def build(layers: list, available: int, worker) -> int:
         # reads the slots too, so the staging window goes back to KV.
         global _STATIC
         _STATIC = cache
-        window = cpu_offload._STATS.pop("window", None)
+        windows = cpu_offload._STATS.pop("windows", None) or []
         for layer in layers:
             layer.exl3_stage = None
             layer.exl3_route = layer.exl3_route_own   # nothing reads it now, but the graph keeps its shape
-        freed = window.numel() if window is not None else 0
-        del window
+        freed = sum(w.numel() for w in windows)
+        del windows
         torch.cuda.empty_cache()  # back to the driver, so KV's allocation can use it
         logger.info(
             "expert cache: every offloaded expert fits in VRAM (%d slots per layer, %.0f MiB); "

@@ -395,6 +395,28 @@ re-chunking the old path's own prefill does (mean 0.057, p99 0.37 both). The exp
 token-identical to resident in eager mode. The bench's two Qwen3.5-35B-A3B MoE entries change on their
 63-token prompt (KL max 0.31 / 0.48, greedy unchanged), which takes a re-bless.
 
+### Prefetching the next layer's experts (2026-11-10, `EXL3_STAGE_PREFETCH=1`, off by default)
+
+Profiled on the 3060 under WSL (16K-token prefill, 45% of experts in VRAM), staging copies were 30% of
+prefill GPU time at 2048-token chunks (3.65 s of 12.6) and 21% at 4096 (2.07 of 10.2): each chunk copies
+most of every layer again, at the link's ~24 GB/s, on the forward stream. With the switch on there are two
+windows, alternating by layer, and a grouped MoE op queues the next layer's copy on a side stream before
+its own count readback, behind an event that orders it after the window's previous user. Routing is not
+known that early, so the copy takes every hosted expert not in a slot (about a third more bytes than
+routed staging). A layer that stages into a window holding another layer's pending copy waits for it and
+drops it, so an unexpected layer order costs the overlap, never correctness. Copies use the copy engine,
+not SMs, so the kernel-overlap deadlock does not apply.
+
+Qwen3.6-35B-A3B 4.00bpw, 16K tokens, graphs on; token ids identical with and without, eager and graphs:
+
+| host | 2048-token chunks | 4096-token chunks | slots given up |
+|---|---|---|---|
+| 5060 Ti, native Linux | 2692 → 3384 t/s (+26%) | 3290 → 3801 (+16%) | |
+| 3060, WSL | 1195 → 1240 (+4%) | 1620 → 1612 (0%) | 6 per layer (357 MiB) |
+
+The host with the larger copy share gains least. Unexplained so far; the suspect is WDDM not running the
+copy engine beside compute, which would leave only the extra bytes. Off by default until that is known.
+
 ## CUDA graphs are worth 1.9x to 4.9x
 
 Llama-3.2-1B, identical work: 312 tok/s captured versus 163 eager. Laguna-XS is

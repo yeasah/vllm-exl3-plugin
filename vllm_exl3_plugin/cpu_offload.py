@@ -472,6 +472,13 @@ def drain_host_copies() -> None:
 #: the staging copy is one layer's offloaded bytes whatever the batch.
 STAGE_MIN_TOKENS = int(os.environ.get("EXL3_STAGE_MIN_TOKENS", "32"))
 
+#: Grouped (prefill) batches copy the next layer's offloaded experts into a second window on a side
+#: stream while this layer computes. Copies are a fifth to a third of offloaded prefill on a 3060 under
+#: WSL (2026-11-10: 2.07 s of 10.2 at 4096-token chunks, 3.65 of 12.6 at 2048), since each chunk copies
+#: most of every layer again. Copies run on the copy engine, not SMs, so they cannot meet exllamav3's
+#: spin-waiting kernels the way an overlapped kernel did (plugin._patch_kernel_overlap).
+PREFETCH = os.environ.get("EXL3_STAGE_PREFETCH", "0") == "1"
+
 #: MoE layers with host blocks, waiting for `build_staging` at the end of load.
 _HOSTED: list = []
 
@@ -489,20 +496,31 @@ def register_experts(layer, blocks: dict) -> None:
         _HOSTED.append(layer)
 
 
+def _layer_number(layer) -> int:
+    """The decoder layer a MoE layer belongs to, from its module path, so staging indices follow the
+    forward; checkpoint order (which the loader follows) need not."""
+    m = re.search(r"layers\.(\d+)\.", layer_prefix(layer))
+    return int(m.group(1)) if m else 0
+
+
 def build_staging() -> None:
-    """Allocate one VRAM staging window, sized to the largest layer's offloaded
+    """Allocate a VRAM staging window, sized to the largest layer's offloaded
     experts, and give each hosted layer a second set of trellis pointer tables
     into it.
 
     One window serves every layer: a layer's copy is issued in stream after the
     previous layer's GEMM, so stream order alone keeps them from overlapping.
-    Called at the end of load, before vLLM sizes the KV cache, so the window is
-    counted as model memory. Tables are static, since the window never moves, so
-    a captured graph can hold them.
+    With ``EXL3_STAGE_PREFETCH`` there are two, alternating by layer, so the next
+    layer's copy can run beside this one's kernels (`prefetch_next`). Layers are
+    indexed in forward order (by layer number) for that. Called at the end of
+    load, before vLLM sizes the KV cache, so the windows are counted as model
+    memory. Tables are static, since the windows never move, so a captured graph
+    can hold them.
     """
     drain_host_copies()
     if not _HOSTED:
         return
+    _HOSTED.sort(key=_layer_number)
     plans, size = [], 0
     for layer in _HOSTED:
         offsets, off = {}, 0
@@ -512,10 +530,12 @@ def build_staging() -> None:
         plans.append((layer, offsets))
         size = max(size, off)
     device = next(iter(_HOSTED[0].exl3_host_blocks.values())).view.device
-    window = torch.empty(size, dtype=torch.uint8, device=device)
-    base = window.data_ptr()
+    count = 2 if PREFETCH and len(_HOSTED) > 1 else 1
+    windows = [torch.empty(size, dtype=torch.uint8, device=device) for _ in range(count)]
 
     for layer, offsets in plans:
+        w = (len(STAGED)) % count
+        window, base = windows[w], windows[w].data_ptr()
         copies, tables, plan = [], [], {}
         for label in ("gate", "up", "down"):
             table = getattr(layer, f"exl3_{label}_trellis_ptrs")
@@ -533,14 +553,16 @@ def build_staging() -> None:
             tables.append(table)
         layer.exl3_stage = (copies, tuple(tables))
         layer.exl3_stage_plan = plan
+        layer.exl3_stage_window = w
         layer.exl3_stage_idx = len(STAGED)
         STAGED.append(layer)
-    # Strong reference: the staged tables hold raw addresses into it
-    _STATS["window"] = window
+    # Strong references: the staged tables hold raw addresses into them
+    _STATS["windows"] = windows
     logger.info(
-        "cpu-offload: %.0f MiB prefill staging window; batches over %d tokens "
-        "copy a layer's offloaded experts in rather than reading them over UVA",
-        size / (1 << 20), STAGE_MIN_TOKENS,
+        "cpu-offload: %s%.0f MiB prefill staging window%s; batches over %d tokens copy a layer's "
+        "offloaded experts in rather than reading them over UVA%s",
+        "2 x " if count == 2 else "", size / (1 << 20), "s" if count == 2 else "", STAGE_MIN_TOKENS,
+        ", the next layer's while this one computes" if count == 2 else "",
     )
     from . import expert_cache
 
@@ -560,10 +582,79 @@ def stage_all(idx: int):
     layer = STAGED[idx]
     if layer.exl3_stage is None:
         return None
+    _settle(layer, idx)
     copies, tables = layer.exl3_stage
     for dst, src in copies:
         dst.copy_(src, non_blocking=True)
     return tables
+
+
+#: Prefetches issued and not yet consumed, by window: (staging index, event, rows moved per label)
+_PENDING_STAGE: list = [None, None]
+_SIDE: dict = {}
+
+
+def _settle(layer, idx: int):
+    """Before anything stages into this layer's window: a prefetch pending there is consumed if it is
+    this layer's, and waited for and dropped if it is another's (layers ran out of the order the
+    indices assume), so the window is never written twice at once. Returns the prefetch's moved rows,
+    or None if this layer must stage for itself."""
+    w = getattr(layer, "exl3_stage_window", 0)
+    pending = _PENDING_STAGE[w] if w < len(_PENDING_STAGE) else None
+    if pending is None:
+        return None
+    _PENDING_STAGE[w] = None
+    torch.cuda.current_stream().wait_event(pending[1])
+    if pending[0] == idx:
+        return pending[2]
+    _STATS["prefetch_misordered"] = _STATS.get("prefetch_misordered", 0) + 1
+    if _STATS["prefetch_misordered"] == 1:
+        logger.warning("cpu-offload: a layer staged out of the forward order prefetch assumes "
+                       "(layer %d after a prefetch for %d); correct, but that copy is not hidden", idx, pending[0])
+    return None
+
+
+def _wanted_rows(layer, want) -> dict:
+    """Per label, the (host row, expert) pairs to copy: experts `want` accepts that are not in VRAM."""
+    from . import expert_cache
+
+    in_vram = expert_cache.in_vram(layer)
+    return {label: sorted((row, e) for e, row in block.rows.items()
+                          if want(e) and not (in_vram is not None and in_vram[e]))
+            for label, block in layer.exl3_host_blocks.items()}
+
+
+def _copy_rows(layer, moved: dict) -> None:
+    """Copy the given host rows to their window offsets, in coalesced runs, on the current stream."""
+    for label, rows in moved.items():
+        if not rows:
+            continue
+        dst, row_bytes = layer.exl3_stage_plan[label]
+        src = layer.exl3_host_blocks[label].host.view(-1).view(torch.uint8)
+        i = 0
+        while i < len(rows):
+            k = i
+            while k + 1 < len(rows) and rows[k + 1][0] == rows[k][0] + 1:
+                k += 1
+            a, b = rows[i][0] * row_bytes, (rows[k][0] + 1) * row_bytes
+            dst[a:b].copy_(src[a:b], non_blocking=True)
+            i = k + 1
+
+
+def _point_at_window(layer, moved: dict, tables: tuple) -> tuple:
+    """The decode tables with the moved experts pointed at the window. The rest keep their decode
+    entries, which are right whether they point at a slot or at the host."""
+    out = []
+    for j, label in enumerate(("gate", "up", "down")):
+        rows = moved.get(label)
+        if not rows:
+            out.append(tables[j])
+            continue
+        mask = torch.zeros(tables[j].numel(), dtype=torch.bool)
+        mask[[e for _, e in rows]] = True
+        mask = mask.pin_memory().to(tables[j].device, non_blocking=True)
+        out.append(torch.where(mask, layer.exl3_stage[1][j], tables[j]))
+    return tuple(out)
 
 
 def stage_routed(idx: int, counts: list[int], tables: tuple) -> tuple:
@@ -574,40 +665,42 @@ def stage_routed(idx: int, counts: list[int], tables: tuple) -> tuple:
     cost a fixed ~15 GB on Qwen3.6-35B-A3B 4.00bpw whatever the chunk, which, once the MoE kernel was
     grouped, made 512-token chunks link-bound. Experts in an expert-cache slot or resident keep their
     VRAM addresses; unrouted ones are never read. Rows go to their usual window offsets in coalesced
-    runs, so the staged tables (`exl3_stage`) give their addresses."""
+    runs, so the staged tables (`exl3_stage`) give their addresses. A layer `prefetch_next` already
+    copied in uses that copy instead."""
     layer = STAGED[idx]
     if layer.exl3_stage is None:
         return tables
-    from . import expert_cache
+    moved = _settle(layer, idx)
+    if moved is None:
+        moved = _wanted_rows(layer, lambda e: counts[e] > 0)
+        _copy_rows(layer, moved)
+    return _point_at_window(layer, moved, tables)
 
-    in_vram = expert_cache.in_vram(layer)
-    out = []
-    for j, label in enumerate(("gate", "up", "down")):
-        block = layer.exl3_host_blocks.get(label)
-        if block is None:
-            out.append(tables[j])
-            continue
-        moved = [(row, e) for e, row in block.rows.items()
-                 if counts[e] > 0 and not (in_vram is not None and in_vram[e])]
-        if not moved:
-            out.append(tables[j])
-            continue
-        moved.sort()
-        dst, row_bytes = layer.exl3_stage_plan[label]
-        src = block.host.view(-1).view(torch.uint8)
-        i = 0
-        while i < len(moved):
-            k = i
-            while k + 1 < len(moved) and moved[k + 1][0] == moved[k][0] + 1:
-                k += 1
-            a, b = moved[i][0] * row_bytes, (moved[k][0] + 1) * row_bytes
-            dst[a:b].copy_(src[a:b], non_blocking=True)
-            i = k + 1
-        mask = torch.zeros(tables[j].numel(), dtype=torch.bool)
-        mask[[e for _, e in moved]] = True
-        mask = mask.pin_memory().to(tables[j].device, non_blocking=True)
-        out.append(torch.where(mask, layer.exl3_stage[1][j], tables[j]))
-    return tuple(out)
+
+def prefetch_next(idx: int) -> None:
+    """With ``PREFETCH``, start copying the next layer's offloaded experts (all of them not in VRAM: its
+    routing is not known yet) into its window on a side stream, behind everything already enqueued on
+    this one -- which includes the last layer to use that window -- so the copy runs beside this layer's
+    kernels. Called at the start of a grouped MoE op, before its count readback."""
+    if not PREFETCH or idx + 1 >= len(STAGED):
+        return
+    nxt = STAGED[idx + 1]
+    w = getattr(nxt, "exl3_stage_window", 0)
+    if nxt.exl3_stage is None or w == getattr(STAGED[idx], "exl3_stage_window", 0) or _PENDING_STAGE[w] is not None:
+        return
+    main = torch.cuda.current_stream()
+    side = _SIDE.get(main.device)
+    if side is None:
+        side = _SIDE[main.device] = torch.cuda.Stream(main.device)
+    ready = torch.cuda.Event()
+    ready.record(main)
+    moved = _wanted_rows(nxt, lambda e: True)
+    with torch.cuda.stream(side):
+        side.wait_event(ready)
+        _copy_rows(nxt, moved)
+        done = torch.cuda.Event()
+        done.record(side)
+    _PENDING_STAGE[w] = (idx + 1, done, moved)
 
 
 def register_offload(layer) -> int:

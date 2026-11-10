@@ -264,7 +264,7 @@ def _staged_layer(offload, monkeypatch):
                                          "up": None,
                                          "down": params["down"].exl3_blocks["down"]})
     cpu_offload.build_staging()
-    window = cpu_offload._STATS["window"]
+    window = cpu_offload._STATS["windows"][0]
     assert window.numel() == 3 * 512 + 8 * 512
     window.zero_()
     rows = {label: params[label].exl3_blocks[label].rows for label in params}
@@ -320,6 +320,96 @@ def test_routed_staging_copies_only_routed_experts_not_in_vram(offload, monkeypa
     copied = int((window.view(torch.int16) != 0).sum())
     nonzero_experts = sum(len(v - {0}) for v in want.values())  # expert 0's rows are zeros anyway
     assert copied == nonzero_experts * 256, "something other than the routed, non-VRAM rows was copied"
+
+
+def _prefetch_layers(offload, monkeypatch, order):
+    """Hosted layers registered in `order` (layer numbers), staged with prefetch on: two windows."""
+    import types
+
+    import torch
+
+    monkeypatch.setattr(cpu_offload, "STAGED", [])
+    monkeypatch.setattr(cpu_offload, "PREFETCH", True)
+    monkeypatch.setattr(cpu_offload, "_PENDING_STAGE", [None, None])
+    offload(_Loader({"experts"}))
+    layers = {}
+    for n in order:
+        param = _Collector(prefix=f"m.layers.{n}.mlp.experts")
+        placed = [cpu_offload.place_expert(param, _expert_tensor(e + 10 * n), "gate", e) for e in range(8)]
+        layer = types.SimpleNamespace(prefix=param.exl3_prefix,
+                                      exl3_gate_trellis_ptrs=torch.tensor([t.data_ptr() for t in placed]),
+                                      exl3_up_trellis_ptrs=torch.arange(8), exl3_down_trellis_ptrs=torch.arange(8))
+        cpu_offload.register_experts(layer, {"gate": param.exl3_blocks["gate"], "up": None, "down": None})
+        layers[n] = layer
+    cpu_offload.build_staging()
+    for w in cpu_offload._STATS["windows"]:
+        w.zero_()
+    return layers
+
+
+def _decode(layer):
+    return (layer.exl3_gate_trellis_ptrs, layer.exl3_up_trellis_ptrs, layer.exl3_down_trellis_ptrs)
+
+
+def _assert_staged_all(layer, table, n):
+    """Every expert of layer `n` points into its window at that layer's own rows (contents e + 10n)."""
+    import torch
+
+    window = cpu_offload._STATS["windows"][layer.exl3_stage_window]
+    for e in range(8):
+        off = int(table[e]) - window.data_ptr()
+        assert 0 <= off < window.numel(), f"expert {e} does not point into its layer's window"
+        got = window[off:off + 512].view(torch.int16)
+        host = layer.exl3_host_blocks["gate"].host[layer.exl3_host_blocks["gate"].rows[e]]
+        assert bool((got == e + 10 * n).all()), (f"expert {e} holds the wrong rows: window {got.unique().tolist()[:6]}, "
+                                                 f"host row {host.unique().tolist()[:6]}")
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="streams and events need CUDA")
+def test_staging_indices_follow_the_forward_and_windows_alternate(offload, monkeypatch):
+    """Checkpoint order is whatever the loader met; prefetch needs layer order, and neighbours in
+    different windows."""
+    layers = _prefetch_layers(offload, monkeypatch, [2, 0, 3, 1])
+    assert [layers[n].exl3_stage_idx for n in range(4)] == [0, 1, 2, 3]
+    assert [layers[n].exl3_stage_window for n in range(4)] == [0, 1, 0, 1]
+    assert len(cpu_offload._STATS["windows"]) == 2
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="streams and events need CUDA")
+def test_prefetched_layer_uses_the_copy_made_while_the_last_one_ran(offload, monkeypatch):
+    """Layer 0's op starts layer 1's copy; layer 1 then stages nothing itself and every hosted expert,
+    routed or not, points at the prefetched rows."""
+    import torch
+
+    layers = _prefetch_layers(offload, monkeypatch, [0, 1])
+    cpu_offload.prefetch_next(0)
+    assert cpu_offload._PENDING_STAGE[1] is not None
+    copies = []
+    monkeypatch.setattr(cpu_offload, "_copy_rows", lambda layer, moved: copies.append(layer))
+    gate, _, _ = cpu_offload.stage_routed(1, [1] + [0] * 8, _decode(layers[1]))
+    torch.cuda.synchronize()
+    assert copies == [], "a prefetched layer copied its experts again"
+    assert cpu_offload._PENDING_STAGE == [None, None]
+    _assert_staged_all(layers[1], gate, 1)
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="streams and events need CUDA")
+def test_out_of_order_staging_drops_the_prefetch_and_stays_correct(offload, monkeypatch):
+    """If another layer stages into the window a prefetch is pending in, it waits for that copy, drops
+    it and stages its own rows; the prefetched layer then stages for itself. Correct either way, only
+    not hidden."""
+    import torch
+
+    layers = _prefetch_layers(offload, monkeypatch, [0, 1, 2, 3])
+    cpu_offload.prefetch_next(0)                         # layer 1's rows into window 1
+    gate3, _, _ = cpu_offload.stage_routed(3, [1] * 9, _decode(layers[3]))   # window 1, out of turn
+    assert cpu_offload._STATS.get("prefetch_misordered") == 1
+    assert cpu_offload._PENDING_STAGE == [None, None]
+    torch.cuda.synchronize()
+    _assert_staged_all(layers[3], gate3, 3)
+    gate1, _, _ = cpu_offload.stage_routed(1, [1] * 9, _decode(layers[1]))
+    torch.cuda.synchronize()
+    _assert_staged_all(layers[1], gate1, 1)
 
 
 def test_cache_mode_hosts_matching_experts_without_spending_the_counter(offload, monkeypatch):
