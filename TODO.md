@@ -77,7 +77,10 @@ allocations, which are admission control. Evidence: [docs/memory-accounting.md](
 **Candidate, cheapest first:** (1) an entry that chunks its prefill (an `Entry` field for
 `max_num_batched_tokens` and a long prompt), since `_continuation_prefill` is unreachable from the gate;
 (2) a VRAM profile per entry (peak and per-prefill growth beside `weight_gib`), the axis the gate is blind to;
-(3) `bless` by entry name, so adding one entry does not re-bless a green tier; (4) flashinfer's autotune,
+(3) `bless` by entry name, so adding one entry does not re-bless a green tier, paired with an additive
+`freeze-tune` seeded from the committed fixture so only missing shapes are timed: adding the native Muse
+entry (2026-11-09) needed 8 new records, but the from-empty freeze re-timed all 254 and 41 changed kernel,
+which forced a re-bless of every entry; a full freeze stays the way to prune unused shapes; (4) flashinfer's autotune,
 the one cache class not frozen, shown to matter or not; (5) TP=4/8 tiers on a rental, with a hub prefetch
 before it starts. Evidence: [bench/README.md](bench/README.md).
 
