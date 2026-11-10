@@ -407,15 +407,24 @@ routed staging). A layer that stages into a window holding another layer's pendi
 drops it, so an unexpected layer order costs the overlap, never correctness. Copies use the copy engine,
 not SMs, so the kernel-overlap deadlock does not apply.
 
+**Issue it after the layer's own readback.** The first version queued the copy at the op's start, before
+the count readback. The 3060 under WSL reports one copy engine (`CU_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT`
+1; the 5060 Ti on native Linux reports 2), and on one engine every transfer queues behind the one in
+flight: a 0.3 ms readback issued just after a 23 ms upload on another stream took 22.5 ms there and 0.03
+ms here. So each layer's readback waited for the next layer's copy, and a trace showed 0.3% of copy time
+overlapping a kernel, the forward stream idle 2.4 s of 10.1. Kernels and copies themselves do run
+concurrently on that card, event-gated or not. Issued after the readback and the layer's table and mask
+uploads, just before its kernels, the copy runs during the layer's compute (~60 ms per layer per 4096-token
+chunk against ~12 ms of copying there) and lands before the next readback: 94.6% overlapped, 0.53 s idle.
+
 Qwen3.6-35B-A3B 4.00bpw, 16K tokens, graphs on; token ids identical with and without, eager and graphs:
 
 | host | 2048-token chunks | 4096-token chunks | slots given up |
 |---|---|---|---|
-| 5060 Ti, native Linux | 2692 → 3384 t/s (+26%) | 3290 → 3801 (+16%) | |
-| 3060, WSL | 1195 → 1240 (+4%) | 1620 → 1612 (0%) | 6 per layer (357 MiB) |
+| 5060 Ti, native Linux (2 copy engines) | 2692 → 3401 t/s (+26%) | 3290 → 3805 (+16%) | |
+| 3060, WSL (1 copy engine) | 1195 → 1667 (+39%) | 1620 → 1938 (+20%) | 6 per layer (357 MiB) |
 
-The host with the larger copy share gains least. Unexplained so far; the suspect is WDDM not running the
-copy engine beside compute, which would leave only the extra bytes. Off by default until that is known.
+2048-token chunks now come within 11-14% of 4096 on both hosts, against 18-26% without prefetch.
 
 ## CUDA graphs are worth 1.9x to 4.9x
 

@@ -874,9 +874,6 @@ def _moe_grouped(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up
     R = FUSED_ROWS_WIDE if wide else TEMP_ROWS_FUSED
     tsg, tsu, tig, tiu = _moe_fused_buffers(dev, R, H, intermediate)
 
-    if stage >= 0:
-        # before the readback below, so the next layer's copy is already queued behind this layer's work
-        cpu_offload.prefetch_next(stage)
     flat_e = topk_ids.reshape(-1).to(torch.long)
     flat_w = topk_weights.reshape(-1).to(torch.half)
     flat_t = torch.arange(M, device=dev).repeat_interleave(K)
@@ -913,6 +910,11 @@ def _moe_grouped(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up
             base[i], kind[i] = n_slots + b * cmax, 2
         n_slots += len(grp) * cmax
     tables = torch.tensor([base, starts, kind], dtype=torch.long).pin_memory().to(dev, non_blocking=True)
+    if stage >= 0:
+        # after this layer's readback and uploads, before its kernels: on a card with one copy engine
+        # (GeForce under WDDM) any transfer queues behind the prefetch, so issued earlier it stalled this
+        # layer's own readback until the next layer's copy landed (0.3% overlap on a 3060 under WSL)
+        cpu_offload.prefetch_next(stage)
     inv_order = torch.empty_like(order).scatter_(0, order, torch.arange(order.numel(), device=dev))
     scratch = torch.empty((max(n_slots, 1), H), dtype=torch.float, device=dev)
     out = torch.zeros((M, H), dtype=torch.float, device=dev)

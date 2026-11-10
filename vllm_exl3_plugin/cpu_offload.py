@@ -681,7 +681,8 @@ def prefetch_next(idx: int) -> None:
     """With ``PREFETCH``, start copying the next layer's offloaded experts (all of them not in VRAM: its
     routing is not known yet) into its window on a side stream, behind everything already enqueued on
     this one -- which includes the last layer to use that window -- so the copy runs beside this layer's
-    kernels. Called at the start of a grouped MoE op, before its count readback."""
+    kernels. Called by a grouped MoE op after its count readback and table uploads, just before its
+    kernels: with one copy engine every transfer queues behind this copy, the readback included."""
     if not PREFETCH or idx + 1 >= len(STAGED):
         return
     nxt = STAGED[idx + 1]
