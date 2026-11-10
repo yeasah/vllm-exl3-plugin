@@ -313,6 +313,62 @@ def test_cache_mode_hosts_matching_experts_without_spending_the_counter(offload,
     assert cpu_offload._STATS["expert_bytes"] == 4 * 512
 
 
+class UVAOffloader(_Loader):
+    """Named as vLLM's, so the real `_uva_loader` accepts it."""
+
+    uva_offloading = True
+
+
+def test_drafter_weights_stay_resident(offload, monkeypatch):
+    """A speculative drafter (an MTP head) loads into the same process after the target. None of
+    it is hosted and its layers are not counted toward the per-layer quota: offloading it once
+    gave it its own staging window and handed the expert cache its one layer in place of the
+    target's 40."""
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    loader = UVAOffloader({"experts"})
+    monkeypatch.setattr(cpu_offload, "get_offloader", lambda: loader)
+    cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
+    target = _Collector()
+    for e in range(8):
+        cpu_offload.place_expert(target, _expert_tensor(e), "gate", e)
+    with cpu_offload.drafting(True):
+        cpu_offload.declare_moe_layer("mtp.layers.0.mlp.experts")
+        draft = _Collector(prefix="mtp.layers.0.mlp.experts")
+        placed = [cpu_offload.place_expert(draft, _expert_tensor(e), "gate", e) for e in range(8)]
+    assert len(target.exl3_blocks["gate"].rows) == 8
+    assert draft.exl3_blocks == {"gate": None}
+    assert all(bool((t == e).all()) for e, t in enumerate(placed))
+    assert cpu_offload._STATS["moe_layers"] == {"m.layers.3.mlp.experts"}
+    assert not cpu_offload._DRAFTING, "drafting must end with the drafter's load"
+
+
+def test_drafter_load_is_marked():
+    """The loader hook marks a load whose ModelConfig has runner type "draft", and only that."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader import base_loader
+
+    from vllm_exl3_plugin import plugin
+
+    saved_pwal = base_loader.process_weights_after_loading
+    saved_flag = getattr(base_loader, "_exl3_offload_summary_patched", False)
+    saved_load = base_loader.BaseModelLoader.load_model
+    seen = []
+    base_loader.BaseModelLoader.load_model = lambda self, vc, mc, *a, **k: seen.append(cpu_offload._DRAFTING)
+    base_loader._exl3_offload_summary_patched = False
+    try:
+        plugin._patch_offload_summary()
+        for runner in ("generate", "draft"):
+            base_loader.BaseModelLoader.load_model(None, None, SimpleNamespace(runner_type=runner))
+        assert seen == [False, True]
+        assert not cpu_offload._DRAFTING
+    finally:
+        base_loader.BaseModelLoader.load_model = saved_load
+        base_loader.process_weights_after_loading = saved_pwal
+        base_loader._exl3_offload_summary_patched = saved_flag
+
+
 def _two_layer_cache(offload, monkeypatch, loader):
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
@@ -495,6 +551,7 @@ def test_summary_fires_at_the_post_load_boundary():
     saved = base_loader.process_weights_after_loading
     saved_flag = getattr(base_loader, "_exl3_offload_summary_patched", False)
     saved_report = cpu_offload.report_once
+    saved_load = base_loader.BaseModelLoader.load_model
 
     inner, reports = [], []
     base_loader.process_weights_after_loading = lambda *a, **k: inner.append(a)
@@ -508,6 +565,7 @@ def test_summary_fires_at_the_post_load_boundary():
     finally:
         cpu_offload.report_once = saved_report
         base_loader.process_weights_after_loading = saved
+        base_loader.BaseModelLoader.load_model = saved_load
         base_loader._exl3_offload_summary_patched = saved_flag
 
 

@@ -117,6 +117,19 @@ def _patch_offload_summary() -> None:
     base_loader.process_weights_after_loading = process_weights_after_loading
     base_loader._exl3_offload_summary_patched = True
 
+    # A speculative drafter is a second load into the same process. vLLM builds it from its own
+    # ModelConfig with runner type "draft" (an MTP head included), so that is what marks it.
+    load_model = base_loader.BaseModelLoader.load_model
+
+    @wraps(load_model)
+    def load_model_marked(self, vllm_config, model_config, *args, **kwargs):
+        from .cpu_offload import drafting
+
+        with drafting(getattr(model_config, "runner_type", None) == "draft"):
+            return load_model(self, vllm_config, model_config, *args, **kwargs)
+
+    base_loader.BaseModelLoader.load_model = load_model_marked
+
 
 def _patch_kernel_overlap() -> None:
     """Never run an EXL3 MoE layer's shared experts on vLLM's side stream.

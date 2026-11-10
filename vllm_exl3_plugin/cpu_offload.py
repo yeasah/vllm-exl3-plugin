@@ -46,6 +46,7 @@ for what offload costs and how to choose what to give it.
 from __future__ import annotations
 
 import collections
+import contextlib
 import ctypes
 import functools
 import math
@@ -107,8 +108,10 @@ def cache_mode() -> str:
 
 def declare_moe_layer(prefix: str) -> None:
     """Count a routed-expert layer at construction, before any weight arrives, so the
-    first expert block can be planned knowing how many layers will follow."""
-    _STATS["moe_layers"].add(prefix)
+    first expert block can be planned knowing how many layers will follow. A drafter's layers
+    are not counted: they stay resident (`drafting`)."""
+    if not _DRAFTING:
+        _STATS["moe_layers"].add(prefix)
 
 
 _reset_stats()
@@ -146,8 +149,30 @@ def layer_prefix(layer) -> str:
     return getattr(layer, "prefix", None) or getattr(layer, "layer_name", "")
 
 
+#: Set while a speculative drafter loads (`plugin._patch_offload_summary`): nothing of it is offloaded
+_DRAFTING = False
+
+
+@contextlib.contextmanager
+def drafting(on: bool):
+    """Keep every EXL3 weight loaded under this resident.
+
+    A drafter runs k times per step and is small, so its weights are what the VRAM is bought for; and
+    the expert cache is sized for the target model's layers. Offloading an MTP head's experts used to
+    give it a second staging window and hand the cache its one layer in place of the target's 40,
+    leaving every target expert read over the link (2026-11-09, Qwen3.6-35B-A3B)."""
+    global _DRAFTING
+    saved, _DRAFTING = _DRAFTING, on
+    try:
+        yield
+    finally:
+        _DRAFTING = saved
+
+
 def _uva_loader():
     """vLLM's offloader if it is UVA with acceleration available, else None."""
+    if _DRAFTING:
+        return None
     try:
         loader = get_offloader()
     except Exception:  # pragma: no cover - defensive; offloader is normally set
