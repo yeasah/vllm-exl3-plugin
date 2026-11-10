@@ -777,6 +777,16 @@ knob to set per configuration, not a default to change.
   `init_attn_backend` one is dead once the trtllm path allocates its own.
 - **Whether the 0.08–0.12 GiB residual is constant across models**, or scales with
   something. It is stable across three backends and three utilizations on one model.
+  A second model lands in the same band (2026-11-09, Qwen3.6-35B-A3B,
+  `--language-model-only`, RTX 3060 under WSL, 0.90): device use grew **+0.063 GiB**
+  past what KV sizing handed out with the experts resident, **+0.077** with the expert
+  cache, so the cache is not the source. A second, separate term sits under it: at sizing,
+  the device showed 3.737 GiB used against vLLM's `total_consumed` of 3.58, i.e. ~0.16 GiB
+  of the process's own pre-snapshot usage (mostly the CUDA context) that the utilization
+  path never charges. Bare Linux would show this only as free memory below the budget;
+  WDDM pages it instead, which cost that run 3× in prefill (~10 s against ~3 s) until the
+  budget dropped to 0.87. Vision hides it there, because encoder profiling leaves ~0.84
+  GiB of slack.
 - **Why the vision encoder exceeds its own profile** at `max_pixels` 4194304 on
   Qwen3.8-27B, when the served image is smaller than the profiled dummy. Fragmentation is
   the suspect and `tools/memprof.py` is the instrument; neither has been applied.

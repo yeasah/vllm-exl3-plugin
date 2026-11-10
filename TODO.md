@@ -62,7 +62,9 @@ backend, without the operator finding the ceiling by an OOM at first inference.
 **Candidate:** (1) the general workspace hook for backends beyond TurboQuant, FlashInfer first (0.385 GiB
 it does not declare, and it is the default); (2) stop making the operator retype the ceiling every startup
 already prints (`free/total`): `gpu_memory_utilization=auto` from the init snapshot, or the appliance reading
-NVML before launch. Out of scope: non-torch growth after the snapshot (JIT loading) and request-shaped
+NVML before launch; (3) charge the process's pre-snapshot usage (~0.16 GiB) and a bytes allowance for
+post-sizing growth (~0.06–0.12 GiB, now seen on two models), which on WSL is a 3× prefill cost rather than
+an OOM. Out of scope: non-torch growth after the snapshot (JIT loading) and request-shaped
 allocations, which are admission control. Evidence: [docs/memory-accounting.md](docs/memory-accounting.md).
 
 ## `bench-gaps` — What the bump gate still cannot see
