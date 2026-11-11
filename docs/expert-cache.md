@@ -990,8 +990,8 @@ All four hold 103 experts per layer in VRAM. Turning residents into slots lifts 
 64 steps), the few slots thrashing. Residents chosen by id are close to dead weight. So the larger offers
 trade context for decode, but the context they give up pays only for duplicate copies and larger windows.
 
-**An exclusive cache would remove the trade** (being built, 2026-11-10): the 15 GiB row's decode with
-fewer host rows than the 10 GiB row's and smaller windows than any of them. Every expert would have exactly one home, a slot or a host
+**An exclusive cache removes the trade** (the default since 2026-11-10; `EXL3_CACHE_EXCLUSIVE=0` restores
+the inclusive one). Every expert would have exactly one home, a slot or a host
 row; a promotion swaps a hot host expert with a cold slot through a scratch slot, writing the cold one
 back to the row the hot one vacated, each entry always pointing at a complete copy. Host rows needed per
 layer would be experts minus slots (153 here, ~9 GiB), windows would stop growing with the offer, all of
@@ -1000,6 +1000,26 @@ device-to-host write per eviction (free on two copy engines, serialized with eve
 rows that move (so staged tables become dynamic), and a single-copy moment in every swap, so a checksum
 detector comes first. Between the extremes, a partly duplicated cache could keep host copies only for
 experts judged dynamic, so that they keep cheap promotions.
+
+Built as `ExclusiveCache`, with the detector (`EXL3_CACHE_VERIFY=1`: checksums at build, every moved expert's
+decode and staged entries and bytes checked after each step boundary) tested first and seen to fire on a
+write-back to the wrong row and on a slot overwritten before its write-back. Results:
+
+- **Identity:** Qwen3.6-35B-A3B 4.00bpw, 40 fixed slots, decode plus a 6K-token prefill after swaps: token
+  ids identical to inclusive in eager and graph mode, and at TP=2 in eager; the detector silent throughout.
+- **Same VRAM, more of it adaptive:** with 86 residents and 40 slots, VRAM hit 94-96% against 90-91%.
+- **The offload sweep again** (godel, same settings as the table above): the VRAM hit rate is now the same
+  at every offer, ~94% / ~88%, and decode matches the 15 GiB inclusive row at 10 GiB (51.6 / 45.9 t/s;
+  a first 10 GiB run at 44.4 / 38.5 did not reproduce, with identical cache stats, and is taken as
+  interference on the shared desktop).
+- **Refusing the excess.** At `--max-model-len auto` the cache stops at `target_share` in VRAM, so hosting
+  stops at the rest plus `EXL3_CACHE_SPARE_ROWS` (16) to swap through (`cpu_offload._exclusive_need`); 17
+  spare rows held the hit rate of 103. With a fixed length the slots are left to KV sizing and the offer is
+  taken as given. Godel offered 15 GiB: hosted 169 of 256 per layer (9.90 GiB, 5.10 unused), windows
+  2 x 254 MiB, **137,936 tokens of context against the inclusive cache's 89,472**, decode 50.6 / 45.2
+  against 52.0 / 46.8 (within the run-to-run spread there), hit rates identical.
+
+The write-backs cost nothing measurable at these promotion rates, on one copy engine or two.
 
 ---
 

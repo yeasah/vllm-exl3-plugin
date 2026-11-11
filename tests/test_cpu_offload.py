@@ -815,3 +815,39 @@ def test_report_is_emitted_only_once():
     assert cpu_offload._STATS["reported"] is True
     cpu_offload.report_once()  # must not raise or re-emit
     cpu_offload._reset_stats()
+
+
+def _vllm_config(monkeypatch, original_max_model_len):
+    import types
+
+    import vllm.config
+
+    cfg = types.SimpleNamespace(model_config=types.SimpleNamespace(original_max_model_len=original_max_model_len))
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: cfg)
+
+
+def test_exclusive_cache_hosts_only_what_it_can_use(offload, monkeypatch):
+    """At --max-model-len auto the exclusive cache stops at target_share in VRAM (103 of 256 for one
+    stream), so it needs rows for the other 153 plus spare ones to swap through; an offer beyond that buys
+    nothing and costs KV through the windows, so the quota stops there."""
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(expert_cache, "EXCLUSIVE", True)
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    _vllm_config(monkeypatch, -1)
+    loader = offload(_Loader({"experts"}))
+    assert cpu_offload._exclusive_need(256, loader) == 256 - 103 + cpu_offload._SPARE_ROWS
+    cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
+    assert cpu_offload._host_quota(256, 512) == 256 - 103 + cpu_offload._SPARE_ROWS
+
+
+@pytest.mark.parametrize("case", ["fixed length", "regex selector", "inclusive"])
+def test_exclusive_cap_only_when_the_need_is_known(offload, monkeypatch, case):
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(expert_cache, "EXCLUSIVE", case != "inclusive")
+    _vllm_config(monkeypatch, 32768 if case == "fixed length" else -1)
+    loader = offload(_Loader({r"re:experts\..*gate"} if case == "regex selector" else {"experts"}))
+    assert cpu_offload._exclusive_need(256, loader) is None

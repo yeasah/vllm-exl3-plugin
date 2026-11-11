@@ -340,6 +340,36 @@ _UNPLANNED = object()
 _HOST_MARGIN = 4 << 30
 
 
+#: Host rows the exclusive cache keeps free to swap through, beyond those it must hold. 17 per layer kept a
+#: 3060's hit rate and decode level with 103 (Qwen3.6-35B-A3B, docs/expert-cache.md).
+_SPARE_ROWS = int(os.environ.get("EXL3_CACHE_SPARE_ROWS", "16"))
+
+
+def _exclusive_need(experts: int, loader) -> int | None:
+    """Experts per layer worth hosting under the exclusive cache, when that is known at load: with
+    `--max-model-len auto` the cache stops at `target_share` in VRAM, so it needs host rows only for the
+    rest plus a few spare to swap through. More would buy nothing and cost KV, since the staging windows
+    are sized to the rows. None when it is not known (a fixed length leaves the slots to KV sizing), or
+    when selectors may host projections unevenly, which falls back to the inclusive cache."""
+    from . import expert_cache
+
+    if cache_mode() != "auto" or not expert_cache.EXCLUSIVE:
+        return None
+    params = getattr(loader, "cpu_offload_params", None) or ()
+    if any(p.startswith("re:") or "proj" in p for p in params):
+        return None
+    try:
+        from vllm.config import get_current_vllm_config
+
+        if getattr(get_current_vllm_config().model_config, "original_max_model_len", None) != -1:
+            return None
+    except Exception:
+        return None
+    streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
+    in_vram = math.ceil(expert_cache.target_share(streams) * experts)
+    return max(0, min(experts, experts - in_vram + _SPARE_ROWS))
+
+
 def _host_quota(experts: int, nbytes: int) -> int:
     """How many experts per layer and projection the host holds, decided once.
 
@@ -359,6 +389,17 @@ def _host_quota(experts: int, nbytes: int) -> int:
         room = max(min(free, budget), 0)
         share = 1.0 if want <= room else room / want
         _STATS["quota"] = math.floor(share * experts)
+        need = _exclusive_need(experts, loader)
+        if need is not None and need < _STATS["quota"]:
+            logger.info(
+                "cpu-offload: hosting %d of %d experts per layer, not %d: the exclusive expert cache stops at "
+                "%d in VRAM at --max-model-len auto, and needs only the rest plus %d spare rows to swap through; "
+                "%.2f GiB of what was offered goes unused",
+                need, experts, _STATS["quota"], experts - need + _SPARE_ROWS, _SPARE_ROWS,
+                layers * (_STATS["quota"] - need) * 3 * nbytes / (1 << 30),
+            )
+            _STATS["quota"] = need
+            share = 1.0
         if share < 1.0:
             logger.warning(
                 "cpu-offload: %s holds %.2f of %.2f GiB of routed experts; offloading %d of %d "

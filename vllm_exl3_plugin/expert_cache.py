@@ -353,8 +353,9 @@ class ExpertCache:
             self.window_steps = self.decode_steps = self.staged_steps = 0
 
 
-#: EXL3_CACHE_EXCLUSIVE=1: every expert in exactly one place (`ExclusiveCache`).
-EXCLUSIVE = os.environ.get("EXL3_CACHE_EXCLUSIVE", "0") == "1"
+#: Every expert in exactly one place (`ExclusiveCache`), the default; EXL3_CACHE_EXCLUSIVE=0 keeps the inclusive
+#: cache, which holds a host copy of every hosted expert and leaves the rest resident by id.
+EXCLUSIVE = os.environ.get("EXL3_CACHE_EXCLUSIVE", "1") != "0"
 #: EXL3_CACHE_VERIFY=1: after every step boundary, synchronize and check that each expert that moved has
 #: its table entries on a copy of its own bytes (checksums taken at build); a debug detector, not a mode.
 VERIFY = os.environ.get("EXL3_CACHE_VERIFY", "0") == "1"
