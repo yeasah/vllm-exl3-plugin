@@ -781,7 +781,7 @@ def test_report_counts_what_vllm_offloaded_first(offload, monkeypatch):
     assert log.lines[-1][0] == "warning" and "used up by" in log.lines[-1][1]
 
 
-def test_empty_selector_offloads_towers_but_not_decoder_layers():
+def test_empty_selector_offloads_towers_but_not_decoder_layers(monkeypatch):
     """vLLM hands towers to wrap_modules with their name as prefix and decoder layers with
     none. With no selector only the towers may go; with one, vLLM decides as before."""
     import torch
@@ -790,6 +790,7 @@ def test_empty_selector_offloads_towers_but_not_decoder_layers():
     from vllm_exl3_plugin import plugin
 
     plugin._patch_offload_defaults()
+    monkeypatch.setattr(plugin, "_serving_exl3", lambda: True)
     seen = []
     saved = UVAOffloader._maybe_offload_to_cpu
     UVAOffloader._maybe_offload_to_cpu = lambda self, m, prefix="": seen.append(prefix) or m
@@ -806,6 +807,39 @@ def test_empty_selector_offloads_towers_but_not_decoder_layers():
         assert seen == ["vision_tower.", ""]
     finally:
         UVAOffloader._maybe_offload_to_cpu = saved
+
+
+def test_empty_selector_is_vllms_own_for_a_model_that_is_not_exl3(monkeypatch):
+    """The plugin is installed for every model; an FP8 model offloaded with no selector gets every
+    decoder layer offered, as vLLM does (the default once left Qwen3.6-35B-A3B FP8 with nothing
+    offloaded at any budget, and it OOMed at construction)."""
+    import torch
+    from vllm.model_executor.offloader.uva import UVAOffloader
+
+    from vllm_exl3_plugin import plugin
+
+    plugin._patch_offload_defaults()
+    monkeypatch.setattr(plugin, "_serving_exl3", lambda: False)
+    seen = []
+    monkeypatch.setattr(UVAOffloader, "_maybe_offload_to_cpu", lambda self, m, prefix="": seen.append(prefix) or m)
+    off = UVAOffloader.__new__(UVAOffloader)
+    off.cpu_offload_bytes = 0
+    off.cpu_offload_params = set()
+    off.wrap_modules(iter([torch.nn.Linear(2, 2)]))
+    assert seen == [""], "a non-EXL3 model's decoder layers were withheld from vLLM's offloader"
+
+
+@pytest.mark.parametrize("name, want", [("exl3", True), ("fp8", False), (None, False)])
+def test_serving_exl3_reads_the_current_quant_config(monkeypatch, name, want):
+    import types
+
+    import vllm.config
+
+    from vllm_exl3_plugin import plugin
+
+    quant = None if name is None else types.SimpleNamespace(get_name=lambda: name)
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: types.SimpleNamespace(quant_config=quant))
+    assert plugin._serving_exl3() is want
 
 
 def test_report_is_emitted_only_once():

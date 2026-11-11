@@ -172,6 +172,19 @@ def _patch_kernel_overlap() -> None:
     SharedExperts._exl3_overlap_patched = True
 
 
+def _serving_exl3() -> bool:
+    """Whether the model being built is EXL3. The plugin is installed for every model in the
+    environment, and an FP8 model offloaded with no selector must get vLLM's own behaviour: the
+    default below once left the Qwen3.6-35B-A3B FP8 release with nothing offloaded at any budget."""
+    try:
+        from vllm.config import get_current_vllm_config
+
+        quant = get_current_vllm_config().quant_config
+    except Exception:
+        return True   # cannot tell: keep the plugin's default, which is what EXL3 needs
+    return quant is not None and quant.get_name() == "exl3"
+
+
 def _patch_offload_defaults() -> None:
     """Give ``--cpu-offload-gb`` without ``--cpu-offload-params`` a safe default:
     multimodal towers and routed experts, nothing else.
@@ -199,7 +212,7 @@ def _patch_offload_defaults() -> None:
 
     @wraps(original)
     def wrap_modules(self, modules_generator, prefix: str = ""):
-        if not self.cpu_offload_params and not prefix:
+        if not self.cpu_offload_params and not prefix and _serving_exl3():
             return list(modules_generator)
         return original(self, modules_generator, prefix)
 
