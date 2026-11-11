@@ -44,6 +44,10 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
   (`generation_config.json` under a sampling profile's `publish`) need their own check: a base update can fix what the
   override worked around (Ornith-9B gaining a config, the MoE's starting to match its card), so the profile's reason is
   re-tested against the new file rather than the override carried forward. The appliance can offer the same for anyone's quants at serve time.
+- `small-card-models` — Find models worth publishing for 4-6 GiB cards. A sub-3 rung of a mid-size model is the wrong
+  answer there: Ornith-1.5-9B's 2.50 kept 70% of recall facts and still didn't bring a 4 GiB card in reach, while 8 GiB
+  runs its 3 bpw fine (2026-11-11). The right one is a smaller model at 3 bpw and up. Candidates include the new LFM3
+  models, which need the exllamav3 fork bumped before they can be converted.
 - `vllm-lora` — Loading and serving existing LoRAs against EXL3 quants through vLLM's `--lora-modules`; then
   quantized LoRA.
 - `vllm-omni` — EXL3 quantization through vllm-omni, starting with its Transformers-compatible components (often a
