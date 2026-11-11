@@ -974,10 +974,24 @@ capture and copies every hosted row through static tables, is what stands in the
 204 against 238 experts hosted per layer, 52 against 18 resident, 51 against 85 slots, 103 in VRAM either
 way. The extra 2 GiB of host RAM bought no residency (the extra hosted experts all ended up in slots,
 stored twice) and the windows grew by 102 MiB, which was the KV lost: 100,656 tokens against 82,016. What it
-can buy is adaptivity, 85 of the 103 following traffic instead of 51; whether that shows in decode is the
-measurement that decides what to change.
+can buy is adaptivity, 85 of the 103 following traffic instead of 51, and it does. Same model and settings
+(0.88, nvfp4 KV, 4096-token chunks, `--max-model-len auto`), one stream, graphs on, two greedy prompts of
+512 tokens; VRAM hit rate from `EXL3_CACHE_STATS` once warm:
 
-**An exclusive cache would remove the trade.** Every expert would have exactly one home, a slot or a host
+| `--cpu-offload-gb` | slots / residents | VRAM hit (prose, code) | decode (prose, code) | context |
+|---|---|---|---|---|
+| 10 | 17 / 86 | ~70%, ~59% | 42.6, 36.5 t/s | 134,208 |
+| 12 | 51 / 52 | ~89%, ~78% | 49.1, 43.2 | 119,296 |
+| 14 | 85 / 18 | ~93%, ~86% | 51.3, 44.2 | 96,928 |
+| 15 | 103 / 0 | ~94%, ~88% | 52.0, 46.8 | 89,472 |
+
+All four hold 103 experts per layer in VRAM. Turning residents into slots lifts the hit rate from ~65% to
+~91% and decode by 22-28%, with little past 85 slots; at 10 GiB the promotion budget is saturated (2048 per
+64 steps), the few slots thrashing. Residents chosen by id are close to dead weight. So the larger offers
+trade context for decode, but the context they give up pays only for duplicate copies and larger windows.
+
+**An exclusive cache would remove the trade** (being built, 2026-11-10): the 15 GiB row's decode with
+fewer host rows than the 10 GiB row's and smaller windows than any of them. Every expert would have exactly one home, a slot or a host
 row; a promotion swaps a hot host expert with a cold slot through a scratch slot, writing the cold one
 back to the row the hot one vacated, each entry always pointing at a complete copy. Host rows needed per
 layer would be experts minus slots (153 here, ~9 GiB), windows would stop growing with the offer, all of
