@@ -780,7 +780,10 @@ def _kv_needed(config, specs: dict, mult: float) -> int:
     """
     from dataclasses import replace
 
-    from vllm.v1.core import kv_cache_utils as kv
+    try:  # upstream moved KV planning out of kv_cache_utils after 0.33
+        from vllm.v1.core import kv_cache_planning as kv
+    except ImportError:
+        from vllm.v1.core import kv_cache_utils as kv
     from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
     try:
@@ -793,6 +796,14 @@ def _kv_needed(config, specs: dict, mult: float) -> int:
         groups = [g for g in groups if not g.host_resident]
         if not groups:
             return 0
+        if kv.__name__.endswith("kv_cache_planning"):
+            # upstream main's `check_enough_kv_cache_memory`: the per-layer sum, against what is
+            # left after the null block
+            # specs as vLLM has them: they carry their own retention there, which the fork's
+            # extra_retained_tokens adjustment above would understate
+            groups = [g for g in kv.get_kv_cache_groups(config, dict(specs)) if not g.host_resident]
+            return (int(mult * kv.max_memory_usage_bytes(config, specs.values()))
+                    + (kv._pool_bytes_per_block(config, groups) if groups else 0))
         return (int(mult * kv._max_memory_usage_bytes_from_groups(config, groups))
                 + kv._pool_bytes_per_block(config, groups))
     except (AttributeError, TypeError, ValueError) as e:  # vLLM internals moved
