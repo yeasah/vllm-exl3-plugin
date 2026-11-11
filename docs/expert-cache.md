@@ -582,6 +582,13 @@ so every verify step takes the prefill path and rebuilds its metadata. Godel at 
 request at 0.87 (FlashInfer's undeclared workspace, see docs/memory-accounting.md). Peak device memory stayed
 under the card in every run, Windows' ~1.5 GiB included, so none of this was WSL paging.
 
+**Trading residency for a drafter can pay** (user, 2026-11-10, on the Blackwell host with nvfp4 KV, where
+MTP works, and `--max-model-len` pinned at the maximum): with MTP the slots came to 29% of experts in VRAM,
+without it 41%; MTP at 29% decoded 62 t/s on average against 58 at 41%. On a fast link residency is worth
+little to decode (+5% from 40% to 60% here without spec) while the drafter is worth 20-50%, so giving up
+slots for its memory comes out ahead. Whether it does elsewhere depends on the link, the KV backend and the
+share together, which is why the TODO item measures the link rather than fixing a rule.
+
 ---
 
 ## Prior art, and what to take from each
