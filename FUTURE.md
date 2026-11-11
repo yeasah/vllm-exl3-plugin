@@ -44,6 +44,13 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
   (`generation_config.json` under a sampling profile's `publish`) need their own check: a base update can fix what the
   override worked around (Ornith-9B gaining a config, the MoE's starting to match its card), so the profile's reason is
   re-tested against the new file rather than the override carried forward. The appliance can offer the same for anyone's quants at serve time.
+- `qbench-vllm-engine` — Bring qbench's `vllm` engine up to par, so served formats with no Transformers path that
+  matches how they serve (NVFP4 runs W4A4 on Blackwell, W4A16 elsewhere) can be scored as served. Three pieces, all
+  in docs/qbench.md: a child process per vLLM arm (designed there: engine and reduction in the child, reference
+  logits by path, statistics back), which cures the per-run leak that makes multi-arm runs OOM; the Qwen3.5-family
+  mis-scoring (KLD 10.26 against 0.013, traced to the patched `compute_topk_scores` path, the self-consistency probe
+  as its guard); and a noise floor like the other engines'. Little used today because of the fragility; AWQ through
+  Transformers stood in for NVFP4 on the Qwen3.6-35B-A3B card (2026-11-11).
 - `small-card-models` — Find models worth publishing for 4-6 GiB cards. A sub-3 rung of a mid-size model is the wrong
   answer there: Ornith-1.5-9B's 2.50 kept 70% of recall facts and still didn't bring a 4 GiB card in reach, while 8 GiB
   runs its 3 bpw fine (2026-11-11). The right one is a smaller model at 3 bpw and up. Candidates include the new LFM3
