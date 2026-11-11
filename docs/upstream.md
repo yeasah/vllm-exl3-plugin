@@ -510,6 +510,37 @@ reinstalls it: run `tools/torch-c10cuda-fix.sh --check`). transformers 5.15 -> `
 
 ---
 
+### The 0.34 bump: what running on `main` already showed (2026-11-10)
+
+Not a survey: a throwaway venv at upstream `main` `960f5c1bb1` (torch 2.14.0, precompiled kernels, our
+`be1219d32` and `00896553c` cherry-picked, exllamav3 built against 2.14, the c10 fix still needed: 2.14.0
+keeps the device guard in the `else` branch only) used to serve the Qwen4Exp hybrid (TODO `engram-ple`).
+What it ran into, for the bump to budget:
+
+- **CUDA graphs fail with expert offload.** `torch._C._host_emptyCache()` in `torch.cuda.graph.__enter__`
+  returns `cudaErrorInvalidValue` during vLLM's graph-memory profile, before capture begins, with
+  `CUDA_LAUNCH_BLOCKING=1` too. Dense EXL3 with no EXL3 tensor offloaded captures fine; Qwen3.6-35B-A3B
+  with experts offloaded fails the same way as Qwen4Exp, before the expert cache exists. So our expert
+  offload leaves something in torch 2.14's pinned-host cache that it cannot free. Suspects: the
+  driver-allocated host rows (`cuMemHostAlloc`, `cpu_offload._pinned`) behind `get_cuda_view_from_cpu_tensor`,
+  then the small per-call pinned temporaries. Unbisected; a blocker, since the bump brings 2.14.
+- **The extensible KV cache is on by default** (`cache_config.enable_extensible_kv_cache`, CUDA and ROCm):
+  it reserves the KV address range and commits pages after warmup, sizing from memory actually free after
+  graph capture, with `gpu_memory_utilization` defaulting to 1.0. It disagrees with the expert cache sizing
+  slots from `determine_available_memory`: the cache left 0.36 GiB and the engine saw 0.26. Possibly
+  upstream's own answer to `kv-budget-margin`; the expert cache will have to size against it.
+- **KV planning moved** from `v1/core/kv_cache_utils.py` to `kv_cache_planning.py` (same names), and
+  `_max_memory_usage_bytes_from_groups` now takes a builder (`kv_cache_config_builder`). The admission
+  check is now the per-layer sum against what is left after the null block. The plugin's `_kv_needed`
+  imports from either module and mirrors that check on `main`, but on the Qwen4Exp hybrid it still came
+  out ~40 MiB short of the engine's figure; cause not found (fixed slots bypassed it).
+- **The v2 model runner** (`vllm/v1/worker/gpu/model_runner.py`) is what `main` runs; `_patch_runners`
+  already looks for it.
+- **Qwen4Exp at TP=2 needs expert parallelism:** its experts and shared expert are 640 wide, which no TP=2
+  split keeps on 128-channel Hadamard blocks; the plugin's guard refuses, correctly.
+- EXL3 checkpoints store plain tensors as fp16; models that declare bf16 parameters (Qwen4Exp's
+  hyper-connections, router gates) load them with a warning per tensor.
+
 ## SINQ
 
 **`device_map="auto"` silently produces an unusable model.** A checkpoint saved by SINQ's

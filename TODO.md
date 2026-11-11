@@ -248,12 +248,22 @@ disk natively. vLLM serves it as PLE: our fork (10-23) has CPU offload (pinned h
 `Qwen4ExpPLEEmbeddingMethod` raises on any quant config other than `Fp8Config`, so an EXL3 checkpoint fails at load.
 `Qwen/Qwen3.8-Flash-Next-FP8` stores the table as 52.3 GB of FP8 in 33 of its 131 files.
 
-**Plan, cheapest first:** (1) survey Qwen4Exp's layers against the plugin (hyper-connections, `qsa`, `low_latency_gemm`,
-MTP, vision): which bypass the quant config. (2) Bump the vLLM fork for `disk_offload`, checking what else moved.
-(3) A hybrid: the EXL3 body plus the FP8 table from the FP8 release, the plugin handing the PLE layer to vLLM's own FP8
-method through an internal `Fp8Config`, so upstream's offload applies unchanged; then judge whether the model is useful.
-(4) Only then a native trellis PLE method, 20 GB against 52 of table; its bit depth (`-ngb`) is the one
-question left from the retired `category-bits`.
+**Done (2026-11-10).** (1) The survey: every layer has a route; GDN, MoE (512 experts, 10 active), the
+sparse attention with its fused 4-shard QKV+indexer linear, `lm_head` and MTP are EXL3 on existing paths,
+hyper-connections and the PLE's projections load plain, and `low_latency_gemm` only touches unquantized
+linears. (3) The hybrid, without plugin work: `ple_embedding_dtype: "float8_e4m3fn"` in the config makes
+`Qwen4ExpPLEEmbeddingMethod.from_quant_config` pick the FP8 table method before it looks at the quant
+config. turboderp's EXL3 body (its 7 indexed shards; the EXL3 table is a separate unindexed file) plus the
+FP8 release's 132 table tensors copied into files of their own (48 GiB), served from disk with upstream
+`main`'s `engram_config={"disk_offload": True}` (the FP8 table is larger than this host's RAM). On a 5060 Ti
+at TP=1, 2.05bpw body, eager: coherent output, 13.6-18.1 t/s decode, 60 s load; the expert cache at 25% of
+experts in VRAM, 28 GiB hosted, VRAM hit climbing past 69%. Scripts and the venv are in
+`/home/bulk/ypell/engram-main` (throwaway; the hybrid dirs reuse one extracted table).
+
+**Open:** 3.05bpw needs TP=2, which needs expert parallelism (640-wide experts); graphs on `main` fail
+under expert offload, and `main`'s KV sizing disagrees with the expert cache (both in docs/upstream.md,
+"The 0.34 bump"). (2) is the 0.34 bump itself. (4) Only then a native trellis PLE method, 20 GB against 52 of
+table; its bit depth (`-ngb`) is the one question left from the retired `category-bits`.
 
 ## `tied-embeddings` — An embedding policy for tied models
 
