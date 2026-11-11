@@ -947,6 +947,46 @@ there, since higher bitrates are the point of this work.
 **Not doing:** predictive prefetch (Belady bound ~1.07x at batch 1), per-layer sync, a disk tier, KV
 residency ([kv-pager.md](kv-pager.md) stands, and Strata disables its equivalent on WSL).
 
+**Why not a disk tier** (2026-11-10). Decode depends on every expert having an address the kernel can
+read at any moment, a slot or a pinned host row: that is what makes a miss a slow read rather than a stall,
+and what lets decode run with no host sync inside a CUDA graph (4.9x on MoE). An expert only on disk breaks
+it; fetching on demand needs the routing before each layer's MoE, which is the per-layer sync above and
+gives up graphs. The one mechanism that keeps the invariant is HMM: with the open kernel modules on native
+Linux a kernel can read pageable memory, including an mmap of the checkpoint, with the page cache as the
+host tier. This host reports `Addressing Mode: HMM`; WSL does not have it, and WSL is where host RAM is
+tightest. Left unmeasured: the fault cost against pinned reads, and whether a fault inside exllamav3's
+spin-waiting kernels stalls more than its own threads. Not worth the complexity for what it would buy.
+
+**What prompted it: hosted experts in slots are stored twice.** The cache keeps a host copy of every
+hosted expert, slot or not, so it can evict; an expert left resident is stored once. Two serves on the 3060
+at 0.88 with nvfp4 KV, both at 103 of 256 experts per layer in VRAM (40%): vision offloaded (0.83 GiB),
+host RAM capped the quota at 224 hosted, 32 resident, 71 slots; language-only hosted all 256 with 103
+slots. The second stored 32 x 40 x 60 MiB = 1.9 GiB more expert bytes in all, and its two windows were
+96 MiB larger (sized to the most hosted experts in a layer), which was its whole KV deficit: 70,832 tokens
+against 82,016. Equal residency is not equal use, though: placement hosts experts in ascending id order,
+so the vision run's 32 resident experts are ids 224-255 whatever they are routed, where all 103 of the
+other run's follow traffic. Popularity-chosen residents would save the duplicate host bytes when host RAM
+binds, but popularity drifts, so that stays speculative. Windows sized to hosted minus slots (staging only
+copies experts not in a slot) would return ~300 MiB here; the per-row path, which can run inside graph
+capture and copies every hosted row through static tables, is what stands in the way.
+
+**More offload can mean less KV.** Language-only, same card and settings, `--cpu-offload-gb` 12 against 14:
+204 against 238 experts hosted per layer, 52 against 18 resident, 51 against 85 slots, 103 in VRAM either
+way. The extra 2 GiB of host RAM bought no residency (the extra hosted experts all ended up in slots,
+stored twice) and the windows grew by 102 MiB, which was the KV lost: 100,656 tokens against 82,016. What it
+can buy is adaptivity, 85 of the 103 following traffic instead of 51; whether that shows in decode is the
+measurement that decides what to change.
+
+**An exclusive cache would remove the trade.** Every expert would have exactly one home, a slot or a host
+row; a promotion swaps a hot host expert with a cold slot through a scratch slot, writing the cold one
+back to the row the hot one vacated, each entry always pointing at a complete copy. Host rows needed per
+layer would be experts minus slots (153 here, ~9 GiB), windows would stop growing with the offer, all of
+VRAM would follow traffic, and offering more than it needs would simply go unused. The costs: a
+device-to-host write per eviction (free on two copy engines, serialized with everything else on one), host
+rows that move (so staged tables become dynamic), and a single-copy moment in every swap, so a checksum
+detector comes first. Between the extremes, a partly duplicated cache could keep host copies only for
+experts judged dynamic, so that they keep cheap promotions.
+
 ---
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
