@@ -353,6 +353,309 @@ class ExpertCache:
             self.window_steps = self.decode_steps = self.staged_steps = 0
 
 
+#: EXL3_CACHE_EXCLUSIVE=1: every expert in exactly one place (`ExclusiveCache`).
+EXCLUSIVE = os.environ.get("EXL3_CACHE_EXCLUSIVE", "0") == "1"
+#: EXL3_CACHE_VERIFY=1: after every step boundary, synchronize and check that each expert that moved has
+#: its table entries on a copy of its own bytes (checksums taken at build); a debug detector, not a mode.
+VERIFY = os.environ.get("EXL3_CACHE_VERIFY", "0") == "1"
+_WEIGHTS: dict = {}
+
+
+def _checksum(t: torch.Tensor) -> int:
+    """Position-weighted sum of a tensor's bytes as int16, so a permutation or a shifted copy differs."""
+    v = t.reshape(-1).view(torch.int16)
+    if v.device.type != "cuda":
+        v = v.to("cuda", non_blocking=False)
+    w = _WEIGHTS.get((v.numel(), v.device))
+    if w is None:
+        w = _WEIGHTS[(v.numel(), v.device)] = torch.arange(v.numel(), device=v.device, dtype=torch.int64) % 65521 + 1
+    return int((v.to(torch.int64) * w).sum())
+
+
+class ExclusiveCache(ExpertCache):
+    """Every expert in exactly one place: a VRAM slot or a host row.
+
+    The inclusive cache keeps a host copy of every hosted expert, slot or not, and leaves the rest resident
+    by expert id. Here residents are ordinary slots (their own tensors), filling the new slots frees their
+    experts' host rows, and a promotion is a swap: the cold expert Y in slot s is written back to a free
+    host row f, and then the hot one X is copied from its row h into s, which frees h. Two step boundaries:
+
+    1. Y is copied s -> f on the side stream, behind an event on the forward stream; Y stays readable at s.
+    2. Once landed, Y's entries flip to f on the forward stream; then, behind an event after that flip, X
+       is copied h -> s. X stays readable at h.
+    3. Once landed, X's entries flip to s, and h joins the free rows.
+
+    Every entry points at a complete copy at every moment, and no copy writes memory that any entry or
+    queued kernel could read. Staged prefill tables are kept beside the decode tables (an expert on host
+    stages from its current row), and staging reads `exl3_row_of`, which follows the moves. Measured on a
+    3060 under WSL at 103 of 256 experts in VRAM: residents chosen by id were close to dead weight, and the
+    host copies of slotted experts cost 1.9 GiB of host RAM and, through larger windows, ~45K tokens of KV
+    (docs/expert-cache.md, "More offload can mean less KV").
+    """
+
+    def _fill(self) -> None:
+        L, E = len(self.layers), self.E
+        self.row_of = numpy.full((L, E), -1, dtype=numpy.int64)
+        self.free_rows: list[list[int]] = []
+        self.views: list[list[tuple]] = []      # per layer, per slot: one device view per label
+        self.busy = numpy.zeros((L, E), dtype=bool)   # Y being written back
+        self.reserved: list[dict[int, int]] = []      # per layer: slot -> incoming X
+        self.pending_d: list = []
+        self.pending_p: list = []
+        self.stage = None
+        if self.layers[0].exl3_stage is not None:
+            self.stage = torch.empty((L, 3, E), dtype=torch.long, device=self.device)
+            self.stage_flat = self.stage.view(-1)
+        owners, updates, stage_updates = [], [], []
+        for l, layer in enumerate(self.layers):
+            blocks = [layer.exl3_host_blocks[label] for label in _LABELS]
+            rows = blocks[0].rows
+            resident = [e for e in range(E) if e not in rows]
+            views = [tuple(getattr(layer, f"_exl3_{label}_trellis")[e] for label in _LABELS) for e in resident]
+            cap = int(self.capacity[l])
+            views += [tuple(self.slot_tensors[l][j][s] for j in range(3)) for s in range(cap)]
+            owner = numpy.full(len(views), -1, dtype=numpy.int64)
+            for s, e in enumerate(resident):
+                owner[s] = e
+                self.slot_of[l, e] = s
+                self.live[l, e] = True
+            hosted = sorted(rows)
+            free = []
+            for k, e in enumerate(hosted[:cap]):
+                s = len(resident) + k
+                for j, block in enumerate(blocks):
+                    views[s][j].copy_(block.host[rows[e]], non_blocking=True)
+                owner[s] = e
+                self.slot_of[l, e] = s
+                self.live[l, e] = True
+                free.append(rows[e])
+            for e in hosted[cap:]:
+                self.row_of[l, e] = rows[e]
+            self.free_rows.append(free)
+            self.views.append(views)
+            self.reserved.append({})
+            owners.append(owner)
+            self.capacity[l] = len(views)
+            layer.exl3_row_of = self.row_of[l]
+            if self.stage is not None:
+                for j in range(3):
+                    self.stage[l, j].copy_(layer.exl3_stage[1][j])
+                layer.exl3_stage = (layer.exl3_stage[0], tuple(self.stage[l, j] for j in range(3)))
+            for e in hosted[:cap]:
+                s = self.slot_of[l, e]
+                updates += [(self._entry(l, j, e), self._view_addr(l, s, j)) for j in range(3)]
+                stage_updates += [(self._entry(l, j, e), self._view_addr(l, s, j)) for j in range(3)]
+        self.owner = owners
+        self.offloaded = self.row_of >= 0
+        self._write(updates)
+        self._write_stage(stage_updates)
+        torch.cuda.synchronize(self.device)
+        self.ref = None
+        if VERIFY:
+            self.ref = numpy.zeros((L, 3, E), dtype=object)
+            for l in range(L):
+                for e in range(E):
+                    for j in range(3):
+                        self.ref[l, j, e] = _checksum(self._home(l, j, e))
+            self._verify(range(L), full=True)
+
+    @property
+    def holds_everything(self) -> bool:
+        return False
+
+    # ------------------------------------------------------------ addresses
+
+    def _view_addr(self, l: int, s: int, j: int) -> int:
+        return self.views[l][s][j].data_ptr()
+
+    def _host_addr(self, l: int, j: int, row: int) -> int:
+        return self.layers[l].exl3_host_blocks[_LABELS[j]].view[row].data_ptr()
+
+    def _window_addr(self, l: int, j: int, row: int) -> int:
+        dst, row_bytes = self.layers[l].exl3_stage_plan[_LABELS[j]]
+        return dst.data_ptr() + row * row_bytes
+
+    def _home(self, l: int, j: int, e: int) -> torch.Tensor:
+        row = self.row_of[l, e]
+        if row >= 0:
+            return self.layers[l].exl3_host_blocks[_LABELS[j]].host[row]
+        return self.views[l][self.slot_of[l, e]][j]
+
+    def _write_stage(self, updates) -> None:
+        if self.stage is None or not updates:
+            return
+        idx, val = zip(*updates)
+        idx = torch.tensor(idx, dtype=torch.long).pin_memory().to(self.device, non_blocking=True)
+        val = torch.tensor(val, dtype=torch.long).pin_memory().to(self.device, non_blocking=True)
+        self.stage_flat.index_copy_(0, idx, val)
+
+    def _to_host(self, l: int, e: int, row: int):
+        self.row_of[l, e] = row
+        self.slot_of[l, e] = -1
+        self.live[l, e] = False
+        self.offloaded[l, e] = True
+        d = [(self._entry(l, j, e), self._host_addr(l, j, row)) for j in range(3)]
+        st = [(self._entry(l, j, e), self._window_addr(l, j, row)) for j in range(3)] if self.stage is not None else []
+        return d, st
+
+    def _to_slot(self, l: int, e: int, s: int):
+        self.row_of[l, e] = -1
+        self.slot_of[l, e] = s
+        self.live[l, e] = True
+        self.offloaded[l, e] = False
+        self.owner[l][s] = e
+        d = [(self._entry(l, j, e), self._view_addr(l, s, j)) for j in range(3)]
+        return d, list(d)
+
+    # ------------------------------------------------------------ the step
+
+    def step_begin(self) -> None:
+        moved, updates, stage_updates = set(), [], []
+        # 3. landed promotions: X onto its slot, and its old row is free
+        while self.pending_p and self.pending_p[0][0].query():
+            _, done = self.pending_p.pop(0)
+            for l, x, s, h in done:
+                d, st = self._to_slot(l, x, s)
+                updates += d
+                stage_updates += st
+                self.free_rows[l].append(h)
+                self.reserved[l].pop(s, None)
+                moved.add((l, x))
+        # 2. landed write-backs: Y onto its row; X's copy into the slot follows, behind these flips
+        follow = []
+        while self.pending_d and self.pending_d[0][0].query():
+            _, done = self.pending_d.pop(0)
+            for l, x, y, s, f in done:
+                d, st = self._to_host(l, y, f)
+                updates += d
+                stage_updates += st
+                self.busy[l, y] = False
+                follow.append((l, x, s, int(self.row_of[l, x])))
+                moved.add((l, y))
+        self._write(updates)
+        self._write_stage(stage_updates)
+        if follow:
+            self._copy_in(follow)
+        if self.ref is not None:
+            self._verify_tick = getattr(self, "_verify_tick", 0) + 1
+            if self._verify_tick % 512 == 0:
+                self._verify(range(len(self.layers)), full=True)
+            elif moved:
+                self._verify(sorted({l for l, _ in moved}), experts=moved)
+        routed = None
+        while self.steps and self.steps[0][1].query():
+            idx, _, tokens, live, step_no = self.steps.pop(0)
+            routed = (idx, tokens, live, step_no)
+        if routed is not None:
+            self._plan(*routed)
+
+    def _copy_in(self, follow) -> None:
+        main = torch.cuda.current_stream(self.device)
+        ready = torch.cuda.Event()
+        ready.record(main)
+        self.side.wait_event(ready)
+        with torch.cuda.stream(self.side):
+            for l, x, s, h in follow:
+                layer = self.layers[l]
+                for j, label in enumerate(_LABELS):
+                    self.views[l][s][j].copy_(layer.exl3_host_blocks[label].host[h], non_blocking=True)
+        done = torch.cuda.Event()
+        done.record(self.side)
+        self.pending_p.append((done, follow))
+
+    def _plan(self, idx: int, tokens: int, live_then, step_no: int) -> None:
+        self.clock += 1
+        L = len(self.layers)
+        ids = self.ring[idx % _RING, :, :tokens].numpy().reshape(L, -1)
+        rows = numpy.repeat(numpy.arange(L), ids.shape[1])
+        flat_ids = ids.reshape(-1)
+        if self.stats_every and live_then is not None:
+            hit = live_then[rows, flat_ids]
+            self.hits += int(hit.sum())
+            self.misses += int((~hit).sum())
+        if self.stats_every:
+            self.planned += 1
+            self.lag += self.step - step_no
+        self.last_use[rows, flat_ids] = self.clock
+        want = (self.row_of[rows, flat_ids] >= 0) & (self.slot_of[rows, flat_ids] < 0)
+        keys, counts = numpy.unique(rows[want] * self.E + flat_ids[want], return_counts=True)
+        order = sorted(range(len(keys)), key=lambda i: (-counts[i], (keys[i] // self.E - self.clock) % L))
+        issued = []
+        for i in order:
+            if len(issued) >= self.budget:
+                break
+            l, x = divmod(int(keys[i]), self.E)
+            if not self.free_rows[l]:
+                continue
+            s = self._victim(l)
+            if s is None:
+                continue
+            y = int(self.owner[l][s])
+            f = self.free_rows[l].pop()
+            self.busy[l, y] = True
+            self.reserved[l][s] = x
+            self.slot_of[l, x] = s          # reserved, so it is not planned again; still read from its row
+            issued.append((l, x, y, s, f))
+        if issued:
+            self._write_back(issued)
+
+    def _victim(self, l: int) -> int | None:
+        best, best_use = None, None
+        for s, e in enumerate(self.owner[l]):
+            if e < 0 or s in self.reserved[l] or not self.live[l, e] or self.busy[l, e]:
+                continue
+            use = self.last_use[l, e]
+            if use >= self.clock:
+                continue
+            if best is None or use < best_use:
+                best, best_use = s, use
+        return best
+
+    def _write_back(self, issued) -> None:
+        main = torch.cuda.current_stream(self.device)
+        ready = torch.cuda.Event()
+        ready.record(main)
+        self.side.wait_event(ready)
+        with torch.cuda.stream(self.side):
+            for l, x, y, s, f in issued:
+                layer = self.layers[l]
+                for j, label in enumerate(_LABELS):
+                    layer.exl3_host_blocks[label].host[f].copy_(self.views[l][s][j], non_blocking=True)
+        done = torch.cuda.Event()
+        done.record(self.side)
+        self.pending_d.append((done, issued))
+        self.promoted += len(issued)
+
+    # ------------------------------------------------------------ the detector
+
+    def _verify(self, layers, experts=None, full: bool = False) -> None:
+        """Synchronize, then check that each expert's decode (and staged) entries point at its current home
+        and that the home holds its bytes. Raises on the first mismatch: a broken swap loses the only copy."""
+        torch.cuda.synchronize(self.device)
+        table = self.table.cpu().numpy()
+        stage = self.stage.cpu().numpy() if self.stage is not None else None
+        todo = [(l, e) for l in layers for e in range(self.E)] if full else sorted(experts)
+        for l, e in todo:
+            row = self.row_of[l, e]
+            for j in range(3):
+                if row >= 0:
+                    want, want_stage = self._host_addr(l, j, row), self._window_addr(l, j, row) if stage is not None else None
+                else:
+                    s = self.slot_of[l, e]
+                    if s < 0 or self.owner[l][s] != e:
+                        raise RuntimeError(f"expert cache: layer {l} expert {e} has no home (slot {s})")
+                    want = want_stage = self._view_addr(l, s, j)
+                if table[l, j, e] != want:
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} {_LABELS[j]} entry {table[l, j, e]:#x} "
+                                       f"is not its home {want:#x} (row {row})")
+                if stage is not None and stage[l, j, e] != want_stage:
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} {_LABELS[j]} staged entry is wrong")
+                got = _checksum(self._home(l, j, e))
+                if got != self.ref[l, j, e]:
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} {_LABELS[j]} holds the wrong bytes "
+                                       f"(row {row}, slot {self.slot_of[l, e]})")
+
+
 def decode_rows(scheduler_output) -> int:
     """How many of the step's leading rows are decodes (vLLM sorts decodes first; see the module
     docstring). Under speculative decoding a decode is its token plus the drafts being verified,
@@ -499,6 +802,18 @@ def _kv_needed(config, specs: dict, mult: float) -> int:
         return int(1.02 * mult * kv.max_memory_usage_bytes(config, specs.values()))
 
 
+def _uniform_hosting(layers) -> bool:
+    """The exclusive cache moves an expert's three projections together, so each layer must host all three
+    for the same experts at the same rows (true of the default selectors; a projection-specific regex is not)."""
+    for layer in layers:
+        blocks = layer.exl3_host_blocks
+        if set(blocks) != set(_LABELS) or any(blocks[label].rows != blocks["gate"].rows for label in _LABELS):
+            logger.warning_once("expert cache: projections are hosted unevenly; EXL3_CACHE_EXCLUSIVE needs all "
+                                "three hosted for the same experts, so the inclusive cache is used")
+            return False
+    return True
+
+
 def build(layers: list, available: int, worker) -> int:
     """Size and allocate the slots; returns the bytes taken from what KV would have had."""
     global CACHE
@@ -546,7 +861,10 @@ def build(layers: list, available: int, worker) -> int:
             "read from host every token. Lower EXL3_KV_RESERVE or --max-model-len.", how,
         )
         return -given_back
-    cache = ExpertCache(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
+    cls = ExpertCache
+    if EXCLUSIVE and slots < per_layer_max and _uniform_hosting(layers):
+        cls = ExclusiveCache
+    cache = cls(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
     used = sum(t.numel() * t.element_size() for d in cache.slot_tensors for t in d.values())
     if cache.holds_everything:
         # Every hosted expert has a slot for good: no controller, no routing, and prefill

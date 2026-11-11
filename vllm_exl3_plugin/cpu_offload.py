@@ -621,7 +621,13 @@ def _settle(layer, idx: int):
 
 
 def _wanted_rows(layer, want) -> dict:
-    """Per label, the (host row, expert) pairs to copy: experts `want` accepts that are not in VRAM."""
+    """Per label, the (host row, expert) pairs to copy: experts `want` accepts that are not in VRAM. Under
+    the exclusive expert cache an expert's row moves, so the layer's `exl3_row_of` (-1 in VRAM) is the
+    authority; it changes only at step boundaries, never within a forward."""
+    row_of = getattr(layer, "exl3_row_of", None)
+    if row_of is not None:
+        pairs = sorted((int(row_of[e]), int(e)) for e in numpy.flatnonzero(row_of >= 0) if want(int(e)))
+        return {label: pairs for label in layer.exl3_host_blocks}
     from . import expert_cache
 
     in_vram = expert_cache.in_vram(layer)
