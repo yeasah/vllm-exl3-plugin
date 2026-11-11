@@ -193,6 +193,26 @@ rounding seed (`EXL3_SEED_IDX_OFFSET=5`) as the noise yardstick:
 release) does not fit where the calibration is made. Project files:
 `/home/bulk/ypell/quant_work/_calgen_ab/`.
 
+## An FP8 release as the generator (2026-11-11)
+
+For a model whose bf16 does not fit where the pipeline runs (Qwen3.6-35B-A3B on 2x 16 GiB), the eval traces
+and, by the default above, the calibration trace come from the publisher's FP8 release through vLLM. Checked on
+Qwen3-4B (`Qwen/Qwen3-4B-FP8`), on `cuda`: the same bf16-generated eval traces in both arms, scored against the
+bf16 reference, uniform bits (calibration reaches the result only through the converter's Hessians), and B
+reconverted at 4.00 with `EXL3_SEED_IDX_OFFSET=5` as the draw-noise yardstick. Excess KLD:
+
+| rung | slice | B (bf16) | F (FP8) | F / B | B reseeded / B |
+|---|---|---|---|---|---|
+| 4.00 | wild | 0.0337 | 0.0346 | 1.03 | 1.46 |
+| 4.00 | swe | 0.0470 | 0.0447 | 0.95 | 1.15 |
+| 3.00 | wild | 0.2718 | 0.2223 | 0.82 | |
+| 3.00 | swe | 0.2762 | 0.1722 | 0.62 | |
+
+FP8 calibration is within 5% of bf16 at 4.00, inside a reseed spread of 15-46%, and ahead at 3.00 by an amount
+the same spread makes noise. No sign of a penalty; one under ~15-20% could hide in this model's draw noise, which
+is far larger than Qwen3-0.6B's (2-3%). The FP8 generator's own KLD against bf16 is about twice the noise floor
+on Qwen3.6-35B-A3B (0.0073 against 0.0033, two rows).
+
 ## An uncalibrated reference (2026-09-29)
 
 `convert.py --uncalibrated` (fork) quantizes every layer through the identity-Hessian
