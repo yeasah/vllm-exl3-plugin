@@ -3171,7 +3171,7 @@ def do_quantize(job, args):
                                  "-w", workdir,
                                  "-o", revdir,
                                  "-d", "0" ] +
-                               ([ "-rcp", recipe ] if recipe else [ "-hq", "-b", bits, "-hb", headbits ]
+                               ([ "-rcp", recipe ] if recipe else [ "-hq", str(args.hq), "-b", bits, "-hb", headbits ]
                                 + ([] if HALF_STEPS else ["--no_half_steps"])) +
                                ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []) +
                                ([ "-hess", hess ] if hess else []),
@@ -3333,6 +3333,11 @@ def main():
     cmd_quantize.add_argument('--embed-bits', default='auto',
                               help="token embedding: 'auto' is a trellis ladder (K=4, K=5 from 5 bpw up); a number "
                                    "is that K at every rate, and 16 keeps it dense")
+    cmd_quantize.add_argument('--hq', type=int, default=1,
+                              help="the converter's -hq multiplier for uniform-bit rungs: select layers (on Qwen3.5/3.6 "
+                                   "MoEs GDN, full attention and the shared expert) get a floor of the base rate plus "
+                                   "N x their select_hq_bits (2 there), so 1 puts them at base+2, 2 at base+4 (capped "
+                                   "at 8); 0 = no floor. Ignored with a recipe")
     cmd_quantize.add_argument('--suffix', default=None,
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
     cmd_quantize.add_argument('--yaqa', default=True, action=argparse.BooleanOptionalAction,
