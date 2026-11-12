@@ -2525,6 +2525,26 @@ def do_baseline(job, args):
             return False
     if refuse_converter_mismatch(present, args, "baseline"):
         return False
+    # A baseline must differ from its rung only in calibration. Until 2026-11-11 baselines were converted without
+    # -eb, so they kept a bf16 embedding while every calibrated rung had the trellis one, and "calibration over
+    # baseline" also measured the embedding (Qwen3.6-35B-A3B pilot; the published 9B and 27B cards carry it).
+    stale = {}
+    for rev, bits, _ in specs:
+        out = os.path.join(job.baseline, rev)
+        if os.path.isfile(os.path.join(out, "quantization_config.json")):
+            have, want = embed_bits_of(out), embed_bits_for(bits, args.embed_bits)
+            if have != want:
+                stale[out] = (have, want)
+    if stale and not args.replace_mismatched:
+        for out, (have, want) in stale.items():
+            print(f"!! baseline {os.path.basename(out)}: embedding K={have}, the ladder's is K={want}")
+        print("=== BASELINE refused: rebuild those rungs with --replace-mismatched (each moves aside to "
+              "<rung>.eb<K>, nothing is deleted) ===")
+        return False
+    for out, (have, _) in stale.items():
+        aside = f"{out}.eb{have}"
+        shutil.move(out, aside)
+        print(f"=== baseline {os.path.basename(out)}: embedding K={have} moved aside to {os.path.basename(aside)}; rebuilding ===")
     gen_wanted = args.generator and has_chat_template(job)
     if gen_wanted and os.path.isfile(os.path.join(job.generator, "quantization_config.json")):
         for p, why in converter_mismatches([job.generator], args).items():
@@ -2539,6 +2559,7 @@ def do_baseline(job, args):
             ok = run_until(os.path.join(out, "quantization_config.json"),
                            [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
                              "-hq", "-b", bits, "-hb", headbits, "-vb", "16", "--out_scales", OUT_SCALES,
+                             "-eb", str(embed_bits_for(bits, args.embed_bits)),
                              *([] if HALF_STEPS else ["--no_half_steps"]),
                              "-i", path, "-w", work, "-o", out, "-d", "0" ],
                            job.log(f"baseline-{rev}"), args.retries + 1, env=gpu_env(slot),
@@ -3075,6 +3096,35 @@ def do_yaqa(job, args):
         print(f"=== Hout blend: {n} tensors -> {out} ===")
     return True
 
+def embed_bits_of(rung) -> int | None:
+    """A converted rung's token-embedding depth: 16 for a dense table, the trellis K otherwise (each row stores
+    K * hidden / 16 int16 words plus 8), None if the checkpoint has no recognizable embedding."""
+    from safetensors import safe_open
+    idx_path = os.path.join(rung, "model.safetensors.index.json")
+    if os.path.isfile(idx_path):
+        with open(idx_path) as f:
+            wm = json.load(f)["weight_map"]
+    else:
+        single = os.path.join(rung, "model.safetensors")
+        if not os.path.isfile(single):
+            return None
+        with safe_open(single, "pt") as f:
+            wm = {n: "model.safetensors" for n in f.keys()}
+    names = [n for n in wm if re.search(r"embed_tokens\.(weight|trellis)$", n) and not n.startswith("mtp.")]
+    if not names:
+        return None
+    n = names[0]
+    if n.endswith(".weight"):
+        return 16
+    with safe_open(os.path.join(rung, wm[n]), "pt") as f:
+        rows_words = f.get_slice(n).get_shape()[-1]
+    with open(os.path.join(rung, "config.json")) as f:
+        cfg = json.load(f)
+    hidden = (cfg.get("text_config") or cfg)["hidden_size"]
+    k = (rows_words - 8) * 16 / hidden
+    return int(k) if k == int(k) else None
+
+
 def embed_bits_for(bits, choice):
     """The embedding's depth at a body rate: the ladder, or a fixed --embed-bits (16 keeps it dense)."""
     if choice != "auto":
@@ -3220,6 +3270,12 @@ def main():
     cmd_baseline.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
+    cmd_baseline.add_argument('--embed-bits', default='auto',
+                              help="token embedding, as for quantize (and it must match it: a baseline should differ "
+                                   "from its rung only in calibration): 'auto' is the trellis ladder, 16 keeps it dense")
+    cmd_baseline.add_argument('--replace-mismatched', action='store_true',
+                              help="rebuild present rungs whose embedding is not the ladder's, moving each aside to "
+                                   "<rung>.eb<K> first (baselines converted before 2026-11-11 kept a bf16 embedding)")
     cmd_baseline.add_argument('--generator', default=False, action=argparse.BooleanOptionalAction,
                               help='also the uncalibrated 8bpw calibration generator (models with a chat template); '
                                    'only `traces --generator uncalibrated` uses it, and builds it itself if missing')
