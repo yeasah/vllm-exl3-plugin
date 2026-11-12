@@ -309,15 +309,20 @@ def collect_metadata(job, qbench, gguf_kld=False):
     data['reference'] = reference_section(job, qbench, floor, data, gguf=gguf_kld) if data['composite'] else None
     data['thresholds'] = []
     for t in load_thresholds(job):
-        qb = {sl: parse_qbench(res, threshold_label(t["repo"])) for sl, res in qbench.items()}
+        label = t.get("label") or threshold_label(t["repo"])
+        qb = {sl: parse_qbench(res, label) for sl, res in qbench.items()}
         if any(v is None for v in qb.values()):
-            print(f"=== threshold {t['repo']} is not scored on every slice: left off the card ===")
+            print(f"=== threshold {label} is not scored on every slice: left off the card ===")
             continue
         excess = {sl: qb[sl]['kld'] - floor[sl] for sl in qb}
-        sz = tensor_survey_remote(t['repo'], t['revision'])
-        data['thresholds'].append({ 'repo': t['repo'], 'name': t['repo'].split("/")[-1], 'excess': excess,
-                                    # as the size plot's axis: without input embeddings and MTP
-                                    'size': (sz['total'] - sz['embed'] - sz.get('mtp', 0)) / 1024**3,
+        gguf_thr = t.get("engine") == "llamacpp"
+        sz = quant_size(hf_hub_download(t['repo'], t['file'])) if gguf_thr else tensor_survey_remote(t['repo'], t['revision'])
+        data['thresholds'].append({ 'repo': t['repo'], 'engine': t.get("engine", "transformers"),
+                                    'name': f"{t['repo'].split('/')[-1]} {t['revision']}" if gguf_thr else t['repo'].split("/")[-1],
+                                    'excess': excess,
+                                    # as the size plot's axis: language-model weights without input embeddings, MTP
+                                    # or a vision encoder (GGUF ships vision separately)
+                                    'size': (sz['total'] - sz['embed'] - sz.get('mtp', 0) - sz.get('encoder', 0)) / 1024**3,
                                     'composite': sum(W[sl] * excess[sl] for sl in composite) if data['composite'] else None,
                                     'raw_excess': excess.get('raw') })
     return data
@@ -515,9 +520,18 @@ def reference_section(job, qbench, floor, data, gguf=False):
     lo = min(v['body'] for v in ours.values()) * 0.9; hi = max(v['body'] for v in ours.values()) * 1.1
     contam = contamination_map(job, info, every)
     ladders = []   # (display name, [rungs])
-    # GGUF sets are out of the KLD comparison unless the card asks (--gguf-kld): they are scored for recall,
-    # and against EXL3 on KLD they mostly stretch the scale. A per-model call
-    compared = [ref for ref in info["references"] if gguf or ref.get("type") != "gguf"]
+    # GGUF sets never join this relative comparison: a baseline of uncalibrated EXL3 has nothing to do with them,
+    # and on its scale they mostly stretch the axis. With --gguf-kld (a per-model call) their ladders go on the
+    # card's section 1 plot instead, as absolute excess KLD at size, where any two points compare across sizes too
+    data['gguf_ladders'] = []
+    if gguf:
+        for ref in (r for r in info["references"] if r.get("type") == "gguf"):
+            for name, branches in ref["ladders"].items():
+                rungs = [dict(r, branch=b) for b, p in branches.items()
+                         if (r := arm(ref_label(ref["repo"], b), p, every))]
+                if rungs:
+                    data['gguf_ladders'].append((ref["repo"], sorted(rungs, key=lambda r: r['size'])))
+    compared = [ref for ref in info["references"] if ref.get("type") != "gguf"]
     for ref in compared:
         named = [n for n in ref["ladders"]]
         for name, branches in ref["ladders"].items():
@@ -1065,8 +1079,10 @@ def plot_quality_vs_size(job, meta, path):
     AXES, GRID, GRID2, LINE = "#555555", "#555555", "#444444", "#2a78d6"
     key = 'composite' if meta['composite'] else 'raw_excess'
     revs = [r for r in meta['revisions'] if r.get(key)]
-    xs = [(r['disk_bytes'] - r['embed_bytes'] - r['mtp_bytes']) / 1024**3 for r in revs]
+    # language-model weights: no input embeddings, MTP or vision encoder, as GGUF files and section 2 count them
+    xs = [(r['disk_bytes'] - r['embed_bytes'] - r['mtp_bytes'] - r.get('encoder_bytes', 0)) / 1024**3 for r in revs]
     ys = [r[key] for r in revs]
+    ggufs = (meta.get('gguf_ladders') or []) if key == 'composite' else []
     fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=150)
     fig.patch.set_facecolor(SURF); ax.set_facecolor(SURF)
     ax.grid(True, which="major", color=GRID, lw=0.8)
@@ -1076,19 +1092,35 @@ def plot_quality_vs_size(job, meta, path):
     for sp in ("left", "bottom"):
         ax.spines[sp].set_color(AXES)
     ax.tick_params(colors=INK2, which="both")
-    ax.plot(xs, ys, color=LINE, lw=2, zorder=2)
-    ax.scatter(xs, ys, s=70, color=LINE, edgecolor=SURF, linewidth=1.5, zorder=3)
+    # with other sets on the plot, ours takes section 2's style (orange diamonds), which the colourblind-checked
+    # palette for other sets was chosen against; the blue alone is too close to that palette's cyan
+    ours_color, ours_mk = ("#eb6834", "D") if ggufs else (LINE, "o")
+    ax.plot(xs, ys, color=ours_color, lw=2, zorder=2, label="this card" if ggufs else None)
+    ax.scatter(xs, ys, s=70, color=ours_color, marker=ours_mk, edgecolor=SURF, linewidth=1.5, zorder=3)
     for r, x, y in zip(revs, xs, ys):
         ax.annotate(f"{r['bits']:.2f} bpw", (x, y), xytext=(8, 4), textcoords="offset points",
                     fontsize=8, color=INK)
         ax.annotate(f"{y:0.4f}", (x, y), xytext=(8, -4), textcoords="offset points",
                     fontsize=6, color=INK)
+    # GGUF ladders (card --gguf-kld) on the same absolute axes: any of their points compares with any of ours,
+    # across sizes too, which the baseline-relative section 2 cannot show
+    styles = other_set_styles(job) if ggufs else {}
+    for name, rungs in ggufs:
+        color, mk = styles.get(name, ("#bbbbbb", "o"))
+        gx, gy = [r['size'] for r in rungs], [r['composite'] for r in rungs]
+        ax.plot(gx, gy, color=color, lw=1.5, zorder=2, label=name)
+        ax.scatter(gx, gy, s=55, color=color, marker=mk, edgecolor=SURF, linewidth=1.2, zorder=3)
+        for r, x, y in zip(rungs, gx, gy):
+            ax.annotate(r['branch'], (x, y), xytext=(7, -9), textcoords="offset points", fontsize=7, color=INK2)
+        ys = ys + gy
+    if ggufs:
+        ax.legend(loc="upper right", fontsize=7.5, frameon=False, labelcolor=INK2)
     ax.set_yscale("log")
     ax.margins(x=0.1)
     draw_thresholds(ax, [(f"{t['name']} ({t['size']:.1f} GiB)", t[key]) for t in meta.get('thresholds', []) if t.get(key)], ys, INK2)
-    ax.set_xlabel("weight size (GiB, excluding input embeddings and MTP)", color=INK2)
+    ax.set_xlabel("weight size (GiB, excluding input embeddings, MTP and vision encoder)", color=INK2)
     ax.set_ylabel("excess KLD vs bf16 (log, lower is better)", color=INK2)
-    fig.text(0.1, 0.97, f"{job.name}: quality vs size", fontsize=11.5, color=INK, va="top")
+    fig.text(0.1, 0.97, f"{job.name}: quality vs size" + (", with GGUF" if ggufs else ""), fontsize=11.5, color=INK, va="top")
     sub = ("composite: " + " + ".join(f"{w:.2f} {DESCRIBE[sl]}" for sl, w in composite_weights(job)[0].items())
            if meta['composite'] else "raw web text (this model has no chat template)")
     fig.text(0.1, 0.915, sub, fontsize=7.5, color=INK2, va="top")
@@ -1576,6 +1608,18 @@ def logit_cache_dir(job, args):
     pruning what one model's bench series did not use cannot touch another model's entries."""
     return os.path.abspath(args.logit_cache or os.path.join(job.dir, "_logit_cache"))
 
+def gguf_pick(repo, q):
+    """The one file in a GGUF repo whose quant suffix is exactly `q`, or None. The quant type is the whole suffix:
+    "IQ3_XXS" must not take unsloth's "UD-IQ3_XXS" (a different recipe, then labelled as the plain type and possibly
+    scored twice)."""
+    files = [f for f in HfApi().list_repo_files(repo) if f.endswith(".gguf") and not f.startswith("mmproj")]
+    m = [f for f in files if re.search(rf"(?<![A-Za-z0-9])(?<!UD-){re.escape(q)}\.gguf$", f, re.I)]
+    if not m:
+        print(f"=== {repo} has no {q} GGUF: left out ===")
+    elif len(m) > 1:
+        raise SystemExit(f"=== {repo}: {q} matches {m}; name the file's own quant suffix ===")
+    return m[0] if m else None
+
 def qbench_project(job, args, slice_, arms, results=None):
     """One qbench project per slice: a bf16-generated eval trace, or raw web text. arms: [(label, path)]"""
     project = { "title": f"{job.name}: {slice_}",
@@ -1583,7 +1627,9 @@ def qbench_project(job, args, slice_, arms, results=None):
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
                               "repo": job.base_repo, "revision": job.base_revision(), "options": { "streaming": True } } ] +
-                          [ { "label": label, "group": "threshold", "engine": "transformers", "source": os.path.abspath(path),
+                          [ { "label": label, "group": "threshold", "engine": "llamacpp", "source": os.path.abspath(path),
+                              "options": { "n_gpu_layers": 999 } } if label.startswith("thr:") and path.endswith(".gguf") else
+                            { "label": label, "group": "threshold", "engine": "transformers", "source": os.path.abspath(path),
                               "options": { "streaming": True } } if label.startswith("thr:") else
                             { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
                                 "options": { "n_gpu_layers": 999 } } if path.endswith(".gguf") else
@@ -1787,16 +1833,7 @@ def do_qbench(job, args):
     # set's bf16 GGUF too, whose excess is llama.cpp's own numerics against the bf16 reference
     parity_arms = []
     for repo in args.reference_gguf or []:
-        files = [f for f in HfApi().list_repo_files(repo) if f.endswith(".gguf") and not f.startswith("mmproj")]
-        def pick(q):
-            # The quant type is the whole suffix: "IQ3_XXS" must not take unsloth's "UD-IQ3_XXS"
-            # (a different recipe, then labelled as the plain type and possibly scored twice)
-            m = [f for f in files if re.search(rf"(?<![A-Za-z0-9])(?<!UD-){re.escape(q)}\.gguf$", f, re.I)]
-            if not m:
-                print(f"=== {repo} has no {q} GGUF: left out ===")
-            elif len(m) > 1:
-                raise SystemExit(f"=== {repo}: {q} matches {m}; name the file's own quant suffix ===")
-            return m[0] if m else None
+        pick = lambda q, repo=repo: gguf_pick(repo, q)
         rungs = {q: hf_hub_download(repo, f) for q in args.gguf_quants.split(",") if (f := pick(q))}
         ref = {"repo": repo, "type": "gguf", "ladders": {"GGUF": rungs} if rungs else {}}
         if args.gguf_parity and (f := pick("bf16") or pick("f16")):
@@ -1811,14 +1848,26 @@ def do_qbench(job, args):
     for t in args.threshold or []:
         repo, _, rev = t.partition("@")
         path = snapshot_download(repo, revision=rev or None, allow_patterns=CONFIGS_ONLY)
-        thresholds.append({"repo": repo, "revision": os.path.basename(path.rstrip("/")), "engine": "transformers"})
+        thresholds.append({"repo": repo, "revision": os.path.basename(path.rstrip("/")), "engine": "transformers",
+                           "label": threshold_label(repo)})
         arms.append((threshold_label(repo), path))
+    # One GGUF file as a line (Q4_K_M, say), for a card that does not carry a whole GGUF ladder: scored by llama.cpp
+    for t in args.threshold_gguf or []:
+        repo, _, q = t.partition("@")
+        if not q:
+            raise SystemExit(f"=== --threshold-gguf {t}: name the quant type, REPO@QUANT ===")
+        f = gguf_pick(repo, q)
+        if not f:
+            continue
+        label = threshold_label(f"{repo}@{q}")
+        thresholds.append({"repo": repo, "revision": q, "file": f, "engine": "llamacpp", "label": label})
+        arms.append((label, hf_hub_download(repo, f)))
     if thresholds:
         tfile = os.path.join(job.main, "thresholds.json")
         prev = load_thresholds(job) if subset else []
-        mine = {t["repo"] for t in thresholds}
+        mine = {t["label"] for t in thresholds}
         with open(tfile, "w") as f:
-            json.dump([t for t in prev if t["repo"] not in mine] + thresholds, f, indent=1)
+            json.dump([t for t in prev if t.get("label", threshold_label(t["repo"])) not in mine] + thresholds, f, indent=1)
     baseline = {rev: os.path.join(job.baseline, rev) for rev in job.baseline_revisions()
                 if not args.revisions or rev in base_want}
     if refuse_converter_mismatch(list(baseline.values()), args, "baseline"):
@@ -3466,6 +3515,9 @@ def main():
                             help="a checkpoint everybody knows, e.g. the publisher's FP8 (REPO[@REVISION], repeatable): "
                                  "scored on every slice by the bf16 reference's own engine and drawn as a line on the "
                                  "card's size plot and TECHNICAL.md's slice plots, not compared in section 2")
+    cmd_qbench.add_argument('--threshold-gguf', action='append',
+                            help="one GGUF file as a threshold line, REPO@QUANT (e.g. unsloth/...-GGUF@UD-Q4_K_M; "
+                                 "repeatable): for a card without a whole --reference-gguf ladder, scored by llama.cpp")
     cmd_qbench.add_argument('--reference', action='append',
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
@@ -3483,8 +3535,9 @@ def main():
     cmd_card = subparsers.add_parser('card', help="the model card and TECHNICAL.md from the qbench results")
     cmd_card.add_argument('--template', default='templates/model_card.jinja')
     cmd_card.add_argument('--gguf-kld', action='store_true',
-                          help="put scored GGUF sets in the KLD comparison too (plot, table, per-slice plots); by "
-                               "default they appear only in the recall plot")
+                          help="draw scored GGUF ladders on section 1's plot, as absolute excess KLD at size, so any "
+                               "of their points compares with any of ours; they never join section 2's baseline-relative "
+                               "comparison. By default they appear only in the recall plot")
     # Raw-text perplexity is meaningless for some models (gpt-oss: ~3600 even for
     # the unquantized reference, on every engine); KLD stays valid, so drop only PPL.
     cmd_card.add_argument('--ppl', default=True,
