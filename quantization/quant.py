@@ -484,18 +484,15 @@ def reference_section(job, qbench, floor, data, gguf=False):
     """Section 2 of the card. Plot: every ladder -- this card's and each reference's -- as excess
     KLD relative to the uncalibrated baseline at equal served size, so no ladder is drawn as a
     perfect line and all share one denominator (its draw noise is common-mode: order and gaps
-    between ladders survive). Table: for each revision of ours, the most competitive rung at the
-    same bit rate across all reference ladders, or, where none has that rate, the most
-    competitive ladder interpolated at equal served size (asterisked). Raw text stays out, as on
-    the rest of the card."""
+    between ladders survive). Table: for each revision of ours, the most competitive reference
+    ladder at its served size, log-interpolated between rungs (asterisked where extrapolated past
+    a ladder's end). Raw text stays out, as on the rest of the card."""
     info = load_reference_info(job)
     if not info:
         return None
     import numpy as np
     slices = [sl for sl in qbench if sl != "raw"]
-    # Sizes as on the rest of the card (minus input embeddings), the total for the size column,
-    # and the body (minus the output head too) for anything interpolated: head bits can change
-    # between rungs (turboderp's 2.75bpw_H5 -> 3.0bpw), and those bytes buy little
+    # Sizes as served, as on the rest of the card: every comparison here is made at that size
     recorded = info.get("sizes", {})
     def survey(path, label=None):
         sz = recorded.get(label) or quant_size(path)
@@ -552,6 +549,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
     lo = min(v['served'] for v in ours.values()) * 0.9; hi = max(v['served'] for v in ours.values()) * 1.1
     contam = contamination_map(job, info, every)
     ladders = []   # (display name, [rungs])
+    whole = {}     # display name -> every scored rung
     # GGUF sets never join this relative comparison: a baseline of uncalibrated EXL3 has nothing to do with them,
     # and on its scale they mostly stretch the axis. With --gguf-kld (a per-model call) their ladders go on the
     # card's section 1 plot instead, as absolute excess KLD at size, where any two points compare across sizes too
@@ -574,9 +572,11 @@ def reference_section(job, qbench, floor, data, gguf=False):
                     r['contaminated'] = sorted(sl for sl, v in contam.get(ref["repo"], {}).get(name, {}).items()
                                                if v >= CONTAMINATED)
             # rungs far outside this card's size range (SC's 1.4-1.8 bpw against a 2-6 bpw set) add nothing
+            # to the plots; the table interpolates on the whole ladder, so a rung just outside still brackets
+            disp = ref["repo"] if len(named) == 1 else f"{ref['repo']} ({name or 'plain'})"
+            whole[disp] = [r for r in rungs if r]
             rungs = [r for r in rungs if r and lo <= r['served'] <= hi]
             if rungs:
-                disp = ref["repo"] if len(named) == 1 else f"{ref['repo']} ({name or 'plain'})"
                 ladders.append((disp, rungs))
     if not ladders:
         return None
@@ -599,43 +599,34 @@ def reference_section(job, qbench, floor, data, gguf=False):
             continue
         row = { 'name': r['name'], 'bits': r['bits'], 'size': o['size'], 'vs': None, 'interpolated': False,
                 'near_floor': False, 'dropped': [] }
-        # same nominal bit rate, preferring the same head bits within a ladder; the strongest
-        # competitor across ladders is the one our ratio against is highest
-        same = []
-        for disp, rungs in ladders:
-            m = [x for x in rungs if x['bits'] is not None and abs(x['bits'] - r['bits']) < 0.01]
-            if m:
-                pick = min(m, key=lambda x: (x['head_bits'] != o['head_bits'],
-                                             -geo(o['excess'], x['excess'], x.get('contaminated', ()))[0]))
-                same.append((geo(o['excess'], pick['excess'], pick.get('contaminated', ())), disp, pick))
-        if same:
-            (ratio, dropped, allnear), disp, best = max(same, key=lambda t: t[0][0])
-            row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped] })
-            rel = {sl: (o['excess'][sl] + floor[sl]) / (best['excess'][sl] + floor[sl]) for sl in slices
-                   if sl not in tainted and sl in o['excess'] and sl in best['excess']}
-            worst = max(rel, key=rel.get)
-            d = o['served'] - best['served']
-            row.update({ 'against': f"{disp}: {best['branch']}",
+        # Every set at this rung's size as served, its ladder log-interpolated between rungs: a rung of the
+        # same nominal rate can differ by its head bits (turboderp's SC_3.00bpw_H4 against plain H6), and
+        # picking by rate handed the comparison to whichever spent more bytes. The strongest set is the one
+        # our ratio against is highest; its nearest rung names it, and the size column says how far that is
+        cands = []
+        for disp, _ in ladders:
+            full = whole[disp]
+            v = {sl: interp(full, o['served'], sl) for sl in W}
+            if all(x is not None for x in v.values()):
+                skip = sorted({sl for x in full for sl in x.get('contaminated', ())})
+                cands.append((geo(o['excess'], v, skip), disp, full))
+        if cands:
+            (ratio, dropped, allnear), disp, full = max(cands, key=lambda t: t[0][0])
+            near = min(full, key=lambda x: abs(x['served'] - o['served']))
+            lo_x, hi_x = min(x['served'] for x in full), max(x['served'] for x in full)
+            d = o['served'] - near['served']
+            row.update({ 'vs': ratio, 'near_floor': allnear, 'dropped': [describe_slice(sl) for sl in dropped],
+                         'against': f"{disp}: {near['branch']}",
+                         # past the ladder's ends by more than rounding (SC_6.00 sits 85 MiB under our 6.00):
+                         # its end slope, extrapolated
+                         'interpolated': not lo_x / 1.01 <= o['served'] <= hi_x * 1.01,
                          'size_delta': f"{d:+.2f} GiB" if abs(d) >= 0.1 else f"{d * 1024:+.0f} MiB",
-                         'size_delta_pct': 100 * (o['served'] / best['served'] - 1),
-                         'worst': rel[worst], 'worst_desc': describe_slice(worst) })
-        else:
-            cands = []
-            for disp, rungs in ladders:
-                v = {sl: interp(rungs, o['served'], sl) for sl in W}
-                if all(x is not None for x in v.values()):
-                    cands.append((geo(o['excess'], v), disp, rungs))
-            if cands:
-                (ratio, dropped, allnear), disp, rungs = max(cands, key=lambda t: t[0][0])
-                row.update({ 'vs': ratio, 'interpolated': True, 'against': disp, 'near_floor': allnear,
-                             'dropped': [describe_slice(sl) for sl in dropped] })
-                # the worst slice against the same equal-size interpolation (a GGUF ladder is
-                # always compared this way, so without it the column would never cover one)
-                rel = {sl: (o['excess'][sl] + floor[sl]) / (v + floor[sl]) for sl in slices if sl not in tainted
-                       if (v := interp(rungs, o['served'], sl))}
-                if rel:
-                    worst = max(rel, key=rel.get)
-                    row.update({ 'worst': rel[worst], 'worst_desc': describe_slice(worst) })
+                         'size_delta_pct': 100 * (o['served'] / near['served'] - 1) })
+            rel = {sl: (o['excess'][sl] + floor[sl]) / (v + floor[sl]) for sl in slices if sl not in tainted
+                   if sl in o['excess'] and (v := interp(full, o['served'], sl))}
+            if rel:
+                worst = max(rel, key=rel.get)
+                row.update({ 'worst': rel[worst], 'worst_desc': describe_slice(worst) })
         rows.append(row)
 
     traces = []
