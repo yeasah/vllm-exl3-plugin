@@ -722,7 +722,7 @@ def plot_slice(sc, path, styles):
             continue
         xs, ys = zip(*pts); ys_all += ys
         base = name.startswith("uncalibrated")
-        color, mk = (OURS, "D") if ours else (BASE, None) if base else styles.get(name, (INK2, "o"))
+        color, mk = (OURS, "D") if ours else (BASE, "o" if len(xs) == 1 else None) if base else styles.get(name, (INK2, "o"))
         ax.plot(xs, ys, color=color, lw=2, ls=(0, (2, 2)) if base else "-", zorder=3 if ours else 2,
                 marker=mk, markersize=5, markeredgecolor=SURF, label=name)
     ax.set_yscale("log")
@@ -1833,6 +1833,24 @@ def do_qbench(job, args):
         ladders = {name: bs for name, bs in ladders.items() if bs}
         references.append({"repo": repo, "ladders": ladders})
         arms += [(ref_label(repo, b), p) for bs in ladders.values() for b, p in bs.items()]
+    if references and not args.allow_thin_baseline:
+        # Section 2 plots every set relative to the baseline at each compared rate: at that rate, or interpolated
+        # between rungs either side. A rate it covers neither way is a hole in the plot nobody asked for (the
+        # Qwen3.6-35B-A3B pilot scored a whole old ladder, 2-6 bpw, against a one-rung baseline)
+        rate = lambda name: float(re.search(r"(\d+(?:\.\d+)?)bpw", name).group(1))
+        base_rates = sorted({rate(b) for b in job.baseline_revisions()})
+        covered = lambda r: (any(abs(r - b) < 0.01 for b in base_rates)
+                             or (len(base_rates) >= 2 and base_rates[0] < r < base_rates[-1]))
+        ours_r = {rate(r) for r in revisions if re.search(r"\d+(?:\.\d+)?bpw", r)}
+        refs_r = {rate(b) for ref in references for bs in ref["ladders"].values() for b in bs}
+        thin = sorted(r for r in ours_r | refs_r if not covered(r))
+        if thin:
+            print(f"=== qbench refused: the EXL3 comparison covers rates {', '.join(f'{r:g}' for r in thin)} "
+                  f"({'ours' if set(thin) <= ours_r else 'the reference' if set(thin) <= refs_r else 'ours and the reference'}), "
+                  f"which the baseline ({', '.join(f'{b:g}' for b in base_rates) or 'none'}) neither has nor brackets. "
+                  f"Build those rungs (`baseline -b ...`), bound the reference (--reference-min-bits / "
+                  f"--reference-max-bits), or score anyway with --allow-thin-baseline ===")
+            return False
     # GGUF sets: one ladder of the chosen quant types, scored by llama.cpp; with --gguf-parity, the
     # set's bf16 GGUF too, whose excess is llama.cpp's own numerics against the bf16 reference
     parity_arms = []
@@ -3319,7 +3337,11 @@ def main():
 
     cmd_baseline = subparsers.add_parser('baseline', help="uncalibrated conversions: the card's baseline ladder and "
                                          "the calibration generator (single-GPU jobs, spread over -d)")
-    cmd_baseline.add_argument('-b', '--bits', default='2.5:5,3:5,3.5:5,4,5,6')
+    cmd_baseline.add_argument('-b', '--bits', default='3:5',
+                              help="rungs to convert uncalibrated. Default: one, the ladder's lowest whole rate, which is "
+                                   "where a failed calibration shows most and what `measure` anchors on. A card with an "
+                                   "EXL3 --reference needs the baseline to cover every compared rate (qbench refuses "
+                                   "otherwise): pass the ladder, e.g. -b 2.5:5,3:5,3.5:5,4,5,6")
     cmd_baseline.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
@@ -3511,6 +3533,9 @@ def main():
     # expensive file in the set. Rerun when llama.cpp or the bench changes
     cmd_qbench.add_argument('--gguf-parity', default=False, action=argparse.BooleanOptionalAction,
                             help="also score the repo's bf16 GGUF: llama.cpp's own numerics against the bf16 reference")
+    cmd_qbench.add_argument('--allow-thin-baseline', action='store_true',
+                            help="score an EXL3 --reference whose compared rates the baseline does not cover (section 2 "
+                                 "then has no plot point there); without it qbench refuses")
     cmd_qbench.add_argument('--reference-min-bits', type=float, default=0.0,
                             help='skip reference rungs below this bit rate (e.g. 2.0)')
     cmd_qbench.add_argument('--reference-max-bits', type=float, default=8.9,
