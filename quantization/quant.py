@@ -614,10 +614,10 @@ def reference_section(job, qbench, floor, data, gguf=False):
             rel = {sl: (o['excess'][sl] + floor[sl]) / (best['excess'][sl] + floor[sl]) for sl in slices
                    if sl not in tainted and sl in o['excess'] and sl in best['excess']}
             worst = max(rel, key=rel.get)
-            d = o['total'] - best['total']
+            d = o['served'] - best['served']
             row.update({ 'against': f"{disp}: {best['branch']}",
                          'size_delta': f"{d:+.2f} GiB" if abs(d) >= 0.1 else f"{d * 1024:+.0f} MiB",
-                         'size_delta_pct': 100 * (o['total'] / best['total'] - 1),
+                         'size_delta_pct': 100 * (o['served'] / best['served'] - 1),
                          'worst': rel[worst], 'worst_desc': describe_slice(worst) })
         else:
             cands = []
