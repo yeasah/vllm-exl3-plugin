@@ -322,7 +322,7 @@ def collect_metadata(job, qbench, gguf_kld=False):
                                     'excess': excess,
                                     # as the size plot's axis: language-model weights without input embeddings, MTP
                                     # or a vision encoder (GGUF ships vision separately)
-                                    'size': (sz['total'] - sz['embed'] - sz.get('mtp', 0) - sz.get('encoder', 0)) / 1024**3,
+                                    'size': served_gib(sz, None),
                                     'composite': sum(W[sl] * excess[sl] for sl in composite) if data['composite'] else None,
                                     'raw_excess': excess.get('raw') })
     return data
@@ -446,13 +446,47 @@ def contamination_map(job, info, slices):
 
 CONTAMINATED = 0.05     # share of a slice's prompts found in a competitor's calibration
 
+SERVED_AXIS = "weights as served (GiB; embedding as held in VRAM, no vision encoder or MTP draft)"
+
+def rev_served_gib(r):
+    """One of this card's revisions on the served axis: the VRAM column's sum."""
+    return (r['disk_bytes'] - r['embed_bytes'] - r.get('encoder_bytes', 0) - r['mtp_bytes'] + r['blockq_bytes']) / 1024**3
+
+def served_embed_bytes(sz, path):
+    """The token embedding as held in VRAM: a table stored quantized (trellis, bq_*) as stored; a dense one in an
+    EXL3 checkpoint as the blockq the plugin encodes it to on load (and qbench scores, `served_embedding`); any other
+    format (GGUF, FP8, AWQ) as stored. Dense or not is read from bytes per element, since a reference may be a
+    configs-only snapshot with no weights on disk."""
+    e = sz['embed']
+    if not path or not isinstance(path, str) or path.endswith(".gguf"):
+        return e
+    if not os.path.isfile(os.path.join(path, "quantization_config.json")):
+        return e
+    try:
+        with open(os.path.join(path, "config.json")) as f:
+            cfg = json.load(f)
+        tc = cfg.get("text_config") or cfg
+        elems = tc["vocab_size"] * tc["hidden_size"]
+    except (OSError, KeyError, ValueError):
+        return e
+    if e >= 1.5 * elems and tc["hidden_size"] % 32 == 0:
+        return int(e / 16 * BLOCKQ_EMBED_BITS)
+    return e
+
+def served_gib(sz, path):
+    """Weights as served, the card's one size axis (its plots, its VRAM column, recall): everything the checkpoint
+    holds but the optional vision encoder and MTP draft, the embedding as `served_embed_bytes` holds it. As served is
+    also as scored. Before 2026-11-12 the card mixed three: with the head but no embedding (section 1), without the
+    head too (section 2 and TECHNICAL.md), and measured VRAM (recall)."""
+    return (sz['total'] - sz['embed'] + served_embed_bytes(sz, path) - sz.get('mtp', 0) - sz.get('encoder', 0)) / 1024**3
+
 def reference_section(job, qbench, floor, data, gguf=False):
     """Section 2 of the card. Plot: every ladder -- this card's and each reference's -- as excess
-    KLD relative to the uncalibrated baseline at equal body size, so no ladder is drawn as a
+    KLD relative to the uncalibrated baseline at equal served size, so no ladder is drawn as a
     perfect line and all share one denominator (its draw noise is common-mode: order and gaps
     between ladders survive). Table: for each revision of ours, the most competitive rung at the
     same bit rate across all reference ladders, or, where none has that rate, the most
-    competitive ladder interpolated at equal body size (asterisked). Raw text stays out, as on
+    competitive ladder interpolated at equal served size (asterisked). Raw text stays out, as on
     the rest of the card."""
     info = load_reference_info(job)
     if not info:
@@ -468,9 +502,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
         # The comparison axes count language-model weights only: GGUF keeps the vision encoder in
         # a separate mmproj file and drops the MTP draft, so EXL3's (0.85 GiB + 0.12 GiB on an
         # Ornith-9B checkpoint) would otherwise read as size that buys nothing
-        other = sz.get('mtp', 0) + sz.get('encoder', 0)
-        return { 'size': (sz['total'] - sz['embed'] - other) / 1024**3, 'total': sz['total'] / 1024**3,
-                 'body': (sz['total'] - sz['embed'] - sz['head'] - other) / 1024**3,
+        return { 'size': served_gib(sz, path), 'total': sz['total'] / 1024**3, 'served': served_gib(sz, path),
                  'bits': sz.get('bits'), 'head_bits': sz.get('head_bits'), 'gguf': path.endswith(".gguf") }
     def arm(label, path, need):
         # The composite's slices are required (every comparison is built on them); any other slice
@@ -484,14 +516,14 @@ def reference_section(job, qbench, floor, data, gguf=False):
         return { **survey(path, label), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
     def interp(ladder, x, sl=None, reach=1.02):
-        """A ladder's composite (or one slice's excess) at body size x, log-interpolated. Within
+        """A ladder's composite (or one slice's excess) at served size x, log-interpolated. Within
         `reach` of either end it extends the end segment's log-linear slope instead. Log, not linear,
         though a rate between rungs is a per-tensor K mix: on the 27B, the 3.5 bpw rung sits 4% under
         the log value of its 3 and 4 bpw neighbours for both the uncalibrated baseline and the recipe
         ladder (21-22% under the linear mean); only turboderp's published half rungs sit near linear
         (2.5: 9%, 3.5: 3.6% under it), with the same K map as the baseline's."""
         val = (lambda r: r['composite']) if sl is None else (lambda r: r['excess'][sl])
-        pts = sorted((r['body'], val(r)) for r in ladder)
+        pts = sorted((r['served'], val(r)) for r in ladder)
         if len(pts) < 2 or not pts[0][0] / reach <= x <= pts[-1][0] * reach or min(p[1] for p in pts) <= 0:
             return None
         xs, ly = [p[0] for p in pts], np.log([p[1] for p in pts])
@@ -517,7 +549,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
     ours = {k: v for k, v in ours.items() if v}
     if not ours:
         return None
-    lo = min(v['body'] for v in ours.values()) * 0.9; hi = max(v['body'] for v in ours.values()) * 1.1
+    lo = min(v['served'] for v in ours.values()) * 0.9; hi = max(v['served'] for v in ours.values()) * 1.1
     contam = contamination_map(job, info, every)
     ladders = []   # (display name, [rungs])
     # GGUF sets never join this relative comparison: a baseline of uncalibrated EXL3 has nothing to do with them,
@@ -542,7 +574,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
                     r['contaminated'] = sorted(sl for sl, v in contam.get(ref["repo"], {}).get(name, {}).items()
                                                if v >= CONTAMINATED)
             # rungs far outside this card's size range (SC's 1.4-1.8 bpw against a 2-6 bpw set) add nothing
-            rungs = [r for r in rungs if r and lo <= r['body'] <= hi]
+            rungs = [r for r in rungs if r and lo <= r['served'] <= hi]
             if rungs:
                 disp = ref["repo"] if len(named) == 1 else f"{ref['repo']} ({name or 'plain'})"
                 ladders.append((disp, rungs))
@@ -590,7 +622,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
         else:
             cands = []
             for disp, rungs in ladders:
-                v = {sl: interp(rungs, o['body'], sl) for sl in W}
+                v = {sl: interp(rungs, o['served'], sl) for sl in W}
                 if all(x is not None for x in v.values()):
                     cands.append((geo(o['excess'], v), disp, rungs))
             if cands:
@@ -600,7 +632,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
                 # the worst slice against the same equal-size interpolation (a GGUF ladder is
                 # always compared this way, so without it the column would never cover one)
                 rel = {sl: (o['excess'][sl] + floor[sl]) / (v + floor[sl]) for sl in slices if sl not in tainted
-                       if (v := interp(rungs, o['body'], sl))}
+                       if (v := interp(rungs, o['served'], sl))}
                 if rel:
                     worst = max(rel, key=rel.get)
                     row.update({ 'worst': rel[worst], 'worst_desc': describe_slice(worst) })
@@ -611,11 +643,11 @@ def reference_section(job, qbench, floor, data, gguf=False):
         for disp, rungs in [("this card", list(ours.values()))] + ladders:
             # The baseline is extrapolated up to the card's own 10% size window, so a rung just past
             # its ends (Q6_K's ~6.6 real bpw against a 6 bpw top) still plots; drawn hollow
-            bl, bh = min(b['body'] for b in base), max(b['body'] for b in base)
+            bl, bh = min(b['served'] for b in base), max(b['served'] for b in base)
             ours_trace = disp == "this card"
             pts = []
-            for x in sorted(rungs, key=lambda x: x['body']):
-                b = {sl: interp(base, x['body'], sl, reach=1.1) for sl in W}
+            for x in sorted(rungs, key=lambda x: x['served']):
+                b = {sl: interp(base, x['served'], sl, reach=1.1) for sl in W}
                 if all(v is not None for v in b.values()):
                     # label: our bit rate, or the other set's branch / quant type. Head bits stay out of
                     # it, as they do for ours: a branch name carries a non-default head where its
@@ -623,7 +655,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
                     lab = f"{x['bits']:.2f}" if ours_trace else re.sub(r"(?i)bpw", "", str(x.get('branch') or x['label']))
                     # extrapolated only past the baseline's ends by more than rounding (a recipe rung's
                     # body can come out a hair under its uniform namesake's)
-                    pts.append((x['body'], geo(x['excess'], b)[0], not bl * 0.995 <= x['body'] <= bh * 1.005, lab))
+                    pts.append((x['served'], geo(x['excess'], b)[0], not bl * 0.995 <= x['served'] <= bh * 1.005, lab))
             if pts:
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in compared],
@@ -647,7 +679,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
             ex = {sl: (row['kld'] - floor[sl]) for sl in qbench if (row := parse_qbench(qbench[sl], r['name']))}
             if ex:
                 ours[r['name']] = {'label': r['name'], 'excess': ex,
-                                   'size': (r['disk_bytes'] - r['embed_bytes'] - r['encoder_bytes'] - r['mtp_bytes']) / 1024**3,
+                                   'size': rev_served_gib(r), 'served': rev_served_gib(r),
                                    'bits': r['bits']}
         ladders, base = [], []
     # GGUF ladders (card --gguf-kld) are out of section 2's baseline-relative comparison but belong here: these
@@ -658,7 +690,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
     for sl in qbench:
         # Compared sets are drawn on the body axis their numbers are computed on (a rung with a
         # bigger head sits further right on total size than the size its ratios assume)
-        xk = 'body' if ref else 'size'
+        xk = 'served'
         series = [("this card", [(o[xk], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
         series += [(disp, [(x[xk], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
         if base and all(sl in b['excess'] for b in base):
@@ -672,7 +704,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
                 m = [x for x in rungs if x.get('bits') is not None and o.get('bits') is not None
                      and abs(x['bits'] - o['bits']) < 0.01 and sl in x['excess']]
                 if not m:
-                    # No rung at this rate (a GGUF ladder never has one): log-interpolated at equal body size
+                    # No rung at this rate (a GGUF ladder never has one): log-interpolated at equal served size
                     pts = sorted((x[xk], x['excess'][sl]) for x in rungs if sl in x['excess'] and xk in x)
                     if len(pts) >= 2 and pts[0][0] * 0.98 <= o.get(xk, 0) <= pts[-1][0] * 1.02 and min(p[1] for p in pts) > 0:
                         import numpy as np
@@ -695,8 +727,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
         out.append({ 'slice': sl, 'title': title, 'anchor': anchor, 'what': what, 'why': why, 'floor': floor[sl], 'tainted_by': tainted_by,
                      'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
                      'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png",
-                     'thresholds': [(t['name'], t['excess'].get(sl)) for t in data.get('thresholds', [])],
-                     'body_axis': bool(ref) })
+                     'thresholds': [(t['name'], t['excess'].get(sl)) for t in data.get('thresholds', [])] })
     return out
 
 def plot_slice(sc, path, styles):
@@ -739,8 +770,7 @@ def plot_slice(sc, path, styles):
         ax.text(0.99, 2 * sc['floor'], "2x noise floor", transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                 fontsize=7, color=INK2)
     ax.margins(x=0.06)
-    ax.set_xlabel("transformer body (GiB; no output head, input embeddings, encoder or MTP)" if sc.get('body_axis') else
-                  "language model weights (GiB; no input embeddings, encoder or MTP)", color=INK2)
+    ax.set_xlabel(SERVED_AXIS, color=INK2)
     ax.set_ylabel("excess KLD (log)", color=INK2)
     leg = ax.legend(frameon=False, fontsize=7.5, loc="upper right")
     for t in leg.get_texts():
@@ -1084,7 +1114,7 @@ def plot_quality_vs_size(job, meta, path):
     key = 'composite' if meta['composite'] else 'raw_excess'
     revs = [r for r in meta['revisions'] if r.get(key)]
     # language-model weights: no input embeddings, MTP or vision encoder, as GGUF files and section 2 count them
-    xs = [(r['disk_bytes'] - r['embed_bytes'] - r['mtp_bytes'] - r.get('encoder_bytes', 0)) / 1024**3 for r in revs]
+    xs = [rev_served_gib(r) for r in revs]
     ys = [r[key] for r in revs]
     ggufs = (meta.get('gguf_ladders') or []) if key == 'composite' else []
     fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=150)
@@ -1111,7 +1141,7 @@ def plot_quality_vs_size(job, meta, path):
     styles = other_set_styles(job) if ggufs else {}
     for name, rungs in ggufs:
         color, mk = styles.get(name, ("#bbbbbb", "o"))
-        gx, gy = [r['size'] for r in rungs], [r['composite'] for r in rungs]
+        gx, gy = [r['served'] for r in rungs], [r['composite'] for r in rungs]
         ax.plot(gx, gy, color=color, lw=1.5, zorder=2, label=name)
         ax.scatter(gx, gy, s=55, color=color, marker=mk, edgecolor=SURF, linewidth=1.2, zorder=3)
         for r, x, y in zip(rungs, gx, gy):
@@ -1122,7 +1152,7 @@ def plot_quality_vs_size(job, meta, path):
     ax.set_yscale("log")
     ax.margins(x=0.1)
     draw_thresholds(ax, [(f"{t['name']} ({t['size']:.1f} GiB)", t[key]) for t in meta.get('thresholds', []) if t.get(key)], ys, INK2)
-    ax.set_xlabel("weight size (GiB, excluding input embeddings, MTP and vision encoder)", color=INK2)
+    ax.set_xlabel(SERVED_AXIS, color=INK2)
     ax.set_ylabel("excess KLD vs bf16 (log, lower is better)", color=INK2)
     fig.text(0.1, 0.97, f"{job.name}: quality vs size" + (", with GGUF" if ggufs else ""), fontsize=11.5, color=INK, va="top")
     sub = ("composite: " + " + ".join(f"{w:.2f} {DESCRIBE[sl]}" for sl, w in composite_weights(job)[0].items())
@@ -1172,13 +1202,9 @@ def recall_section(job, revisions):
     sets = []
     sizes = info.get("sizes", {})
     def served_gb(label, path):
-        """VRAM as the plugin serves the arm: qbench's figure counts the embedding as stored, so a dense
-        one the plugin encodes to blockq on load (and qbench scored that way, `served_embedding`) is
-        charged at blockq size, as the card's VRAM column charges it."""
-        gb = results[label]["vram_gb"]
-        if label in sizes and isinstance(path, str) and served_embedding(path):
-            gb -= sizes[label]["embed"] * (1 - BLOCKQ_EMBED_BITS / 16) / 1024**3
-        return gb
+        """On the card's one size axis (`served_gib`), from the sizes qbench recorded; qbench's own measured VRAM
+        only where a size was not recorded."""
+        return served_gib(sizes[label], path) if label in sizes else results[label]["vram_gb"]
     for ref in info["references"]:
         for name, branches in ref["ladders"].items():
             pts = [(served_gb(l, branches[b] if isinstance(branches, dict) else None), results[l]["recall_kept"])
@@ -1188,7 +1214,7 @@ def recall_section(job, revisions):
                               "points": sorted(pts) })
     return { "rows": rows, "questions": known, "confident": selection["confident"],
              "floor": results.get("Noise floor", {}).get("recall_bands"),
-             "ours": [(results[r['name']]["vram_gb"], results[r['name']]["recall_kept"], f"{r['bits']:0.2f}")
+             "ours": [(rev_served_gib(r), results[r['name']]["recall_kept"], f"{r['bits']:0.2f}")
                       for r in revisions if "recall_kept" in results.get(r['name'], {})],
              "sets": sets, "styles": other_set_styles(job) }
 
@@ -1273,7 +1299,7 @@ def plot_recall_vs_size(recall, path):
         color, mk = recall['styles'][s['name']]
         ax.scatter([x for x, _ in s['points']], [100 * y for _, y in s['points']], marker=mk, s=40, color=color,
                    edgecolor=SURF, linewidth=0.8, zorder=2, label=s['name'])
-    ax.set_xlabel("VRAM in vLLM (GiB, weights as served)", color=INK2)
+    ax.set_xlabel(SERVED_AXIS, color=INK2)
     ax.set_ylabel("facts kept (%)", color=INK2)
     leg = ax.legend(frameon=False, fontsize=7.5, loc="lower right")
     for t in leg.get_texts():
@@ -1320,7 +1346,7 @@ def plot_vs_reference(job, ref, path):
     pad = max(0.03, (hi - lo) * 0.14)
     ax.set_ylim(lo - pad, hi + pad)
     ax.margins(x=0.08)
-    ax.set_xlabel("transformer body (GiB; no output head, input embeddings, encoder or MTP)", color=INK2)
+    ax.set_xlabel(SERVED_AXIS, color=INK2)
     ax.set_ylabel("KLD incl. rounding noise, relative\nto uncalibrated EXL3 at equal size", color=INK2)
     if any_ext:
         ax.scatter([], [], marker="o", s=36, facecolor=SURF, edgecolor=INK2, linewidth=1.5,
