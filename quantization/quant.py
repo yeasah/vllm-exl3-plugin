@@ -651,7 +651,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
                 if all(v is not None for v in b.values()):
                     # label: our bit rate, or the other set's branch / quant type. Head bits stay out of
                     # it, as they do for ours: a branch name carries a non-default head where its
-                    # publisher put one, and TECHNICAL.md states what the body axis credits a big head
+                    # publisher put one, and the served axis charges its bytes
                     lab = f"{x['bits']:.2f}" if ours_trace else re.sub(r"(?i)bpw", "", str(x.get('branch') or x['label']))
                     # extrapolated only past the baseline's ends by more than rounding (a recipe rung's
                     # body can come out a hair under its uniform namesake's)
@@ -688,8 +688,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
     ladders = list(ladders) + list(data.get('gguf_ladders') or [])
     out = []
     for sl in qbench:
-        # Compared sets are drawn on the body axis their numbers are computed on (a rung with a
-        # bigger head sits further right on total size than the size its ratios assume)
+        # Compared sets are drawn on the served axis their numbers are computed on
         xk = 'served'
         series = [("this card", [(o[xk], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
         series += [(disp, [(x[xk], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
@@ -1310,7 +1309,7 @@ def plot_recall_vs_size(recall, path):
 
 
 def plot_vs_reference(job, ref, path):
-    """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal body size,
+    """Section 2 of the card: each ladder relative to the uncalibrated baseline at equal served size,
     every point labelled (our bit rate and ratio; another set's branch or quant type)."""
     import numpy as np
     import matplotlib
