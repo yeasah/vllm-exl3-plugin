@@ -44,6 +44,13 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
   (`generation_config.json` under a sampling profile's `publish`) need their own check: a base update can fix what the
   override worked around (Ornith-9B gaining a config, the MoE's starting to match its card), so the profile's reason is
   re-tested against the new file rather than the override carried forward. The appliance can offer the same for anyone's quants at serve time.
+- `qbench-fp8-fixture` — A simulated FP8 threshold line for models with no FP8 or AWQ release on the Hub (Ornith-1.5-9B
+  has neither; the card then has nothing familiar to read the ladder against). Not a stand-in for a missing artifact:
+  vLLM's online `--quantization fp8` serves exactly this from a bf16 checkpoint with one flag. Simulate what that path
+  does (per-tensor weight scale as far as known; check its current defaults), which qbench's `fake_quantize` already
+  has as `fp8_tensor`; the work is a `weight_quant` option applying it to quantizable linears in the transformers
+  streaming engine, with embedding, head and norms left out. Validate against Qwen3.6-35B-A3B's real FP8 release,
+  already scored. Like the published FP8 lines, it measures weights under bf16 compute. Wait for more cards to want it.
 - `qbench-vllm-engine` — Bring qbench's `vllm` engine up to par, so served formats with no Transformers path that
   matches how they serve (NVFP4 runs W4A4 on Blackwell, W4A16 elsewhere) can be scored as served. Three pieces, all
   in docs/qbench.md: a child process per vLLM arm (designed there: engine and reduction in the child, reference
