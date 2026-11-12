@@ -650,11 +650,15 @@ def slice_comparisons(job, qbench, floor, data, ref):
                                    'size': (r['disk_bytes'] - r['embed_bytes'] - r['encoder_bytes'] - r['mtp_bytes']) / 1024**3,
                                    'bits': r['bits']}
         ladders, base = [], []
+    # GGUF ladders (card --gguf-kld) are out of section 2's baseline-relative comparison but belong here: these
+    # plots are absolute excess by size, like section 1's, and without them a card with no other EXL3 set (the 9B)
+    # shows one trace per slice
+    ladders = list(ladders) + list(data.get('gguf_ladders') or [])
     out = []
     for sl in qbench:
         # Compared sets are drawn on the body axis their numbers are computed on (a rung with a
         # bigger head sits further right on total size than the size its ratios assume)
-        xk = 'body' if ladders else 'size'
+        xk = 'body' if ref else 'size'
         series = [("this card", [(o[xk], o['excess'][sl]) for o in ours.values() if sl in o['excess']], True)]
         series += [(disp, [(x[xk], x['excess'][sl]) for x in rungs if sl in x['excess']], False) for disp, rungs in ladders]
         if base and all(sl in b['excess'] for b in base):
@@ -669,10 +673,10 @@ def slice_comparisons(job, qbench, floor, data, ref):
                      and abs(x['bits'] - o['bits']) < 0.01 and sl in x['excess']]
                 if not m:
                     # No rung at this rate (a GGUF ladder never has one): log-interpolated at equal body size
-                    pts = sorted((x['body'], x['excess'][sl]) for x in rungs if sl in x['excess'] and 'body' in x)
-                    if len(pts) >= 2 and pts[0][0] * 0.98 <= o.get('body', 0) <= pts[-1][0] * 1.02 and min(p[1] for p in pts) > 0:
+                    pts = sorted((x[xk], x['excess'][sl]) for x in rungs if sl in x['excess'] and xk in x)
+                    if len(pts) >= 2 and pts[0][0] * 0.98 <= o.get(xk, 0) <= pts[-1][0] * 1.02 and min(p[1] for p in pts) > 0:
                         import numpy as np
-                        v = float(np.exp(np.interp(o['body'], [p[0] for p in pts], np.log([p[1] for p in pts]))))
+                        v = float(np.exp(np.interp(o[xk], [p[0] for p in pts], np.log([p[1] for p in pts]))))
                         cells.append({ 'ratio': o['excess'][sl] / v, 'near': max(o['excess'][sl], v) < 2 * floor[sl],
                                        'interpolated': True, 'contaminated': False })
                     else:
@@ -692,7 +696,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
                      'weight': composite_weights(job)[0].get(sl), 'stats': n, 'series': series, 'table': table,
                      'ladders': [disp for disp, _ in ladders], 'plot': f"plots/slice_{sl}.png",
                      'thresholds': [(t['name'], t['excess'].get(sl)) for t in data.get('thresholds', [])],
-                     'body_axis': bool(ladders) })
+                     'body_axis': bool(ref) })
     return out
 
 def plot_slice(sc, path, styles):
