@@ -480,6 +480,24 @@ def served_gib(sz, path):
     head too (section 2 and TECHNICAL.md), and measured VRAM (recall)."""
     return (sz['total'] - sz['embed'] + served_embed_bytes(sz, path) - sz.get('mtp', 0) - sz.get('encoder', 0)) / 1024**3
 
+def ladder_at(ladder, x, sl=None, reach=1.02):
+    """A ladder's composite (or one slice's excess) at served size x, log-interpolated. Within
+    `reach` of either end it extends the end segment's log-linear slope instead. Log, not linear,
+    though a rate between rungs is a per-tensor K mix: on the 27B, the 3.5 bpw rung sits 4% under
+    the log value of its 3 and 4 bpw neighbours for both the uncalibrated baseline and the recipe
+    ladder (21-22% under the linear mean); only turboderp's published half rungs sit near linear
+    (2.5: 9%, 3.5: 3.6% under it), with the same K map as the baseline's."""
+    import numpy as np
+    val = (lambda r: r['composite']) if sl is None else (lambda r: r['excess'][sl])
+    pts = sorted((r['served'], val(r)) for r in ladder)
+    if len(pts) < 2 or not pts[0][0] / reach <= x <= pts[-1][0] * reach or min(p[1] for p in pts) <= 0:
+        return None
+    xs, ly = [p[0] for p in pts], np.log([p[1] for p in pts])
+    if xs[0] <= x <= xs[-1]:
+        return float(np.exp(np.interp(x, xs, ly)))
+    i = 0 if x < xs[0] else len(xs) - 2
+    return float(np.exp(ly[i] + (x - xs[i]) * (ly[i + 1] - ly[i]) / (xs[i + 1] - xs[i])))
+
 def reference_section(job, qbench, floor, data, gguf=False):
     """Section 2 of the card. Plot: every ladder -- this card's and each reference's -- as excess
     KLD relative to the uncalibrated baseline at equal served size, so no ladder is drawn as a
@@ -512,22 +530,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
         ex = {sl: rows[sl]['kld'] - floor[sl] for sl in rows}
         return { **survey(path, label), 'label': label, 'excess': ex,
                  'composite': sum(w * ex[sl] for sl, w in composite_weights(job)[0].items()) }
-    def interp(ladder, x, sl=None, reach=1.02):
-        """A ladder's composite (or one slice's excess) at served size x, log-interpolated. Within
-        `reach` of either end it extends the end segment's log-linear slope instead. Log, not linear,
-        though a rate between rungs is a per-tensor K mix: on the 27B, the 3.5 bpw rung sits 4% under
-        the log value of its 3 and 4 bpw neighbours for both the uncalibrated baseline and the recipe
-        ladder (21-22% under the linear mean); only turboderp's published half rungs sit near linear
-        (2.5: 9%, 3.5: 3.6% under it), with the same K map as the baseline's."""
-        val = (lambda r: r['composite']) if sl is None else (lambda r: r['excess'][sl])
-        pts = sorted((r['served'], val(r)) for r in ladder)
-        if len(pts) < 2 or not pts[0][0] / reach <= x <= pts[-1][0] * reach or min(p[1] for p in pts) <= 0:
-            return None
-        xs, ly = [p[0] for p in pts], np.log([p[1] for p in pts])
-        if xs[0] <= x <= xs[-1]:
-            return float(np.exp(np.interp(x, xs, ly)))
-        i = 0 if x < xs[0] else len(xs) - 2
-        return float(np.exp(ly[i] + (x - xs[i]) * (ly[i + 1] - ly[i]) / (xs[i + 1] - xs[i])))
+    interp = ladder_at
     W = composite_weights(job)[0]
     def geo(a, b, skip=()):
         """Weighted geometric mean of per-slice ratios of total divergence -- excess plus the slice's noise
@@ -651,7 +654,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
                 traces.append({ 'name': disp, 'points': pts, 'ours': disp == "this card" })
     return { 'rows': rows, 'traces': traces, 'repos': [r["repo"] for r in compared],
              'baseline': len(base) >= 2, 'slices': slices, 'slice_descs': [describe_slice(sl) for sl in slices],
-             'ladders': ladders, 'ours': ours, 'base': base,
+             'ladders': ladders, 'whole': whole, 'ours': ours, 'base': base,
              'tainted': [{'slice': describe_slice(sl), 'by': tainted_by[sl]} for sl in tainted],
              'parity': [{'repo': ref['repo'], 'excess': {describe_slice(sl): row['kld'] - floor[sl] for sl in every
                                                          if (row := parse_qbench(qbench[sl], ref_label(ref['repo'], 'bf16')))},
@@ -660,10 +663,10 @@ def reference_section(job, qbench, floor, data, gguf=False):
 
 def slice_comparisons(job, qbench, floor, data, ref):
     """TECHNICAL.md's per-slice section: for each slice, every ladder's excess by size (the plot)
-    and ours against each ladder's rung at the same bit rate (the table), cells where both sit
+    and ours against each ladder at the same size as served (the table), cells where both sit
     under 2x the slice's noise floor marked. Without references, ours (and the baseline) only."""
     if ref:
-        ours, ladders, base = ref['ours'], ref['ladders'], ref['base']
+        ours, ladders, base, whole = ref['ours'], ref['ladders'], ref['base'], ref.get('whole', {})
     else:
         ours = {}
         for r in data['revisions']:
@@ -672,7 +675,7 @@ def slice_comparisons(job, qbench, floor, data, ref):
                 ours[r['name']] = {'label': r['name'], 'excess': ex,
                                    'size': rev_served_gib(r), 'served': rev_served_gib(r),
                                    'bits': r['bits']}
-        ladders, base = [], []
+        ladders, base, whole = [], [], {}
     # GGUF ladders (card --gguf-kld) are out of section 2's baseline-relative comparison but belong here: these
     # plots are absolute excess by size, like section 1's, and without them a card with no other EXL3 set (the 9B)
     # shows one trace per slice
@@ -691,23 +694,16 @@ def slice_comparisons(job, qbench, floor, data, ref):
                 continue
             cells = []
             for disp, rungs in ladders:
-                m = [x for x in rungs if x.get('bits') is not None and o.get('bits') is not None
-                     and abs(x['bits'] - o['bits']) < 0.01 and sl in x['excess']]
-                if not m:
-                    # No rung at this rate (a GGUF ladder never has one): log-interpolated at equal served size
-                    pts = sorted((x[xk], x['excess'][sl]) for x in rungs if sl in x['excess'] and xk in x)
-                    if len(pts) >= 2 and pts[0][0] * 0.98 <= o.get(xk, 0) <= pts[-1][0] * 1.02 and min(p[1] for p in pts) > 0:
-                        import numpy as np
-                        v = float(np.exp(np.interp(o[xk], [p[0] for p in pts], np.log([p[1] for p in pts]))))
-                        cells.append({ 'ratio': o['excess'][sl] / v, 'near': max(o['excess'][sl], v) < 2 * floor[sl],
-                                       'interpolated': True, 'contaminated': False })
-                    else:
-                        cells.append(None)
+                # each set at this rung's size as served, over its whole ladder, as in section 2's table
+                full = [x for x in whole.get(disp, rungs) if sl in x['excess']]
+                v = ladder_at(full, o[xk], sl) if full else None
+                if v is None:
+                    cells.append(None)
                     continue
-                x = min(m, key=lambda x: (x['head_bits'] != o.get('head_bits'), x['excess'][sl]))
-                cells.append({ 'ratio': o['excess'][sl] / x['excess'][sl] if x['excess'][sl] > 0 else None,
-                               'near': max(o['excess'][sl], x['excess'][sl]) < 2 * floor[sl], 'branch': x.get('branch'),
-                               'contaminated': sl in x.get('contaminated', ()) })
+                lo_x, hi_x = min(x[xk] for x in full), max(x[xk] for x in full)
+                cells.append({ 'ratio': o['excess'][sl] / v, 'near': max(o['excess'][sl], v) < 2 * floor[sl],
+                               'interpolated': not lo_x / 1.01 <= o[xk] <= hi_x * 1.01,
+                               'contaminated': any(sl in x.get('contaminated', ()) for x in full) })
             table.append({ 'bits': o['bits'], 'excess': o['excess'][sl], 'cells': cells })
         table.sort(key=lambda t: t['bits'])
         n = trace_stats(job, sl)
