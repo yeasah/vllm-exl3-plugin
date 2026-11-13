@@ -62,6 +62,9 @@ What this all adds up to is that there is *incredibly* thin statistically valid 
 
 In the lack of valid concrete data, there is a tendency for users to fall back to individual anecdotal experience: what it "feels" like, how successful outcomes were in some (from a statistical perspective) vanishingly small set of tasks that any one person tends to run, how frustrating it is watching the sometimes-meandering reasoning streams, etc. All of which is both valid in its own way, and completely statistically invalid.
 
+
+## Quanitzed Model Evaluation
+
 In terms of evaluating quants of models, the situation is in some ways a little better. The situation with capability testing is not any better, but there is a different question that is much easier to pin down: how much does this quant statistically diverge from what the original, undamaged model would have produced?
 
 There are many metrics for this: in my opinion the most generally useful is "Kullback–Leibler divergence", which on the quants I produce is the main basis for most of the results presented. Like capability evaluations, this is more complicated than just one thing; you still need to have some content on which to measure what the answers diverge *from*, so KLD metrics presented on model cards from different producers are not comparable. The measurements on my quants use a mix of captured real-world content for the scoring, including content from longer agentic sessions, so that kind of work is well-represented rather than just generic text or conversations.
@@ -72,7 +75,7 @@ On the quants I produce, I've added a different kind of divergence metric, which
 
 There's still no direct connection to capability: it cannot be said that a model that was judged to have answered wrongly where the original model answered correctly would reach any worse outcome on a real task. But it is at least reasonable to assume that this kind of damage to previously known facts would not be helpful, and the presentation of statistics such as "forgot 82% of previously known facts" or "reported incorrect answers confidently at a 5% rate" is intuitively meaningful in way that other divergence metrics are not.
 
-As most things with quantization, the amount of damage increases dramatically past a certain size
+As with most things with quantization, the amount of damage increases dramatically past a certain size, and there is a point at which the model is too damaged to be useful/reliable/trustworthy enough. There is no rule about this, and can't be: it depends too much on a user's tolerance and workload. Generally I end the quant ladders before it crosses below an 80% recall rate, which is usually around 2.5-3 bits per weight. This is a completely arbitrary line, but it needs to be drawn somewhere.
 
 
 ## Model Recommendations By Available VRAM
