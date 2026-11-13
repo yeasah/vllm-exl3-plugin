@@ -48,6 +48,84 @@ This all means there are a number of different ways to experience an out-of-memo
 - Insufficient space for the configured max-model-len KV cache. This will be reported directly by vLLM. Reducing max-model-len (or setting to auto), enabling kv cache quantization, or reducing the size of model weights (as above) is the solution
 - vLLM starts up, serves for a while, then OOMs later on a request. Fragmentation or allocation transients are the likely cause: the former may be helped by enabling expandable segments.
 
+## Model Evaluation
+
+Before we get into model recommendations, a word on the current state of model evaluations. When picking a model, one naturally wants solid information about how it performs on certain kinds of tasks relative to other candidates. The best thing one could want is a series of standardized benchmarks designed to produce statistically valid results that operate the model in mock simulations of the tasks under evaluation. There are *many* such benchmarks, but there are also many serious problems:
+
+- Evaluations can be costly to run, and often the only available evaluations are from the model's producer.
+- Unless the evaluation takes special measures to defend against it, models released after the benchmarks have been published may have included some or all of the benchmark in its training, contaminating the result ("benchmaxxing")
+- Because of this fact, and the fact that model capability continues to rapidly improve, new benchmarks are constantly being created.
+- Benchmarks have many more parameters than just the model under test and the benchmark name: the harness used, the exact version of the evaluation, the exact configuration of the model as served (sampling parameters, KV setup, etc.), the inference stack, etc. Almost no reported eval includes 100% of this information, and many include essentially none.
+- Coming up with a problem set that thoroughly exercises the models and can also be fairly judged is difficult, and it's difficult to guarantee that the judgement criteria will always correlate with the best outcome.
+
+What this all adds up to is that there is *incredibly* thin statistically valid cross-model data available: what is presented on a model card is some subset of benchmarks that often barely overlaps with scores presented on other cards even roughly, and basically not at all when considering the variations possible even within each benchmark. Many cards do include select competitor scores alongside theirs, and that is probably the closest we get: but there we have to trust that the model's creator treated their competitors fairly, and there are a lot of reasons why that could be a source of significant skew (and not all of them require actual intent to mislead)
+
+In the lack of valid concrete data, there is a tendency for users to fall back to individual anecdotal experience: what it "feels" like, how successful outcomes were in some (from a statistical perspective) vanishingly small set of tasks that any one person tends to run, how frustrating it is watching the sometimes-meandering reasoning streams, etc. All of which is both valid in its own way, and completely statistically invalid.
+
+In terms of evaluating quants of models, the situation is in some ways a little better. The situation with capability testing is not any better, but there is a different question that is much easier to pin down: how much does this quant statistically diverge from what the original, undamaged model would have produced?
+
+There are many metrics for this: in my opinion the most generally useful is "Kullback–Leibler divergence", which on the quants I produce is the main basis for most of the results presented. Like capability evaluations, this is more complicated than just one thing; you still need to have some content on which to measure what the answers diverge *from*, so KLD metrics presented on model cards from different producers are not comparable. The measurements on my quants use a mix of captured real-world content for the scoring, including content from longer agentic sessions, so that kind of work is well-represented rather than just generic text or conversations.
+
+This allows one to solidly answer the question of "how different is this quant from the original", but nothing more: there is no statement about to what degree or in what way this impacts capability or outcome. It is reasonable to guess that a more divergent quant would be less desirable than a less divergent one; more than this cannot be said.
+
+On the quants I produce, I've added a different kind of divergence metric, which is slightly more concrete than this. It's still a divergence measurement, but it's scored based on a set of meaningful factual questions that the original model correctly answered, and the divergence then becomes the degree to which a model has forgotten facts it once knew.
+
+There's still no direct connection to capability: it cannot be said that a model that was judged to have answered wrongly where the original model answered correctly would reach any worse outcome on a real task. But it is at least reasonable to assume that this kind of damage to previously known facts would not be helpful, and the presentation of statistics such as "forgot 82% of previously known facts" or "reported incorrect answers confidently at a 5% rate" is intuitively meaningful in way that other divergence metrics are not.
+
+As most things with quantization, the amount of damage increases dramatically past a certain size
+
+
+## Model Recommendations By Available VRAM
+
+Here's a breakdown of general model recommendations at different levels of available VRAM. Not considered are much older models, or the more sketchy looking finetunes/abliterations/distillations.
+
+One prominent gap in coverage in this list is nvidia's sprawling Nemotron family, some of which is EXL3 supported. I just personally haven't used them at all, and there may be appealing options there.
+
+### 4-6GiB
+
+This size category is extra-tricky: not just because it's very small, but because most cards in this category are too old of an architecture to support any of vLLM's KV cache quantizations: no fp8, no TurboQuant, no NVFP4.
+
+This means the name of the game becomes KV management more than size of the model weights. As always, different model architectures have different levels of efficiency in KV memory requirements, and in this class, the Qwen3.5 family models are the king. Not only do they have the highest maximum context in the class (256K), they also have the lowest KiB/token requirement (12KiB/t and 32KiB/t respectively). Additionally, Qwen3.5 in this range generally have among the highest capability benchmark scores. Finally, the models are both vision and MTP enabled, so both of those features are available if desired and space allows.
+
+So it ends up a race between `Qwen3.5-2B` and `Qwen3.5-4B`: the former is obviously a less capable model, but with a more efficient KV, so if long context is an absolute requirement this may still be the better pick. My advice would be that a 2B model (or really even the 4B model) is unlikely to be able to really take advantage of a much longer context, and the VRAM would very likely be better spent on the 4B model with a correspondingly reduced context size.
+
+The main other contender in this space is `MiniCPM5-2B`, which by model size is competitive with Qwen3.5 on benchmarks, but lacks in the other ways Qwen is strong: a maximum 128K context, no vision, no MTP, and most importantly a considerably less efficient KV (at 42KiB/t). For use cases where longer context or vision is not a requirement, it could be worth considering.
+
+LiquidAI's `LFM3-1.7B` (or its vision-enabled variant `LFM3-VL-2B`) is competitive as well: good KV efficiency (22KiB/t) and impressive looking (though thin) published benchmarks. There are currently no EXL3 quants available, however. Their prior LFM2.5 series are generally not as competitive, although the tiny MoE `LFM2.5-8B-A1B` deserves mention for being a much smaller MoE than any other model listed, with a KV efficiency that ties the best alternative (`Qwen3.5-2B`). With 1B active parameters, there are real questions about capability, but some benchmark scores look acceptable.
+
+
+### 8GiB
+
+There's really currently only two reasonable contenders in this space: Gemma 4's MoE `gemma-4-26B-A4B`, and `Qwen3.5-9B` (or finetunes such as `Ornith-1.5-9B`). Gemma generally has different strengths than Qwen, so the recommendation is more about use case than anything. For conversational tasks, many people find gemma a more pleasant model to work with. For agentic work, Qwen does score much better on benchmarks; it is worth nothing however, that agentic work at the 9B model class may be fairly disappointing by modern standards.
+
+
+### 12GiB
+
+The 12GiB cards open up considerably in terms of options. `Qwen3.6-35B-A3B` is probably the best choice for agentic work: a very efficient KV, vision and MTP support, the extra speed that MoEs can bring, and solid scores on benchmarks. Finetunes of 35B Qwen MoEs are available as well (i.e. `Ornith-1.5-35B-A3B`).
+
+As at the 8GiB tier, for conversational work Gemma 4's 12B dense model `gemma-4-12B-it` is worth consideration. It has no vision, but otherwise offers similar capabilities as Qwen. As a dense model, it will likely run more slowly.
+
+Two other MoEs deserve mention: poolside's `Laguna-XS-2.1` and zai-org's `GLM-4.7-Flash`. Neither model support vision, and both have a less efficient KV than Qwen or Gemma, but they have different strengths and could better fit certain use cases.
+
+
+### 16GiB
+
+The main model that opens up here is `Qwen3.8-27B`, although it is tight: KV costs more, and the model itself is much bigger in resident VRAM. However, the capability scores are potentially very worth it: it is a very strong model, especially for coding tasks. Likely it will be necessary to bump the body bitrate below 4bpw, which will affect quality; the main question is whether this degradation of a stronger model will be a fair trade as compared to a higher bitrate `Qwen3.6-35B-A3B`.
+
+The wildcard option is `Qwen3.8-Flash-Next`: a much larger model that doesn't seem like it would plausibly fit, but the architecture means it can, barely -- with a combination of disk offload and host cpu offload. It does require a large amount of host RAM available, and generation speed will naturally be lower. But the KV efficiency is shockingly good, and its capability scores are in a different class entirely from anything else that can be run. In order to fit on a 16GiB card, it is necessary to use a 2bpw or lower quant, and there is the very real question of how much damage that represents to the model, and whether it is better to use a less damaged smaller model on the balance. There isn't solid data on that, but there is reason to think that larger models can be considerably more resilient to aggressive quantization than smaller ones, so it's a plausibly good trade.
+
+
+### 24GiB+
+
+`Qwen3.8-Flash-Next` becomes progressively more of a no-brainer at higher VRAM systems, as it becomes possible to run at bitrates that are more classically acceptable. At 32GiB, 4bpw is possible, and there this model becomes the obvious choice.
+
+`Nanbeige4.3-33B` looks at first blush like an interesting model: benchmark scores are very high (almost too high to believe), but the benchmark validity question becomes irrelevant once you look at the KV efficiency: this model is essentially impossible to run at long context on cards of this VRAM class.
+
+`gemma-4-31B-it` is possible, and would be a decent pick in all the same situations that Gemma 4 at other VRAM classes would be. It's got a more expensive KV, but not to a disqualifying degree like Nanbeige, particularly given Gemma's strength lies in directions that do not demand the longest contexts.
+
+Meta's `Muse-Glimmer-30B` is another prominent option here, and its main claim to fame is an incredibly efficient KV architecture: at 15KiB/token, it is possible to run a quantized KV cache on this model at the maximum context in 0.5GiB of VRAM. The caveat is that the maximum context is lower than any nearby competitor, at 128K. But this is plenty of context for many kinds of work, and a larger KV than maximum context supports greater concurrent use, so this is still a potentially significant strength for certain kinds of use.
+
+
 ## Recommended Dense Models
 
 A variety of recent dense models in the 9-30B range are available in EXL3 format:
