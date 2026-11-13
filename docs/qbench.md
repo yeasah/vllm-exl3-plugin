@@ -1515,7 +1515,9 @@ of the excess (33% at 200). The card's 200 sat near the top of what 200-row subs
 Costs scale linearly: eval traces ~3.5 h (FP8, TP=2), reference and floor ~80 min, ~40 min per EXL3 arm per GPU,
 ~48 GB of reference logits. For calibration decisions on this model the 800-session trace is the instrument
 (`work/Qwen3.6-35B-A3B-exl3/_traces/eval800_swe.json`); whether the card's swe moves to 800 is open, at about 4x the
-swe qbench time per card.
+swe qbench time per card. 800 sessions resolve rows, not draws: a reseeded 4.00 (`EXL3_SEED_IDX_OFFSET=5`) reads
+1.096 [1.04, 1.16] of the original on swe800 and 0.998 on wild (calibration.md, "The draw yardstick"), so an swe
+comparison on this model needs several conversions per arm.
 
 ## Known limitations, and what closing them would unlock
 
