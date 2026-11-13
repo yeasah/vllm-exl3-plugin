@@ -1490,6 +1490,33 @@ experts and shared experts, which hurts chat and helps long-context agent work, 
 measurement cannot see that tradeoff. `-hq` is the MoE default; whether per-tensor exponents change
 this is in TODO `recipe-value`. Work: `quant_work/_moe_chaos`, `/home/archive/ypell/moe-allocation-test`.
 
+## The swe slice: fragile tokens and 800 sessions (2026-11-12)
+
+On Qwen3.6-35B-A3B the 200-session swe could not see calibration: calibrated / uncalibrated 4.00 read 1.02 with a
+90% row-bootstrap interval of [0.90, 1.16], against wild's 0.81 [0.79, 0.84].
+
+**Precision still reaches it.** swe excess halves per bpw down a ladder as wild's does, and sits ~5x wild's for every
+format (our 4.00, Q4_K_M, the FP8 release, 6.00). Its noise floor is the outlier: 0.0168 against the 27B's 0.0004,
+a median token KLD of 0 and p90 0.027. A minority of tokens is fragile -- bf16 rounding noise alone moves them a
+lot -- and depth is not why (the floor is already 5x wild's at 2-4k tokens of context).
+
+**Fragility belongs to the token.** A second noise-floor draw (`noise_salt: 1` in a project, deps/exllamav3
+f2027b4c; 0 keeps the original seeding and cache keys) correlates 0.94 with the first per token (log), and 79% of
+tokens above 0.01 in one draw are above it in the other. Weighting tokens by w = tau / (tau + floor) with weights
+from one draw and the other subtracted: wild is flat at every tau (the drift a same-draw prototype showed was that
+confound), swe is not -- calibration and -hq help less the more fragile the token, along a continuum with no
+plateau -- and the intervals widen rather than narrow. Weighting changes what swe means without sharpening it, so
+the card's swe stays unweighted: on the fragile tokens it measures real damage that only bits move.
+
+**Rows are what resolve it.** 800 sessions (the card's recipe at -n 800, seed 1; ~1,200 distinct repositories per
+harness group are available) put calibrated / uncalibrated at 0.949 [0.902, 1.001], our 4.00 at 0.927 [0.879,
+0.979], the old 5.00 at 0.440: +-5%, better than the sqrt(4) the row count predicts, with the top 10 rows holding 17%
+of the excess (33% at 200). The card's 200 sat near the top of what 200-row subsets of these 800 give (0.87-1.04).
+Costs scale linearly: eval traces ~3.5 h (FP8, TP=2), reference and floor ~80 min, ~40 min per EXL3 arm per GPU,
+~48 GB of reference logits. For calibration decisions on this model the 800-session trace is the instrument
+(`work/Qwen3.6-35B-A3B-exl3/_traces/eval800_swe.json`); whether the card's swe moves to 800 is open, at about 4x the
+swe qbench time per card.
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)

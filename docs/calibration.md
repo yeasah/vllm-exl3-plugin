@@ -751,6 +751,68 @@ our 3bpw beat his. Everything below was measured, in the order it cost least to 
 So the "instability" was the default calibration's coverage gap, exposed by an instrument
 that happened to aim at it. The fix is the section above.
 
+## Calibrating a MoE's experts: routing, depth, and content weighting (2026-11-12 to -13)
+
+exllamav3 calibrates Qwen3.5/3.6 MoEs with every token through every expert (`calibration_all_experts`), so each
+expert's Hessian is the whole layer's input covariance rather than that of the tokens the router sends it. On
+Qwen3.6-35B-A3B (256 experts, 8 per token) that looked wasteful, and the obvious alternative, calibrating each expert
+on its routed tokens, looked like the fix. It is not, and neither is a middle way. Every arm is a 4.00 conversion
+without recipe or YAQA, composed onto the uncalibrated baseline's checkpoint (`tools/compose_checkpoint.py --take
+body --take head`) so all share its embedding and calibration is the only difference. Excess KLD relative to that
+baseline; swe800 is the 800-session swe (qbench.md, "The swe slice: fragile tokens and 800 sessions"), with 90%
+row-bootstrap intervals:
+
+| arm | what was calibrated, and how | wild (60) | swe (200) | swe800 |
+|---|---|---|---|---|
+| C | everything, every token through every expert | **0.813** [0.79, 0.84] | 1.022 | **0.949** [0.90, 1.00] |
+| A | always-active tensors and head only; experts uncalibrated | 0.872 | 1.045 | |
+| B | routed experts only | 0.922 | 1.095 | |
+| R | as C, experts on their routed tokens (`EXL3_CALIBRATION_ALL_EXPERTS=0`) | 0.958 | 1.102 | |
+| routed | R's full checkpoint (its own embedding) | 0.926 | 1.124 | |
+| calW | as C, each expert's tokens weighted by its routed diet over content groups | 0.843 [0.81, 0.87] | | 0.986 [0.94, 1.04] |
+
+On wild, calibration helps in both places and the gains compose (A x B = 0.80, about C). Routing the expert
+calibration gives most of that back. The 200-session swe could not resolve any of it (+-13%); at 800 sessions
+calibration is worth about 5% there, against 19% on wild.
+
+**A routing census** (forward only, the calibration's conversations and default-mix rows through the uncalibrated
+4.00, every layer's full router softmax; per-expert counts scaled to the converter's 512k-token budget) measured
+what routed calibration gives each expert and what it eats:
+
+- *Depth.* Median 13.7k routed tokens per expert, p10 5.3k, minimum 359. Only 170 of 10,240 experts fall under
+  2,048, the gate/up input dimension, mostly in the last layers (16 at layer 39). At ~7 tokens per dimension the
+  sample's weak directions are underestimated by roughly 2-3x, so routed calibration is thin rather than
+  rank-deficient.
+- *Specialization.* Diets are clearly structured, increasingly with depth: over 23 content groups (document kind x
+  prompt/answer, the raw sources, random tokens) the median expert sits 0.32 nats from the global mix, and 37% of
+  experts get some group at more than 4x its global share (9% at layer 0, ~45% from layer 30). Specialists gather on
+  code and diffs, raw code and technical text, multilingual text, the model's own answers and short stories;
+  generic web, wiki and loop prompts have almost none.
+- *Random rows.* Under routing, 179 experts get more than half their calibration from the random-token rows (one
+  88%): routed calibration fits them mostly to noise.
+- *Router-probability weighting* (each token weighted by the expert's softmax probability to a power) keeps depth
+  but not specialization: the softmax over 256 experts is too flat, and at power 1 the weighted diets sit 0.022
+  nats from global against routing's 0.32 -- essentially C.
+
+**Content weighting (calW)** took the specialization at full depth: every expert still sees every token, each
+token's x x^T weighted by that expert's routed share of the token's content group over the group's global share
+(`EXL3_CALIBRATION_EXPERT_WEIGHTS`, deps/exllamav3 8beef6f4: a file of per-token group labels for the packed
+calibration plus per-layer [groups, experts] weights). That reproduces each expert's routed diet over the groups at
+a median of ~300k effective tokens, 22x routed's. Labels for C's own packed file were recovered by matching it back
+to its conversations, so calW differs from C in the weighting alone; all-ones weights reproduce C's layer-0 experts
+exactly. It came out about 4% behind C on both slices (calW / C: wild 1.036 [1.00, 1.08], swe800 1.039 [0.99, 1.09]).
+
+**Reading.** The arms order by how far each expert's Hessian leans toward its own diet -- C (global) < calW (own
+diet by group, full depth) < R (own diet by token, thin) -- and calW kept the depth, so depth is not the whole
+story: leaning toward the diet costs on its own. An expert's inputs in operation are broader than its calibration
+diet -- the quantized model routes differently, eval content is not the mix, and fragile tokens flip routes -- and a
+Hessian shaped to the diet places rounding error exactly where those inputs land. The global covariance fits an
+expert's average token worse but leaves no direction unprotected. For this model the all-expert default stands, and
+content in the mix is the remaining calibration lever for swe (the agent slice). Not separated: calW gave the
+random-diet experts mostly random tokens, a specific failure apart from specialization; an arm holding the random
+group at its global share would settle it, and is not expected to beat C given the ordering. Neither environment
+variable changes anything unset.
+
 ## Converter internals worth knowing
 
 **Sign vectors alias within a module.** `convert_model.py` seeds each module with its
