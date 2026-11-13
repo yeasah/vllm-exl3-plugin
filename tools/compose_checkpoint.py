@@ -1038,9 +1038,14 @@ def write_quantization_config(args, dst, donors, assign, restore, versions,
     value is a size-weighted average over the whole file and computing it here
     would be inventing a number upstream computes differently.
     """
+    # Parsed once per directory: the loop below asks for a donor's map once per moved module, and an MoE's
+    # map is tens of MB (Qwen3.6-35B-A3B: 40 MB, ~31k modules moved), which re-parsed each time took 1.5 h
+    parsed = {}
     def load_qc(d):
-        p = os.path.join(d, "quantization_config.json")
-        return json.load(open(p)) if os.path.exists(p) else {}
+        if d not in parsed:
+            p = os.path.join(d, "quantization_config.json")
+            parsed[d] = json.load(open(p)) if os.path.exists(p) else {}
+        return parsed[d]
 
     qc = load_qc(args.base)
     if not qc:
