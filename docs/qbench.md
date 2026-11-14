@@ -1517,7 +1517,8 @@ Costs scale linearly: eval traces ~3.5 h (FP8, TP=2), reference and floor ~80 mi
 (`work/Qwen3.6-35B-A3B-exl3/_traces/eval800_swe.json`); whether the card's swe moves to 800 is open, at about 4x the
 swe qbench time per card. 800 sessions resolve rows, not draws: a reseeded 4.00 (`EXL3_SEED_IDX_OFFSET=5`) reads
 1.096 [1.04, 1.16] of the original on swe800 and 0.998 on wild (calibration.md, "The draw yardstick"), so an swe
-comparison on this model needs several conversions per arm.
+comparison on this model needs several conversions per arm. Three plain draws read 0.927, 1.015 and 1.002 of the
+baseline on swe800: the 0.927 above was the lucky one, and calibration's swe gain over draws is ~2%.
 
 ## Known limitations, and what closing them would unlock
 
