@@ -1490,6 +1490,36 @@ experts and shared experts, which hurts chat and helps long-context agent work, 
 measurement cannot see that tradeoff. `-hq` is the MoE default; whether per-tensor exponents change
 this is in TODO `recipe-value`. Work: `quant_work/_moe_chaos`, `/home/archive/ypell/moe-allocation-test`.
 
+## The swe slice: a format collision, and keeping past reasoning (2026-11-14)
+
+`load_swe` stripped the recorded agent's reasoning from a session's past turns, and Qwen3.5/3.6's templates render
+each stripped turn as an empty `<think>\n\n</think>`. The scored turn then opens a real thought after a history that
+says, turn after turn, that thoughts are empty. Qwen3.6-35B-A3B is torn at the first token of the turn -- whether to
+think at all -- and 35% of its thinking turns came out malformed: a nested `<think>`, an empty thought, or one that
+stops without closing. Those decision points are where swe's noise floor lived: 2% of tokens carried 60% of it, the
+worst a turn's first token, flipped by bf16 rounding by up to 9 nats; malformed turns alone held 30% of the floor.
+
+Open-SWE-Traces records reasoning for every assistant turn of both eval harnesses (median ~120 characters). Kept
+(`ctx_trace.py --swe_reasoning`, now `match` by default: kept when the scored turn thinks, stripped when its template
+variables turn thinking off), the same 200-session recipe on the same checkpoints:
+
+| swe, Qwen3.6-35B-A3B | reasoning stripped | kept |
+|---|---|---|
+| malformed thinking turns | 52 / 149 | 0 / 150 |
+| noise floor | 0.0168 | 0.0030 (wild 0.0029) |
+| uncalibrated baseline's excess | 0.0289 | 0.0067 |
+| 4.00 / baseline, thinking turns [90% rows] | 1.020 | 0.833 [0.75, 0.93] |
+| old 5.00 / baseline | 0.501 | 0.443 |
+
+The collision belongs to a template family. Malformed thinking turns on the stripped traces: Qwen3.6-35B-A3B 52/149,
+Qwen3.5-4B 139/149; the published cards barely -- Qwen3.8-27B 1/149, Ornith-1.5-9B 2/149, MiniCPM5-2B 4/151 -- whose
+swe floors sit at or below wild's. LFM2.5-8B-A1B is not malformed (2/161) but its swe floor is 2.5x wild's, so its
+elevation has another cause. Every swe trace made before this change is the stripped kind; eval-traces reuses a
+trace that exists, so a rerun needs the old one moved aside.
+
+The section below was measured on the stripped trace: its fragile tokens are this collision's, and its draw
+lottery (a ~10% swing per redraw) is unmeasured on a kept-reasoning trace.
+
 ## The swe slice: fragile tokens and 800 sessions (2026-11-12)
 
 On Qwen3.6-35B-A3B the 200-session swe could not see calibration: calibrated / uncalibrated 4.00 read 1.02 with a

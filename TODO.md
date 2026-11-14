@@ -339,6 +339,19 @@ A cheaper shakedown first: the 27B's reasoning-effort ladder (one set of weights
 Settled so far: 4-bit TurboQuant KV costs nothing detectable, and agentic harnesses distort Q&A benchmarks.
 Design rules and results: [docs/capability-suite.md](docs/capability-suite.md).
 
+## `swe-reasoning-rerun` — swe on traces that keep the agent's past reasoning
+
+**Outcome:** every card's and every open experiment's swe measured on kept-reasoning traces
+(`ctx_trace.py --swe_reasoning match`, the default since 2026-11-14), the stripped traces retired.
+
+**Why:** stripped, Qwen3.5/3.6 templates collide (35-93% of thinking turns malformed, the MoE's swe floor 5.8x wild's,
+calibration's swe gain hidden: [docs/qbench.md](docs/qbench.md), "The swe slice: a format collision"). The published
+cards show little sign of it (1-4 malformed turns of ~150, floors at wild's), so for them this removes an unknown.
+
+**Order:** the Qwen3.6-35B-A3B MoE questions first (calibration's swe effect over draws, the swe draw lottery, the
+agent slice), then Qwen3.8-27B and Ornith-1.5-9B (agentic-weighted composites), then MiniCPM5-2B (cheap). A rerun
+moves the old `eval_swe.json` aside: eval-traces reuses a trace that exists.
+
 ## Loose ends
 
 *Small residue of retired items: a line each, done when convenient.*

@@ -753,6 +753,8 @@ that happened to aim at it. The fix is the section above.
 
 ## Calibrating a MoE's experts: routing, depth, and content weighting (2026-11-12 to -13)
 
+*Every swe figure in this section is on traces with the agent's past reasoning stripped, which on Qwen3.6 is a format collision (qbench.md, "The swe slice: a format collision"); wild and the diagnostic slices are unaffected. The swe readings are to be redone on kept-reasoning traces.*
+
 exllamav3 calibrates Qwen3.5/3.6 MoEs with every token through every expert (`calibration_all_experts`), so each
 expert's Hessian is the whole layer's input covariance rather than that of the tokens the router sends it. On
 Qwen3.6-35B-A3B (256 experts, 8 per token) that looked wasteful, and the obvious alternative, calibrating each expert
@@ -826,6 +828,8 @@ does not move swe's mean on this model and costs ~1% on wild, the 9B proxy's cos
 hint at three draws a side, not evidence -- the plain spread is one draw. That draw is the original 4.00 (0.927): over
 draws, calibration buys this model ~2% on swe, not the 5-7% one conversion showed, against ~20% on wild. Every swe
 comparison above made against the 4.00, or against C (which shares its sign draw), was made against that draw.
+
+*Everything in this section measured swe on traces with the agent's past reasoning stripped, which on this model is a format collision (qbench.md, "The swe slice: a format collision"): with reasoning kept, the same 4.00 reads 0.83 of the baseline on swe's thinking turns rather than ~1.0, and the floor falls to wild's. The swe conclusions below -- calibration barely moving swe, the draw lottery, the agent slice's null -- stand for that trace only.*
 
 **The analogs improve; swe does not, and context length is not why (2026-11-14).** Scored against the same
 uncalibrated baseline (one draw each; these slices have wild-like quiet floors, where a redraw moved nothing
