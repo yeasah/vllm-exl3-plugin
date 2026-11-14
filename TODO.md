@@ -343,6 +343,8 @@ Design rules and results: [docs/capability-suite.md](docs/capability-suite.md).
 
 *Small residue of retired items: a line each, done when convenient.*
 
+- Log a warning before the plugin's first exllamav3 import when `exllamav3_ext` is not prebuilt: the JIT build
+  that follows is minutes of silence, and an indefinite one on a stale build lock (field notes, 2026-11-14).
 - The embedding quant-config fork patch (`vllm-embed-quant-config`) needs its drafter fix before it can be offered
   upstream (`tied-embeddings`).
 - `calibration-mix`: whether the conversational slice's 3% wild cost is dilution, with a share that takes nothing
