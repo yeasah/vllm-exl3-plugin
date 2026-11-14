@@ -430,11 +430,14 @@ TP=2 on the 5060 Ti pair, slots fixed at 100 per layer so that ranks stage (39% 
 4207 t/s (+38%) at 2048-token chunks, eager token ids identical. Without the fixed count every hosted expert
 fits in slots at TP=2 and both windows are freed, as one was before.
 
-**The default is decided at slot sizing.** `auto` (the default) allocates both windows at load; when the
-expert cache sizes its slots, it drops the second one if, and only if, keeping it is what takes residency
-below `target_share`: the odd layers' staged tables and copy plans fold back onto the first window before
+**The default (on, since 2026-11-14).** Both windows stay. It was decided at slot sizing until a residency
+sweep on the 3060 (docs/expert-cache.md, "Residency against throughput under WSL2 + Docker") showed the window
+worth ~50% of prefill for a few points of residency that decode barely notices; that rule survives as
+`EXL3_STAGE_PREFETCH=auto`. Under `auto` both windows are allocated at load, and when the expert cache sizes its
+slots it drops the second one if, and only if, keeping it is what takes residency below `target_share`: the odd layers' staged tables and copy plans fold back onto the first window before
 graph capture, and the bytes go to slots. Under the target either way, prefetch stays, since it is worth
-20-39% of prefill against about two points of residency. `1` keeps it regardless, `0` never allocates it.
+20-39% of prefill against about two points of residency. `1` keeps it regardless (the default), `0` never
+allocates it.
 On the 3060 at 0.87 with nvfp4 KV and 4096-token chunks: at a fixed 131072-token `--max-model-len` it is
 dropped ("would have left 38% of experts in VRAM, under the 40% target") and slots stay at 85 (40%); with
 `--max-model-len auto` both windows stay, slots stop at the target, and KV gives way (auto-fit 74,560

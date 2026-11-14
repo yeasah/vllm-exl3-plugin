@@ -591,6 +591,40 @@ share together, which is why the TODO item measures the link rather than fixing 
 
 ---
 
+### Residency against throughput under WSL2 + Docker (2026-11-14)
+
+The user's series, Qwen3.6-35B-A3B 4.00bpw on a desktop-shared 12 GiB RTX 3060 in the serve image under WSL2
+(10.32 GiB of VRAM used; vision offloaded; `--max-num-batched-tokens 2048`, `--max-num-seqs 4`). Residency is the
+expert cache's share of experts in VRAM, as sized by `--max-model-len` and the KV dtype; prefill is approximate.
+
+| context / MTP | KV | resident | prefill staging | prefill, t/s | decode, t/s |
+|---|---|---|---|---|---|
+| 128K | nvfp4 | 42% | dropped (auto) | 923 | 35 |
+| 128K | nvfp4 | 38% | forced on | 1385 | 35 |
+| 256K | nvfp4 | 34% | on | 1385 | 34 |
+| 256K | nvfp4 | 36% | forced off | 923 | 35 |
+| 16K | bf16 | 45% | on | 1385 | 36 |
+| 16K + MTP | bf16 | 40% | on | 923 | 44 |
+| 32K | bf16 | 43% | on | 1385 | 36 |
+| 32K + MTP | bf16 | 36% | on | 923 | 41 |
+| 64K | bf16 | 39% | on | 923 | 34 |
+| 64K + MTP | bf16 | 31% | on | 923 | 39 |
+| 128K | bf16 | 31% | on | 923 | 33 |
+| 128K + MTP | bf16 | 22% | on | 923 | 34 |
+| 192K | bf16 | 23% | on | 692 | 31 |
+| 192K + MTP | bf16 | OOM | | | |
+
+- **The second staging window is worth ~50% of prefill** (923 -> 1385 t/s) for the 2-4 points of residency it
+  takes, which decode does not notice at these shares. The rule that dropped it below `target_share` gave that up
+  for nothing, so the window is now on by default (`EXL3_STAGE_PREFETCH=auto` keeps the old rule).
+- **No cliff in residency.** From 45% (as close to resident as this card gets, on the flat of the curve) decode
+  loses ~8% at 31% and ~14% at 23%: a more gradual knee than the inclusive cache showed, on this model and content.
+- **MTP is a decode win wherever it fits** -- largest at high residency (36 -> 44 t/s at 16K), shrinking toward
+  none at 22% -- and never a loss. Its cost is prefill (1385 -> 923 t/s at 16-32K), since its draft head and
+  verify rows take residency and staging room.
+- The serve image's numbers match earlier bare-WSL2 runs; the image needed `VLLM_WSL2_ENABLE_PIN_MEMORY=1` and a
+  prebuilt exllamav3 extension to get here (field notes).
+
 ## Prior art, and what to take from each
 
 | source | what it does | take |

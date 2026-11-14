@@ -518,12 +518,13 @@ STAGE_MIN_TOKENS = int(os.environ.get("EXL3_STAGE_MIN_TOKENS", "32"))
 #: WSL (2026-11-10: 2.07 s of 10.2 at 4096-token chunks, 3.65 of 12.6 at 2048), since each chunk copies
 #: most of every layer again. Copies run on the copy engine, not SMs, so they cannot meet exllamav3's
 #: spin-waiting kernels the way an overlapped kernel did (plugin._patch_kernel_overlap).
-#: ``EXL3_STAGE_PREFETCH``: "auto" (default) allocates both windows and lets the expert cache drop the
-#: second when keeping it would take residency below its target (`drop_prefetch`); "1" keeps it
-#: whatever that costs, "0" never allocates it.
-PREFETCH_MODE = {"1": "on", "0": "off"}.get(
-    os.environ.get("EXL3_STAGE_PREFETCH", "auto").strip().lower() or "auto",
-    os.environ.get("EXL3_STAGE_PREFETCH", "auto").strip().lower() or "auto")
+#: ``EXL3_STAGE_PREFETCH``: "1" (default) keeps both windows; "auto" lets the expert cache drop the
+#: second when keeping it would take residency below its target (`drop_prefetch`); "0" never allocates it.
+#: On by default since 2026-11-14: the window is worth ~50% of prefill, and the few points of residency it
+#: costs move decode by little at these shares (Qwen3.6-35B-A3B on a 12 GiB 3060, 128K nvfp4 KV: 42% resident
+#: without it, 38% with it, 923 -> 1385 t/s prefill and 35 t/s decode either way; docs/expert-cache.md).
+_PREFETCH_ENV = os.environ.get("EXL3_STAGE_PREFETCH", "1").strip().lower() or "1"
+PREFETCH_MODE = {"1": "on", "0": "off"}.get(_PREFETCH_ENV, _PREFETCH_ENV)
 PREFETCH = PREFETCH_MODE != "off"
 
 #: MoE layers with host blocks, waiting for `build_staging` at the end of load.

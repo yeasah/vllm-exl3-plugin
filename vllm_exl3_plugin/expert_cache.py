@@ -852,8 +852,8 @@ def build(layers: list, available: int, worker) -> int:
         slots = size_slots(available, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
         extra = cpu_offload.prefetch_window_bytes()
         if extra:
-            # the second staging window (prefill prefetch) is dropped only when it is what takes
-            # residency below the target; under it either way, prefill keeps its 20-39%
+            # EXL3_STAGE_PREFETCH=auto only (the default keeps the window): the second staging window is
+            # dropped only when it is what takes residency below the target
             target = target_share(float(os.environ.get("EXL3_KV_RESERVE", "1.0")))
             freed_slots = size_slots(available + extra, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
             kept, freed = (E - per_layer_max + slots) / E, (E - per_layer_max + freed_slots) / E
@@ -864,7 +864,7 @@ def build(layers: list, available: int, worker) -> int:
                 slots = freed_slots
                 logger.info(
                     "expert cache: prefill prefetch off; its second staging window (%.0f MiB) would have left "
-                    "%.0f%% of experts in VRAM, under the %.0f%% target (EXL3_STAGE_PREFETCH=1 keeps it)",
+                    "%.0f%% of experts in VRAM, under the %.0f%% target (EXL3_STAGE_PREFETCH=auto; 1 keeps it)",
                     dropped / (1 << 20), 100 * kept, 100 * target,
                 )
     if slots <= 0:
