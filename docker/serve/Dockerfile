@@ -85,6 +85,8 @@ WORKDIR $HOME
 
 # copy the venv from the build step
 COPY --from=build /root/.venv /root/.venv
+# the entrypoint: clears stale build locks on the cache volume, then `vllm serve` (entrypoint.sh)
+COPY --from=build /root/vllm-exl3-plugin/docker/serve/entrypoint.sh /usr/local/bin/vllm-exl3-entrypoint
 
 # this actually ends up being 12GiB installed
 #RUN flashinfer install-cubin-wheel && flashinfer install-jit-cache-wheel
@@ -94,7 +96,7 @@ COPY --from=build /root/.venv /root/.venv
 # offload. Read only under WSL, so harmless elsewhere
 ENV VLLM_WSL2_ENABLE_PIN_MEMORY=1
 
-ENTRYPOINT [ "vllm", "serve" ]
+ENTRYPOINT [ "/usr/local/bin/vllm-exl3-entrypoint" ]
 
 # default example that will work on most hardware
 CMD [ "turboderp/Llama-3.2-1B-Instruct-exl3", "--revision", "3.0bpw", "--max-model-len", "auto", "--gpu-memory-utilization", "0.80" ]
