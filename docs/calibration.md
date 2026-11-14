@@ -827,6 +827,17 @@ hint at three draws a side, not evidence -- the plain spread is one draw. That d
 draws, calibration buys this model ~2% on swe, not the 5-7% one conversion showed, against ~20% on wild. Every swe
 comparison above made against the 4.00, or against C (which shares its sign draw), was made against that draw.
 
+**The analogs improve; swe does not, and context length is not why (2026-11-14).** Scored against the same
+uncalibrated baseline (one draw each; these slices have wild-like quiet floors, where a redraw moved nothing
+measurable), the 4.00 reads ctx_user 0.719, ctx_tool 0.787, ctx_ml 0.744, loop 0.715 and self 0.844 -- calibration's
+wild-sized gain on every synthetic analog of what swe contains, against ~2% on swe itself (the old published 4.00,
+on older default calibration, reads 0.86-0.96 on the same slices). The loop slice's construction at 12-24 tool rounds
+instead of 2-3 (`ctx_trace.py --loop_rounds`, deps/exllamav3; same documents, generator and sampling; 29 rows,
+7.4-14.7k tokens of context, swe's range) keeps the gain: 0.727 [0.68, 0.78] against 0.715 at ~2k, the old 5.00
+0.386 against 0.413. Its noise floor rises from 0.0031 to 0.0046, still a third of swe's 0.0145. So 2,048-token
+calibration rows reach 12k contexts fine, and what keeps swe flat is in the sessions themselves: real tool output,
+another agent's action history, or the fragile thinking tokens their floor concentrates in (qbench.md).
+
 **Reading.** The arms order by how far each expert's Hessian leans toward its own diet -- C (global) < calW (own
 diet by group, full depth) < R (own diet by token, thin) -- and calW kept the depth, so depth is not the whole
 story: leaning toward the diet costs on its own. An expert's inputs in operation are broader than its calibration
