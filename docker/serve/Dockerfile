@@ -84,6 +84,11 @@ COPY --from=build /root/.venv /root/.venv
 # this actually ends up being 12GiB installed
 #RUN flashinfer install-cubin-wheel && flashinfer install-jit-cache-wheel
 
+# WSL2: vLLM never pins host memory there unless told to (platforms/cuda.py is_pin_memory_available), and says so
+# in one easily missed line; unpinned offload then pages through WSL2's overcommit like a very slow weight
+# offload. Read only under WSL, so harmless elsewhere
+ENV VLLM_WSL2_ENABLE_PIN_MEMORY=1
+
 ENTRYPOINT [ "vllm", "serve" ]
 
 # default example that will work on most hardware

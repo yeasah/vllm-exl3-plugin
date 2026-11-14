@@ -253,6 +253,14 @@ decode). Output matches resident token for token in eager mode, the cache's acce
    verify-row term needs its own measurement once the link term is in. Data:
    [docs/expert-cache.md](docs/expert-cache.md), "Speculative decoding against residency".
 
+4. **Resident non-EXL3 tensors in the slot sizer** (reported 2026-11-14). Offloading a vision model's experts
+   but not its dense vision tower leaves the tower resident, and the sizer does not count it: the slots take
+   the room and KV starves. Not a recommended configuration, but it must size correctly rather than fail.
+5. **Warn when WSL2 will not pin.** Without `VLLM_WSL2_ENABLE_PIN_MEMORY=1` vLLM declares pinned memory
+   unsupported in one log line, and an offloaded model then runs through WSL2's overcommit, which looks like
+   a badly performing offload rather than an error. A loud startup warning when experts are offloaded under
+   WSL with pinning off (the serve image sets the variable since 2026-11-14).
+
 Phase 5 (embedding table on host, saved slot state, double-buffered staging, a CPU tail) waits on its
 own evidence. Smaller open questions are in [docs/cpu-offload.md](docs/cpu-offload.md), "Open questions".
 
