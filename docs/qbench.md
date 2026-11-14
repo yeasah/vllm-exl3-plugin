@@ -1513,8 +1513,10 @@ variables turn thinking off), the same 200-session recipe on the same checkpoint
 
 The collision belongs to a template family. Malformed thinking turns on the stripped traces: Qwen3.6-35B-A3B 52/149,
 Qwen3.5-4B 139/149; the published cards barely -- Qwen3.8-27B 1/149, Ornith-1.5-9B 2/149, MiniCPM5-2B 4/151 -- whose
-swe floors sit at or below wild's. LFM2.5-8B-A1B is not malformed (2/161) but its swe floor is 2.5x wild's, so its
-elevation has another cause. Every swe trace made before this change is the stripped kind; eval-traces reuses a
+swe floors sit at or below wild's. LFM2.5-8B-A1B is not malformed (2/161) but its swe floor is 2.5x wild's, and
+kept reasoning (three past thoughts per row) leaves it there -- floor 0.0133 -> 0.0139, every rung's excess within 2%
+-- though it changes the model's behaviour: turns that never open a thought fall from 39/200 to 6/200. Its elevation
+has another cause, in the sessions themselves. Every swe trace made before this change is the stripped kind; eval-traces reuses a
 trace that exists, so a rerun needs the old one moved aside.
 
 The section below was measured on the stripped trace: its fragile tokens are this collision's, and its draw

@@ -352,6 +352,21 @@ cards show little sign of it (1-4 malformed turns of ~150, floors at wild's), so
 agent slice), then Qwen3.8-27B and Ornith-1.5-9B (agentic-weighted composites), then MiniCPM5-2B (cheap). A rerun
 moves the old `eval_swe.json` aside: eval-traces reuses a trace that exists.
 
+## `multi-draw` — Cards and decisions that see the sign-draw lottery
+
+**Outcome:** the pipeline converts a rung more than once (sign-draw offsets), scores the draws, and either publishes
+the best on its scored slices or reports the spread -- and arm comparisons on draw-sensitive slices use several draws
+per arm by construction.
+
+**Why:** on Qwen3.6-35B-A3B's swe a redraw moves a 4.00 by 10-17% (wild: ~1%), on traces with and without the format
+collision ([docs/calibration.md](docs/calibration.md), [docs/qbench.md](docs/qbench.md)); the 27B's default-calibration
+draws spread 0.86-1.14 on agent sessions. A user gets one draw, so the published one is a lottery ticket on exactly the
+slice the agentic-weighted composites lean on, and single-draw arm comparisons there cannot resolve 5-10% effects.
+
+**Open:** how many draws a rung affords (each is a full conversion), whether picking the best draw on held-out swe
+overfits it, and whether a calibration that narrows the spread (the agent slice is the first candidate) beats paying
+for draws.
+
 ## Loose ends
 
 *Small residue of retired items: a line each, done when convenient.*
