@@ -1520,6 +1520,24 @@ swe qbench time per card. 800 sessions resolve rows, not draws: a reseeded 4.00 
 comparison on this model needs several conversions per arm. Three plain draws read 0.927, 1.015 and 1.002 of the
 baseline on swe800: the 0.927 above was the lucky one, and calibration's swe gain over draws is ~2%.
 
+## Recall for a model that cannot stop thinking (2026-11-14)
+
+LFM2.5-8B-A1B's template has no thinking switch and the model opens every turn with `<think>` (all 337 responses
+in its wild, self and calibration traces). `recall_trace.py` renders questions with `enable_thinking: false` and scores
+the answer right after the generation prompt, which on Qwen-family templates follows an empty think block; here it
+lands where the model is all but certain of `<think>`. The reference scored the pool at perplexity 129,106, its
+first wrong token at P = 1.0 every time, and 0 of 19,684 questions known.
+
+Two fixes were weighed. Scoring the answer after the *reference's* thought hands every arm the fact (a reasoning
+model usually states it while thinking), so recall would read near 100% for any quant. The design that keeps recall
+meaningful lets each arm think for itself: the thought is private to the model -- never stored, scored or compared
+-- and the answer's probability is read as each model's own continuation of its own thought. KL has no meaning
+across different prefixes, but recall's metric (per question, the quant's P(answer) against the reference's) does.
+qbench is purely teacher-forced, so it needs generate-then-score in every engine that carries a recall arm, and
+recall would become the one slice that generates per arm. Not built for a single model (FUTURE.md
+`recall-think-first`); such a model's card simply has no recall slice -- skip `recall-slice`, and qbench and the
+card leave it out.
+
 ## Known limitations, and what closing them would unlock
 
 **No noise floor.** The `vllm` engine has no noise-injection (self-noise-floor)

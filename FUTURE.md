@@ -6,6 +6,7 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
 
 ## Investigations
 
+- `recall-think-first` — Recall for models that cannot turn thinking off (LFM2.5-8B-A1B): each arm thinks for itself, the scorer never sees the thoughts, and the answer's probability is read as each model's continuation of its own. Needs generate-then-score in every recall engine. [docs/qbench.md](docs/qbench.md)
 - `kvarn-accuracy` — Does KVarN actually match FP16 accuracy? A claim worth testing before relying on it. [docs/kvarn.md](docs/kvarn.md)
 - `qbench-noise-floor` — Self-noise-floor support for qbench's `vllm` engine, so served-path runs get a floor like the native ones. [docs/qbench.md](docs/qbench.md)
 - `mtp-turboquant` — Zero MTP draft acceptance under TurboQuant KV, and output that does not survive it. [docs/turboquant-kv.md](docs/turboquant-kv.md)
