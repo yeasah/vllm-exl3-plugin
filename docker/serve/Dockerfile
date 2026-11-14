@@ -43,8 +43,13 @@ RUN git -C vllm-exl3-plugin/deps/vllm fetch -q --no-tags \
     pip install --no-cache-dir ./vllm-exl3-plugin/deps/vllm[audio] \
     && python -c 'import vllm; print(vllm.__version__); assert not vllm.__version__.startswith("0.1.dev")'
 
-# install exllamav3
-RUN pip install --no-cache-dir ./vllm-exl3-plugin/deps/exllamav3
+# install exllamav3, its CUDA extension compiled here for TORCH_CUDA_ARCH_LIST. Without --no-build-isolation its
+# setup.py cannot see torch and installs no extension, so every container JIT-compiles one into /root/.cache on
+# first use -- minutes of silence, and a hang forever (torch's FileBaton) if a container was stopped mid-build and
+# left the lock on the cache volume
+RUN pip install --no-cache-dir 'setuptools>=77' wheel ninja \
+    && pip install --no-cache-dir --no-build-isolation ./vllm-exl3-plugin/deps/exllamav3 \
+    && python -c 'import importlib.util as u; assert u.find_spec("exllamav3_ext"), "exllamav3 extension not prebuilt"'
 
 # install plugin
 RUN pip install --no-cache-dir ./vllm-exl3-plugin
