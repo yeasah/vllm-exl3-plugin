@@ -3130,7 +3130,12 @@ def collect_hout(job, args, path, rows, out, name):
         rc = run_logged([ "python3", tool, "-m", path, "-c", rows, "-o", out, "-d", args.device, "--tf32" ] +
                         ([ "-l", f"{a}:{b}" ] if step < n_layers else []) +
                         ([ "-rv", args.reserve_vram ] if args.reserve_vram else []),
-                        job.log(f"yaqa-{name}-{a}"), {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+                        job.log(f"yaqa-{name}-{a}"), {"CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+                        # The pass's peak is one row's vocabulary-wide softmax on top of every collected layer's
+                        # activations, and fixed-size segments fragment around it: Qwen3.5-2B ran out on a 15.5 GiB card
+                        # at its second row with 9.9 GiB in use and 2.1 GiB reserved but unusable, and fit at a steady
+                        # 13.7 GiB peak with expandable segments (2026-11-15). A user's own setting wins
+                        "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF") or "expandable_segments:True"})
         if rc:
             print(f"=== Hout {name} layers {a}:{b} FAILED (log {job.log(f'yaqa-{name}-{a}')}) ==="); return False
         open(mark, "w").close()
