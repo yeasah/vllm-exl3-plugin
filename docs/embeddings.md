@@ -1885,6 +1885,38 @@ None of it is measurable end to end yet — exllamav3 cannot convert the
 architecture (FUTURE.md `gemma4-e2b`).
 
 
+## A tied 2B against GGUF: the duplicate vocabulary decides it (2026-11-15)
+
+Qwen3.5-2B (tied, 248,320 x 2,048 vocabulary, about a third of its weights) lost to unsloth's Q5_K_M at 5 bpw by
+15-28% on every slice, raw text included. Not calibration and not the recipe -- a uniform-bits control is 7-17% worse
+than the recipe rungs everywhere. The bytes: our 5.00 serves 0.803 GiB of body, a 0.300 GiB trellis embedding (`-eb`)
+and a 0.356 GiB H6 head (1.46 GiB); Q5_K_M serves 0.938 GiB of body and one Q6_K table as both embedding and head
+(1.33 GiB). The converter writes a separate head for every model and marks the output untied, and `-eb` adds a table
+beside it, so a tied model pays for its vocabulary twice in vLLM.
+
+Head-served (the rung's own H6 head decoded as its embedding, `embed_file`; row cosine 0.9997 to the original tied
+matrix), excess KLD at served size:
+
+| | wild | swe | self | raw |
+|---|---|---|---|---|
+| 4.00 two tables (1.24 GiB) | 0.0157 | 0.0071 | 0.0138 | 0.0153 |
+| 4.00 head-served (1.00) | 0.0150 | 0.0067 | 0.0134 | 0.0143 |
+| Q4_K_M (1.18) | 0.0251 | 0.0095 | 0.0210 | 0.0230 |
+| 5.00 two tables (1.46) | 0.0041 | 0.0018 | 0.0035 | 0.0040 |
+| 5.00 head-served (1.16) | 0.0040 | 0.0017 | 0.0035 | 0.0039 |
+| Q5_K_M (1.33) | 0.0081 | 0.0031 | 0.0066 | 0.0079 |
+
+Serving the embedding from the head costs nothing here and puts EXL3 ahead of both GGUFs at less size. But a checkpoint
+that relies on it is one stock exllamav3 cannot load (its loader ties only when the head is absent), and the format
+line is not worth crossing for this: a host-resident embedding table (TODO `cpu-offload`, phase 5) is exllamav3's own
+arrangement and removes the duplicate from VRAM with no format change. Until then, small tied models carry the tax.
+
+**A nested tie flag made the ladder unloadable in vLLM.** The converter set `tie_word_embeddings: false` only at the
+top of `config.json`; Qwen3.5's `text_config` kept `true`, vLLM tied the head to a trellis table with no weight, and no
+rung loaded. qbench scores through exllamav3, so the full card was built anyway. Fixed in the converter (every level,
+deps/exllamav3 `0705af6f`; upstream has the same code) and repaired in place on the 2B's rungs. Work: `cuda:
+work/Qwen3.5-2B-exl3/_headserved`.
+
 ## Moved from TODO.md (2026-11-05)
 
 *The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
