@@ -876,7 +876,12 @@ baseline with 90% row-bootstrap intervals:
   0.750 (6.1%), ctx_tool 0.752 (6.7%) -- against swe's 0.909 (14.2%). Calibration's mean gain is still ~16 points
   smaller on real sessions, and draw sensitivity runs along a gradient: prose-shaped content steady, tool-shaped
   content a modest lottery, real sessions the far end of it. Real tool output (test logs, tracebacks, diffs,
-  listings) is the leading suspect; LFM2.5-8B-A1B, cheap to redraw, is where to chase it.
+  listings) is the leading suspect.
+- **LFM2.5-8B-A1B does not reproduce it** (3.00bpw-H5, three draws, kept-reasoning swe200, 2026-11-14). Mean
+  (range): self 0.870 (1.7%), ctx_ml 0.799 (0.9%), wild 0.846 (1.2%), ctx_user 0.774 (0.6%), ctx_tool 0.760 (1.9%),
+  loop 0.764 (4.2%), swe 0.857 (3.5%). The direction of the gradient survives faintly, but swe is no outlier: a redraw
+  moves it 4% (Qwen3.6: 17%), and calibration helps it as much as wild. Its 2.5x swe floor is not this. The swe
+  anomaly so far is Qwen3.6-35B-A3B's, and a cheap MoE is no proxy for it.
 
 ## Converter internals worth knowing
 
