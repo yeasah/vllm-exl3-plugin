@@ -893,6 +893,23 @@ factor pass larger than the card still completes -- a 12 GiB 3060 finished MiniC
 the overflow to host memory instead of failing; slowly, and with the throughput cliff any WSL overshoot has.
 `--layers-per-run` keeps the pass on the card instead.
 
+**The first probe snapshot (Qwen3.5-2B, 4.00, 2026-11-15; `quantization/probe.py`):** five recipe draws, a uniform
+control and the probe-factor rung, scored on wild, swe, self and recall:
+
+| | draw sd | uniform / recipe | YAQA probe / control |
+|---|---|---|---|
+| wild | 0.6% | 1.118 | 0.805 |
+| swe | 3.1% | 1.043 (within draw noise) | 0.864 |
+| self | 1.4% | 1.084 | 0.791 |
+| recall kept | 1.0 pts | +1.2 pts (within) | -1.4 pts (within) |
+
+YAQA is the largest lever on this model -- 14-21% less excess KLD, many times the draw noise, at no recall cost beyond
+it -- and the recipe the second. On a single 15.5 GiB card the factor pass first ran out of memory at its second row
+from fragmentation (9.9 GiB in use, 2.1 GiB reserved but unusable around a 1.9 GiB fp32 softmax over the 248k
+vocabulary); `yaqa` now sets `expandable_segments` for it, and the pass ran three layers per run at 10.9-13.3 GB. The
+softmax's fp32 copies (~3.8 GiB of peak) and the activations kept for every layer above the collected one (~4.5 GiB,
+which fewer layers per run does not shrink) are the next levers if a model needs them.
+
 
 ## Moved from TODO.md (2026-11-05)
 

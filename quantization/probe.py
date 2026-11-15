@@ -61,9 +61,13 @@ def main(a):
         if not os.path.isfile(os.path.join(W, yaqa, "quantization_config.json")):
             run(["python3", QUANT, "-m", a.model, "quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa", *dev],
                 env={"EXL3_SEED_IDX_OFFSET": "0"})
-    run(["python3", QUANT, "-m", a.model, "qbench", *dev, "--slices", a.slices, "--revisions", ",".join(arms),
+    # recall too, when the model has a slice: YAQA has cost recall that KL read as a win (Qwen3.8-27B)
+    slices = a.slices.split(",")
+    if os.path.isfile(os.path.join(W, "_traces", "eval_recall.json")) and "recall" not in slices:
+        slices.append("recall")
+    run(["python3", QUANT, "-m", a.model, "qbench", *dev, "--slices", ",".join(slices), "--revisions", ",".join(arms),
          "--allow-converter-mismatch"])
-    report(W, a.slices.split(","), draws, uniform, yaqa if a.yaqa else None)
+    report(W, slices, draws, uniform, yaqa if a.yaqa else None)
 
 
 def report(W, slices, draws, uniform, yaqa):
@@ -73,6 +77,23 @@ def report(W, slices, draws, uniform, yaqa):
     print(f"{'slice':8} {'draw excess (mean, spread)':>34}  {'recipe: uniform/recipe d0':>27}  {'yaqa: yaqa/d0':>16}")
     for sl in slices:
         rows = {r["label"]: r for r in json.load(open(os.path.join(W, "main", f"qb_{sl}.json")))}
+        if sl == "recall":
+            kept = {l: rows[l]["recall_kept"] for l in draws + [uniform] + ([yaqa] if yaqa else []) if "recall_kept" in rows.get(l, {})}
+            d = [kept[l] for l in draws if l in kept]
+            if not d:
+                continue
+            mean = sum(d) / len(d)
+            sd = (sum((x - mean) ** 2 for x in d) / (len(d) - 1)) ** 0.5 if len(d) > 2 else float("nan")
+            d0 = kept.get(draws[0])
+            def pts(l):
+                if l not in kept or d0 is None:
+                    return ""
+                diff = 100 * (kept[l] - d0)
+                return f"{diff:+.1f} pts" + (" (within draw noise)" if not math.isnan(sd) and abs(diff) < 200 * sd else "")
+            print(f"{'recall':8} kept {mean:.3f} ({100 * (max(d) - min(d)):.1f} pts range, {100 * sd:.1f} pts sd)"
+                  f"  uniform {pts(uniform):>24}  yaqa {pts(yaqa) if yaqa else '':>24}")
+            out["slices"]["recall"] = {"draws": d, "mean": mean, "sd": sd, "uniform": kept.get(uniform), "yaqa": kept.get(yaqa) if yaqa else None}
+            continue
         fl = rows["Noise floor"]["kld"]
         ex = {l: rows[l]["kld"] - fl for l in draws + [uniform] + ([yaqa] if yaqa else []) if l in rows}
         d = [ex[l] for l in draws if l in ex]
