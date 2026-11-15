@@ -47,17 +47,18 @@ def main(a):
         arms.append(yaqa)
     dev = ["-d", a.device]
     common = ["-b", str(a.bits)] + (["--no-yaqa"])
-    # draws: the ladder's own configuration (recipe when measured), no YAQA, one seed offset each
-    for i, name in enumerate(draws):
-        if not os.path.isfile(os.path.join(W, name, "quantization_config.json")):
-            run(["python3", QUANT, "-m", a.model, "quantize", *common, "--suffix", name.split(base + "-")[1], *dev],
-                env={"EXL3_SEED_IDX_OFFSET": str(i)})
+    # draws: the ladder's own configuration (recipe when measured), no YAQA, one seed offset each -- one quantize
+    # call, so quant.py deals them to the GPUs like a ladder (finished draws are skipped there)
+    if not all(os.path.isfile(os.path.join(W, name, "quantization_config.json")) for name in draws):
+        run(["python3", QUANT, "-m", a.model, "quantize", *common, "--suffix", "probe", "--draws", str(a.draws), *dev])
     if not os.path.isfile(os.path.join(W, uniform, "quantization_config.json")):
         run(["python3", QUANT, "-m", a.model, "quantize", *common, "--no-recipe", "--suffix", "probe-uniform", *dev],
             env={"EXL3_SEED_IDX_OFFSET": "0"})
     if a.yaqa:
         if not os.path.isfile(os.path.join(W, "_hess", "probe", "DONE.json")):
-            run(["python3", QUANT, "-m", a.model, "yaqa", "--probe", *dev] + (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []))
+            run(["python3", QUANT, "-m", a.model, "yaqa", "--probe", *dev] +
+                (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []) +
+                (["--reserve-vram", a.reserve_vram] if a.reserve_vram else []))
         if not os.path.isfile(os.path.join(W, yaqa, "quantization_config.json")):
             run(["python3", QUANT, "-m", a.model, "quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa", *dev],
                 env={"EXL3_SEED_IDX_OFFSET": "0"})
@@ -125,9 +126,11 @@ if __name__ == "__main__":
     p.add_argument("-b", "--bits", type=float, default=4.0)
     p.add_argument("--draws", type=int, default=5)
     p.add_argument("--yaqa", action="store_true", help="also the YAQA arm (yaqa --probe's factor)")
-    p.add_argument("--layers-per-run", type=int, default=None)
+    p.add_argument("--layers-per-run", type=int, default=None, help="yaqa: decoder layers per factor pass")
+    p.add_argument("--reserve-vram", default=None, help="yaqa: GB kept free of weights per device, with several (-d 0,1)")
     p.add_argument("--slices", default="wild,swe,self")
-    p.add_argument("-d", "--device", default="0")
+    p.add_argument("-d", "--device", default="0", help="GPUs for every step: quantize deals the draws to them, yaqa splits the model "
+                                                    "across them, qbench splits the arms")
     a = p.parse_args()
     if not a.model or "/" not in a.model:
         raise SystemExit("-m takes the base model's repo id, as quant.py does")

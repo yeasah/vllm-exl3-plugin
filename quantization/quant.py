@@ -3297,7 +3297,11 @@ def do_quantize(job, args):
     if args.plan:
         return plan_recipes(job, args, recipe_source, share, rfn)
 
-    def task(rev, bits, headbits):
+    def task(rev, bits, headbits, offset=None):
+        # offset: this draw's sign-draw seed (EXL3_SEED_IDX_OFFSET), for --draws; the converter records it at job
+        # creation and refuses a resume under another, so a draw cannot be mixed with its neighbour
+        def env(slot):
+            return {**gpu_env(slot), **({"EXL3_SEED_IDX_OFFSET": str(offset)} if offset is not None else {})}
         def run(slot, echo):
             revdir = job.revdir(rev)
             workdir = os.path.join(revdir, "_work")
@@ -3332,7 +3336,7 @@ def do_quantize(job, args):
                 attempt += 1
                 if os.path.isfile(os.path.join(workdir, "args.json")):
                     say(f"=== RESUMING QUANTIZTION OF {revdir} ===")
-                    run_logged([ "python3", script, "-w", workdir, "-r", "-d", "0" ], log_path, gpu_env(slot), echo)
+                    run_logged([ "python3", script, "-w", workdir, "-r", "-d", "0" ], log_path, env(slot), echo)
                 else:
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
                     run_logged([ "python3", script,
@@ -3346,7 +3350,7 @@ def do_quantize(job, args):
                                 + ([] if HALF_STEPS else ["--no_half_steps"])) +
                                ([ "--cal_data", job.cal_data ] if args.calibration == "mix" else []) +
                                ([ "-hess", hess ] if hess else []),
-                               log_path, gpu_env(slot), echo)
+                               log_path, env(slot), echo)
             if not os.path.isfile(donefile):
                 say(f"=== QUANTIZATION OF {revdir} FAILED after {attempt} attempt(s) ===")
                 return False
@@ -3370,7 +3374,16 @@ def do_quantize(job, args):
             return True
         return rev, run
     specs = bit_specs(args.bits, args.suffix)
-    failed = run_jobs([task(*sp) for sp in specs], device_slots(args.device), "QUANTIZE")
+    offsets = None
+    if args.draws > 1:
+        # Several sign draws of each rung, `<rev>-d0` .. `-d{N-1}` at seed offsets 0 .. N-1, dealt to the GPUs with the rest
+        # (TODO multi-draw): the lottery on agentic content is worth measuring or choosing from, and a probe wants them
+        if os.environ.get("EXL3_SEED_IDX_OFFSET"):
+            print("=== --draws sets each draw's EXL3_SEED_IDX_OFFSET itself; unset it ==="); return False
+        specs = [(f"{rev}-d{k}", bits, headbits) for rev, bits, headbits in specs for k in range(args.draws)]
+        offsets = list(range(args.draws)) * (len(specs) // args.draws)
+    failed = run_jobs([task(*sp, offset=offsets[i] if offsets else None) for i, sp in enumerate(specs)],
+                      device_slots(args.device), "QUANTIZE")
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
 def main():
@@ -3525,6 +3538,9 @@ def main():
                                    "at 8); 0 = no floor. Ignored with a recipe")
     cmd_quantize.add_argument('--suffix', default=None,
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
+    cmd_quantize.add_argument('--draws', type=int, default=1,
+                              help="sign draws per rung: each becomes <rev>-d0 .. -d{N-1} at seed offsets 0 .. N-1, dealt to "
+                                   "the GPUs like any other conversion (probe.py; TODO multi-draw)")
     cmd_quantize.add_argument('--yaqa', default=True, action=argparse.BooleanOptionalAction,
                               help="two-sided LDLQ with `yaqa`'s blended output factor when it exists (default); "
                                    "--no-yaqa converts one-sided as before")
