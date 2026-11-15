@@ -905,8 +905,24 @@ well-formed), three draws, never for release:
 Content moves swe's command tokens -- the model's own acting -- and barely its thinking, where most of the gap is;
 even this probe leaves swe at 0.83, behind every analog under the plain mix, and costs every other slice 10-24% (own
 voice worse than uncalibrated). The best of plain's three draws (0.833) matches the probe's mean: on swe the draw is
-worth as much as the most extreme calibration, at no cost elsewhere (TODO.md `multi-draw`). Next: which part of a
-session carries the command gain -- the agent's own turns, or the tool output it reads.
+worth as much as the most extreme calibration, at no cost elsewhere (TODO.md `multi-draw`).
+
+**Neither half of a session carries it (2026-11-15).** The probe's sessions split into two all-agent calibrations,
+three draws each: the agent's own turns with every tool result stubbed, and the tool results alone as plain text.
+
+| / baseline | plain | all-agent | own turns | tool outputs |
+|---|---|---|---|---|
+| swe, thinking rows | 0.909 | 0.831 (x0.91 [0.84, 0.98]) | 0.886 (x0.97 [0.90, 1.05]) | 0.944 (x1.04 [0.95, 1.13]) |
+| swe thinking tokens | 0.883 | 0.839 (x0.95) | 0.858 (x0.97) | 0.951 (x1.08) |
+| swe command arguments | 1.040 | 0.823 (draws 0.59-0.96) | 1.062 (x1.02) | 0.946 (x0.91 [0.67, 1.07]) |
+| wild / analogs / self | 0.80 / 0.73-0.75 / 0.84 | 0.93 / 0.82-0.93 / 1.04 | 0.96 / 0.86-0.93 / 1.02 | 0.99 / 0.93-1.01 / 1.07 |
+
+The command-token gain does not survive the split: none from the agent's own turns, ~5% from tool outputs within its
+interval, and the all-agent arm's 0.823 leaned on one draw (0.593; its others 0.92 and 0.96). Thinking tokens move a
+few percent with own turns or whole sessions and get worse on tool outputs alone. Every variant costs 14-35% elsewhere.
+So the most in-distribution calibration available buys ~9% on swe at a heavy general cost, and no part of it isolates
+into a content kind worth adding to the mix: for this model's swe, more and better analogs is the wrong tree. Draws
+(a 14% spread) and bits are the levers.
 
 ## Converter internals worth knowing
 
