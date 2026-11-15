@@ -201,8 +201,12 @@ on others (Qwen3.8-27B: -3..-8% for up to 2.5 points of kept), so `quant.py` sho
 no YAQA against the probe, judged on KL and kept against a bar around -10%. 60 rows kept 80-90% of the gain on
 the 2B, and the factor reached cosine 0.974 with the full one. **Built (2026-11-15):** `quant.py yaqa --probe` (60 own-voice rows, its factor alone) and
 `quantization/probe.py`, which reports draw noise, recipe gain and YAQA gain, recall included, side by side; first
-snapshot on Qwen3.5-2B in [docs/yaqa.md](docs/yaqa.md). Still open: a bar for "on" (gain beyond twice the draw sd on
-the scored slices, no recall cost beyond it, is what the 2B suggests), and the FP8 route. Possibly from an FP8 release, which might fit a
+snapshot on Qwen3.5-2B in [docs/yaqa.md](docs/yaqa.md). The probe is a go/no-go gate, not a sizing (2026-11-15, the user's
+call): its 60-row own-voice factor is a lower bound on YAQA's gain (MiniCPM5-2B's full blend did 12.5% better on swe),
+which is enough to say whether YAQA helps and does not hurt. A marginal result on a big model could earn an optional
+deeper probe (the blend's calibration half), but past a point that work is better spent on the full factors. Still
+open: the bar for "on" (gain beyond twice the draw sd on the scored slices, no recall cost beyond it, is what both 2B
+models suggest), and the FP8 route. Possibly from an FP8 release, which might fit a
 single 96 GB card: unknowns are Transformers' backward through FP8 linears and whether FP8 factors rank models
 as BF16 ones do. Also open: why the 50/50 blend costs more recall than either half alone on the 27B.
 Evidence: [docs/yaqa.md](docs/yaqa.md).
