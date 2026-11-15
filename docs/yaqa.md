@@ -887,6 +887,12 @@ run to run, so a regenerated own-voice set differs in text (same prompts) and th
 Fused MoE experts are not covered by the factor tool and stay one-sided. Work: `quant_work/_yaqa`,
 `quant_work/_yaqa9`; factors and measurements in the `yeasah/yaqa-9b-hess` bucket.
 
+`yaqa --probe` (2026-11-15) builds only the cheap half: one own-voice pass of 60 rows and its factor, into
+`_hess/probe`, for `quantize --yaqa-source probe` against a `--no-yaqa` control (TODO.md `yaqa-probe`). Under WSL a
+factor pass larger than the card still completes -- a 12 GiB 3060 finished MiniCPM5-2B's -- because the driver pages
+the overflow to host memory instead of failing; slowly, and with the throughput cliff any WSL overshoot has.
+`--layers-per-run` keeps the pass on the card instead.
+
 
 ## Moved from TODO.md (2026-11-05)
 
