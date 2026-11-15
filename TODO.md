@@ -262,7 +262,12 @@ decode). Output matches resident token for token in eager mode, the cache's acce
    WSL with pinning off (the serve image sets the variable since 2026-11-14).
 
 Phase 5 (embedding table on host, saved slot state, double-buffered staging, a CPU tail) waits on its
-own evidence. Smaller open questions are in [docs/cpu-offload.md](docs/cpu-offload.md), "Open questions".
+own evidence -- except the embedding table, which now has its case: a tied model under vLLM carries its vocabulary
+twice in VRAM (the head and a trellis table), 0.30 GiB of a 2B's 1.46 (enough to lose Qwen3.5-2B's lead to unsloth's
+Q5_K_M, which serves both roles from one table), and serving the embedding from the head costs no quality there but
+needs a format exllamav3 cannot load. A host-resident table is exllamav3's own arrangement and needs no new format.
+`cpu_offload_params` does not reach it today (2026-11-15: the trellis embedding's `et_table` is an ordinary parameter
+the offloader never sees; "no EXL3 tensor matched"); the lookup reads one row per token, which UVA suits. Smaller open questions are in [docs/cpu-offload.md](docs/cpu-offload.md), "Open questions".
 
 ## `engram-ple` — Serving Qwen4Exp (Qwen3.8-Flash-Next) with its n-gram table off the GPU
 
@@ -386,6 +391,11 @@ and fifth plain draw on both traces is the cheap test).
 
 *Small residue of retired items: a line each, done when convenient.*
 
+- Smoke-load every rung in vLLM before its card is built: qbench scores through exllamav3, so a checkpoint vLLM cannot
+  load got a full card (Qwen3.5-2B, a nested `text_config.tie_word_embeddings` left true; fixed in the converter
+  2026-11-15). Load, a few greedy tokens, done.
+- Report upstream: exllamav3's `update_config` unties only the top-level `tie_word_embeddings`, so a tied multimodal
+  model (Qwen3.5 small sizes, gemma-4) converts unloadable in vLLM (deps/exllamav3 `0705af6f`).
 - qbench: two processes that both find a reference store missing race -- one regenerates it, the other fails on the
   half-built directory (`FileNotFoundError` on `logits_*`). Lock or wait on the store. Seen 2026-11-14 when the
   Qwen3.6-35B-A3B job's 200 GB logit-cache cap had evicted the diagnostic slices' references during swe800 work.
