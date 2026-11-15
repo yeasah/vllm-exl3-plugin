@@ -90,7 +90,9 @@ Quantization can leave a model fluent but wrong about facts, which KLD does not 
 Loss is not spread evenly. A quant holds on to what the unquantized model was sure of and loses more of what it barely knew:
 
 ![facts kept by how firmly the unquantized model held the answer](./recall.png)
-
+{% if recall.profile %}
+How the unquantized model holds what it knows matters as much as how a quant treats each band: of the facts it gets right, it holds {% for n, v in recall.profile %}{{ '{0:0.0f}'.format(v) }}% {{ n }}{% if not loop.last %}, {% endif %}{% endfor %} (by the bands above). A model whose knowledge leans toward the lower bands has more to lose once a quant runs short of bits; hedging is a valid way to know things, and it is measured here as it is held.{% if recall.thin_bands %} Bands with too few questions to measure are left off the plot ({{ recall.thin_bands | join(', ') }}).{% endif %}
+{% endif %}
 Bars are approximate and cover both sampling and the difference between equivalent conversions. Differences of a point or two between rungs mean little.
 {% if recall.sets %}
 Other published quants of this model, scored on the same questions, show how much is at stake at each size, and how fast facts go once a quant is small enough:

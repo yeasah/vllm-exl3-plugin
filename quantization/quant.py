@@ -1162,21 +1162,24 @@ def recall_interval(p, n):
     return max(0.0, centre - RECALL_BAR_WIDEN * half), min(1.0, centre + RECALL_BAR_WIDEN * half)
 
 def recall_section(job, revisions):
-    """The card's recall numbers, or None when the model has no slice or only a thin one: the rule is that a model
-    with too few confident questions shows no metric, whether or not --allow-thin scored it anyway."""
+    """The card's recall numbers, or None when the model has no slice or only a thin one: too few questions in all shows
+    no metric, whether or not --allow-thin scored it anyway. Confidence is not the test -- a model that hedges holds most
+    of its facts below P 0.7 and its retention there is as measurable (recall_select.py) -- but a band with too few
+    questions is left off the band plot."""
     path, trace = os.path.join(job.main, f"qb_{RECALL_SLICE}.json"), job.eval_trace(RECALL_SLICE)
     if not (os.path.isfile(path) and os.path.isfile(trace)):
         return None
     with open(trace) as f:
         selection = json.load(f)["meta"]["selection"]
     if selection["thin"]:
-        print(f"=== recall slice is thin ({selection['confident']} confident questions): left off the card ===")
+        print(f"=== recall slice is thin ({selection.get('confident', 0) + selection.get('below', 0)} questions): left off the card ===")
         return None
+    thin_bands = set(selection.get("thin_bands") or [])
     with open(path) as f:
         results = {r["label"]: r for r in json.load(f)}
     def row(r, label, bits=None):
         return { "label": label, "bits": bits, "kept": r["recall_kept"], "errors": r["recall_confident_errors"],
-                 "bands": r["recall_bands"] }
+                 "bands": {n: v for n, v in r["recall_bands"].items() if n not in thin_bands} }
     rows = [row(results[r['name']], f"{r['bits']:0.2f}", r['bits']) for r in revisions if "recall_kept" in results.get(r['name'], {})]
     if not rows:
         return None
@@ -1198,8 +1201,12 @@ def recall_section(job, revisions):
             if pts:
                 sets.append({ "name": ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})",
                               "points": sorted(pts) })
+    floor_bands = results.get("Noise floor", {}).get("recall_bands")
     return { "rows": rows, "questions": known, "confident": selection["confident"],
-             "floor": results.get("Noise floor", {}).get("recall_bands"),
+             "floor": {n: v for n, v in floor_bands.items() if n not in thin_bands} if floor_bands else None,
+             # the reference's known facts by how firmly it held them, and bands too thin to plot
+             "profile": [(n, 100 * selection["profile"][n]) for n, _ in RECALL_BANDS if n in selection.get("profile", {})],
+             "thin_bands": [n for n, _ in RECALL_BANDS if n in thin_bands],
              "ours": [(rev_served_gib(r), results[r['name']]["recall_kept"], f"{r['bits']:0.2f}")
                       for r in revisions if "recall_kept" in results.get(r['name'], {})],
              "sets": sets, "styles": other_set_styles(job) }
