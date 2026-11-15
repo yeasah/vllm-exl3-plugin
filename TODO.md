@@ -371,6 +371,9 @@ for draws.
 
 *Small residue of retired items: a line each, done when convenient.*
 
+- qbench: two processes that both find a reference store missing race -- one regenerates it, the other fails on the
+  half-built directory (`FileNotFoundError` on `logits_*`). Lock or wait on the store. Seen 2026-11-14 when the
+  Qwen3.6-35B-A3B job's 200 GB logit-cache cap had evicted the diagnostic slices' references during swe800 work.
 - Log a warning before the plugin's first exllamav3 import when `exllamav3_ext` is not prebuilt: the JIT build
   that follows is minutes of silence, and an indefinite one on a stale build lock (field notes, 2026-11-14).
 - The embedding quant-config fork patch (`vllm-embed-quant-config`) needs its drafter fix before it can be offered

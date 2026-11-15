@@ -871,6 +871,12 @@ baseline with 90% row-bootstrap intervals:
   bunching on the stripped trace was chance. That closes the agent slice on this model.
 - **Rows are not the limit; draws are.** At ~7% sd per draw, comparing two calibrations at +-5% on swe takes 6-8
   draws per arm; 800 sessions would only narrow the row interval. TODO.md `multi-draw`.
+- **Draws do not close the gap to the analogs.** The same three plain draws on the synthetic slices, mean (range):
+  self 0.837 (1.1%), ctx_ml 0.742 (1.0%), wild 0.796 (1.2%), ctx_user 0.732 (2.9%), long loop 0.742 (5.1%), loop
+  0.750 (6.1%), ctx_tool 0.752 (6.7%) -- against swe's 0.909 (14.2%). Calibration's mean gain is still ~16 points
+  smaller on real sessions, and draw sensitivity runs along a gradient: prose-shaped content steady, tool-shaped
+  content a modest lottery, real sessions the far end of it. Real tool output (test logs, tracebacks, diffs,
+  listings) is the leading suspect; LFM2.5-8B-A1B, cheap to redraw, is where to chase it.
 
 ## Converter internals worth knowing
 
