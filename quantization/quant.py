@@ -3034,17 +3034,24 @@ YAQA_SEEDS = 3              # own-voice passes: one pass over the 157-prompt poo
 YAQA_OWNVOICE_ROWS = 85     # rows asked of each pass; ctx_trace fills a shortfall with raw rows, dropped after
 YAQA_BLEND = 0.5            # own-voice share of the blended factor, each side normalized to unit trace
 YAQA_DONE = "DONE.json"     # provenance, written last: a factor directory without it is incomplete
+# `yaqa --probe` (TODO.md yaqa-probe): one own-voice pass of 60 rows, its factor alone, no calibration factor or
+# blend. 60 rows kept 80-90% of the full blend's gain on MiniCPM5-2B, at cosine 0.974 to the full factor, for about
+# an eighth of the work: enough to tell a YAQA-friendly model from one that is not (docs/yaqa.md)
+YAQA_PROBE_ROWS = 60
+YAQA_PROBE = "probe"        # its factor directory under the job's Hessians: quantize --yaqa-source probe
 
 def yaqa_ready(job, source="blend"):
     """A finished factor directory: the blend, or one side of it (--yaqa-source), else None."""
     d = os.path.join(job.hess, source)
     return d if os.path.isfile(os.path.join(d, YAQA_DONE)) else None
 
-def ownvoice_rows(job, args, path, env):
-    """Own-voice rows for the output factor: YAQA_SEEDS self-only calibration passes through the eval
+def ownvoice_rows(job, args, path, env, out_path=None, seeds=YAQA_SEEDS, rows_per_pass=YAQA_OWNVOICE_ROWS, tag="ownvoice"):
+    """Own-voice rows for the output factor: `seeds` self-only calibration passes through the eval
     generator, the raw rows ctx_trace pads a short pass with dropped (matched against the bundled
-    corpus exactly). The held-out own-voice eval prompts are a separate pool, never generated from."""
-    if os.path.isfile(job.ownvoice):
+    corpus exactly). The held-out own-voice eval prompts are a separate pool, never generated from.
+    The probe takes one pass of YAQA_PROBE_ROWS into its own file."""
+    out_path = out_path or job.ownvoice
+    if os.path.isfile(out_path):
         return True
     import torch
     from safetensors.torch import load_file, save_file
@@ -3053,20 +3060,20 @@ def ownvoice_rows(job, args, path, env):
     sampling = (["--sampling_profile", resolve_sampling_profile(job, args, path)]
                 if resolve_sampling_profile(job, args, path) else [])
     parts = []
-    for s in range(YAQA_SEEDS):
-        out = os.path.join(job.traces, f"ownvoice_s{s}.safetensors")
+    for s in range(seeds):
+        out = os.path.join(job.traces, f"{tag}_s{s}.safetensors")
         parts.append(out)
         if os.path.isfile(out):
             continue
         rc = run_logged([ "python3", "-u", ctx_trace, "-m", gen, "-cs", "65536",
-                          "-o", os.path.join(job.traces, f"ownvoice_s{s}"), "--docs", "cal", "--cal_out", out,
-                          "--cal_rows", str(YAQA_OWNVOICE_ROWS), "--cal_cols", "2048",
+                          "-o", os.path.join(job.traces, f"{tag}_s{s}"), "--docs", "cal", "--cal_out", out,
+                          "--cal_rows", str(rows_per_pass), "--cal_cols", "2048",
                           "--shares", json.dumps({"raw": 0, "ctx": 0, "loop": 0, "self": 1.0, "random": 0}),
                           "-tv", CAL_TEMPLATE_VARS, "--max_new_tokens", str(CAL_MAX_NEW_TOKENS),
                           "--exclude_self", EVAL_SELF_PROMPTS, "--seed", str(s) ] + sampling + backend,
-                        job.log(f"yaqa-ownvoice-s{s}"), env)
+                        job.log(f"yaqa-{tag}-s{s}"), env)
         if rc or not os.path.isfile(out):
-            print(f"=== own-voice pass {s} FAILED (log {job.log(f'yaqa-ownvoice-s{s}')}) ==="); return False
+            print(f"=== own-voice pass {s} FAILED (log {job.log(f'yaqa-{tag}-s{s}')}) ==="); return False
     sys.path.insert(0, os.path.abspath(args.exllamav3dir))
     from exllamav3 import Config, Tokenizer
     from exllamav3.conversion.calibration_data import get_default_calibration
@@ -3075,7 +3082,9 @@ def ownvoice_rows(job, args, path, env):
     rows = torch.cat([load_file(p)["input_ids"] for p in parts], 0)
     keep = [r for r in rows if tuple(r.tolist()) not in default]
     print(f"=== own-voice rows: {len(keep)} of {rows.shape[0]} ({rows.shape[0] - len(keep)} raw fill rows dropped) ===")
-    save_file({"input_ids": torch.stack(keep).contiguous()}, job.ownvoice)
+    if not keep:
+        print("=== no own-voice rows survived: nothing to build a factor from ==="); return False
+    save_file({"input_ids": torch.stack(keep).contiguous()}, out_path)
     return True
 
 def range_logged_ok(log_path, a, b, ranged):
@@ -3169,6 +3178,16 @@ def do_yaqa(job, args):
     if setup is None:
         return False
     path, _, _ = setup
+    if args.probe:
+        # One own-voice pass, its factor alone: the YAQA arm of a probe pair (quantize --yaqa-source probe)
+        rows = os.path.join(job.traces, f"ownvoice_{YAQA_PROBE}.safetensors")
+        if not os.path.isfile(os.path.join(job.hess, YAQA_PROBE, YAQA_DONE)) and not ownvoice_rows(
+                job, args, path, eval_env(args), out_path=rows, seeds=1, rows_per_pass=YAQA_PROBE_ROWS, tag=f"ownvoice_{YAQA_PROBE}"):
+            return False
+        if not collect_hout(job, args, path, rows, os.path.join(job.hess, YAQA_PROBE), YAQA_PROBE):
+            return False
+        print(f"=== probe factor ready: quantize --yaqa-source {YAQA_PROBE} for the YAQA arm, --no-yaqa for the control ===")
+        return True
     # The rows only feed the own-voice factor: with that done (e.g. restored from a bucket without
     # its rows), regenerating them would take minutes and leave rows the factor was not built from
     if not os.path.isfile(os.path.join(job.hess, "ownvoice", YAQA_DONE)) and not ownvoice_rows(job, args, path, eval_env(args)):
@@ -3462,6 +3481,10 @@ def main():
                                       "rows, the factor on them and on the calibration, and their blend for `quantize`")
     trace_args(cmd_yaqa)
     # -d/--device (from trace_args): the factor pass's GPU(s), comma-separated to split the model; --eval-devices: own-voice generation
+    cmd_yaqa.add_argument('--probe', action='store_true',
+                          help=f"a cheap YAQA probe: one own-voice pass of {YAQA_PROBE_ROWS} rows and its factor alone, into "
+                               f"the job's Hessians as '{YAQA_PROBE}' (quantize --yaqa-source {YAQA_PROBE}); the full factors "
+                               "and their blend are left alone")
     cmd_yaqa.add_argument('--layers-per-run', type=int, default=None,
                           help='decoder layers per factor pass, when every layer\'s factors do not fit beside the model and '
                                'its backward pass (default: all at once). A 9B on 48 GB: 4')
