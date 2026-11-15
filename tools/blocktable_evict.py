@@ -279,7 +279,7 @@ def run(args):
         enforce_eager=True,
         enable_prefix_caching=False,
         max_num_seqs=max(args.reqs, 1),
-        trust_remote_code=True,
+        trust_remote_code=args.trust_remote_code,   # off unless asked: never run a checkpoint's own code by default
     )
     if args.kv != "auto":
         kwargs["kv_cache_dtype"] = args.kv
@@ -452,6 +452,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("model")
     r.add_argument("out")
+    r.add_argument("--trust-remote-code", action="store_true", help="run the code the checkpoint ships (review it first)")
     r.add_argument("--kv", default="auto")
     r.add_argument("--ctx", type=int, default=2048)
     r.add_argument("--tokens", type=int, default=32)

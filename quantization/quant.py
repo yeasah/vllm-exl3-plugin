@@ -1636,17 +1636,24 @@ def gguf_pick(repo, q):
         raise SystemExit(f"=== {repo}: {q} matches {m}; name the file's own quant suffix ===")
     return m[0] if m else None
 
+def remote_code(args, repo):
+    """Model-spec options letting transformers run code a checkpoint ships: only for a repo the user named with
+    --trust-remote-code, never by default (qbench's engines refuse it unless a spec says so)"""
+    return { "trust_remote_code": True } if repo in (getattr(args, "trust_remote_code", None) or []) else {}
+
 def qbench_project(job, args, slice_, arms, results=None):
     """One qbench project per slice: a bf16-generated eval trace, or raw web text. arms: [(label, path)]"""
+    thr_repo = {threshold_label(t.partition("@")[0]): t.partition("@")[0] for t in getattr(args, "threshold", None) or []}
     project = { "title": f"{job.name}: {slice_}",
                 "logit_cache": { "dir": logit_cache_dir(job, args),
                                  "max_size_gb": args.logit_cache_size },
                 "models": [ { "label": "HF BF16", "group": "reference", "engine": "transformers",
-                              "repo": job.base_repo, "revision": job.base_revision(), "options": { "streaming": True } } ] +
+                              "repo": job.base_repo, "revision": job.base_revision(),
+                              "options": { "streaming": True, **remote_code(args, job.base_repo) } } ] +
                           [ { "label": label, "group": "threshold", "engine": "llamacpp", "source": os.path.abspath(path),
                               "options": { "n_gpu_layers": 999 } } if label.startswith("thr:") and path.endswith(".gguf") else
                             { "label": label, "group": "threshold", "engine": "transformers", "source": os.path.abspath(path),
-                              "options": { "streaming": True } } if label.startswith("thr:") else
+                              "options": { "streaming": True, **remote_code(args, thr_repo.get(label)) } } if label.startswith("thr:") else
                             { "label": label, "group": "GGUF", "engine": "llamacpp", "source": os.path.abspath(path),
                                 "options": { "n_gpu_layers": 999 } } if path.endswith(".gguf") else
                             { "label": label, "group": "EXL3", "engine": "exllamav3",
@@ -3552,6 +3559,10 @@ def main():
                             help='skip reference rungs below this bit rate (e.g. 2.0)')
     cmd_qbench.add_argument('--reference-max-bits', type=float, default=8.9,
                             help='skip reference rungs above this bit rate (e.g. 6.0)')
+    cmd_qbench.add_argument('--trust-remote-code', action='append', metavar='REPO',
+                            help="let transformers run the code REPO's checkpoint ships (its auto_map modeling files), for "
+                                 "that repo's reference or threshold arm only (repeatable). Off for everything by default; "
+                                 "review the code first")
     cmd_qbench.add_argument('--threshold', action='append',
                             help="a checkpoint everybody knows, e.g. the publisher's FP8 (REPO[@REVISION], repeatable): "
                                  "scored on every slice by the bf16 reference's own engine and drawn as a line on the "

@@ -194,7 +194,7 @@ def run(args):
         enforce_eager=True,
         enable_prefix_caching=False,
         max_num_seqs=1,
-        trust_remote_code=True,
+        trust_remote_code=args.trust_remote_code,   # off unless asked: never run a checkpoint's own code by default
         **({"kv_cache_dtype": args.kv} if args.kv != "auto" else {}),
     )
     tok = llm.get_tokenizer()
@@ -308,6 +308,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("model")
     r.add_argument("out")
+    r.add_argument("--trust-remote-code", action="store_true", help="run the code the checkpoint ships (review it first)")
     r.add_argument("--ctx", type=int, default=2048)
     r.add_argument("--tokens", type=int, default=32)
     r.add_argument("--block", type=int, default=40)

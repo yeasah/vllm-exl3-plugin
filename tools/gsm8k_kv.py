@@ -117,7 +117,7 @@ def build_llm(model, kv):
         max_model_len=int(os.environ.get("MML", 2048)),
         gpu_memory_utilization=float(os.environ.get("UTIL", 0.60)),
         enforce_eager=True,
-        trust_remote_code=True,
+        trust_remote_code=os.environ.get("TRUST_REMOTE_CODE") == "1",   # off unless asked: never run a checkpoint's own code by default
     )
     if os.environ.get("SKIP_SLIDING"):
         kwargs["kv_cache_dtype_skip_layers"] = os.environ["SKIP_SLIDING"].split(",")
