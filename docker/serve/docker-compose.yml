@@ -5,6 +5,7 @@ services:
       - ${HOST_PORT:-8000}:8000
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     command: --config /root/vllm_config.yml
     volumes:
       - ./vllm_config.yml:/root/vllm_config.yml

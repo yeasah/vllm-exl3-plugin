@@ -853,6 +853,25 @@ random-diet experts mostly random tokens, a specific failure apart from speciali
 group at its global share would settle it, and is not expected to beat C given the ordering. Neither environment
 variable changes anything unset.
 
+## swe without the collision: calibration, the lottery, and the agent slice (2026-11-14)
+
+On the kept-reasoning swe200 (qbench.md, "The swe slice: a format collision"), the 150 thinking rows, three draws
+per arm (seed offsets 0, 5, 6; reconversions byte-identical to the originals), excess relative to the uncalibrated
+baseline with 90% row-bootstrap intervals:
+
+| arm | draws 0 / 5 / 6 | mean | range (sd) |
+|---|---|---|---|
+| plain 4.00 | 0.833 / 0.975 / 0.920 | 0.909 [0.83, 1.00] | 0.142 (0.072) |
+| agent slice | 0.903 / 0.960 / 0.813 | 0.892 | 0.147 (0.074) |
+
+- **Calibration is worth ~9% on swe** averaged over draws (the stripped trace said ~2%), against ~20% on wild.
+- **The draw lottery is the model's, not the collision's.** A redraw moves swe by up to 17% (redraw 5 / original
+  1.170 [1.04, 1.32]); the same three draws agree within ~1% on wild.
+- **The agent slice neither narrows it nor moves the mean**: agent / plain 0.981 [0.92, 1.05]. Its tighter
+  bunching on the stripped trace was chance. That closes the agent slice on this model.
+- **Rows are not the limit; draws are.** At ~7% sd per draw, comparing two calibrations at +-5% on swe takes 6-8
+  draws per arm; 800 sessions would only narrow the row interval. TODO.md `multi-draw`.
+
 ## Converter internals worth knowing
 
 **Sign vectors alias within a module.** `convert_model.py` seeds each module with its
