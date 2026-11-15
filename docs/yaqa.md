@@ -910,6 +910,15 @@ vocabulary); `yaqa` now sets `expandable_segments` for it, and the pass ran thre
 softmax's fp32 copies (~3.8 GiB of peak) and the activations kept for every layer above the collected one (~4.5 GiB,
 which fewer layers per run does not shrink) are the next levers if a model needs them.
 
+**MiniCPM5-2B, the same probe (2026-11-15):** draw sd 1.1 / 0.8 / 2.1% (wild / swe / self), recall 0.8 pts; uniform /
+recipe 1.189 / 1.205 / 1.159; probe factor / control 0.864 / 0.887 / 0.859, recall -1.2 pts (within). Against its
+published 4.00 -- recipe plus the full blend (218 own-voice rows and the calibration factor, 50/50), scored on the same
+traces -- the full blend beats the control by 0.822 / 0.775 / 0.836 and the probe factor by 0.952 / 0.875 / 0.973, at
+-1.0 pts recall. The probe factor is a lower bound on YAQA's gain, not an estimate: the calibration half of the blend
+carries the documents, tool results and loops swe resembles, which a 60-row own-voice factor lacks, and the shortfall
+is largest there (12.5% on swe). Enough for an on/off call -- a probe that clears the noise means the real factor does
+by more -- not for sizing the gain. The published ladder has no lottery to exploit and nothing the probe would change.
+
 
 ## Moved from TODO.md (2026-11-05)
 
