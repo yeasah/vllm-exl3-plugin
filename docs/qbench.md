@@ -1552,6 +1552,29 @@ swe qbench time per card. 800 sessions resolve rows, not draws: a reseeded 4.00 
 comparison on this model needs several conversions per arm. Three plain draws read 0.927, 1.015 and 1.002 of the
 baseline on swe800: the 0.927 above was the lucky one, and calibration's swe gain over draws is ~2%.
 
+## Recall for models that hedge (2026-11-15)
+
+The recall slice refused any model with under 300 confident questions (P >= 0.7). Qwen3.5-2B knows more answers than
+MiniCPM5-2B (2,025 against 1,628) but holds them loosely -- a median top-1 probability of 0.18 at the answer, its
+commonest guess "John" -- so 172 confident questions survived the caps and its card showed no recall. Scored anyway:
+
+| known facts by band | sure | firm | leaning | shaky | barely |
+|---|---|---|---|---|---|
+| MiniCPM5-2B | 42% | 17% | 16% | 14% | 12% |
+| Qwen3.5-2B | 15% | 22% | 17% | 19% | 28% |
+
+| kept, weighted by each model's own profile | 3.00 | 3.50 | 4.00 | 5.00 |
+|---|---|---|---|---|
+| MiniCPM5-2B | 0.742 | 0.791 | 0.867 | 0.926 |
+| Qwen3.5-2B | 0.683 | 0.799 | 0.887 | 0.954 |
+
+Within each model, the weaker the hold, the faster a fact dies; band for band, though, Qwen3.5-2B keeps its shaky facts
+better (4.00: shaky 0.87, barely 0.80, against 0.76 and 0.64). Net, hedged knowledge survives as well as confident
+knowledge at 3.5 bpw and up and falls faster only where bits run out. Hedging is a valid strategy, and the slice already
+measured it: its below-bar group put each model's slice within 1-2 points of its profile-weighted whole. So thin is
+now the whole slice (under 300 selected), a band under 30 questions is left off the plot, and the card states the
+reference's knowledge profile (`recall_select.py`, `recall_section`).
+
 ## Recall for a model that cannot stop thinking (2026-11-14)
 
 LFM2.5-8B-A1B's template has no thinking switch and the model opens every turn with `<think>` (all 337 responses
