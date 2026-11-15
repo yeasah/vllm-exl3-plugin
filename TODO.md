@@ -363,9 +363,24 @@ collision ([docs/calibration.md](docs/calibration.md), [docs/qbench.md](docs/qbe
 draws spread 0.86-1.14 on agent sessions. A user gets one draw, so the published one is a lottery ticket on exactly the
 slice the agentic-weighted composites lean on, and single-draw arm comparisons there cannot resolve 5-10% effects.
 
-**Open:** how many draws a rung affords (each is a full conversion), whether picking the best draw on held-out swe
-overfits it, and whether a calibration that narrows the spread (the agent slice is the first candidate) beats paying
-for draws.
+**Evidence so far (2026-11-15):** on swe the draw is worth about as much as the most extreme calibration: plain's best
+of three draws (0.833 of the baseline) matches an all-agent calibration's mean (0.831), which costs 10-24% on every
+other slice; draws cost nothing elsewhere (wild within ~1%). The draw ranking held across independent traces: draw 0
+best on both the stripped swe800 and the kept-reasoning swe200 (different sessions and format), by a wide margin.
+
+**Shape (the user's, 2026-11-15):**
+- *A probe before the pipeline,* the same orchestrator as `yaqa-probe` and a recipe probe: N draws at a mid rate,
+  scored on a low-noise eval that shows the lottery, reported as draw spread beside the estimated YAQA and recipe
+  gains -- one snapshot for the on/off calls on draws, YAQA and recipes. Mechanical; can live outside `quant.py`.
+- *Ladder draws per rung:* `quantize --draws N` makes one rung's N draws on the usual schedule, then a narrowed qbench
+  picks the winner and the losers are deleted before the next rung: N + M quants of disk, not N x M (over half a
+  terabyte for a ~35B ladder), with quantize's scheduling mostly intact and no qbench inside quantize.
+- *Selection on a held-out trace* (another seed's swe sessions, with wild as a guard), never the card's scored trace,
+  so the published number carries no winner's curse; the chosen draw's seed offset is already in its
+  `quantization_config.json`.
+
+**Open:** how many draws a rung affords, and whether the cross-trace ranking holds at more than three draws (a fourth
+and fifth plain draw on both traces is the cheap test).
 
 ## Loose ends
 
