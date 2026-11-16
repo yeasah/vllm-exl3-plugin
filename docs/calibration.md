@@ -870,7 +870,8 @@ baseline with 90% row-bootstrap intervals:
 - **The agent slice neither narrows it nor moves the mean**: agent / plain 0.981 [0.92, 1.05]. Its tighter
   bunching on the stripped trace was chance. That closes the agent slice on this model.
 - **Rows are not the limit; draws are.** At ~7% sd per draw, comparing two calibrations at +-5% on swe takes 6-8
-  draws per arm; 800 sessions would only narrow the row interval. TODO.md `multi-draw`.
+  draws per arm; 800 sessions would only narrow the row interval. (Mostly draw x trace interaction, it turned out:
+  "A draw's swe rank does not transfer" below.)
 - **Draws do not close the gap to the analogs.** The same three plain draws on the synthetic slices, mean (range):
   self 0.837 (1.1%), ctx_ml 0.742 (1.0%), wild 0.796 (1.2%), ctx_user 0.732 (2.9%), long loop 0.742 (5.1%), loop
   0.750 (6.1%), ctx_tool 0.752 (6.7%) -- against swe's 0.909 (14.2%). Calibration's mean gain is still ~16 points
@@ -905,7 +906,7 @@ well-formed), three draws, never for release:
 Content moves swe's command tokens -- the model's own acting -- and barely its thinking, where most of the gap is;
 even this probe leaves swe at 0.83, behind every analog under the plain mix, and costs every other slice 10-24% (own
 voice worse than uncalibrated). The best of plain's three draws (0.833) matches the probe's mean: on swe the draw is
-worth as much as the most extreme calibration, at no cost elsewhere (TODO.md `multi-draw`).
+worth as much as the most extreme calibration, at no cost elsewhere -- on this trace (it does not transfer: below).
 
 **Neither half of a session carries it (2026-11-15).** The probe's sessions split into two all-agent calibrations,
 three draws each: the agent's own turns with every tool result stubbed, and the tool results alone as plain text.
@@ -922,7 +923,31 @@ interval, and the all-agent arm's 0.823 leaned on one draw (0.593; its others 0.
 few percent with own turns or whole sessions and get worse on tool outputs alone. Every variant costs 14-35% elsewhere.
 So the most in-distribution calibration available buys ~9% on swe at a heavy general cost, and no part of it isolates
 into a content kind worth adding to the mix: for this model's swe, more and better analogs is the wrong tree. Draws
-(a 14% spread) and bits are the levers.
+(a 14% spread) and bits are the levers. *(Draws are not: see the next section. Bits are the lever.)*
+
+**A draw's swe rank does not transfer (2026-11-15).** The question a multi-draw pipeline rests on: does a draw that
+scores well on one set of real sessions score well on others? Five plain 4.00 draws (seed offsets 0, 1, 2, 5, 6) on two
+kept-reasoning swe200 traces whose repositories do not overlap (A, the trace above; B, seed 2 with A's repositories
+excluded; B's floor is twice A's), and wild. Excess over the five draws' mean:
+
+| | d0 | d1 | d2 | d5 | d6 | sd |
+|---|---|---|---|---|---|---|
+| swe A | **0.935** | 1.005 | 0.999 | 1.032 | 1.029 | 3.9% |
+| swe B | 1.014 | 0.952 | **0.937** | 1.054 | 1.042 | 5.3% |
+| wild | 0.994 | 1.005 | 1.001 | 0.992 | 1.007 | 0.7% |
+
+- **The winner does not carry over.** A's best draw is slightly worse than average on B (1.014); B's best is exactly
+  average on A (0.999). The traces' draw scores correlate at 0.22.
+- **Most of the lottery belongs to the trace.** By covariance, ~2.1% sd is the draw's own and shows on both (d5 and
+  d6 bottom on both); 3-5% is draw x trace interaction -- instrument noise that happens to move with the seed. The
+  earlier "held across independent traces" (draw 0 best on swe800 and swe200) was on overlapping sessions.
+- **wild cannot select either**: its draws sit within 0.7%.
+
+So the swe draw spread measured above is mostly not a property of the artifact. It is still the right yardstick for
+comparing two arms on one trace (an arm's draws average the interaction out, as a second trace would), but best-of-N
+on swe buys nothing at 200 sessions: five draws could win at most ~2.4% from the shared part, and only with a
+selection trace whose own noise sits well under that -- on the order of 800 sessions, kept-reasoning. No multi-draw
+ladder; `quantize --draws` and `probe.py` stay, for yardsticks and the YAQA/recipe gate.
 
 ## Converter internals worth knowing
 

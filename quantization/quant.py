@@ -3440,7 +3440,8 @@ def do_quantize(job, args):
     offsets = None
     if args.draws > 1:
         # Several sign draws of each rung, `<rev>-d0` .. `-d{N-1}` at seed offsets 0 .. N-1, dealt to the GPUs with the rest
-        # (TODO multi-draw): the lottery on agentic content is worth measuring or choosing from, and a probe wants them
+        # for yardsticks and probe.py: a draw's swe rank does not transfer between session sets, so they are measured,
+        # not chosen from (docs/calibration.md, "A draw's swe rank does not transfer")
         if os.environ.get("EXL3_SEED_IDX_OFFSET"):
             print("=== --draws sets each draw's EXL3_SEED_IDX_OFFSET itself; unset it ==="); return False
         specs = [(f"{rev}-d{k}", bits, headbits) for rev, bits, headbits in specs for k in range(args.draws)]
@@ -3600,7 +3601,7 @@ def main():
                               help='appended to every revision name (e.g. 4.00bpw-rcp), to keep variants apart')
     cmd_quantize.add_argument('--draws', type=int, default=1,
                               help="sign draws per rung: each becomes <rev>-d0 .. -d{N-1} at seed offsets 0 .. N-1, dealt to "
-                                   "the GPUs like any other conversion (probe.py; TODO multi-draw)")
+                                   "the GPUs like any other conversion (probe.py's draw-noise yardstick)")
     cmd_quantize.add_argument('--yaqa', default=True, action=argparse.BooleanOptionalAction,
                               help="two-sided LDLQ with `yaqa`'s blended output factor when it exists (default); "
                                    "--no-yaqa converts one-sided as before")

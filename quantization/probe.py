@@ -7,7 +7,8 @@ Builds, at one rate (default 4.00):
   - with --yaqa, a rung converted against `yaqa --probe`'s factor at offset 0 (its control is draw 0),
 then scores them with one restricted qbench and reports each slice's excess KLD, the draws' spread, and each gain
 measured against that spread. A gain smaller than what a redraw does is labelled as such: on Qwen3.6-35B-A3B's swe a
-redraw moved a 4.00 by 10-17%, as much as the most extreme calibration tried (TODO.md multi-draw, yaqa-probe).
+redraw moved a 4.00 by 10-17%, mostly draw x trace interaction (docs/calibration.md, "A draw's swe rank does not
+transfer") -- noise an arm's gain has to clear either way.
 
 Mechanical by design: it only drives `quant.py quantize`, `yaqa --probe` and `qbench`, and every step is skipped when
 its output exists, so a rerun picks up where one stopped. With --yaqa the factor is collected first, on every GPU;

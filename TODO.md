@@ -364,36 +364,6 @@ cards show little sign of it (1-4 malformed turns of ~150, floors at wild's), so
 agent slice), then Qwen3.8-27B and Ornith-1.5-9B (agentic-weighted composites), then MiniCPM5-2B (cheap). A rerun
 moves the old `eval_swe.json` aside: eval-traces reuses a trace that exists.
 
-## `multi-draw` — Cards and decisions that see the sign-draw lottery
-
-**Outcome:** the pipeline converts a rung more than once (sign-draw offsets), scores the draws, and either publishes
-the best on its scored slices or reports the spread -- and arm comparisons on draw-sensitive slices use several draws
-per arm by construction.
-
-**Why:** on Qwen3.6-35B-A3B's swe a redraw moves a 4.00 by 10-17% (wild: ~1%), on traces with and without the format
-collision ([docs/calibration.md](docs/calibration.md), [docs/qbench.md](docs/qbench.md)); the 27B's default-calibration
-draws spread 0.86-1.14 on agent sessions. A user gets one draw, so the published one is a lottery ticket on exactly the
-slice the agentic-weighted composites lean on, and single-draw arm comparisons there cannot resolve 5-10% effects.
-
-**Evidence so far (2026-11-15):** on swe the draw is worth about as much as the most extreme calibration: plain's best
-of three draws (0.833 of the baseline) matches an all-agent calibration's mean (0.831), which costs 10-24% on every
-other slice; draws cost nothing elsewhere (wild within ~1%). The draw ranking held across independent traces: draw 0
-best on both the stripped swe800 and the kept-reasoning swe200 (different sessions and format), by a wide margin.
-
-**Shape (the user's, 2026-11-15):**
-- *A probe before the pipeline,* the same orchestrator as `yaqa-probe` and a recipe probe: N draws at a mid rate,
-  scored on a low-noise eval that shows the lottery, reported as draw spread beside the estimated YAQA and recipe
-  gains -- one snapshot for the on/off calls on draws, YAQA and recipes. Mechanical; can live outside `quant.py`.
-- *Ladder draws per rung:* `quantize --draws N` makes one rung's N draws on the usual schedule, then a narrowed qbench
-  picks the winner and the losers are deleted before the next rung: N + M quants of disk, not N x M (over half a
-  terabyte for a ~35B ladder), with quantize's scheduling mostly intact and no qbench inside quantize.
-- *Selection on a held-out trace* (another seed's swe sessions, with wild as a guard), never the card's scored trace,
-  so the published number carries no winner's curse; the chosen draw's seed offset is already in its
-  `quantization_config.json`.
-
-**Open:** how many draws a rung affords, and whether the cross-trace ranking holds at more than three draws (a fourth
-and fifth plain draw on both traces is the cheap test).
-
 ## Loose ends
 
 *Small residue of retired items: a line each, done when convenient.*
@@ -417,6 +387,7 @@ and fifth plain draw on both traces is the cheap test).
 
 *One line each, newest first. Prune to ~10 when appending; the cut of 2026-11-05 exceeds that for one window, so stale references still land.*
 
+- `multi-draw` — closed 2026-11-15: a draw's swe rank does not transfer across disjoint session sets (winners land at the other trace's mean), so there is no draw to select; `quantize --draws` and `probe.py` remain for yardsticks and the YAQA/recipe gate; reopen only with a much larger kept-reasoning selection trace; see [docs/calibration.md](docs/calibration.md) "A draw's swe rank does not transfer".
 - `blockq-on-load` — closed 2026-11-05: on-load blockq is the default with an LRU-capped cache, and the pipeline emits trellis embeddings (`-eb`); see [docs/embeddings.md](docs/embeddings.md).
 - `repair-tool` — closed 2026-11-05: `tools/quantize_embedding.py` repairs published checkpoints (`--sidecar`, `--trellis K`); on-load blockq makes it optional; see [docs/embeddings.md](docs/embeddings.md).
 - `exl3-metadata` — closed 2026-11-05: see [docs/format-and-loading.md](docs/format-and-loading.md).
