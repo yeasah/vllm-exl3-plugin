@@ -2110,6 +2110,91 @@ def qbench_canary(job, args, revisions, baseline, slots, script):
     print(f"=== qbench canary passed: {rev} at {ratio:.3f} of {base}'s excess on wild (bound {bound:.3f}) ===")
     return True
 
+def job_in_use(job):
+    """Other processes running against this job: a quant.py on its model, or anything (qbench, convert.py) whose
+    command line names the job directory."""
+    # Not this process or its ancestors: the shell that ran `quant.py clean` names the job in its own command line
+    mine, pid = set(), os.getpid()
+    while pid > 1 and pid not in mine:
+        mine.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    found = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) in mine:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = f.read().decode(errors="replace").split("\0")
+        except OSError:
+            continue
+        line = " ".join(argv)
+        if f"/{job.name}/" in line or f"/{job.name} " in line + " " or \
+                (any(a.endswith("quant.py") for a in argv) and job.base_repo in argv):
+            found.append((int(pid), line[:160]))
+    return found
+
+def do_clean(job, args):
+    """After a ladder is published: remove what the job keeps that costs nothing to rebuild and was never
+    uploaded -- the blended YAQA factor (re-averaged from its inputs by `yaqa`), the probe's factor and arms
+    (main/probe.json stays), the upload staging copy, and conversion work directories beside finished rungs.
+    --factors also removes the collected YAQA factors (a cloud pass each on a large model), --logits the reference
+    logit cache (a bf16 pass per slice). A dry run, with sizes, unless --yes; refused while a process is running
+    against the job."""
+    def size(p):
+        if os.path.isfile(p):
+            return os.lstat(p).st_size
+        total = 0
+        for root, _, files in os.walk(p):
+            for f in files:
+                try:
+                    total += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    pass
+        return total
+    targets = []
+    def add(path, why):
+        if os.path.lexists(path):
+            targets.append((path, why))
+    add(os.path.join(job.hess, "blend"), "blended YAQA factor (yaqa re-blends it from cal and ownvoice)")
+    add(os.path.join(job.hess, YAQA_PROBE), "probe's YAQA factor")
+    for rev in sorted(os.listdir(job.dir)) if os.path.isdir(job.dir) else []:
+        if re.search(r"-probe(-|$)", rev) and os.path.isdir(os.path.join(job.dir, rev)):
+            add(os.path.join(job.dir, rev), "probe arm (main/probe.json keeps its result)")
+    add(os.path.join(job.dir, "_upload_main"), "upload staging copy")
+    for rev in job.revisions():
+        if job.is_complete(rev):
+            add(os.path.join(job.revdir(rev), "_work"), f"conversion work directory of finished {rev}")
+    for rev in job.baseline_revisions():
+        add(os.path.join(job.baseline, f"_work-{rev}"), f"conversion work directory of finished baseline {rev}")
+    if os.path.isfile(os.path.join(job.generator, "quantization_config.json")):
+        add(os.path.join(job.traces, "_work-gen"), "conversion work directory of the finished generator")
+    if args.factors:
+        for name in ("cal", "ownvoice"):
+            add(os.path.join(job.hess, name), f"collected YAQA factor '{name}' (expensive to rebuild)")
+    if args.logits:
+        add(logit_cache_dir(job, args), "reference logit cache (a bf16 pass per slice to rebuild)")
+    if not targets:
+        print("=== nothing to clean ==="); return True
+    sizes = [size(p) for p, _ in targets]
+    for (p, why), b in zip(targets, sizes):
+        print(f"   {b / 2**30:8.2f} GiB  {os.path.relpath(p, job.dir)}  -- {why}")
+    print(f"   {sum(sizes) / 2**30:8.2f} GiB in all")
+    if not args.yes:
+        print("=== dry run: --yes removes them ==="); return True
+    busy = job_in_use(job)
+    if busy:
+        for pid, line in busy:
+            print(f"!! pid {pid}: {line}")
+        print("=== clean refused: processes are running against this job ==="); return False
+    for p, _ in targets:
+        shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+    print(f"=== removed {sum(sizes) / 2**30:.2f} GiB ===")
+    return True
+
 def do_compare(job, args):
     """A table of scored revisions from main/qb_<slice>.json, for exploring variants: per slice,
     excess KLD as a share of the uncalibrated baseline at the same rate (log-interpolated
@@ -3886,6 +3971,17 @@ def main():
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
     cmd_qbench.set_defaults(func=do_qbench)
+
+    cmd_clean = subparsers.add_parser('clean', help="after publishing: remove what costs nothing to rebuild (blended "
+                                      "YAQA factor, probe leftovers, staging and work directories); a dry run "
+                                      "unless --yes")
+    cmd_clean.add_argument('--yes', action='store_true', help='remove them; without it, only list them with sizes')
+    cmd_clean.add_argument('--factors', action='store_true',
+                           help="also the collected YAQA factors (cal, ownvoice): a factor pass each to rebuild")
+    cmd_clean.add_argument('--logits', action='store_true',
+                           help="also the reference logit cache: a bf16 pass per slice to rebuild")
+    cmd_clean.add_argument('--logit-cache', default=None, help=argparse.SUPPRESS)
+    cmd_clean.set_defaults(func=do_clean)
 
     cmd_compare = subparsers.add_parser('compare', help="table of scored revisions: per slice and composite, against the "
                                          "uncalibrated baseline or a --base revision (for exploring variants)")
