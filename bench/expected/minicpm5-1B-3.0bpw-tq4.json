@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "8762d12",
-   "head": "8762d12dd0",
+   "describe": "2dbc8ab",
+   "head": "2dbc8aba70",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -35,8 +35,8 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-100-g4bff9eb2",
-   "head": "4bff9eb21b",
+   "describe": "v1.6.4-110-g0705af6f",
+   "head": "0705af6f83",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,48 +46,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmp3mwn_vie/caches/exllamav3_autotune",
+   "path": "/tmp/tmpr1hn0zmn/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8400,
-   "mtime": 1794278913
+   "mtime": 1794808146
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmp3mwn_vie/caches/vllm",
+   "path": "/tmp/tmpr1hn0zmn/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 9,
-   "bytes": 2818067,
-   "mtime": 1794278872
+   "bytes": 2818158,
+   "mtime": 1794808105
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmp3mwn_vie/caches/triton",
+   "path": "/tmp/tmpr1hn0zmn/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 449,
-   "bytes": 11997401,
-   "mtime": 1794278930
+   "files": 473,
+   "bytes": 12776382,
+   "mtime": 1794808163
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmp3mwn_vie/caches/flashinfer",
+   "path": "/tmp/tmpr1hn0zmn/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6291829,
-   "mtime": 1794278949
+   "mtime": 1794808183
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "53",
+    "temperature.gpu": "49",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "25.30 W",
+    "power.draw": "24.99 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -96,10 +96,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "31",
+    "temperature.gpu": "28",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.90 W",
+    "power.draw": "9.72 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
@@ -1939,10 +1939,10 @@
   }
  ],
  "tune_drift": null,
- "weight_gib": 0.52,
+ "weight_gib": 0.41,
  "attn_backend": [
   "FLASH_ATTN",
   "TURBOQUANT"
  ],
- "kv_cache_gib": 11.88
+ "kv_cache_gib": 11.98
 }
