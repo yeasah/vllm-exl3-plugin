@@ -10,6 +10,8 @@ import glob as globmod
 import subprocess
 import shutil
 import datetime
+import signal
+import threading
 import time
 import yaml
 from jinja2 import Environment, FileSystemLoader
@@ -2098,6 +2100,40 @@ class Stamped:
     def __getattr__(self, name):
         return getattr(self._s, name)
 
+# Children run in their own sessions, so the terminal's Ctrl-C reaches only us, and we pass it on: left to the
+# terminal, the batch's worker threads (not daemons) outlived the interrupted main thread, counted each
+# interrupted child as a failed attempt, and started its retry -- or the next task -- with nothing left to stop it.
+_STOP = threading.Event()
+_LIVE, _LIVE_LOCK = set(), threading.Lock()
+
+def stop_children(grace=60):
+    """No child starts from here on; each live one's process group gets SIGINT (what the terminal would have
+    sent: it lets a nested quant.py stop its own children the same way), then SIGTERM, then SIGKILL, each
+    stage only while anything in the group is left."""
+    with _LIVE_LOCK:
+        _STOP.set()
+        procs = list(_LIVE)
+    def alive(p):
+        p.poll()                                 # reap the leader, so a dead group reads as gone
+        try:
+            os.killpg(p.pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+    for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, 15), (signal.SIGKILL, 5)):
+        left = [p for p in procs if alive(p)]
+        if not left:
+            return
+        print(f"=== interrupted: {signal.Signals(sig).name} to {len(left)} child process group(s) ===", flush=True)
+        for p in left:
+            try:
+                os.killpg(p.pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + wait
+        while time.time() < deadline and any(alive(p) for p in left):
+            time.sleep(0.2)
+
 def run_logged(cmd, log_path, env=None, echo=True):
     """Run cmd, echoing its output to the terminal and appending it to log_path.
 
@@ -2111,15 +2147,23 @@ def run_logged(cmd, log_path, env=None, echo=True):
     with open(log_path, "ab") as log:
         log.write(f"\n=== {stamp()} {' '.join(cmd)}\n".encode())
         log.flush()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                env=None if env is None else {**os.environ, **env})
-        while chunk := os.read(proc.stdout.fileno(), 65536):
-            if echo:
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-            log.write(chunk)
-            log.flush()
-        rc = proc.wait()
+        with _LIVE_LOCK:                         # checked and registered together: stop_children misses none
+            if _STOP.is_set():
+                return 130
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+                                    env=None if env is None else {**os.environ, **env})
+            _LIVE.add(proc)
+        try:
+            while chunk := os.read(proc.stdout.fileno(), 65536):
+                if echo:
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                log.write(chunk)
+                log.flush()
+            rc = proc.wait()
+        finally:
+            with _LIVE_LOCK:
+                _LIVE.discard(proc)
         dt = time.time() - t0
         took = f"{dt / 60:.1f} min" if dt >= 60 else f"{dt:.0f} s"
         log.write(f"\n=== {stamp()} exit {rc} after {took}\n".encode())
@@ -2130,6 +2174,8 @@ def run_until(output, cmd, log_path, tries, env=None, cleanup=None, echo=True):
     for attempt in range(1, tries + 1):
         if os.path.exists(output):
             return True
+        if _STOP.is_set():
+            break
         if attempt > 1:
             print(f"=== ATTEMPT {attempt} of {tries} for {output} ===")
             if cleanup:
@@ -2208,7 +2254,7 @@ def run_jobs(tasks, slots, what):
     def lane(g, items):                          # one of this GPU's slots: take its next task in turn
         while True:
             with lock:
-                if not items:
+                if not items or _STOP.is_set():
                     return
                 task = items.pop(0)
             run(g, task)
@@ -3689,4 +3735,8 @@ def main():
     sys.exit(0 if ok is not False else 1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        stop_children()
+        raise SystemExit(130)

@@ -19,11 +19,14 @@ import argparse, json, os, re, shlex, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUANT = os.path.join(HERE, "quant.py")
+LOG = os.devnull            # each quant.py step keeps its own logs
+sys.path.insert(0, HERE)
+import quant                # its child handling: own sessions, and Ctrl-C passed on to them
 
 
 def run(cmd, env=None):
     print("=== " + " ".join(cmd), flush=True)
-    rc = subprocess.call(cmd, cwd=HERE, env={**os.environ, **(env or {})})
+    rc = quant.run_logged(cmd, LOG, {**(env or {}), "PYTHONUNBUFFERED": "1"})   # own session: Ctrl-C is ours to pass on
     if rc:
         raise SystemExit(f"=== failed ({rc}): {' '.join(cmd)}")
 
@@ -186,4 +189,9 @@ if __name__ == "__main__":
     a = p.parse_args()
     if not a.model or "/" not in a.model:
         raise SystemExit("-m takes the base model's repo id, as quant.py does")
-    main(a)
+    os.chdir(HERE)          # quant.py's paths (work/, ../deps/exllamav3) are relative to it
+    try:
+        main(a)
+    except KeyboardInterrupt:
+        quant.stop_children()
+        raise SystemExit(130)
