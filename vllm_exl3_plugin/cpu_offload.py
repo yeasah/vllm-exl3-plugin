@@ -310,13 +310,11 @@ def embed_on_host() -> bool:
 HOST_ROW_ALIGN = 64
 
 
-def host_resident(t: torch.Tensor, label: str) -> torch.Tensor:
+def host_resident(t: torch.Tensor) -> torch.Tensor:
     """`t` (on CPU, row-indexed) copied once into pinned host memory, returned as the UVA view kernels index.
-    Rows come back padded to `HOST_ROW_ALIGN` bytes: a gather takes `[:, :t.shape[1]]` of what it selects
-    (`trim_rows`)."""
+    Rows come back padded to `HOST_ROW_ALIGN` bytes: a gather cuts what it selects back to the stored width."""
     t = t.contiguous()
     if t.dim() == 2:
-        # only rows wider than the alignment: a narrow row (blockq's 8-byte ranges) is one read either way
         row = t.shape[1] * t.element_size()
         pad = (-row % HOST_ROW_ALIGN) // t.element_size() if row > HOST_ROW_ALIGN and HOST_ROW_ALIGN % t.element_size() == 0 else 0
         if pad:
@@ -324,17 +322,32 @@ def host_resident(t: torch.Tensor, label: str) -> torch.Tensor:
     host = _pinned(t.shape, t.dtype)
     _host_copy(host, t)
     drain_host_copies()
-    nbytes = host.numel() * host.element_size()
-    _STATS["embed_host_bytes"] = _STATS.get("embed_host_bytes", 0) + nbytes
-    logger.info("Token embedding %s on host: %.2f GiB pinned, read over UVA (EXL3_EMBED_HOST=0 keeps it in VRAM)", label, nbytes / (1 << 30))
     return get_accelerator_view_from_cpu_tensor(host)
 
 
-def trim_rows(rows: torch.Tensor, cols: int | None) -> torch.Tensor:
-    """Selected rows of a `host_resident` table, cut back to its stored width (a no-op for one never padded)."""
-    if cols is None or rows.shape[-1] == cols:
-        return rows
-    return rows[..., :cols].contiguous()
+def place_embedding(tensors: dict[str, torch.Tensor], label: str) -> dict[str, torch.Tensor]:
+    """An embedding's row-indexed tensors (on CPU, as `place` kept them), placed: on host the ones whose rows are
+    wider than `HOST_ROW_ALIGN`, in VRAM the rest. A narrow row (blockq's 16-byte ranges, 4 MiB in all) costs a
+    link round trip per token for no saving; the wide ones (the table, blockq's 30-76 MiB of scales) move at the
+    link's rate. Measured both ways: keeping the scales in VRAM too saved 1-10 us a lookup (2026-11-16)."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    out, hosted, kept = {}, [], []
+    for name, t in tensors.items():
+        if t[0].numel() * t.element_size() > HOST_ROW_ALIGN:
+            out[name] = host_resident(t)
+            hosted.append((name, t.numel() * t.element_size()))
+        else:
+            out[name] = t.to(device)
+            kept.append(name)
+    nbytes = sum(n for _, n in hosted)
+    _STATS["embed_host_bytes"] = _STATS.get("embed_host_bytes", 0) + nbytes
+    if hosted:
+        logger.info(
+            "Token embedding %s on host: %.2f GiB pinned (%s), read over UVA%s (EXL3_EMBED_HOST=0 keeps it in VRAM)",
+            label, nbytes / (1 << 30), ", ".join(n for n, _ in hosted),
+            f"; {', '.join(kept)} in VRAM" if kept else "",
+        )
+    return out
 
 
 class HostBlock:

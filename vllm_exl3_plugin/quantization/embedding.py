@@ -371,7 +371,9 @@ class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
         table = torch.nn.functional.pad(table, (0, 0, 0, target - table.shape[0]))
         layer.et_row_words = table.shape[1]
         if params["et_table"].exl3_host:
-            table = cpu_offload.host_resident(table, f"{getattr(layer, 'prefix', '') or 'embed_tokens'} (trellis)")
+            table = cpu_offload.place_embedding(
+                {"et_table": table}, getattr(layer, "prefix", "") or "embed_tokens"
+            )["et_table"]
 
         layer.register_parameter("et_table", Parameter(table, requires_grad=False))
         layer.register_parameter("et_signs", Parameter(signs, requires_grad=False))
@@ -544,9 +546,9 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
             }
 
         layer.bq_widths = tuple(stored[n].shape[-1] for n in names)
+        if any(params[name].exl3_host for name in stored):
+            stored = cpu_offload.place_embedding(stored, self.embed_prefix or "embed_tokens")
         for name, t in stored.items():
-            if params[name].exl3_host:
-                t = cpu_offload.host_resident(t, f"{self.embed_prefix or 'embed_tokens'}.{name}")
             layer.register_parameter(name, Parameter(t, requires_grad=False))
         for param in params.values():
             param.release()
