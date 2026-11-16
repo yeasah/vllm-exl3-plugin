@@ -1003,9 +1003,9 @@ def stage_main(job, fetched):
     stage = os.path.join(job.dir, "_upload_main")
     shutil.rmtree(stage, ignore_errors=True)
     # not published: qbench project files (local paths), part files, exploration rows kept for the
-    # record, and screening results on sampled slices (qb_<slice>.s<N>.json)
+    # record, screening results on sampled slices (qb_<slice>.s<N>.json), and the canary's pair and verdict
     shutil.copytree(job.main, stage, ignore=shutil.ignore_patterns("qbench-*.yaml", "_qbench_parts", "_exploration_*",
-                                                                   "qb_*.s[0-9]*.json"))
+                                                                   "qb_*.s[0-9]*.json", "_qb_canary.json", "canary.json"))
     original = os.path.join(job.dir, FETCHED_REFERENCE)
     if fetched and os.path.isfile(original):
         shutil.copyfile(original, os.path.join(stage, "reference.json"))
@@ -3493,6 +3493,51 @@ def do_quantize(job, args):
                       device_slots(args.device), "QUANTIZE")
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
+#: Outside the EXL3_/VLLM_ prefixes, the variables a run's record keeps: device choice, allocator, Hub cache and mode
+RECORDED_ENV = ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "PYTORCH_CUDA_ALLOC_CONF", "HF_HOME", "HF_HUB_CACHE",
+                "HF_HUB_OFFLINE")
+
+def invocation(argv):
+    """This run as a record: the command line, the plugin's commit (marked when its tree is dirty), and the
+    environment variables that change what quant.py or its children do."""
+    import shlex
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        head = subprocess.check_output(["git", "-C", here, "rev-parse", "--short", "HEAD"], text=True,
+                                       stderr=subprocess.DEVNULL).strip()
+        dirty = subprocess.call(["git", "-C", here, "diff", "--quiet", "HEAD"], stderr=subprocess.DEVNULL) != 0
+    except (OSError, subprocess.CalledProcessError):
+        head, dirty = None, False
+    # An allowlist, and never a credential: a prefix sweep took HF_TOKEN along (2026-11-16)
+    env = {k: v for k, v in os.environ.items()
+           if (k.startswith(("EXL3_", "VLLM_")) or k in RECORDED_ENV)
+           and not re.search(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH", k)}
+    return {"at": datetime.datetime.now().replace(microsecond=0).isoformat(), "cwd": os.getcwd(),
+            "command": shlex.join(["python3", "quant.py", *argv]), "argv": argv,
+            "plugin": head and head + ("-dirty" if dirty else ""), "env": env}
+
+def record_command(job, rec, ok):
+    """Every quant.py run on a job, appended to <job>/commands.jsonl: how a rung, a trace or a score came to be is
+    otherwise only in the logs, and a qbench line with its references, thresholds and GGUF quants is not
+    reconstructible from them. Skipped when the job directory does not exist (a mistyped -m)."""
+    if os.path.isdir(job.dir):
+        with open(os.path.join(job.dir, "commands.jsonl"), "a") as f:
+            f.write(json.dumps({**rec, "ok": ok}) + "\n")
+
+def write_qbench_script(job, rec):
+    """<job>/qbench.sh: the last full qbench series that succeeded, as a script that reruns it (a rescore after a
+    scorer or reference change). Subset runs (--revisions, --slices) only go to commands.jsonl. Beside main/, not
+    in it: main/ is published, and this holds local paths."""
+    import shlex
+    env = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(rec["env"].items()))
+    path = os.path.join(job.dir, "qbench.sh")
+    with open(path, "w") as f:
+        f.write(f"#!/bin/sh\n# The last full qbench series on this job that succeeded: {rec['at']}, plugin {rec['plugin']}.\n"
+                f"# Every quant.py run on the job is in commands.jsonl beside this.\n"
+                f"cd {shlex.quote(rec['cwd'])} || exit 1\n"
+                f"exec {'env ' + env + ' ' if env else ''}{rec['command']}\n")
+    os.chmod(path, 0o755)
+
 def main():
     parser = argparse.ArgumentParser(description="EXL3 quantization pipeline. Usual order: baseline, eval-traces, cal-traces, "
                                      "measure, (yaqa-traces, yaqa), quantize, qbench, card, upload")
@@ -3784,8 +3829,14 @@ def main():
         sys.exit(f"{os.path.dirname(fetched)} was made by `fetch` from the published repo and holds no weights: "
                  "only card, upload (main only) and fetch run there")
     sys.stdout = Stamped(sys.stdout)       # after parsing: --help and usage errors stay unstamped
-    ok = args.func(Job(args), args)
-    sys.exit(0 if ok is not False else 1)
+    job, rec, ok = Job(args), invocation(sys.argv[1:]), False
+    try:
+        ok = args.func(job, args) is not False
+    finally:
+        record_command(job, rec, ok)
+    if ok and args.func is do_qbench and not (args.revisions or args.slices):
+        write_qbench_script(job, rec)
+    sys.exit(0 if ok else 1)
 
 if __name__ == "__main__":
     try:
