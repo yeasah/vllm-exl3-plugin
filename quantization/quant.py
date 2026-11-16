@@ -38,8 +38,8 @@ class Job:
         # --uncalibrated` puts it (and the generator) in a separate repo, `fetch --uncalibrated`
         # brings them back
         self.baseline = os.path.join(self.dir, "_baseline")
-        # The calibration generator, an uncalibrated 8bpw: built by `baseline` (or by `traces` if
-        # missing), used by `traces`
+        # The calibration generator, an uncalibrated 8bpw: built by `baseline` (or by `cal-traces` if
+        # missing), used by `cal-traces`
         self.generator = os.path.join(self.traces, "gen-8bpw-uncal")
         self.uncal_repo = f"{self.repo}-uncalibrated"
         # Per-tensor sensitivity measurements from `measure`: two ends of the recipe's measurement
@@ -1440,7 +1440,7 @@ Wikipedia text apply to the files that contain it, not to the model weights.
 | `eval_ctx_user.json`, `eval_ctx_tool.json`, `eval_ctx_ml.json`, `eval_loop.json` | the diagnostic evals: held-out documents in a user turn, as tool results, multilingual, and in tool-use loops, answered by the unquantized model | [stas/openwebtext-10k](https://huggingface.co/datasets/stas/openwebtext-10k) (OpenWebText, CC0), [Salesforce/wikitext](https://huggingface.co/datasets/Salesforce/wikitext) (CC BY-SA 3.0), source files of [vLLM](https://github.com/vllm-project/vllm) (Apache 2.0), Wikipedia 20231101 (CC BY-SA 3.0 / GFDL) |
 | `eval_self.json` | the diagnostic own-voice eval: prompts held out of calibration, answered by the unquantized model | the prompt list of exllamav3's `sc_trace.py` (MIT) |
 
-Built with `quantization/quant.py traces` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
+Built with `quantization/quant.py eval-traces` and `cal-traces` in [vllm-exl3-plugin](https://github.com/yeasah/vllm-exl3-plugin).
 """
 
 def publish_traces(job):
@@ -1533,7 +1533,7 @@ def do_card(job, args):
 
 def fetch_uncalibrated(job, args):
     """Populate a working job dir with the uncalibrated conversions published in <repo>-uncalibrated
-    (baseline rungs, calibration generator), so `baseline` (and `traces`) skip what is already
+    (baseline rungs, calibration generator), so `baseline` (and `cal-traces`) skip what is already
     made. Only what is missing locally is downloaded; nothing is marked FETCHED."""
     if os.path.isfile(os.path.join(job.dir, "FETCHED.json")):
         print("=== this job dir is card-only (fetched without --uncalibrated): fetch uncalibrated "
@@ -1840,7 +1840,7 @@ def do_qbench(job, args):
     missing = [sl for sl in EVAL_SLICES if not os.path.isfile(job.eval_trace(sl))]    # absent traces, not --slices
     if missing:
         print(f"=== no eval traces for {', '.join(missing)}: the card falls back to raw text "
-              f"(run `traces` first for the composite) ===")
+              f"(run `eval-traces` first for the composite) ===")
     arms = [(rev, job.revdir(rev)) for rev in revisions]
     # Existing sets of this model's quants (each grouped into ladders by branch name), and the
     # uncalibrated baseline sweep from `baseline`: section 2 of the card
@@ -2473,10 +2473,6 @@ def do_cal_traces(job, args):
         json.dump({"generator": named}, f, indent=1)
     decontaminate_self(job)
     return True
-
-def do_traces(job, args):
-    """Both trace sets: `eval-traces`, then `cal-traces`."""
-    return do_eval_traces(job, args) and do_cal_traces(job, args)
 
 def decontaminate_self(job):
     """Drop own-voice eval rows whose prompt the calibration trace also used. Calibration excludes
@@ -3179,31 +3175,44 @@ def ownvoice_row_count(job):
             rc = r.get_slice("input_ids").get_shape()[0]
     return rc
 
-def do_yaqa(job, args):
-    """Output-side Fisher factors for two-sided LDLQ: own-voice rows (eval generator), the factor on
-    them and on the calibration, and the blend `quantize` converts with. Holds the unquantized model
-    and its full backward pass (a 9B needs ~44 GB at 4 layers per run), so it runs with the traces
-    and the measurement, on a box sized for them. Each part is skipped when its output exists."""
-    if not os.path.isfile(job.cal_data):
-        print(f"=== no calibration trace at {job.cal_data}: run `traces` first ==="); return False
+def probe_rows(job):
+    return os.path.join(job.traces, f"ownvoice_{YAQA_PROBE}.safetensors")
+
+def do_yaqa_traces(job, args):
+    """The own-voice rows the YAQA output factor is collected on, through the eval generator: three self-only passes, or
+    with --probe one pass of YAQA_PROBE_ROWS for the cheap probe factor. `yaqa` collects the factors afterwards, on a box
+    that holds the unquantized model's backward pass. Skipped when the rows exist."""
     setup = trace_setup(job, args)
     if setup is None:
         return False
     path, _, _ = setup
     if args.probe:
-        # One own-voice pass, its factor alone: the YAQA arm of a probe pair (quantize --yaqa-source probe)
-        rows = os.path.join(job.traces, f"ownvoice_{YAQA_PROBE}.safetensors")
-        if not os.path.isfile(os.path.join(job.hess, YAQA_PROBE, YAQA_DONE)) and not ownvoice_rows(
-                job, args, path, eval_env(args), out_path=rows, seeds=1, rows_per_pass=YAQA_PROBE_ROWS, tag=f"ownvoice_{YAQA_PROBE}"):
-            return False
-        if not collect_hout(job, args, path, rows, os.path.join(job.hess, YAQA_PROBE), YAQA_PROBE):
+        return ownvoice_rows(job, args, path, eval_env(args), out_path=probe_rows(job), seeds=1,
+                             rows_per_pass=YAQA_PROBE_ROWS, tag=f"ownvoice_{YAQA_PROBE}")
+    # With the own-voice factor done (e.g. restored from a bucket without its rows), regenerating them would leave
+    # rows the factor was not built from
+    if os.path.isfile(os.path.join(job.hess, "ownvoice", YAQA_DONE)):
+        print("=== own-voice factor already collected: no rows needed ==="); return True
+    return ownvoice_rows(job, args, path, eval_env(args))
+
+def do_yaqa(job, args):
+    """Output-side Fisher factors for two-sided LDLQ: the factor on the own-voice rows (`yaqa-traces`) and on the
+    calibration (`cal-traces`), and the blend `quantize` converts with; with --probe, the probe factor alone. Holds the
+    unquantized model and its full backward pass (a 9B needs ~44 GB at 4 layers per run). Each part is skipped when its
+    output exists."""
+    path = job.base_snapshot()
+    if args.probe:
+        # The probe rows' factor alone: the YAQA arm of a probe pair (quantize --yaqa-source probe)
+        if not os.path.isfile(os.path.join(job.hess, YAQA_PROBE, YAQA_DONE)) and not os.path.isfile(probe_rows(job)):
+            print(f"=== no probe rows at {probe_rows(job)}: run `yaqa-traces --probe` first ==="); return False
+        if not collect_hout(job, args, path, probe_rows(job), os.path.join(job.hess, YAQA_PROBE), YAQA_PROBE):
             return False
         print(f"=== probe factor ready: quantize --yaqa-source {YAQA_PROBE} for the YAQA arm, --no-yaqa for the control ===")
         return True
-    # The rows only feed the own-voice factor: with that done (e.g. restored from a bucket without
-    # its rows), regenerating them would take minutes and leave rows the factor was not built from
-    if not os.path.isfile(os.path.join(job.hess, "ownvoice", YAQA_DONE)) and not ownvoice_rows(job, args, path, eval_env(args)):
-        return False
+    if not os.path.isfile(job.cal_data):
+        print(f"=== no calibration trace at {job.cal_data}: run `cal-traces` first ==="); return False
+    if not os.path.isfile(os.path.join(job.hess, "ownvoice", YAQA_DONE)) and not os.path.isfile(job.ownvoice):
+        print(f"=== no own-voice rows at {job.ownvoice}: run `yaqa-traces` first ==="); return False
     for name, rows in (("ownvoice", job.ownvoice), ("cal", job.cal_data)):
         if not collect_hout(job, args, path, rows, os.path.join(job.hess, name), name):
             return False
@@ -3256,7 +3265,7 @@ def embed_bits_for(bits, choice):
 def do_quantize(job, args):
     path = job.base_snapshot()
     if args.calibration == "mix" and not os.path.isfile(job.cal_data):
-        print(f"=== no calibration trace at {job.cal_data}: run `traces` first "
+        print(f"=== no calibration trace at {job.cal_data}: run `cal-traces` first "
               f"(or --calibration default for the bundled corpus) ===")
         return False
     if args.calibration == "mix":
@@ -3387,8 +3396,8 @@ def do_quantize(job, args):
     return report_failures(failed, "QUANTIZE", {rev: job.log(rev) for rev, _, _ in specs})
 
 def main():
-    parser = argparse.ArgumentParser(description="EXL3 quantization pipeline. Usual order: baseline, traces, "
-                                     "measure, quantize, qbench, card, upload")
+    parser = argparse.ArgumentParser(description="EXL3 quantization pipeline. Usual order: baseline, eval-traces, cal-traces, "
+                                     "measure, (yaqa-traces, yaqa), quantize, qbench, card, upload")
     parser.add_argument('-x', '--exllamav3dir', default='../deps/exllamav3')
     parser.add_argument('-w', '--workdir', default='work')
     parser.add_argument('-m', '--model', required=True)
@@ -3426,47 +3435,56 @@ def main():
     cmd_baseline.set_defaults(func=do_baseline)
 
 
-    def trace_args(p):
-        p.add_argument('-d', '--device', default='0',
-                       help='GPUs for the calibration generator (uncalibrated): its conversion uses the first, the '
-                            'calibration trace all of them (a large generator autosplits), e.g. 0,1')
-        p.add_argument('--eval-devices', default=None,
-                       help='CUDA_VISIBLE_DEVICES for the bf16 eval traces, and for a bf16 calibration trace (default: all visible)')
+    # Trace options in three groups, each command taking the ones it reads: what every generation takes, the eval
+    # generator (eval traces, own-voice rows, and a bf16 calibration trace), and the calibration generator
+    def trace_common_args(p):
         p.add_argument('--retries', type=int, default=2)
+        p.add_argument('--sampling-profile', default=None,
+                       help='JSON of sampling modes and per-conversation rules (default: '
+                            'quantization/sampling/<org>__<model>.json, else the base model\'s '
+                            'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
+    def eval_generator_args(p):
+        p.add_argument('--eval-devices', default=None,
+                       help='CUDA_VISIBLE_DEVICES for the eval generator (default: all visible)')
         p.add_argument('--eval-generator', default=None,
                        help='repo or path that writes the eval traces\' answers (default: the base model). '
                             'For models too large to generate from locally in bf16, the FP8 release with '
                             '--eval-backend vllm. Never an EXL3 checkpoint')
         # vLLM: substantially faster for the eval traces on TP>1 and never measurably slower
         p.add_argument('--eval-backend', default='vllm', choices=['exllamav3', 'vllm'],
-                       help='engine for the eval traces (default vllm: one engine per ctx_trace process, with --vllm-args)')
+                       help='engine for the eval generator (default vllm: one engine per ctx_trace process, with --vllm-args)')
+        p.add_argument('--vllm-args', default='{}',
+                       help='vLLM engine arguments for the eval generator, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
+                            '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')
+    def cal_generator_args(p):
+        p.add_argument('-d', '--device', default='0',
+                       help='GPUs for the uncalibrated calibration generator: its conversion uses the first, the '
+                            'calibration trace all of them (a large generator autosplits), e.g. 0,1')
         # bf16 where it fits: on Qwen3-0.6B (2026-10-23, docs/calibration.md) it ties the uncalibrated
         # generator on wild and beats it on swe by 6-8% at 3-4 bpw, against a 3% reseed spread
         p.add_argument('--generator', default='bf16', choices=['bf16', 'uncalibrated'],
-                       help="what writes the calibration trace: the eval traces' own generator and engine (default; "
-                            "needs that model to fit), or the uncalibrated 8bpw EXL3 stand-in (built if missing) "
-                            "where it does not")
+                       help="what writes the calibration trace: the eval generator and its engine (default, the "
+                            "--eval-* and --vllm-args options; needs that model to fit), or the uncalibrated 8bpw EXL3 "
+                            "stand-in (built if missing) where it does not")
         p.add_argument('--cal-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
                        help='engine for an uncalibrated-generator calibration trace; vllm uses --cal-vllm-args')
         p.add_argument('--cal-vllm-args', default='{}',
                        help='vLLM engine arguments for the uncalibrated generator, JSON; e.g. \'{"tensor_parallel_size": 1}\' '
                             'where EXL3 cannot split the model over the GPUs')
-        p.add_argument('--vllm-args', default='{}',
-                       help='vLLM engine arguments for the eval generator (and a bf16 calibration trace), JSON. '
-                            'Qwen3.8-27B-FP8 on 2x16 GB: \'{"max_num_batched_tokens": 1024, "enforce_eager": true, '
-                            '"gpu_memory_utilization": 0.968}\'')
-        p.add_argument('--sampling-profile', default=None,
-                       help='JSON of sampling modes and per-conversation rules (default: '
-                            'quantization/sampling/<org>__<model>.json, else the base model\'s '
-                            'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
-    for name, fn, helptext in (
-            ("traces", do_traces, "eval traces, then the calibration trace (`eval-traces` and `cal-traces`)"),
+    for name, fn, helptext, groups in (
             ("eval-traces", do_eval_traces, "the bf16-generated eval traces; needs only the reference model, so it "
-                                            "can run alone on a box sized for it"),
-            ("cal-traces", do_cal_traces, "the calibration trace (after eval-traces), from the uncalibrated 8bpw "
-                                          "generator or, with --generator bf16, from the eval generator")):
+                                            "can run alone on a box sized for it", (eval_generator_args,)),
+            ("cal-traces", do_cal_traces, "the calibration trace (after eval-traces), from the eval generator or, with "
+                                          "--generator uncalibrated, the uncalibrated 8bpw stand-in",
+             (eval_generator_args, cal_generator_args)),
+            ("yaqa-traces", do_yaqa_traces, "the own-voice rows for `yaqa`'s output factor, from the eval generator "
+                                            "(--probe: one pass of 60 rows, for the cheap probe factor)", (eval_generator_args,))):
         p = subparsers.add_parser(name, help=helptext)
-        trace_args(p)
+        trace_common_args(p)
+        for g in groups:
+            g(p)
+        if name == "yaqa-traces":
+            p.add_argument('--probe', action='store_true', help=f"one own-voice pass of {YAQA_PROBE_ROWS} rows, for `yaqa --probe`")
         p.set_defaults(func=fn)
 
     cmd_recall = subparsers.add_parser('recall-slice', help="choose the model's recall slice with one reference pass; "
@@ -3502,14 +3520,15 @@ def main():
                              help="keep sc_measure's per-module input cache in host memory (needed past ~10 rows of a 9B on 16 GB)")
     cmd_measure.set_defaults(func=do_measure)
 
-    cmd_yaqa = subparsers.add_parser('yaqa', help="output-side Fisher factors for two-sided LDLQ (after traces): own-voice "
-                                      "rows, the factor on them and on the calibration, and their blend for `quantize`")
-    trace_args(cmd_yaqa)
-    # -d/--device (from trace_args): the factor pass's GPU(s), comma-separated to split the model; --eval-devices: own-voice generation
+    cmd_yaqa = subparsers.add_parser('yaqa', help="output-side Fisher factors for two-sided LDLQ: on the own-voice rows "
+                                     "(`yaqa-traces`) and the calibration (`cal-traces`), blended for `quantize`")
+    cmd_yaqa.add_argument('-d', '--device', default='0',
+                          help='GPUs for the factor pass: the unquantized model is split across them in the order given, '
+                               'leaving --reserve-vram free on each')
     cmd_yaqa.add_argument('--probe', action='store_true',
-                          help=f"a cheap YAQA probe: one own-voice pass of {YAQA_PROBE_ROWS} rows and its factor alone, into "
-                               f"the job's Hessians as '{YAQA_PROBE}' (quantize --yaqa-source {YAQA_PROBE}); the full factors "
-                               "and their blend are left alone")
+                          help=f"the probe factor alone, from `yaqa-traces --probe`'s {YAQA_PROBE_ROWS} rows, into the job's "
+                               f"Hessians as '{YAQA_PROBE}' (quantize --yaqa-source {YAQA_PROBE}); the full factors and "
+                               "their blend are left alone")
     cmd_yaqa.add_argument('--layers-per-run', type=int, default=None,
                           help='decoder layers per factor pass, when every layer\'s factors do not fit beside the model and '
                                'its backward pass (default: all at once). A 9B on 48 GB: 4')
@@ -3522,7 +3541,7 @@ def main():
     cmd_quantize.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_quantize.add_argument('--calibration', default='mix', choices=['mix', 'default'],
-                              help='mix: the conversational trace from `traces`; default: the bundled corpus')
+                              help='mix: the conversational trace from `cal-traces`; default: the bundled corpus')
     cmd_quantize.add_argument('--retries', type=int, default=2,
                               help='resume a failed revision this many times before stopping')
     cmd_quantize.add_argument('--plan', action='store_true',

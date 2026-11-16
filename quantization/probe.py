@@ -14,7 +14,7 @@ its output exists, so a rerun picks up where one stopped. Run from quantization/
 
     python3 probe.py -m openbmb/MiniCPM5-2B --draws 5 --yaqa
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, re, shlex, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUANT = os.path.join(HERE, "quant.py")
@@ -56,6 +56,8 @@ def main(a):
             env={"EXL3_SEED_IDX_OFFSET": "0"})
     if a.yaqa:
         if not os.path.isfile(os.path.join(W, "_hess", "probe", "DONE.json")):
+            # the probe rows through the eval generator, then their factor
+            run(["python3", QUANT, "-m", a.model, "yaqa-traces", "--probe", *shlex.split(a.trace_args)])
             run(["python3", QUANT, "-m", a.model, "yaqa", "--probe", *dev] +
                 (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []) +
                 (["--reserve-vram", a.reserve_vram] if a.reserve_vram else []))
@@ -127,6 +129,9 @@ if __name__ == "__main__":
     p.add_argument("--draws", type=int, default=5)
     p.add_argument("--yaqa", action="store_true", help="also the YAQA arm (yaqa --probe's factor)")
     p.add_argument("--layers-per-run", type=int, default=None, help="yaqa: decoder layers per factor pass")
+    p.add_argument("--trace-args", default="",
+                   help="yaqa-traces: the eval generator's options, one string, e.g. "
+                        "'--eval-generator Qwen/Qwen3.6-35B-A3B-FP8 --vllm-args {\"tensor_parallel_size\": 2}'")
     p.add_argument("--reserve-vram", default=None, help="yaqa: GB kept free of weights per device, with several (-d 0,1)")
     p.add_argument("--slices", default="wild,swe,self")
     p.add_argument("-d", "--device", default="0", help="GPUs for every step: quantize deals the draws to them, yaqa splits the model "
