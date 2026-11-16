@@ -3508,10 +3508,12 @@ def main():
     cmd_baseline = subparsers.add_parser('baseline', help="uncalibrated conversions: the card's baseline ladder and "
                                          "the calibration generator (single-GPU jobs, spread over -d)")
     cmd_baseline.add_argument('-b', '--bits', default='3:5',
-                              help="rungs to convert uncalibrated. Default: one, the ladder's lowest whole rate, which is "
-                                   "where a failed calibration shows most and what `measure` anchors on. A card with an "
-                                   "EXL3 --reference needs the baseline to cover every compared rate (qbench refuses "
-                                   "otherwise): pass the ladder, e.g. -b 2.5:5,3:5,3.5:5,4,5,6")
+                              help="rungs to convert uncalibrated. Default: one at 3 bpw (H5). Better: the ladder's own "
+                                   "lowest rung, named as the ladder names it (-b 3.5:5 for a ladder from 3.50bpw-H5): "
+                                   "that is where a failed calibration shows most, and qbench's canary then compares at "
+                                   "the same rate. A card with an EXL3 --reference needs the baseline to cover every "
+                                   "compared rate (qbench refuses otherwise): pass the ladder, e.g. -b 2.5:5,3:5,3.5:5,4,5,6. "
+                                   "Only `measure --rfn-anchor probe` (not the default) wants an integer rate")
     cmd_baseline.add_argument('-d', '--device', default='0',
                               help='GPUs, e.g. 0 or 0,1,2,3: one conversion per GPU at a time; list a GPU twice for two on it (nvidia-smi numbering)')
     cmd_baseline.add_argument('--retries', type=int, default=2)
