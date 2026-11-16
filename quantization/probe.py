@@ -130,8 +130,8 @@ if __name__ == "__main__":
     p.add_argument("--yaqa", action="store_true", help="also the YAQA arm (yaqa --probe's factor)")
     p.add_argument("--layers-per-run", type=int, default=None, help="yaqa: decoder layers per factor pass")
     p.add_argument("--trace-args", default="",
-                   help="yaqa-traces: the eval generator's options, one string, e.g. "
-                        "'--eval-generator Qwen/Qwen3.6-35B-A3B-FP8 --vllm-args {\"tensor_parallel_size\": 2}'")
+                   help="yaqa-traces: its generator options, one string, e.g. "
+                        "'--generator Qwen/Qwen3.6-35B-A3B-FP8 -d 0,1 --vllm-args {\"tensor_parallel_size\": 2}'")
     p.add_argument("--reserve-vram", default=None, help="yaqa: GB kept free of weights per device, with several (-d 0,1)")
     p.add_argument("--slices", default="wild,swe,self")
     p.add_argument("-d", "--device", default="0", help="GPUs for every step: quantize deals the draws to them, yaqa splits the model "

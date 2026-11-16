@@ -232,23 +232,25 @@ def eval_generator_named(job):
     repo = f"{m.group(1)}/{m.group(2)}" if m else model
     return None if repo == job.base_repo else repo
 
-def eval_generator(job, args):
-    """(model path, backend args) for the eval traces. Never an EXL3 checkpoint: eval text from a
-    quant scores one calibration against another quant's sampled text (docs/calibration.md)."""
-    src = args.eval_generator or job.base_repo
-    path = src if os.path.isdir(src) else snapshot_download(repo_id=src) if args.eval_generator else job.base_snapshot()
+def generator_backend(args):
+    """The engine arguments every trace command passes to ctx_trace: vLLM with --vllm-args, or exllamav3's own"""
+    return ["--backend", "vllm", "--vllm", args.vllm_args] if args.backend == "vllm" else []
+
+def trace_generator(job, args):
+    """(model path, backend args) for a trace command's --generator: the base model (bf16) by default, any repo or path
+    otherwise (an FP8 release where bf16 does not fit). Never an EXL3 checkpoint: text from a quant scores one
+    calibration against another quant's sampled text (docs/calibration.md); the calibration's 8bpw stand-in is
+    `cal-traces --uncalibrated`, not a --generator."""
+    src = args.generator or job.base_repo
+    path = src if os.path.isdir(src) else snapshot_download(repo_id=src) if args.generator else job.base_snapshot()
     qc = json.load(open(os.path.join(path, "config.json"))).get("quantization_config") or {}
     if qc.get("quant_method") == "exl3" or os.path.isfile(os.path.join(path, "quantization_config.json")):
-        raise SystemExit(f"--eval-generator {src} is an EXL3 checkpoint; eval traces must come from the base model or an FP8/bf16 release")
-    backend = ["--backend", "vllm", "--vllm", args.vllm_args] if args.eval_backend == "vllm" else []
-    return path, backend
+        raise SystemExit(f"--generator {src} is an EXL3 checkpoint; traces come from the base model or an FP8/bf16 release "
+                         f"(cal-traces --uncalibrated for the 8bpw stand-in)")
+    return path, generator_backend(args)
 
-def cal_generator(job, args):
-    """(backend args) for the calibration trace. Its generator is the uncalibrated 8bpw EXL3, which
-    vLLM serves through vllm-exl3-plugin; its engine arguments are its own (--cal-vllm-args), not
-    the eval generator's. EXL3 does not split every geometry over TP>1 (Qwen3-0.6B at TP=2 fails):
-    '{"tensor_parallel_size": 1}' runs it on one GPU."""
-    return ["--backend", "vllm", "--vllm", args.cal_vllm_args] if args.cal_backend == "vllm" else []
+def generator_named(args):
+    return f"{args.generator}" if args.generator else "the base model (bf16)"
 
 def collect_metadata(job, qbench, gguf_kld=False):
     """qbench: {slice: results list}. Excess KLD is each quant's KLD minus the slice's noise
@@ -2351,8 +2353,9 @@ def trace_setup(job, args):
     print(f"=== sampling: {profile or 'exllamav3 default (explicitly requested)'} ===")
     return path, (["--sampling_profile", profile] if profile else []), args.retries + 1
 
-def eval_env(args):
-    return None if args.eval_devices is None else {"CUDA_VISIBLE_DEVICES": args.eval_devices}
+def generator_env(args):
+    """-d: the GPUs a trace command generates on (default: all visible)"""
+    return None if args.device is None else {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": args.device}
 
 def do_recall_slice(job, args):
     """The model's recall slice (eval/recall_select.py): the pool's questions its reference clearly knows, chosen by one
@@ -2396,15 +2399,15 @@ def do_eval_traces(job, args):
     check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "torch-c10cuda-fix.sh")
     if subprocess.call([check, "--check"]):
         print("!! torch is not patched for pytorch#196258; a multi-GPU bf16 run may fault (fork free_mem() covers load)")
-    eval_path, eval_backend = eval_generator(job, args)
-    eval_desc = f"{args.eval_generator or 'bf16'}" + (" via vLLM" if eval_backend else "")
+    eval_path, eval_backend = trace_generator(job, args)
+    eval_desc = generator_named(args) + (" via vLLM" if eval_backend else "")
     for sl, (n, _) in EVAL_SLICES.items():
         print(f"=== eval trace ({sl}, {n} conversations, {eval_desc}) -> {job.eval_trace(sl)} ===")
         if not run_until(job.eval_trace(sl),
                          [ "python3", "-u", ctx_trace, "-m", eval_path, "-cs", "65536",
                            "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
                            "--slices", sl, "-n", str(n), "--seed", str(EVAL_SEED) ] + sampling + eval_backend,
-                         job.log(f"traces-eval-{sl}"), tries, env=eval_env(args)):
+                         job.log(f"traces-eval-{sl}"), tries, env=generator_env(args)):
             print(f"=== eval trace {sl} FAILED ==="); return False
 
     print(f"=== diagnostic eval traces ({', '.join(DIAG_SLICES)}, {DIAG_N} each, {eval_desc}) ===")
@@ -2413,7 +2416,7 @@ def do_eval_traces(job, args):
                        "-o", os.path.join(job.traces, "eval"), "--docs", "eval",
                        "--slices", ",".join(DIAG_SLICES), "-n", str(DIAG_N), "--seed", str(EVAL_SEED),
                        "--code_glob", CODE_DOCS, "--self_from", EVAL_SELF_PROMPTS ] + sampling + eval_backend,
-                     job.log("traces-eval-diag"), tries, env=eval_env(args)):
+                     job.log("traces-eval-diag"), tries, env=generator_env(args)):
         print("=== diagnostic eval traces FAILED ==="); return False
     return True
 
@@ -2443,22 +2446,25 @@ def do_cal_traces(job, args):
         print(f"=== no eval swe trace at {job.eval_trace('swe')}: run `eval-traces` first (the calibration "
               f"keeps out its repositories) ==="); return False
     ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
-    if args.generator == "bf16":
-        gen, cal_backend = eval_generator(job, args)
-        env = eval_env(args)
-        named = f"{args.eval_generator} (the eval traces' generator)" if args.eval_generator else "the base model (bf16)"
+    if not args.uncalibrated:
+        gen, cal_backend = trace_generator(job, args)
+        env = generator_env(args)
+        named = generator_named(args)
     else:
         # -d may list several GPUs for the calibration trace (a large generator autosplits over them);
         # the generator's conversion is single-GPU and sees only the first
-        env = gpu_env(",".join(device_slots(args.device)))
+        slots = device_slots(args.device or "0")
+        env = gpu_env(",".join(slots))
         gen = job.generator
         if not os.path.isfile(os.path.join(gen, "quantization_config.json")):
             # Normally made by `baseline` alongside the uncalibrated ladder (the same kind of job, so it
             # spreads over GPUs with them); built here when traces are wanted without baselines
             print("=== calibration generator missing (normally made by `baseline`): building it ===")
-            if not build_generator(job, args, path, gpu_env(device_slots(args.device)[0])):
+            if not build_generator(job, args, path, gpu_env(slots[0])):
                 print("=== calibration generator FAILED ==="); return False
-        cal_backend = cal_generator(job, args)
+        # vLLM serves it through vllm-exl3-plugin; EXL3 does not split every geometry over TP>1 (Qwen3-0.6B at TP=2
+        # fails), where '{"tensor_parallel_size": 1}' in --vllm-args runs it on one GPU
+        cal_backend = generator_backend(args)
         named = "uncalibrated 8bpw of the base model"
     print(f"=== calibration trace ({named}) -> {job.cal_data} ===")
     if not run_until(job.cal_data,
@@ -3059,7 +3065,7 @@ def ownvoice_rows(job, args, path, env, out_path=None, seeds=YAQA_SEEDS, rows_pe
     import torch
     from safetensors.torch import load_file, save_file
     ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
-    gen, backend = eval_generator(job, args)
+    gen, backend = trace_generator(job, args)
     sampling = (["--sampling_profile", resolve_sampling_profile(job, args, path)]
                 if resolve_sampling_profile(job, args, path) else [])
     parts = []
@@ -3187,13 +3193,13 @@ def do_yaqa_traces(job, args):
         return False
     path, _, _ = setup
     if args.probe:
-        return ownvoice_rows(job, args, path, eval_env(args), out_path=probe_rows(job), seeds=1,
+        return ownvoice_rows(job, args, path, generator_env(args), out_path=probe_rows(job), seeds=1,
                              rows_per_pass=YAQA_PROBE_ROWS, tag=f"ownvoice_{YAQA_PROBE}")
     # With the own-voice factor done (e.g. restored from a bucket without its rows), regenerating them would leave
     # rows the factor was not built from
     if os.path.isfile(os.path.join(job.hess, "ownvoice", YAQA_DONE)):
         print("=== own-voice factor already collected: no rows needed ==="); return True
-    return ownvoice_rows(job, args, path, eval_env(args))
+    return ownvoice_rows(job, args, path, generator_env(args))
 
 def do_yaqa(job, args):
     """Output-side Fisher factors for two-sided LDLQ: the factor on the own-voice rows (`yaqa-traces`) and on the
@@ -3435,54 +3441,41 @@ def main():
     cmd_baseline.set_defaults(func=do_baseline)
 
 
-    # Trace options in three groups, each command taking the ones it reads: what every generation takes, the eval
-    # generator (eval traces, own-voice rows, and a bf16 calibration trace), and the calibration generator
-    def trace_common_args(p):
+    # Every trace command generates text the same way, so they take the same options: which model writes it, through
+    # which engine, on which GPUs. Only the calibration can also use the uncalibrated 8bpw EXL3 stand-in.
+    def trace_args(p):
+        p.add_argument('-d', '--device', default=None,
+                       help='GPUs to generate on, e.g. 0,1 (default: all visible); with cal-traces --uncalibrated the '
+                            "stand-in's conversion uses the first")
+        p.add_argument('--generator', default=None,
+                       help='repo or path that writes the trace (default: the base model, bf16). Where bf16 does not '
+                            'fit, the FP8 release with --backend vllm. Never an EXL3 checkpoint')
+        # vLLM: substantially faster on TP>1 and never measurably slower
+        p.add_argument('--backend', default='vllm', choices=['exllamav3', 'vllm'],
+                       help='engine (default vllm: one engine per ctx_trace process, with --vllm-args)')
+        p.add_argument('--vllm-args', default='{}',
+                       help='vLLM engine arguments, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
+                            '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')
         p.add_argument('--retries', type=int, default=2)
         p.add_argument('--sampling-profile', default=None,
                        help='JSON of sampling modes and per-conversation rules (default: '
                             'quantization/sampling/<org>__<model>.json, else the base model\'s '
                             'generation_config.json; "exllamav3-default" for exllamav3\'s own)')
-    def eval_generator_args(p):
-        p.add_argument('--eval-devices', default=None,
-                       help='CUDA_VISIBLE_DEVICES for the eval generator (default: all visible)')
-        p.add_argument('--eval-generator', default=None,
-                       help='repo or path that writes the eval traces\' answers (default: the base model). '
-                            'For models too large to generate from locally in bf16, the FP8 release with '
-                            '--eval-backend vllm. Never an EXL3 checkpoint')
-        # vLLM: substantially faster for the eval traces on TP>1 and never measurably slower
-        p.add_argument('--eval-backend', default='vllm', choices=['exllamav3', 'vllm'],
-                       help='engine for the eval generator (default vllm: one engine per ctx_trace process, with --vllm-args)')
-        p.add_argument('--vllm-args', default='{}',
-                       help='vLLM engine arguments for the eval generator, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
-                            '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')
-    def cal_generator_args(p):
-        p.add_argument('-d', '--device', default='0',
-                       help='GPUs for the uncalibrated calibration generator: its conversion uses the first, the '
-                            'calibration trace all of them (a large generator autosplits), e.g. 0,1')
-        # bf16 where it fits: on Qwen3-0.6B (2026-10-23, docs/calibration.md) it ties the uncalibrated
-        # generator on wild and beats it on swe by 6-8% at 3-4 bpw, against a 3% reseed spread
-        p.add_argument('--generator', default='bf16', choices=['bf16', 'uncalibrated'],
-                       help="what writes the calibration trace: the eval generator and its engine (default, the "
-                            "--eval-* and --vllm-args options; needs that model to fit), or the uncalibrated 8bpw EXL3 "
-                            "stand-in (built if missing) where it does not")
-        p.add_argument('--cal-backend', default='exllamav3', choices=['exllamav3', 'vllm'],
-                       help='engine for an uncalibrated-generator calibration trace; vllm uses --cal-vllm-args')
-        p.add_argument('--cal-vllm-args', default='{}',
-                       help='vLLM engine arguments for the uncalibrated generator, JSON; e.g. \'{"tensor_parallel_size": 1}\' '
-                            'where EXL3 cannot split the model over the GPUs')
-    for name, fn, helptext, groups in (
-            ("eval-traces", do_eval_traces, "the bf16-generated eval traces; needs only the reference model, so it "
-                                            "can run alone on a box sized for it", (eval_generator_args,)),
-            ("cal-traces", do_cal_traces, "the calibration trace (after eval-traces), from the eval generator or, with "
-                                          "--generator uncalibrated, the uncalibrated 8bpw stand-in",
-             (eval_generator_args, cal_generator_args)),
-            ("yaqa-traces", do_yaqa_traces, "the own-voice rows for `yaqa`'s output factor, from the eval generator "
-                                            "(--probe: one pass of 60 rows, for the cheap probe factor)", (eval_generator_args,))):
+    for name, fn, helptext in (
+            ("eval-traces", do_eval_traces, "the eval traces, from the base model (or --generator); needs only that "
+                                            "model, so it can run alone on a box sized for it"),
+            ("cal-traces", do_cal_traces, "the calibration trace (after eval-traces), from the base model (or "
+                                          "--generator), or the uncalibrated 8bpw stand-in with --uncalibrated"),
+            ("yaqa-traces", do_yaqa_traces, "the own-voice rows for `yaqa`'s output factor, from the base model (or "
+                                            "--generator); --probe: one pass of 60 rows, for the cheap probe factor")):
         p = subparsers.add_parser(name, help=helptext)
-        trace_common_args(p)
-        for g in groups:
-            g(p)
+        trace_args(p)
+        if name == "cal-traces":
+            # bf16 where it fits: on Qwen3-0.6B (2026-10-23, docs/calibration.md) it ties the uncalibrated
+            # generator on wild and beats it on swe by 6-8% at 3-4 bpw, against a 3% reseed spread
+            p.add_argument('--uncalibrated', action='store_true',
+                           help="write the calibration trace with the uncalibrated 8bpw EXL3 stand-in (built if missing) "
+                                "instead of --generator, for a model whose bf16 and FP8 do not fit")
         if name == "yaqa-traces":
             p.add_argument('--probe', action='store_true', help=f"one own-voice pass of {YAQA_PROBE_ROWS} rows, for `yaqa --probe`")
         p.set_defaults(func=fn)
