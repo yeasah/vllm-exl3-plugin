@@ -677,6 +677,46 @@ or ~0.75 s instead of ~50 s on Gen5. Decode stays on UVA, where laziness is what
 
 ---
 
+## Phase 5: the embedding table on host (2026-11-15)
+
+**On by default** (`EXL3_EMBED_HOST`, `0` keeps it in VRAM). The token embedding's quantized table -- exllamav3's
+trellis `et_table` or the plugin's blockq `bq_*` -- stays on CPU from load, is padded and pinned once
+(`cpu_offload.host_resident`), and is indexed through a UVA view. A lookup reads only the rows it gathers, so where
+the whole vocabulary used to sit idle in VRAM, a token now costs a few KiB over the link. llama.cpp makes the same
+call for the same reason: "there is very little benefit to offloading the input layer, so always keep it on the
+CPU" (`src/llama-model.cpp`). It spends nothing from `--cpu-offload-gb`. A tied model without a table (served from
+its `lm_head`) has nothing to move.
+
+**Why now.** A tied model under vLLM carried its vocabulary twice in VRAM, the head and a trellis table: 0.30 GiB of
+Qwen3.5-2B's 1.46, enough to lose its lead to unsloth's Q5_K_M, which serves both roles from one table
+([embeddings.md](embeddings.md), "A tied 2B"). Serving the embedding from the head would fix it but needs a format
+exllamav3 cannot load; this needs no format change.
+
+**Rows are padded to 64 bytes**, and that is not cosmetic. Unaligned rows cost `index_select` its vector loads,
+which in VRAM never showed and over UVA made every narrow load a round trip: the 27B's 2600-byte trellis rows moved
+2.7 GB/s (8192 tokens: +7.8 ms against the VRAM table), aligned rows 23.6 (+0.77 ms), about this link's rate.
+Padding to 16 bytes gave 18.2, to 128 nothing more. Rows of 64 bytes or less are left alone. The gathers trim back
+to the stored width after the select (`trellis_embed.gather`'s `row_words`, `blockq.gather`'s `widths`). The
+padding changes the table's shape, so the flag is in the compile cache key
+(`EXL3Config._stamp_compile_factors`): without it a graph cached from a VRAM run failed its input check on the next
+host run (`expected size ... stride 416==390`), which only a host with the compile cache on shows -- godel did.
+
+**Measured.** Gather microbenchmark, CUDA-graph replayed, host minus VRAM: +1-16 us per call at 1-64 tokens on
+both formats and both the 2B's and the 27B's shapes, +0.3-0.8 ms at 8192 tokens. Whole engines, alternating
+processes:
+
+| | VRAM table | host table | freed |
+|---|---|---|---|
+| Qwen3.8-27B 4.00bpw, TP=2: batch-1 / 8-seq decode / 4x2200 prefill (tok/s) | 39.9 / 242.7 / 1274 | 39.9 / 242.4 / 1274 | 0.30 GiB a rank, KV 142k -> 150k tokens |
+| MiniCPM5-1B 3.00bpw trellis, batch 1 (the shortest step) | 260 / 2024 / 19230 | 260 / 2022 / 19060 | 0.10 GiB |
+| godel (3060, WSL): MiniCPM5-2B 4.00bpw, trellis | 122 / 721 / 4308 | 122 / 726 / 4368 | 0.12 GiB, KV +0.12 |
+| godel: Ornith-1.5-9B 4.00bpw, blockq on load | 56 / 329 / 1443 | 56 / 330 / 1449 | 0.54 GiB, KV 3.57 -> 4.11 GiB |
+
+No difference resolves; MiniCPM5-1B's prefill gap is inside its own VRAM runs' spread (19173-19290), and godel's
+two rounds differed by ~3% in both modes. Greedy token ids identical in every pair. The bench gate (default and TP
+tiers) with it on: every logit bit-identical to the baseline, weight bytes down by the table; the compiled entries'
+drift is their own (two VRAM captures differ as much).
+
 ## Why llama.cpp's offload knobs look different
 
 llama.cpp expresses MoE offload as tensor-name patterns like

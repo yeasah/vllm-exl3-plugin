@@ -1909,7 +1909,9 @@ matrix), excess KLD at served size:
 Serving the embedding from the head costs nothing here and puts EXL3 ahead of both GGUFs at less size. But a checkpoint
 that relies on it is one stock exllamav3 cannot load (its loader ties only when the head is absent), and the format
 line is not worth crossing for this: a host-resident embedding table (TODO `cpu-offload`, phase 5) is exllamav3's own
-arrangement and removes the duplicate from VRAM with no format change. Until then, small tied models carry the tax.
+arrangement and removes the duplicate from VRAM with no format change. *Done, and the default (2026-11-15):
+[cpu-offload.md](cpu-offload.md), "Phase 5: the embedding table on host". The two-table rows above now serve at
+the head-served sizes.*
 
 **A nested tie flag made the ladder unloadable in vLLM.** The converter set `tie_word_embeddings: false` only at the
 top of `config.json`; Qwen3.5's `text_config` kept `true`, vLLM tied the head to a trellis table with no weight, and no

@@ -108,6 +108,11 @@ checkpoint, so `--quantization` is not needed. The main differences:
   quantized embedding (exllamav3's trellis table from `convert.py --embed_bits`, or `bq_*`) is
   served as stored. A tied model is served from its quantized `lm_head`. `EXL3_BLOCKQ_ON_LOAD=0`
   serves a dense embedding dense. See [docs/embeddings.md](docs/embeddings.md).
+- **The embedding table lives in host memory.** A quantized table (blockq or trellis) is pinned
+  in host RAM and read over PCIe, a few KiB per token, as llama.cpp keeps its input layer on the
+  CPU: that much more VRAM for KV cache (0.30 GiB a rank on Qwen3.8-27B at TP=2), at no measured
+  cost to decode or prefill. `EXL3_EMBED_HOST=0` keeps it in VRAM. See
+  [docs/cpu-offload.md](docs/cpu-offload.md), "Phase 5: the embedding table on host".
 - **Tensor parallelism admits only some degrees per checkpoint.** A shard has to be a whole
   number of 128-wide Hadamard blocks, so which TP degrees a checkpoint admits depends on its
   shapes, and a degree it does not admit is refused at load: no Qwen3 checkpoint (151,936-token
@@ -172,6 +177,7 @@ Defaults suit serving; most of these exist for measurement or to isolate a probl
 | `EXL3_BLOCKQ_CACHE_DIR` | `$XDG_CACHE_HOME/vllm-exl3-plugin/blockq-embeddings` | where the cache lives; safe to delete at any time |
 | `EXL3_BLOCKQ_CACHE_MAX_GB` | 16 | the cache's ceiling: each write evicts least-recently-used entries down to it; 0 never evicts |
 | `EXL3_BLOCKQ_ENCODE_CHUNK` | 16384 | rows per on-load encode pass; lower bounds the fp32 temporary |
+| `EXL3_EMBED_HOST` | 1 | keep the token embedding's quantized table in pinned host memory, read over UVA; 0 keeps it in VRAM |
 | `EXL3_DENSE_EMBED` | 0 | keep a tied model's embedding dense instead of serving it from the quantized `lm_head` |
 | `EXL3_EXPANDABLE_SEGMENTS` | 1 | exllamav3's allocator choice; 0 keeps PyTorch's classic allocator (see TP above) |
 | `EXL3_RECONSTRUCT_THRESHOLD` | 144 | rows above which a linear decodes to fp16 and uses cuBLAS; 0 always uses the fused kernel |

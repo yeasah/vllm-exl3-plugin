@@ -268,13 +268,9 @@ decode). Output matches resident token for token in eager mode, the cache's acce
    a badly performing offload rather than an error. A loud startup warning when experts are offloaded under
    WSL with pinning off (the serve image sets the variable since 2026-11-14).
 
-Phase 5 (embedding table on host, saved slot state, double-buffered staging, a CPU tail) waits on its
-own evidence -- except the embedding table, which now has its case: a tied model under vLLM carries its vocabulary
-twice in VRAM (the head and a trellis table), 0.30 GiB of a 2B's 1.46 (enough to lose Qwen3.5-2B's lead to unsloth's
-Q5_K_M, which serves both roles from one table), and serving the embedding from the head costs no quality there but
-needs a format exllamav3 cannot load. A host-resident table is exllamav3's own arrangement and needs no new format.
-`cpu_offload_params` does not reach it today (2026-11-15: the trellis embedding's `et_table` is an ordinary parameter
-the offloader never sees; "no EXL3 tensor matched"); the lookup reads one row per token, which UVA suits. Smaller open questions are in [docs/cpu-offload.md](docs/cpu-offload.md), "Open questions".
+Phase 5's embedding table is done and on by default (2026-11-15; [docs/cpu-offload.md](docs/cpu-offload.md), "Phase
+5: the embedding table on host"); the rest of phase 5 (saved slot state, double-buffered staging, a CPU tail) waits on
+its own evidence. Smaller open questions are in [docs/cpu-offload.md](docs/cpu-offload.md), "Open questions".
 
 ## `engram-ple` — Serving Qwen4Exp (Qwen3.8-Flash-Next) with its n-gram table off the GPU
 

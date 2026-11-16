@@ -294,13 +294,14 @@ def place(param, t: torch.Tensor) -> torch.Tensor:
     return get_accelerator_view_from_cpu_tensor(host)
 
 
-#: ``EXL3_EMBED_HOST=1``: the token embedding's table (trellis ``et_table``, blockq ``bq_*``) lives in pinned
-#: host memory behind a UVA view, as llama.cpp keeps its input layer on the CPU. A lookup reads only the rows
-#: it gathers -- a few KiB a token -- where in VRAM the whole vocabulary sits idle (0.30 GiB of a tied 2B's
-#: 1.46). Independent of ``--cpu-offload-gb``: it spends no offload budget. Opt-in while it is measured
-#: (TODO.md ``cpu-offload``, phase 5).
+#: ``EXL3_EMBED_HOST`` (default on; ``0`` keeps it in VRAM): the token embedding's table (trellis
+#: ``et_table``, blockq ``bq_*``) lives in pinned host memory behind a UVA view, as llama.cpp keeps its input
+#: layer on the CPU. A lookup reads only the rows it gathers -- a few KiB a token -- where in VRAM the whole
+#: vocabulary sits idle (0.30 GiB of a tied 2B's 1.46). Measured at no cost: decode and prefill unchanged on the
+#: 27B at TP=2, MiniCPM5-1B at batch 1 and a 3060 under WSL, logits bit-identical (docs/cpu-offload.md, "Phase 5:
+#: the embedding table on host"). Independent of ``--cpu-offload-gb``: it spends no offload budget.
 def embed_on_host() -> bool:
-    return os.environ.get("EXL3_EMBED_HOST", "0").strip() == "1"
+    return os.environ.get("EXL3_EMBED_HOST", "1").strip() != "0"
 
 
 #: A hosted table's rows, padded to this many bytes. A row gather over UVA moves ~23 GB/s on aligned rows and
@@ -325,7 +326,7 @@ def host_resident(t: torch.Tensor, label: str) -> torch.Tensor:
     drain_host_copies()
     nbytes = host.numel() * host.element_size()
     _STATS["embed_host_bytes"] = _STATS.get("embed_host_bytes", 0) + nbytes
-    logger.info("Token embedding %s on host: %.2f GiB pinned, read over UVA (EXL3_EMBED_HOST)", label, nbytes / (1 << 30))
+    logger.info("Token embedding %s on host: %.2f GiB pinned, read over UVA (EXL3_EMBED_HOST=0 keeps it in VRAM)", label, nbytes / (1 << 30))
     return get_accelerator_view_from_cpu_tensor(host)
 
 
