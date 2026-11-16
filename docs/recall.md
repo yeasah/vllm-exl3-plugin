@@ -6,6 +6,39 @@ over sum of P), confident errors, and kept by band of the reference's confidence
 that `quant.py recall-slice` chooses and refuses when thin. `docs/calibration.md` and `docs/yaqa.md` carry
 the experiments that used it.
 
+## Does recall score answer form? (2026-11-16)
+
+Recall teacher-forces one answer string per question -- the reference's preferred alias for PopQA, the only string for
+the Wikidata facts -- so probability a quant moves to another correct form of the answer reads as loss. The worry was
+that a model holding its answers loosely (Qwen3.5-2B) would be penalised for that, not for forgetting.
+`tools/recall_scan.py` takes each arm's 100 lowest-kept known questions, has the quant answer them greedily, and
+classifies the answers; the "different" bucket was then read by hand. MiniCPM5-2B against Qwen3.5-2B (YAQA ladder):
+
+| worst 100 by kept | still gives the answer | same answer, other form | wrong answer |
+|---|---|---|---|
+| MiniCPM5-2B 3.50 | 5 | 13 | 82 |
+| MiniCPM5-2B 4.00 | 26 | 12 | 62 |
+| Qwen3.5-2B 3.50 | 29 | 7 | 64 |
+| Qwen3.5-2B 4.00 | 23 | 8 | 69 |
+
+- **Losses are real.** Mostly a same-category neighbour (Funafuti for Yaren, Stockholm for Oslo), as on the 27B. Neither
+  model hedges or refuses once among them. "Still gives the answer" is P falling with the argmax holding, which kept
+  counts in proportion, deliberately.
+- **Form slips are about one in ten**, the largest single source being constellation genitives copied from the star's
+  name in the question ("Boötis", "Cancri" for Boötes, Cancer); the rest scattered variants ("Court of Justice of the
+  European Union", "United States Supreme Court", "Francisco de Goya", "St. Petersburg"). Misspellings, genus for
+  family, and part-names that change the answer ("Oklahoma" for Oklahoma City) count as losses.
+- **The hedger is not the one penalised**: its form slips are 4% of its worst rows' lost mass against MiniCPM5-2B's
+  13-17%.
+
+What it moves on the card: credited as fully kept, the slips found raise kept by +0.1 to +0.8 points; assuming the same
+share across all lost mass (an overestimate: most of the rest still answers correctly), by +0.6 to +2.4. Below a rung
+step (4-8 points) and below recall's draw spread. **Scoring is left as it is.** A fix aimed at the slips these two
+models happen to make (a genitive table) would correct a fraction of a point and make the slice depend on which slips
+were noticed. The general fix, should a model show a much larger form share, is to score each question's alias set
+(Wikidata alias labels for the facts) with an end-of-turn token after each answer, so that alternative forms are
+disjoint events whose probabilities add.
+
 ## Moved from TODO.md (2026-11-05)
 
 *The working record of these items as they stood when TODO.md was cut back to open tasks, kept verbatim. Open work on them, if any, is in TODO.md or FUTURE.md under the same slug or the one named.*
