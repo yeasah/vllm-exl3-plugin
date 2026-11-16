@@ -10,7 +10,8 @@ measured against that spread. A gain smaller than what a redraw does is labelled
 redraw moved a 4.00 by 10-17%, as much as the most extreme calibration tried (TODO.md multi-draw, yaqa-probe).
 
 Mechanical by design: it only drives `quant.py quantize`, `yaqa --probe` and `qbench`, and every step is skipped when
-its output exists, so a rerun picks up where one stopped. Run from quantization/:
+its output exists, so a rerun picks up where one stopped. With more GPUs (-d) than draws, the draws take the first
+--draws of them and the uniform arm and the YAQA chain run on the rest meanwhile. Run from quantization/:
 
     python3 probe.py -m openbmb/MiniCPM5-2B --draws 5 --yaqa
 """
@@ -25,6 +26,27 @@ def run(cmd, env=None):
     rc = subprocess.call(cmd, cwd=HERE, env={**os.environ, **(env or {})})
     if rc:
         raise SystemExit(f"=== failed ({rc}): {' '.join(cmd)}")
+
+
+def run_lanes(model, lanes):
+    """Each lane's steps in turn, the lanes side by side; a step whose output exists is skipped when it is reached.
+    One lane failing lets the others finish (their outputs stand for a rerun), then fails the probe."""
+    import threading
+    failed = []
+    def lane(steps):
+        try:
+            for done, cmd, env in steps:
+                if not done():
+                    run(["python3", QUANT, "-m", model, *cmd], env=env)
+        except SystemExit as e:
+            failed.append(str(e))
+    threads = [threading.Thread(target=lane, args=(steps,)) for steps in lanes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if failed:
+        raise SystemExit("\n".join(failed))
 
 
 def job_dir(model):
@@ -45,30 +67,46 @@ def main(a):
     yaqa = f"{base}-probe-yaqa"
     if a.yaqa:
         arms.append(yaqa)
-    dev = ["-d", a.device]
     common = ["-b", str(a.bits)] + (["--no-yaqa"])
+    built = lambda name: lambda: os.path.isfile(os.path.join(W, name, "quantization_config.json"))
+    # GPUs past the draws' share run the other arms meanwhile (a dependency split, not a scheduler: quantize still
+    # deals the draws within its share); with no spare GPU every step runs in turn on all of them
+    devs = a.device.split(",")
+    spare = devs[a.draws:]
+    draw_dev = ",".join(devs[:a.draws]) if spare else a.device
+    uniform_dev = spare[0] if spare else a.device
+    yaqa_dev = a.yaqa_devices or (",".join(spare[1:]) if len(spare) > 1 else uniform_dev)
     # draws: the ladder's own configuration (recipe when measured), no YAQA, one seed offset each -- one quantize
     # call, so quant.py deals them to the GPUs like a ladder (finished draws are skipped there)
-    if not all(os.path.isfile(os.path.join(W, name, "quantization_config.json")) for name in draws):
-        run(["python3", QUANT, "-m", a.model, "quantize", *common, "--suffix", "probe", "--draws", str(a.draws), *dev])
-    if not os.path.isfile(os.path.join(W, uniform, "quantization_config.json")):
-        run(["python3", QUANT, "-m", a.model, "quantize", *common, "--no-recipe", "--suffix", "probe-uniform", *dev],
-            env={"EXL3_SEED_IDX_OFFSET": "0"})
+    draw_lane = [(lambda: all(built(name)() for name in draws),
+                  ["quantize", *common, "--suffix", "probe", "--draws", str(a.draws), "-d", draw_dev], None)]
+    uniform_lane = [(built(uniform), ["quantize", *common, "--no-recipe", "--suffix", "probe-uniform", "-d", uniform_dev],
+                     {"EXL3_SEED_IDX_OFFSET": "0"})]
+    yaqa_lane = []
     if a.yaqa:
-        if not os.path.isfile(os.path.join(W, "_hess", "probe", "DONE.json")):
-            # the probe rows through the eval generator, then their factor
-            run(["python3", QUANT, "-m", a.model, "yaqa-traces", "--probe", *shlex.split(a.trace_args)])
-            run(["python3", QUANT, "-m", a.model, "yaqa", "--probe", *dev] +
-                (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []) +
-                (["--reserve-vram", a.reserve_vram] if a.reserve_vram else []))
-        if not os.path.isfile(os.path.join(W, yaqa, "quantization_config.json")):
-            run(["python3", QUANT, "-m", a.model, "quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa", *dev],
-                env={"EXL3_SEED_IDX_OFFSET": "0"})
+        factored = lambda: os.path.isfile(os.path.join(W, "_hess", "probe", "DONE.json"))
+        trace_args = shlex.split(a.trace_args)
+        if not {"-d", "--device"} & set(trace_args):
+            trace_args += ["-d", yaqa_dev]      # else the generator lands on GPU 0, which a draw holds
+        # the probe rows through the eval generator, then their factor, then the rung
+        yaqa_lane = [(factored, ["yaqa-traces", "--probe", *trace_args], None),
+                     (factored, ["yaqa", "--probe", "-d", yaqa_dev] +
+                      (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []) +
+                      (["--reserve-vram", a.reserve_vram] if a.reserve_vram else []), None),
+                     (built(yaqa), ["quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa",
+                                    "-d", yaqa_dev], {"EXL3_SEED_IDX_OFFSET": "0"})]
+    if not spare:
+        lanes = [draw_lane + uniform_lane + yaqa_lane]
+    elif yaqa_dev == uniform_dev:
+        lanes = [draw_lane, uniform_lane + yaqa_lane]
+    else:
+        lanes = [draw_lane, uniform_lane, yaqa_lane]
+    run_lanes(a.model, [l for l in lanes if l])
     # recall too, when the model has a slice: YAQA has cost recall that KL read as a win (Qwen3.8-27B)
     slices = a.slices.split(",")
     if os.path.isfile(os.path.join(W, "_traces", "eval_recall.json")) and "recall" not in slices:
         slices.append("recall")
-    run(["python3", QUANT, "-m", a.model, "qbench", *dev, "--slices", ",".join(slices), "--revisions", ",".join(arms),
+    run(["python3", QUANT, "-m", a.model, "qbench", "-d", a.device, "--slices", ",".join(slices), "--revisions", ",".join(arms),
          "--allow-converter-mismatch"])
     report(W, slices, draws, uniform, yaqa if a.yaqa else None)
 
@@ -134,8 +172,13 @@ if __name__ == "__main__":
                         "'--generator Qwen/Qwen3.6-35B-A3B-FP8 -d 0,1 --vllm-args {\"tensor_parallel_size\": 2}'")
     p.add_argument("--reserve-vram", default=None, help="yaqa: GB kept free of weights per device, with several (-d 0,1)")
     p.add_argument("--slices", default="wild,swe,self")
-    p.add_argument("-d", "--device", default="0", help="GPUs for every step: quantize deals the draws to them, yaqa splits the model "
-                                                    "across them, qbench splits the arms")
+    p.add_argument("-d", "--device", default="0",
+                   help="GPUs for the probe. With more GPUs than draws, the first --draws take the draws and the rest run "
+                        "the uniform arm (first spare) and the YAQA chain (the other spares) meanwhile; otherwise every step "
+                        "runs in turn on all of them. qbench always splits the arms across all of them")
+    p.add_argument("--yaqa-devices", default=None,
+                   help="GPUs for the YAQA chain instead of the spares, e.g. when its factor pass needs more of them; "
+                        "overlapping the draws' share is allowed and is then your call")
     a = p.parse_args()
     if not a.model or "/" not in a.model:
         raise SystemExit("-m takes the base model's repo id, as quant.py does")
