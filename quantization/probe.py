@@ -40,6 +40,8 @@ def run_lanes(model, lanes):
                     run(["python3", QUANT, "-m", model, *cmd], env=env)
         except SystemExit as e:
             failed.append(str(e))
+    if len(lanes) > 1:          # side by side, every quant.py job reports in start/finish lines, its output in its log
+        lanes = [[(done, cmd, {**(env or {}), "QUANT_LOG_ONLY": "1"}) for done, cmd, env in steps] for steps in lanes]
     threads = [threading.Thread(target=lane, args=(steps,)) for steps in lanes]
     for t in threads:
         t.start()

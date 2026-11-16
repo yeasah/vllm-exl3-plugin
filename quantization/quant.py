@@ -2168,9 +2168,11 @@ def run_jobs(tasks, slots, what):
     gemma-4-12b ladder, 2026-10-23); dealt up front, each card runs two then one. No stealing
     either, which would bring the same tail back. Children's output goes to their logs only (four
     interleaved progress bars read as noise), with a line per start and finish. Every task runs,
-    whatever fails (each failure announced at once with JOB_FAILED); returns the names that failed."""
+    whatever fails (each failure announced at once with JOB_FAILED); returns the names that failed.
+    QUANT_LOG_ONLY=1 takes the second path with one slot too: for an orchestrator running several
+    quant.py commands side by side (probe.py), so they all report alike rather than one echoing."""
     import threading, time
-    if len(slots) == 1:
+    if len(slots) == 1 and os.environ.get("QUANT_LOG_ONLY") != "1":
         failed = []
         for name, fn in tasks:
             t0 = time.time()
