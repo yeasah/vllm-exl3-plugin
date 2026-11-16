@@ -1932,12 +1932,14 @@ def do_qbench(job, args):
         with open(os.path.join(job.main, "reference.json"), "w") as f:
             json.dump(info, f, indent=1)
     base_arms = [(baseline_label(rev), p) for rev, p in baseline.items()]
-    print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
-    series_start = datetime.datetime.now().replace(microsecond=0)
-    # One scorer per GPU: a second on the same card would size its memory budgets from the same
-    # free VRAM as the first
     slots = list(dict.fromkeys(device_slots(args.device)))
+    if not subset and baseline and args.canary and not qbench_canary(job, args, revisions, baseline, slots, script):
+        return False
+    print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
+    series_start = datetime.datetime.now().replace(microsecond=0)
+    # One scorer per GPU (`slots`, above): a second on the same card would size its memory budgets from the same
+    # free VRAM as the first
     for sl in slices:
         sl_arms = arms + (base_arms if sl.split(".")[0] in EVAL_SLICES else [])   # the baseline only enters through the composite
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
@@ -1969,6 +1971,55 @@ def do_qbench(job, args):
         print(f"=== pruning reference logits unused since {series_start.isoformat()} ===")
         run_logged([ "python3", os.path.join(args.exllamav3dir, "eval", "qbench_prune.py"),
                      logit_cache_dir(job, args), "--unused-since", series_start.isoformat() ], job.log("qbench-prune"))
+    return True
+
+#: A ladder rung's excess KLD on wild over its uncalibrated baseline's, at the same rate, above which `qbench` stops
+#: before the full series. Every published ladder sat at 0.25-0.85 (2026-11-16: MiniCPM5-2B 0.23-0.25, Ornith-9B and
+#: Qwen3.8-27B 0.39-0.52, Qwen3.6-35B-A3B 0.79, LFM2.5-8B-A1B 0.84-0.85), the worst research arm at 0.96, and wild's
+#: draw noise is about 1%
+CANARY_MAX_RATIO = 0.95
+#: Excess KLD per half bit, across rates, on the ladders above (0.45-0.54): the bound's scale when no rung shares the
+#: baseline's rate
+CANARY_HALF_BIT = 0.5
+
+def qbench_canary(job, args, revisions, baseline, slots, script):
+    """Before a full series: one rung against its uncalibrated baseline on wild, the cheapest slice, so a ladder that
+    is no better than uncalibrated (a broken calibration, a recipe gone wrong, a converter regression) stops the
+    pipeline here rather than after every slice is scored -- the card may not show it, with one baseline rung. Its
+    reference logits, noise floor and both arms' results land in qbench's cache, so the series that follows reuses
+    them. The pair: the same rate if there is one; else the nearest, with the bound scaled by `CANARY_HALF_BIT` per
+    half bit between them (a 3.50 rung against a 3.00 baseline must come in under 0.475). True to go on."""
+    rate = lambda name: float(m.group(1)) if (m := re.search(r"(\d+(?:\.\d+)?)bpw", name)) else None
+    ours = [r for r in revisions if rate(r) is not None]
+    pairs = [(abs(rate(o) - rate(b)), rate(o) < rate(b), o, b) for o in ours for b in baseline if rate(b) is not None]
+    if not pairs or not os.path.isfile(job.eval_trace("wild")):
+        print("=== qbench canary: no rung and baseline to pair, or no wild trace; skipped ===")
+        return True
+    _, _, rev, base = min(pairs)
+    bound = args.canary_max_ratio * CANARY_HALF_BIT ** ((rate(rev) - rate(base)) / 0.5)
+    out = os.path.join(job.main, "_qb_canary.json")
+    project = os.path.join(job.main, "qbench-canary.yaml")
+    with open(project, "w") as f:
+        yaml.safe_dump(qbench_project(job, args, "wild", [(rev, job.revdir(rev)), (baseline_label(base), baseline[base])],
+                                      results=out), f, sort_keys=False)
+    print(f"=== qbench canary: {rev} against {baseline_label(base)} on wild ===")
+    if run_logged(["python3", script, project, "-d", "0"], job.log("qbench-canary"), gpu_env(slots[0])):
+        print("=== qbench canary FAILED to run; see its log ===")
+        return False
+    rows = {r["label"]: r for r in json.load(open(out))}
+    floor = rows["Noise floor"]["kld"]
+    ratio = (rows[rev]["kld"] - floor) / (rows[baseline_label(base)]["kld"] - floor)
+    ok = ratio <= bound
+    with open(os.path.join(job.main, "canary.json"), "w") as f:
+        json.dump({"revision": rev, "baseline": base, "slice": "wild", "ratio": ratio, "bound": bound, "passed": ok,
+                   "at": datetime.datetime.now().replace(microsecond=0).isoformat()}, f, indent=1)
+    if not ok:
+        print(f"=== qbench canary FAILED: {rev} keeps {ratio:.3f} of {base}'s excess KLD on wild, over the {bound:.3f} "
+              f"bound. A calibrated ladder has beaten its uncalibrated baseline by far more on every model so far "
+              f"(0.25-0.85): check the calibration, recipe and converter before scoring the rest. --no-canary scores "
+              f"anyway ===")
+        return False
+    print(f"=== qbench canary passed: {rev} at {ratio:.3f} of {base}'s excess on wild (bound {bound:.3f}) ===")
     return True
 
 def do_compare(job, args):
@@ -3656,6 +3707,13 @@ def main():
     # expensive file in the set. Rerun when llama.cpp or the bench changes
     cmd_qbench.add_argument('--gguf-parity', default=False, action=argparse.BooleanOptionalAction,
                             help="also score the repo's bf16 GGUF: llama.cpp's own numerics against the bf16 reference")
+    cmd_qbench.add_argument('--canary', default=True, action=argparse.BooleanOptionalAction,
+                            help="before a full series, score one rung against its uncalibrated baseline on wild and stop "
+                                 "if it is not clearly better (main/canary.json); its scores are reused by the series. "
+                                 "--no-canary skips it")
+    cmd_qbench.add_argument('--canary-max-ratio', type=float, default=CANARY_MAX_RATIO,
+                            help=f"the canary's bound: the rung's excess KLD over the baseline's at the same rate "
+                                 f"(default {CANARY_MAX_RATIO}; scaled by {CANARY_HALF_BIT} per half bit between them)")
     cmd_qbench.add_argument('--allow-thin-baseline', action='store_true',
                             help="score an EXL3 --reference whose compared rates the baseline does not cover (section 2 "
                                  "then has no plot point there); without it qbench refuses")

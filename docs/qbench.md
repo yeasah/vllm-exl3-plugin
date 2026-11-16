@@ -1560,6 +1560,24 @@ swe qbench time per card. 800 sessions resolve rows, not draws: a reseeded 4.00 
 comparison on this model needs several conversions per arm. Three plain draws read 0.927, 1.015 and 1.002 of the
 baseline on swe800: the 0.927 above was the lucky one, and calibration's swe gain over draws is ~2%.
 
+## The canary: a ladder no better than uncalibrated stops the series (2026-11-16)
+
+A full `qbench` series first scores one rung against its uncalibrated baseline on wild and stops if the rung is not
+clearly better (`qbench_canary`, `main/canary.json`). A broken calibration, a recipe gone wrong or a converter
+regression otherwise surfaces only after every slice is scored, and maybe not then: with the baseline built at one
+rate (3 bpw when no EXL3 reference needs more), the card shows the comparison at a single point. The canary's
+reference logits, noise floor and both arms' results go into qbench's cache, so the series that follows reuses them;
+what it costs is that one pair runs on one GPU before the series is dealt out. Subset runs (`--revisions`,
+`--slices`) skip it, as does `--no-canary`.
+
+The bound is 0.95 of the baseline's excess at the same rate (`--canary-max-ratio`). Every published ladder sat far
+under it, on wild: MiniCPM5-2B 0.23-0.25, Ornith-1.5-9B and Qwen3.8-27B 0.39-0.52, Qwen3.6-35B-A3B 0.79, LFM2.5-8B-A1B
+0.84-0.85; the worst research arm (a deliberately odd calibration on the 35B-A3B) 0.96, and wild's draw noise is about
+1%. Where no rung shares the baseline's rate (Qwen3.5-2B's 3.50-up ladder against a 3.00 baseline), the nearest pair is
+used, preferring a rung above the baseline, and the bound scaled by 0.5 per half bit between them -- excess roughly
+halves per half bit on these ladders (0.45-0.54) -- so a 3.50 rung must come in under 0.475 (Qwen3.5-2B: 0.18). A rung
+below the baseline's rate gets a looser bound (1.9 for half a bit), a weaker check that no ladder so far would need.
+
 ## Recall for models that hedge (2026-11-15)
 
 The recall slice refused any model with under 300 confident questions (P >= 0.7). Qwen3.5-2B knows more answers than
