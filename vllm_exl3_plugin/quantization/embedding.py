@@ -46,7 +46,7 @@ import torch
 from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
-from .. import blockq, blockq_cache, env, format, ops, tp, trellis_embed
+from .. import blockq, blockq_cache, cpu_offload, env, format, ops, tp, trellis_embed
 from ..log import init_logger
 from .linear import EXL3Parameter
 from .lm_head import EXL3LMHeadMethod
@@ -327,6 +327,7 @@ class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
                 row_shard_size=rows_per_rank,
             ),
         )
+        layer.et_table.exl3_host = cpu_offload.embed_on_host()
         layer.register_parameter(
             "et_signs",
             EXL3Parameter(
@@ -368,11 +369,14 @@ class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
                 f"only {target}"
             )
         table = torch.nn.functional.pad(table, (0, 0, 0, target - table.shape[0]))
+        layer.et_row_words = table.shape[1]
+        if params["et_table"].exl3_host:
+            table = cpu_offload.host_resident(table, getattr(layer, "prefix", "et_table"))
 
         layer.register_parameter("et_table", Parameter(table, requires_grad=False))
         layer.register_parameter("et_signs", Parameter(signs, requires_grad=False))
         layer.register_buffer(
-            "et_book", trellis_embed.codebook(table.device), persistent=False
+            "et_book", trellis_embed.codebook(signs.device), persistent=False
         )
         for param in params.values():
             param.release()
@@ -386,6 +390,7 @@ class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
             layer.et_book,
             layer.exl3_hidden_size,
             layer.exl3_params_dtype,
+            layer.et_row_words,
         )
 
     def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
@@ -467,6 +472,7 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
                     row_shard_size=rows_per_rank,
                 ),
             )
+            getattr(layer, suffix).exl3_host = cpu_offload.embed_on_host()
 
         if self.quant_config.blockq_is_on_load():
             # Nothing in the checkpoint fills `bq_*` here, so a parameter has to
@@ -537,7 +543,10 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
                 for name, t in stored.items()
             }
 
+        layer.bq_widths = tuple(stored[n].shape[-1] for n in names)
         for name, t in stored.items():
+            if params[name].exl3_host:
+                t = cpu_offload.host_resident(t, f"{getattr(layer, 'prefix', '<embedding>')}.{name}")
             layer.register_parameter(name, Parameter(t, requires_grad=False))
         for param in params.values():
             param.release()
@@ -555,7 +564,8 @@ class EXL3BlockQEmbeddingMethod(QuantizeMethodBase):
         exactly what the loader stored, so no index arithmetic is needed here.
         """
         return blockq.gather(
-            input_, layer.bq_q, layer.bq_s, layer.bq_r, layer.exl3_params_dtype
+            input_, layer.bq_q, layer.bq_s, layer.bq_r, layer.exl3_params_dtype,
+            layer.bq_widths,
         )
 
     def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:

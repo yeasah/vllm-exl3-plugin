@@ -166,17 +166,18 @@ def gather(
     bq_s: torch.Tensor,
     bq_r: torch.Tensor,
     out_dtype: torch.dtype,
+    widths: tuple[int, int, int] | None = None,
 ) -> torch.Tensor:
     """Embedding lookup: take `ids`' rows out of storage and decode only those.
 
     Shape-preserving like the `F.embedding` it replaces -- `[*ids.shape, hidden]`
     -- so a caller never has to know that the decode works on flattened rows.
+    `widths`: the stored row widths of the three, when they are host copies padded
+    past them (`cpu_offload.host_resident`).
     """
     flat = ids.reshape(-1)
-    rows = decode(
-        torch.index_select(bq_q, 0, flat),
-        torch.index_select(bq_s, 0, flat),
-        torch.index_select(bq_r, 0, flat),
-        out_dtype,
-    )
+    parts = [torch.index_select(t, 0, flat) for t in (bq_q, bq_s, bq_r)]
+    if widths is not None:
+        parts = [p if p.shape[-1] == w else p[..., :w].contiguous() for p, w in zip(parts, widths)]
+    rows = decode(*parts, out_dtype)
     return rows.view(*ids.shape, rows.shape[-1])

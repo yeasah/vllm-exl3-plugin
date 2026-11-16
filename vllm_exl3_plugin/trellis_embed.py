@@ -110,8 +110,13 @@ def gather(
     book: torch.Tensor,
     hidden: int,
     out_dtype: torch.dtype,
+    row_words: int | None = None,
 ) -> torch.Tensor:
-    """Embedding lookup: `ids`' rows out of storage, decoded, shape-preserving."""
+    """Embedding lookup: `ids`' rows out of storage, decoded, shape-preserving. `row_words`: the stored row width,
+    when `table` is a host copy padded past it (`cpu_offload.host_resident`)."""
     flat = ids.reshape(-1)
-    rows = decode(torch.index_select(table, 0, flat), signs, book, hidden, out_dtype)
+    packed = torch.index_select(table, 0, flat)
+    if row_words is not None and packed.shape[1] != row_words:
+        packed = packed[:, :row_words].contiguous()
+    rows = decode(packed, signs, book, hidden, out_dtype)
     return rows.view(*ids.shape, hidden)

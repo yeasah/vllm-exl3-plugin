@@ -268,6 +268,10 @@ def place(param, t: torch.Tensor) -> torch.Tensor:
     ``UVAOffloader._maybe_offload_to_cpu`` for one tensor: the budget is checked
     *before* the tensor, as ``uva.py`` does, so the whole budget is spent.
     """
+    if getattr(param, "exl3_host", False):
+        # the embedding table bound for host (`embed_on_host`): kept on CPU until its method pads it and
+        # pins it once, so it never passes through VRAM. A copy, not the loader's mmapped view
+        return t.contiguous().clone()
     loader = (
         _uva_loader()
         if param.exl3_offloadable and param.exl3_name in _OFFLOADABLE_COMPONENTS
@@ -288,6 +292,48 @@ def place(param, t: torch.Tensor) -> torch.Tensor:
     _host_copy(host, t)
     _count(loader, param.exl3_prefix, host.numel() * host.element_size())
     return get_accelerator_view_from_cpu_tensor(host)
+
+
+#: ``EXL3_EMBED_HOST=1``: the token embedding's table (trellis ``et_table``, blockq ``bq_*``) lives in pinned
+#: host memory behind a UVA view, as llama.cpp keeps its input layer on the CPU. A lookup reads only the rows
+#: it gathers -- a few KiB a token -- where in VRAM the whole vocabulary sits idle (0.30 GiB of a tied 2B's
+#: 1.46). Independent of ``--cpu-offload-gb``: it spends no offload budget. Opt-in while it is measured
+#: (TODO.md ``cpu-offload``, phase 5).
+def embed_on_host() -> bool:
+    return os.environ.get("EXL3_EMBED_HOST", "0").strip() == "1"
+
+
+#: A hosted table's rows, padded to this many bytes. A row gather over UVA moves ~23 GB/s on aligned rows and
+#: 2.7 on the 27B's 2600-byte trellis rows: unaligned, `index_select` loses its vector loads, and across the
+#: link every narrow load is a round trip (8192 tokens: 7.8 ms against 0.9 padded). In VRAM it never showed.
+HOST_ROW_ALIGN = 64
+
+
+def host_resident(t: torch.Tensor, label: str) -> torch.Tensor:
+    """`t` (on CPU, row-indexed) copied once into pinned host memory, returned as the UVA view kernels index.
+    Rows come back padded to `HOST_ROW_ALIGN` bytes: a gather takes `[:, :t.shape[1]]` of what it selects
+    (`trim_rows`)."""
+    t = t.contiguous()
+    if t.dim() == 2:
+        # only rows wider than the alignment: a narrow row (blockq's 8-byte ranges) is one read either way
+        row = t.shape[1] * t.element_size()
+        pad = (-row % HOST_ROW_ALIGN) // t.element_size() if row > HOST_ROW_ALIGN and HOST_ROW_ALIGN % t.element_size() == 0 else 0
+        if pad:
+            t = torch.nn.functional.pad(t, (0, pad))
+    host = _pinned(t.shape, t.dtype)
+    _host_copy(host, t)
+    drain_host_copies()
+    nbytes = host.numel() * host.element_size()
+    _STATS["embed_host_bytes"] = _STATS.get("embed_host_bytes", 0) + nbytes
+    logger.info("Token embedding %s on host: %.2f GiB pinned, read over UVA (EXL3_EMBED_HOST)", label, nbytes / (1 << 30))
+    return get_accelerator_view_from_cpu_tensor(host)
+
+
+def trim_rows(rows: torch.Tensor, cols: int | None) -> torch.Tensor:
+    """Selected rows of a `host_resident` table, cut back to its stored width (a no-op for one never padded)."""
+    if cols is None or rows.shape[-1] == cols:
+        return rows
+    return rows[..., :cols].contiguous()
 
 
 class HostBlock:
