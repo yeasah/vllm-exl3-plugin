@@ -1090,7 +1090,7 @@ the Hessians see) and for eval (the text every card number is measured on). Noti
 2026-10-03.
 
 **Done 2026-10-04:** `ctx_trace.py --sampling_profile` picks sampling per conversation (slice,
-thinking); `quant.py traces` resolves a profile -- explicit, else checked-in
+thinking); the trace commands (`eval-traces`, `cal-traces`, `yaqa-traces`) resolve a profile -- explicit, else checked-in
 `quantization/sampling/<org>__<model>.json`, else the base model's `generation_config.json`,
 else it refuses -- and publishes it as `traces/sampling.json`. Profiles exist for
 Ornith-1.5-9B (general / coding, swe -> coding) and Qwen3.8-27B (thinking / instruct).

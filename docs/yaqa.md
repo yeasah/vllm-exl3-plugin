@@ -875,8 +875,8 @@ size, excess KL against the one-sided conversion:
   noise, validated on the 0.6B: 11-25% cheaper than one-sided at equal rfn, the size of the real gain)
   moves bits from layers 28-31 to 0-7. That traded wild for 4 bpw swe instead of improving both.
 
-**In the pipeline:** `quant.py yaqa` (after `traces`) generates own-voice rows through the eval generator
-(three passes over the 157-prompt pool, raw fill rows dropped), collects Hout on them and on the
+**In the pipeline:** `quant.py yaqa-traces` generates own-voice rows through the eval generator
+(three passes over the 157-prompt pool, raw fill rows dropped); `quant.py yaqa` then collects Hout on them and on the
 calibration, and blends them into `_hess/blend`; `quantize` then converts with `-hess` and records it in
 each revision's `calibration.json` (`--no-yaqa` converts one-sided). Costs: the factor pass holds the
 bf16 model and its full backward pass (a 9B needs ~44 GB at `--layers-per-run 4`, ~45 min per factor on
@@ -887,7 +887,7 @@ run to run, so a regenerated own-voice set differs in text (same prompts) and th
 Fused MoE experts are not covered by the factor tool and stay one-sided. Work: `quant_work/_yaqa`,
 `quant_work/_yaqa9`; factors and measurements in the `yeasah/yaqa-9b-hess` bucket.
 
-`yaqa --probe` (2026-11-15) builds only the cheap half: one own-voice pass of 60 rows and its factor, into
+`yaqa-traces --probe` and `yaqa --probe` (2026-11-15) build only the cheap half: one own-voice pass of 60 rows and its factor, into
 `_hess/probe`, for `quantize --yaqa-source probe` against a `--no-yaqa` control (TODO.md `yaqa-probe`). Under WSL a
 factor pass larger than the card still completes -- a 12 GiB 3060 finished MiniCPM5-2B's -- because the driver pages
 the overflow to host memory instead of failing; slowly, and with the throughput cliff any WSL overshoot has.
