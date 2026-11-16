@@ -298,9 +298,8 @@ def collect_metadata(job, qbench, gguf_kld=False):
               # The MTP draft: off by default in both engines (exllamav3 loads it only as a separate
               # draft model), and an external draft model is often the better choice where supported
               'mtp_bytes': sizes.get('mtp', 0),
-              # What vLLM holds for the embedding: a stored trellis or bq_* table as it is, a dense one encoded
-              # to blockq on load. Shrinking an already quantized table again understated VRAM by 0.43 GiB a rung
-              'blockq_bytes': sizes['embed'] if embedding_stored_quantized(job.revdir(rev)) else int(sizes['embed'] / 16 * BLOCKQ_EMBED_BITS),
+              # What vLLM holds of the embedding in VRAM: nothing, its table is in host memory (`served_embed_bytes`)
+              'embed_vram_bytes': served_embed_bytes(sizes, job.revdir(rev)),
               'excess': excess,
               'raw_excess': excess.get('raw'),
               'raw_ppl': qb['raw']['ppl'] if 'raw' in qb else None }
@@ -320,13 +319,14 @@ def collect_metadata(job, qbench, gguf_kld=False):
             continue
         excess = {sl: qb[sl]['kld'] - floor[sl] for sl in qb}
         gguf_thr = t.get("engine") == "llamacpp"
-        sz = quant_size(hf_hub_download(t['repo'], t['file'])) if gguf_thr else tensor_survey_remote(t['repo'], t['revision'])
+        gguf_path = hf_hub_download(t['repo'], t['file']) if gguf_thr else None
+        sz = quant_size(gguf_path) if gguf_thr else tensor_survey_remote(t['repo'], t['revision'])
         data['thresholds'].append({ 'repo': t['repo'], 'engine': t.get("engine", "transformers"),
                                     'name': f"{t['repo'].split('/')[-1]} {t['revision']}" if gguf_thr else t['repo'].split("/")[-1],
                                     'excess': excess,
                                     # as the size plot's axis: language-model weights without input embeddings, MTP
                                     # or a vision encoder (GGUF ships vision separately)
-                                    'size': served_gib(sz, None),
+                                    'size': served_gib(sz, gguf_path),
                                     'composite': sum(W[sl] * excess[sl] for sl in composite) if data['composite'] else None,
                                     'raw_excess': excess.get('raw') })
     return data
@@ -450,38 +450,31 @@ def contamination_map(job, info, slices):
 
 CONTAMINATED = 0.05     # share of a slice's prompts found in a competitor's calibration
 
-SERVED_AXIS = "weights as served (GiB; embedding as held in VRAM, no vision encoder or MTP draft)"
+SERVED_AXIS = "weights in VRAM as served (GiB; no input embedding, vision encoder or MTP draft)"
 
 def rev_served_gib(r):
     """One of this card's revisions on the served axis: the VRAM column's sum."""
-    return (r['disk_bytes'] - r['embed_bytes'] - r.get('encoder_bytes', 0) - r['mtp_bytes'] + r['blockq_bytes']) / 1024**3
+    return (r['disk_bytes'] - r['embed_bytes'] - r.get('encoder_bytes', 0) - r['mtp_bytes'] + r['embed_vram_bytes']) / 1024**3
 
 def served_embed_bytes(sz, path):
-    """The token embedding as held in VRAM: a table stored quantized (trellis, bq_*) as stored; a dense one in an
-    EXL3 checkpoint as the blockq the plugin encodes it to on load (and qbench scores, `served_embedding`); any other
-    format (GGUF, FP8, AWQ) as stored. Dense or not is read from bytes per element, since a reference may be a
-    configs-only snapshot with no weights on disk."""
+    """The token embedding as held in VRAM by the engine that serves the format. EXL3 under the plugin: none, its
+    table is in host memory (`EXL3_EMBED_HOST`, on by default since 2026-11-15; docs/cpu-offload.md, "Phase 5").
+    GGUF under llama.cpp: none either, it keeps `token_embd` on the CPU -- but a tied model's head is that table
+    duplicated onto the GPU (no `output.weight`), so it counts once. Any other format (FP8, AWQ under vLLM) as
+    stored. Before 2026-11-15 this counted every GGUF's `token_embd` as in VRAM, which llama.cpp never does: untied
+    GGUF competitors were compared at more than they serve."""
     e = sz['embed']
-    if not path or not isinstance(path, str) or path.endswith(".gguf"):
+    if isinstance(path, str) and path.endswith(".gguf"):
+        return 0 if sz.get('head') else e
+    if not path or not isinstance(path, str) or not os.path.isfile(os.path.join(path, "quantization_config.json")):
         return e
-    if not os.path.isfile(os.path.join(path, "quantization_config.json")):
-        return e
-    try:
-        with open(os.path.join(path, "config.json")) as f:
-            cfg = json.load(f)
-        tc = cfg.get("text_config") or cfg
-        elems = tc["vocab_size"] * tc["hidden_size"]
-    except (OSError, KeyError, ValueError):
-        return e
-    if e >= 1.5 * elems and tc["hidden_size"] % 32 == 0:
-        return int(e / 16 * BLOCKQ_EMBED_BITS)
-    return e
+    return 0
 
 def served_gib(sz, path):
     """Weights as served, the card's one size axis (its plots, its VRAM column, recall): everything the checkpoint
-    holds but the optional vision encoder and MTP draft, the embedding as `served_embed_bytes` holds it. As served is
-    also as scored. Before 2026-11-12 the card mixed three: with the head but no embedding (section 1), without the
-    head too (section 2 and TECHNICAL.md), and measured VRAM (recall)."""
+    holds in VRAM but the optional vision encoder and MTP draft, the embedding as `served_embed_bytes` holds it. As
+    served is also as scored. Before 2026-11-12 the card mixed three: with the head but no embedding (section 1),
+    without the head too (section 2 and TECHNICAL.md), and measured VRAM (recall)."""
     return (sz['total'] - sz['embed'] + served_embed_bytes(sz, path) - sz.get('mtp', 0) - sz.get('encoder', 0)) / 1024**3
 
 def ladder_at(ladder, x, sl=None, reach=1.02):
@@ -1533,7 +1526,7 @@ def do_card(job, args):
         f.write(env.get_template("technical.jinja").render(
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], recall=meta['recall'], **{k: meta[k] for k in
-            ('traces_published', 'eval_generator', 'multimodal', 'thresholds') if k in meta}))
+            ('traces_published', 'eval_generator', 'multimodal', 'thresholds', 'embed_quantized') if k in meta}))
 
 def fetch_uncalibrated(job, args):
     """Populate a working job dir with the uncalibrated conversions published in <repo>-uncalibrated
@@ -2285,7 +2278,6 @@ SAMPLING_DIR = os.path.join(HERE, "sampling")
 GC_SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "frequency_penalty",
                     "repetition_penalty")
 
-BLOCKQ_EMBED_BITS = 4.5    # bits per weight of a blockq:32 4-bit embedding, scales included
 
 def served_embedding(path):
     """qbench options that score an EXL3 checkpoint's embedding as vLLM serves it. A dense embedding is

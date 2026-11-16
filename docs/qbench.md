@@ -186,6 +186,14 @@ comparability with every figure already recorded in this note and in
 [embeddings.md](embeddings.md), which were all taken with the embedding counted. A merge
 that quietly re-baselines the axis invalidates the archive rather than extending it.
 
+**The model card's served axis is a different number, and does not breach this (2026-11-15).** `quant.py`'s
+`served_gib` sizes each set by the weights its engine holds in VRAM, and since the plugin keeps the embedding table in
+host memory by default ([cpu-offload.md](cpu-offload.md), "Phase 5") that leaves out the input embedding for both
+formats: llama.cpp keeps `token_embd` on the CPU too, and counts once for a tied GGUF, whose head is that table on the
+GPU. It is derived from where each engine puts the bytes, not from a decision that the embedding does not matter, and
+the card's size-on-disk column still carries every stored byte. qbench's own accounting, the one this policy governs,
+is unchanged.
+
 The boundary matters because it will be tempting to cross later. Full "will this fit and
 run" capacity planning — weights plus KV cache at a target context length plus batching —
 belongs to the packaged appliance, whose users are precisely the ones who do *not* bring
