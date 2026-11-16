@@ -13,6 +13,7 @@ import datetime
 import signal
 import threading
 import time
+import types
 import yaml
 from jinja2 import Environment, FileSystemLoader
 from huggingface_hub import ModelCard, ModelCardData, HfApi, hf_hub_download, snapshot_download
@@ -968,6 +969,92 @@ CONFIGS_ONLY = ["*.json", "*.jinja", "*.txt", "*.model"]
 
 HF_SNAPSHOT = re.compile(r"/models--([^/]+?)--([^/]+)/snapshots/([0-9a-f]{7,})(?:/(.+))?$")
 
+#: Commit messages that say nothing about what changed: the scored-quants table shows the date alone for these
+HUB_GENERIC_COMMIT = re.compile(r"huggingface_hub|upload-large-folder|^upload (folder|model|files?)\b|^upload \d+ files?$|"
+                                r"^(add|upload|update)\s+\S+\.(gguf|safetensors|json|md|txt)$|^initial commit$", re.I)
+
+#: The file whose last commit dates a scored quant, by kind: its weights, or what is written with them
+PROVENANCE_FILES = ("quantization_config.json", "model.safetensors.index.json", "model.safetensors", "config.json")
+
+def scored_identity(src):
+    """(repo, commit, file or None) of a scored arm's source -- an HF cache path, its portable `hf:` form, or a
+    {repo, revision} record -- else None (a local conversion)."""
+    if isinstance(src, dict):
+        return (src["repo"], src["revision"], src.get("file")) if src.get("repo") and src.get("revision") else None
+    if src.startswith("hf:"):
+        m = re.match(r"hf:([^@]+)@([0-9a-f]{7,})(?:/(.+))?$", src)
+        return m.groups() if m else None
+    m = HF_SNAPSHOT.search(src.rstrip("/"))
+    return (f"{m.group(1)}/{m.group(2)}", m.group(3), m.group(4)) if m else None
+
+def scored_provenance(job):
+    """Every other quant the card's numbers came from, and the bf16 reference itself, at the commit actually scored:
+    the last commit that touched its weights, with that commit's date and message. Read from the qbench projects
+    (main/qbench-<slice>.yaml, every arm's resolved source), else reference.json; looked up on the Hub once and kept
+    in main/provenance.json, which is published, so a fetched job re-cards without the Hub. A repo's head commit
+    would say the wrong thing: unsloth's Qwen3.8-27B head reads "Upload imatrix" while its quant files date from the
+    day before."""
+    arms = {}
+    for y in sorted(globmod.glob(os.path.join(job.main, "qbench-*.yaml"))):
+        with open(y) as f:
+            for m in (yaml.safe_load(f) or {}).get("models", []):
+                if m["label"].startswith(("ref:", "thr:")) or m.get("group") == "reference":
+                    arms.setdefault(m["label"], m.get("source") or {"repo": m.get("repo"), "revision": m.get("revision")})
+    if not arms:
+        info = load_reference_info(job) or {}
+        for ref in info.get("references", []):
+            for bs in ref.get("ladders", {}).values():
+                for b, path in bs.items():
+                    arms[ref_label(ref["repo"], b)] = path
+    cache_file = os.path.join(job.main, "provenance.json")
+    cache = json.load(open(cache_file)) if os.path.isfile(cache_file) else {}
+    api, rows, changed = None, [], False
+    for label, src in arms.items():
+        ident = scored_identity(src)
+        if not ident:
+            continue
+        repo, sha, file = ident
+        key = f"{repo}@{sha}" + (f"/{file}" if file else "")
+        if key not in cache:
+            from huggingface_hub import HfApi
+            api = api or HfApi()
+            entry = {"repo": repo, "revision": sha, "file": file}
+            try:
+                found = api.get_paths_info(repo, [file] if file else list(PROVENANCE_FILES), revision=sha, expand=True)
+                found = sorted(found, key=lambda x: PROVENANCE_FILES.index(x.path) if x.path in PROVENANCE_FILES else -1)
+                lc = found[0].last_commit if found else None
+                if lc is None:
+                    c = api.list_repo_commits(repo, revision=sha)[0]
+                    lc = types.SimpleNamespace(oid=c.commit_id, title=c.title, date=c.created_at)
+                entry.update(commit=lc.oid, title=lc.title, date=lc.date.date().isoformat())
+            except Exception as e:      # no network, a deleted revision: the row keeps what the path says
+                print(f"=== provenance: {key}: {type(e).__name__}: {e} ===")
+            cache[key], changed = entry, True
+        e = cache[key]
+        rows.append({"label": label, "repo": repo, "revision": sha, "file": file, "commit": e.get("commit"),
+                     "date": e.get("date"), "note": "" if not e.get("title") or HUB_GENERIC_COMMIT.search(e["title"])
+                     else e["title"]})
+    if changed:
+        with open(cache_file, "w") as f:
+            json.dump(cache, f, indent=1)
+    def quant(r):           # what the row is called in the table: the rung, the GGUF type, or the checkpoint
+        if r["label"].startswith("ref:"):
+            return r["label"].split("@", 1)[1]
+        return r["file"] or ("checkpoint" if r["label"].startswith("thr:") else "reference (bf16)")
+    ladders = {r["repo"]: set() for r in rows}
+    for r in rows:
+        r["quant"] = quant(r)
+        r["url"] = f"https://huggingface.co/{r['repo']}/commit/{r['commit'] or r['revision']}"
+        # an EXL3 set's branches form ladders by their prefix; GGUF type names do not
+        r["ladder"] = ((m.group(1) if (m := re.match(r"(.*?)_?\d", r["quant"])) else "")
+                       if r["label"].startswith("ref:") and not r["file"] else "")
+        ladders[r["repo"]].add(r["ladder"])
+    for r in rows:          # named as the card names its ladders: by the branch prefix, "plain" for none
+        r["set"] = r["repo"] + (f" ({r['ladder'] or 'plain'})" if len(ladders[r["repo"]]) > 1 else "")
+    order = lambda r: (r["label"] != "HF BF16", r["label"].startswith("thr:"), r["set"],
+                       float(m.group(1)) if (m := re.search(r"(\d+(?:\.\d+)?)bpw", r["quant"])) else 0, r["quant"])
+    return sorted(rows, key=order)
+
 def portable(path, job):
     """An absolute path as an identifier that means the same thing on any machine."""
     marker = f"/{job.name}/"
@@ -1491,6 +1578,7 @@ def do_card(job, args):
         raise SystemExit(f"=== revisions declare different base commits ({', '.join(sorted(bases))}): requantize or fix the records ===")
     meta['base_revision'] = json.loads(bases.pop())["revision"] if bases else None
     # A quantized token embedding: conditional, because reading one needs a newer exllamav3 than the checkpoints before it
+    meta['scored'] = scored_provenance(job)
     meta['embed_quantized'] = any(json.load(open(os.path.join(job.revdir(r['name']), "calibration.json"))).get("embedding", {}).get("embed_bits", 16) < 16
                                   for r in meta['revisions'] if os.path.isfile(os.path.join(job.revdir(r['name']), "calibration.json")))
 
@@ -1526,7 +1614,7 @@ def do_card(job, args):
         f.write(env.get_template("technical.jinja").render(
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], recall=meta['recall'], **{k: meta[k] for k in
-            ('traces_published', 'eval_generator', 'multimodal', 'thresholds', 'embed_quantized') if k in meta}))
+            ('traces_published', 'eval_generator', 'multimodal', 'thresholds', 'embed_quantized', 'scored') if k in meta}))
 
 def fetch_uncalibrated(job, args):
     """Populate a working job dir with the uncalibrated conversions published in <repo>-uncalibrated
