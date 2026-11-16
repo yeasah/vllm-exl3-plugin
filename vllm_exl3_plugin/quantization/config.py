@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 
 
-from .. import env, format
+from .. import cpu_offload, env, format
 from ..format import EXL3FormatError
 from ..log import init_logger
 
@@ -272,7 +272,8 @@ class EXL3Config(QuantizationConfig):
         """Put the flags that change the embedding's parameters in vLLM's key.
 
         `EXL3_BLOCKQ_ON_LOAD` and `EXL3_DENSE_EMBED` each decide whether the
-        embedding owns a dense `weight` or `bq_q`/`bq_s`/`bq_r`, and an AOT
+        embedding owns a dense `weight` or `bq_q`/`bq_s`/`bq_r` (and
+        `EXL3_EMBED_HOST` whether its table is padded), and an AOT
         graph traced against one set is called with the other on the next
         start: `KeyError: 'weight'`, from inside torch's AOT wrapper. vLLM's
         cache key cannot see either flag -- it hashes `VLLM_*` variables and
@@ -293,6 +294,10 @@ class EXL3Config(QuantizationConfig):
         hf_config.exl3_compile_factors = {
             "blockq_on_load": self._blockq_on_load,
             "dense_embed": self._dense_embed,
+            # A hosted table's rows are padded (`cpu_offload.HOST_ROW_ALIGN`), so a graph traced
+            # against the VRAM table fails its input check on the host one: `expected size ...
+            # stride 416==390` (MiniCPM5-1B's trellis rows; godel, 2026-11-15)
+            "embed_host": cpu_offload.HOST_ROW_ALIGN if cpu_offload.embed_on_host() else 0,
         }
 
     def _skip_hub_lookup(self, model_name: str, revision: str | None) -> bool:
