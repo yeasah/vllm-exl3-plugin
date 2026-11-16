@@ -168,8 +168,8 @@ tables).
 ## bf16 as the calibration generator (2026-10-23)
 
 The uncalibrated 8bpw generator was a stand-in for bf16 where bf16 cannot run (see *An
-uncalibrated reference* below). Where it can, `cal-traces --generator bf16` writes the
-calibration with the eval traces' own model and engine, which also takes the 8bpw quant out
+uncalibrated reference* below). Where it can, `cal-traces` writes the
+calibration with the base model (or the same `--generator` as the eval traces), which also takes the 8bpw quant out
 of the pipeline. A/B on Qwen3-0.6B: the same eval traces, constant rfn anchors, default
 recipe; U is the existing trace from the uncalibrated 8bpw (exllamav3), B is regenerated from
 bf16 through vLLM. Excess KLD, B as a share of U, and a second U at 4 bpw with a different
@@ -189,8 +189,8 @@ rounding seed (`EXL3_SEED_IDX_OFFSET=5`) as the noise yardstick:
   turns, and bf16's turns are the text the swe eval scores against.
 - One model and one draw per arm, so the size is soft; the direction is what moved the default.
 
-**`--generator bf16` is the default**; `uncalibrated` stays for a model whose bf16 (or FP8
-release) does not fit where the calibration is made. Project files:
+**The base model (or an FP8 release through `--generator`) is the default**; `cal-traces --uncalibrated` stays for a model
+whose bf16 (or FP8 release) does not fit where the calibration is made (option names as of 2026-11-15). Project files:
 `/home/bulk/ypell/quant_work/_calgen_ab/`.
 
 ## An FP8 release as the generator (2026-11-11)
@@ -1035,8 +1035,8 @@ use and is a guard with a tolerance, not a target to buy back with a real slice.
    1024-token prefill chunks, eager, utilization 0.968, native sampler; ~0.12 GiB of slack).
    Checked neutral on Ornith-9B: the wild eval regenerated through vLLM bf16 gives the same
    ratios as exllamav3's (default/unc 0.582 vs 0.585, mix/unc 0.516 vs 0.517). In `quant.py
-   traces` as `--eval-generator Qwen/Qwen3.8-27B-FP8 --eval-backend vllm --vllm-args ...`;
-   an EXL3 checkpoint is refused as eval generator, and the card names the generator.
+   eval-traces` as `--generator Qwen/Qwen3.8-27B-FP8 --backend vllm --vllm-args ...` (the same options on
+   every trace command); an EXL3 checkpoint is refused as a generator, and the card names the generator.
 2. *An agentic calibration slice.* Real coding-agent sessions are where draws still
    spread (0.73-0.89 for the mix, 0.94-1.23 for default at 27B). Tried on the proxy
    2026-10-05 as Open-SWE-Traces' minisweagent/qwen38_27b sessions at a 0.20 share: wild
