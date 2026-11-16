@@ -25,8 +25,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "2dbc8ab",
-   "head": "2dbc8aba70",
+   "describe": "0e35b44",
+   "head": "0e35b44679",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -50,48 +50,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpr1hn0zmn/caches/exllamav3_autotune",
+   "path": "/tmp/tmpq1ij6eru/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8400,
-   "mtime": 1794807999
+   "mtime": 1794850274
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpr1hn0zmn/caches/vllm",
+   "path": "/tmp/tmpq1ij6eru/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 7,
    "bytes": 1953067,
-   "mtime": 1794808014
+   "mtime": 1794850290
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpr1hn0zmn/caches/triton",
+   "path": "/tmp/tmpq1ij6eru/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 369,
    "bytes": 8867650,
-   "mtime": 1794808019
+   "mtime": 1794850295
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpr1hn0zmn/caches/flashinfer",
+   "path": "/tmp/tmpq1ij6eru/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6290521,
-   "mtime": 1794808047
+   "mtime": 1794850323
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "46",
+    "temperature.gpu": "49",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "24.76 W",
+    "power.draw": "25.18 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -100,7 +100,7 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "28",
+    "temperature.gpu": "29",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
     "power.draw": "9.74 W",
@@ -1944,7 +1944,7 @@
   }
  ],
  "tune_drift": null,
- "weight_gib": 0.41,
+ "weight_gib": 0.42,
  "attn_backend": "FLASH_ATTN",
  "kv_cache_gib": 11.67
 }

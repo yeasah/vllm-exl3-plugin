@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "2dbc8ab",
-   "head": "2dbc8aba70",
+   "describe": "0e35b44",
+   "head": "0e35b44679",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,48 +46,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpwpoqhppo/caches/exllamav3_autotune",
+   "path": "/tmp/tmp3tofpkn7/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8400,
-   "mtime": 1794808620
+   "mtime": 1794850890
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpwpoqhppo/caches/vllm",
+   "path": "/tmp/tmp3tofpkn7/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 10,
    "bytes": 3508189,
-   "mtime": 1794808629
+   "mtime": 1794850900
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpwpoqhppo/caches/triton",
+   "path": "/tmp/tmp3tofpkn7/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 505,
-   "bytes": 9655336,
-   "mtime": 1794808650
+   "files": 497,
+   "bytes": 9514790,
+   "mtime": 1794850920
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpwpoqhppo/caches/flashinfer",
+   "path": "/tmp/tmp3tofpkn7/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6293137,
-   "mtime": 1794808678
+   "mtime": 1794850948
   }
  },
  "hardware": {
   "gpu": [
    {
     "temperature.gpu": "45",
-    "clocks.sm": "2400 MHz",
+    "clocks.sm": "562 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "21.49 W",
+    "power.draw": "19.23 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -97,9 +97,9 @@
    },
    {
     "temperature.gpu": "37",
-    "clocks.sm": "472 MHz",
+    "clocks.sm": "690 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "15.27 W",
+    "power.draw": "16.98 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",

@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "2dbc8ab",
-   "head": "2dbc8aba70",
+   "describe": "0e35b44",
+   "head": "0e35b44679",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,48 +46,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpwpoqhppo/caches/exllamav3_autotune",
+   "path": "/tmp/tmp3tofpkn7/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8400,
-   "mtime": 1794808509
+   "mtime": 1794850781
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpwpoqhppo/caches/vllm",
+   "path": "/tmp/tmp3tofpkn7/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 3507283,
-   "mtime": 1794808453
+   "mtime": 1794850724
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpwpoqhppo/caches/triton",
+   "path": "/tmp/tmp3tofpkn7/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 489,
-   "bytes": 9533280,
-   "mtime": 1794808529
+   "files": 481,
+   "bytes": 9392734,
+   "mtime": 1794850800
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpwpoqhppo/caches/flashinfer",
+   "path": "/tmp/tmp3tofpkn7/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6291393,
-   "mtime": 1794808557
+   "mtime": 1794850827
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "46",
-    "clocks.sm": "727 MHz",
+    "temperature.gpu": "47",
+    "clocks.sm": "517 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "19.10 W",
+    "power.draw": "13.60 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -96,10 +96,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "38",
-    "clocks.sm": "1807 MHz",
+    "temperature.gpu": "37",
+    "clocks.sm": "472 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "23.60 W",
+    "power.draw": "13.07 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",

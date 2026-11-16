@@ -25,8 +25,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "2dbc8ab",
-   "head": "2dbc8aba70",
+   "describe": "0e35b44",
+   "head": "0e35b44679",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -50,48 +50,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpr1hn0zmn/caches/exllamav3_autotune",
+   "path": "/tmp/tmpq1ij6eru/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 8400,
-   "mtime": 1794807965
+   "mtime": 1794850240
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpr1hn0zmn/caches/vllm",
+   "path": "/tmp/tmpq1ij6eru/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 5,
    "bytes": 1102129,
-   "mtime": 1794807930
+   "mtime": 1794850206
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpr1hn0zmn/caches/triton",
+   "path": "/tmp/tmpq1ij6eru/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 273,
    "bytes": 5829361,
-   "mtime": 1794807898
+   "mtime": 1794850174
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpr1hn0zmn/caches/flashinfer",
+   "path": "/tmp/tmpq1ij6eru/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6290085,
-   "mtime": 1794807995
+   "mtime": 1794850270
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "43",
+    "temperature.gpu": "48",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "24.50 W",
+    "power.draw": "24.87 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -100,10 +100,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "28",
+    "temperature.gpu": "29",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.71 W",
+    "power.draw": "9.74 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
@@ -1943,7 +1943,7 @@
   }
  ],
  "tune_drift": null,
- "weight_gib": 0.41,
+ "weight_gib": 0.42,
  "attn_backend": "FLASH_ATTN",
  "kv_cache_gib": 12.05
 }
