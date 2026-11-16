@@ -2723,8 +2723,10 @@ def adopt_converter(paths, args):
     """Record the current converter on conversions that carry no record, after a human has checked
     that the converter has not changed since they were made (e.g. the fork's history under
     exllamav3/ and convert.py). One recorded decision instead of an override passed on every run,
-    which would teach the flag and dilute the refusal. Never overwrites a record that names
-    another converter: that one is a true record of a different converter, and must be rebuilt."""
+    which would teach the flag and dilute the refusal. A record that names another converter is a
+    true record of a different converter: it is replaced only with --reviewed, the person's account
+    of the diff between the two (e.g. "4bff9eb..0705af6: MoE calibration switches and the tie flag,
+    neither reaches this dense model"), and the old record is kept inside the new one."""
     cur = converter_id(args.exllamav3dir)
     if cur["tree"] is None:
         print("=== cannot adopt: the current converter has uncommitted changes or is not a git checkout ==="); return False
@@ -2734,14 +2736,22 @@ def adopt_converter(paths, args):
                 rec = json.load(f)
         except FileNotFoundError:
             rec = {"tree": None}
-        if rec.get("tree") is not None:
-            print(f"=== {p}: already recorded ({'current' if rec['tree'] == cur['tree'] else 'a different converter'}); not adopted ===")
+        if rec.get("tree") == cur["tree"]:
+            print(f"=== {p}: already recorded under the current converter ==="); continue
+        if rec.get("tree") is not None and not args.reviewed:
+            print(f"=== {p}: recorded under converter {(rec.get('commit') or '?')[:10]}; not adopted. Rebuild it, or "
+                  f"review the converter's diff since then and pass --reviewed with what you found ===")
             continue
+        if rec.get("tree") is None:
+            entry = {"note": "adopted: made before converters were recorded, judged by a person to be from this "
+                             "converter; not verified by a build"}
+        else:
+            entry = {"note": "adopted across a converter change, judged by a person to produce the same output for "
+                             "this model; not verified by a build", "reviewed": args.reviewed, "previous": rec}
         with open(os.path.join(p, CONVERTER_FILE), "w") as f:
-            json.dump({**cur, "adopted": True, "recorded": stamp(),
-                       "note": "adopted: made before converters were recorded, judged by a person to be from this "
-                               "converter; not verified by a build"}, f, indent=1)
-        print(f"=== {p}: adopted under converter {cur['commit'][:10]} ===")
+            json.dump({**cur, "adopted": True, "recorded": stamp(), **entry}, f, indent=1)
+        print(f"=== {p}: adopted under converter {cur['commit'][:10]}"
+              + (f" (was {(rec.get('commit') or '?')[:10]}; reviewed: {args.reviewed})" if rec.get("tree") else "") + " ===")
     return True
 
 def refuse_converter_mismatch(paths, args, what):
@@ -3664,7 +3674,12 @@ def main():
     cmd_baseline.add_argument('--adopt-converter', action='store_true',
                               help='record the current converter on present rungs (and the generator) that carry no '
                                    'record, once you have checked the converter has not changed since they were made; '
-                                   'never overrides a record of a different converter')
+                                   'a record of a different converter only with --reviewed')
+    cmd_baseline.add_argument('--reviewed', default=None, metavar='WHAT',
+                              help="with --adopt-converter: adopt rungs recorded under a different converter, after "
+                                   "reading its diff since then; WHAT is what you found (\"4bff9eb..0705af6: MoE "
+                                   "calibration switches and the tie flag, neither applies to this dense model\"), kept "
+                                   "in each rung's record with the old one")
     cmd_baseline.set_defaults(func=do_baseline)
 
 
