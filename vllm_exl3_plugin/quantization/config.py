@@ -266,6 +266,9 @@ class EXL3Config(QuantizationConfig):
             # selection rather than at load.
             text = getattr(hf_config, "text_config", None) or hf_config
             self._hidden_size = getattr(text, "hidden_size", None)
+            # Read in the process that builds the model, through the pickled config: engram.py patches vLLM's
+            # Qwen4Exp only for that architecture (its import costs ~2 s, too much for every model)
+            self._architectures = list(getattr(hf_config, "architectures", None) or [])
             self._stamp_compile_factors(hf_config)
 
     def _stamp_compile_factors(self, hf_config: Any) -> None:
@@ -921,6 +924,11 @@ class EXL3Config(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
         _refuse_microbatching()
+        if any(a.startswith("Qwen4Exp") for a in getattr(self, "_architectures", ())):
+            # Before the model reaches its n-gram layer: earlier layers ask for their methods first
+            from .. import engram
+
+            engram.patch_qwen4_exp()
         from vllm.model_executor.layers.vocab_parallel_embedding import (
             ParallelLMHead,
             VocabParallelEmbedding,
