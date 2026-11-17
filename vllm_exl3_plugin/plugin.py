@@ -114,7 +114,7 @@ def _patch_offload_summary() -> None:
 
         # Before anything serves: an uneven MLP split is exact only for a channel-pairwise activation
         model = args[0] if args else kwargs.get("model")
-        if model is not None:
+        if hasattr(model, "named_modules"):
             check_uneven_mlps(model)
         build_staging()
         report_once()
