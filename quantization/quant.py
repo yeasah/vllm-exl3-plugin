@@ -1279,11 +1279,11 @@ def recall_section(job, revisions):
         only where a size was not recorded."""
         return served_gib(sizes[label], path) if label in sizes else results[label]["vram_gb"]
     for ref in info["references"]:
-        for name, branches in ref["ladders"].items():
+        for name, branches in ref.get("recall_ladders", ref["ladders"]).items():
             pts = [(served_gb(l, branches[b] if isinstance(branches, dict) else None), results[l]["recall_kept"])
                    for b in branches if "recall_kept" in results.get(l := ref_label(ref["repo"], b), {})]
             if pts:
-                sets.append({ "name": ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})",
+                sets.append({ "name": set_name(ref, name),
                               "points": sorted(pts) })
     floor_bands = results.get("Noise floor", {}).get("recall_bands")
     return { "rows": rows, "questions": known, "confident": selection["confident"],
@@ -1341,12 +1341,19 @@ def plot_recall(recall, path):
 OTHER_SET_COLORS = ["#4e68ce", "#49cffc", "#eee354", "#c22d6d"]
 OTHER_SET_MARKERS = ["o", "s", "^", "v"]
 
+def set_name(ref, name):
+    """A reference ladder's display name: the repo alone when it is the reference's only (KLD-plot) ladder, else the
+    repo and the ladder ("plain" for the unprefixed one). One rule for every plot, so colours match up."""
+    return ref["repo"] if len(ref["ladders"]) == 1 and name in ref["ladders"] else f"{ref['repo']} ({name or 'plain'})"
+
 def other_set_styles(job):
     """{set display name: (color, marker)}, fixed by the set's place in reference.json, so a set keeps its colour
     on every plot of the card whichever others a plot leaves out."""
     info = load_reference_info(job) or {"references": []}
-    names = [ref["repo"] if len(ref["ladders"]) == 1 else f"{ref['repo']} ({name or 'plain'})"
-             for ref in info["references"] for name in ref["ladders"]]
+    names = [set_name(ref, name) for ref in info["references"] for name in ref["ladders"]]
+    # a ladder only the recall plot has (wholly under --reference-min-bits) gets the next colour after them
+    names += [n for ref in info["references"] for name in ref.get("recall_ladders", {})
+              if (n := set_name(ref, name)) not in names]
     return {n: (OTHER_SET_COLORS[i % len(OTHER_SET_COLORS)], OTHER_SET_MARKERS[i % len(OTHER_SET_MARKERS)])
             for i, n in enumerate(names)}
 
@@ -1929,20 +1936,33 @@ def do_qbench(job, args):
     arms = [(rev, job.revdir(rev)) for rev in revisions]
     # Existing sets of this model's quants (each grouped into ladders by branch name), and the
     # uncalibrated baseline sweep from `baseline`: section 2 of the card
-    references = []
+    references, recall_arms = [], []
     for ref in args.reference or []:
         (repo, *patterns) = ref.split(":")
         branches = [b.name for b in HfApi().list_repo_refs(repo).branches]
         # Rungs below --reference-min-bits are left out (turboderp's SC ladder runs down to 1.4)
         # Rungs above --reference-max-bits are left out (default 8.9 catches up to a hypothetical 8bpw + HQ)
-        keep = lambda b: (args.reference_max_bits >= float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= args.reference_min_bits 
-                          and (len(patterns) == 0 or sum(int(re.search(pattern, b) is not None) for pattern in patterns) > 0))
+        keep = lambda b, lo=args.reference_min_bits: (
+            args.reference_max_bits >= float(re.search(r"(\d+(?:\.\d+)?)bpw", b).group(1)) >= lo
+            and (len(patterns) == 0 or sum(int(re.search(pattern, b) is not None) for pattern in patterns) > 0))
         # configs only: qbench fetches a rung's weights itself if it has to run it (a cache miss);
         # sizes come from the Hub's safetensors headers. A fully cached series downloads no weights
-        ladders = {name: {b: snapshot_download(repo, revision=b, allow_patterns=CONFIGS_ONLY) for b in bs if keep(b)}
-                   for name, bs in ladders_of(branches).items()}
+        fetch = lambda b: snapshot_download(repo, revision=b, allow_patterns=CONFIGS_ONLY)
+        ladders = {name: {b: fetch(b) for b in bs if keep(b)} for name, bs in ladders_of(branches).items()}
         ladders = {name: bs for name, bs in ladders.items() if bs}
-        references.append({"repo": repo, "ladders": ladders})
+        ref_entry = {"repo": repo, "ladders": ladders}
+        # The recall plot shows each reference's whole ladder by default (--recall-min-bits): where a quant falls off
+        # is the point there, while the KLD plots stay bounded. The rungs below --reference-min-bits are scored on
+        # the recall slice only
+        lo = min(args.recall_min_bits, args.reference_min_bits)
+        recall_ladders = {name: {b: ladders.get(name, {}).get(b) or fetch(b) for b in bs if keep(b, lo)}
+                          for name, bs in ladders_of(branches).items()}
+        recall_ladders = {name: bs for name, bs in recall_ladders.items() if bs}
+        if recall_ladders != ladders:
+            ref_entry["recall_ladders"] = recall_ladders
+            recall_arms += [(ref_label(repo, b), p) for name, bs in recall_ladders.items() for b, p in bs.items()
+                            if b not in ladders.get(name, {})]
+        references.append(ref_entry)
         arms += [(ref_label(repo, b), p) for bs in ladders.values() for b, p in bs.items()]
     if references and not args.allow_thin_baseline:
         # Section 2 plots every set relative to the baseline at each compared rate: at that rate, or interpolated
@@ -2008,7 +2028,7 @@ def do_qbench(job, args):
     if references or baseline:
         # Every compared quant's size, recorded where the scores are: a re-card from the published
         # repo then needs neither the weights nor a header the Hub cannot parse (GGUF)
-        sizes = {label: quant_size(p) for label, p in arms if label.startswith("ref:")}
+        sizes = {label: quant_size(p) for label, p in arms + recall_arms if label.startswith("ref:")}
         sizes.update({baseline_label(rev): quant_size(p) for rev, p in baseline.items()})
         info = {"references": references, "baseline": baseline, "sizes": sizes}
         prev = load_reference_info(job) if args.revisions else None
@@ -2030,6 +2050,8 @@ def do_qbench(job, args):
     # free VRAM as the first
     for sl in slices:
         sl_arms = arms + (base_arms if sl.split(".")[0] in EVAL_SLICES else [])   # the baseline only enters through the composite
+        if sl.split(".")[0] == RECALL_SLICE:
+            sl_arms = sl_arms + recall_arms
         qbench_file = os.path.join(job.main, f"qbench-{sl}.yaml")
         final = os.path.join(job.main, f"qb_{sl}.json")
         out = os.path.join(job.main, f"_qb_{sl}.subset.json") if args.revisions else final
@@ -3967,6 +3989,10 @@ def main():
     cmd_qbench.add_argument('--threshold-gguf', action='append',
                             help="one GGUF file as a threshold line, REPO@QUANT (e.g. unsloth/...-GGUF@UD-Q4_K_M; "
                                  "repeatable): for a card without a whole --reference-gguf ladder, scored by llama.cpp")
+    cmd_qbench.add_argument('--recall-min-bits', type=float, default=0.0,
+                            help="the recall slice's own lower bound on reference rungs (default 0: each reference's "
+                                 "whole ladder, scored on recall only, so the recall plot shows where it falls off "
+                                 "while --reference-min-bits keeps the KLD plots bounded)")
     cmd_qbench.add_argument('--reference', action='append',
                             help='HF repo of an existing set of this model\'s quants to compare against '
                                  '(card section 2); repeatable')
