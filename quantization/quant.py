@@ -547,7 +547,7 @@ def reference_section(job, qbench, floor, data, gguf=False):
     ours = {k: v for k, v in ours.items() if v}
     if not ours:
         return None
-    lo = min(v['served'] for v in ours.values()) * 0.9; hi = max(v['served'] for v in ours.values()) * 1.1
+    lo = min(v['served'] for v in ours.values()) * 0.85; hi = max(v['served'] for v in ours.values()) * 1.15
     contam = contamination_map(job, info, every)
     ladders = []   # (display name, [rungs])
     whole = {}     # display name -> every scored rung
