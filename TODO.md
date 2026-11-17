@@ -314,8 +314,9 @@ under full decode graphs (upstream's FP8 hybrid: 13.6-18.1 eager). Next: overlap
 the same path for DeepSeek-V4.1-Flash's engram.
 
 **TP=2 (2026-11-17):** runs by uneven blocks (`tp-uneven-blocks`), exact against TP=1, 36 t/s decode on the 2.05bpw
-body; the 3.05bpw body does not fit this host at TP=2 (2x16 GiB VRAM, 40 GiB RAM: ~42 GiB of experts), a job for a
-larger-RAM host. **Open:** 3.05bpw at TP=2 elsewhere; breakable CUDA graphs fail for EXL3 GDN models (ours and
+body. The 3.05bpw body serves at TP=2 here too (2x16 GiB, 40 GiB RAM: 28.1 GiB of experts hosted, 7.0 GiB each in
+VRAM, cache coverage 32%/54%): 10.8 t/s, link-bound -- once the host-RAM margin was taken once rather than per rank.
+**Open:** breakable CUDA graphs fail for EXL3 GDN models (ours and
 `main`'s, "CUDA graphs under breakable capture"), and `main`'s KV sizing disagrees with the expert cache (docs/upstream.md,
 "The 0.34 bump"). The native trellis PLE method is done (the plugin-owned table above); its bit depth per user
 (`EXL3_NGRAM_REVISION`/`_FILE`) answers most of the `-ngb` question left from the retired `category-bits`.

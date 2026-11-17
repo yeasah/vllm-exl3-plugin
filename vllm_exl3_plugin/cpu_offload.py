@@ -456,7 +456,9 @@ def _host_quota(experts: int, nbytes: int) -> int:
     if _STATS["quota"] is None:
         layers = max(len(_STATS["moe_layers"]), 1)
         want = layers * experts * 3 * nbytes
-        free = _mem_available() // _local_ranks() - max(_HOST_MARGIN, _mem_total() // 10)
+        # The margin protects the host, so it is taken once, not once per rank: per rank it reserved 8 GiB of a
+        # 40 GiB host at TP=2 and left Qwen4Exp's 3.05bpw body short of host rows (2026-11-17)
+        free = (_mem_available() - max(_HOST_MARGIN, _mem_total() // 10)) // _local_ranks()
         loader = _uva_loader()
         budget = (max(loader.cpu_offload_max_bytes - loader.cpu_offload_bytes, 0)
                   if loader is not None else want)
