@@ -298,6 +298,13 @@ at TP=1, 2.05bpw body, eager: coherent output, 13.6-18.1 t/s decode, 60 s load; 
 experts in VRAM, 28 GiB hosted, VRAM hit climbing past 69%. Scripts and the venv are in
 `/home/bulk/ypell/engram-main` (throwaway; the hybrid dirs reuse one extracted table).
 
+**Plugin-owned table on the fork (2026-11-17), the route chosen over the 0.34 bump and a backport of upstream's
+`b44a48c`:** the table stays on disk, rows staged per step through exllamav3's `RowTable` into fixed device buffers,
+decoded by `ngram_dequant` in the forward (`vllm_exl3_plugin/engram.py`). Milestone 1 done: the EXL3 body loads and
+runs on the fork with a stub table (73 s load, coherent output), and decodes under full CUDA graphs at 22 t/s; vLLM's
+default piecewise capture fails, so the plugin defaults this model to `FULL_DECODE_ONLY` (docs/upstream.md, "CUDA graphs
+and expert offload"; the piecewise segment that records a host-allocator event is unfound). Milestone 2: the disk table.
+
 **Open:** 3.05bpw needs TP=2, which needs expert parallelism or `tp-uneven-blocks` (640-wide experts); graphs on `main` fail
 under expert offload, and `main`'s KV sizing disagrees with the expert cache (both in docs/upstream.md,
 "The 0.34 bump"). (2) is the 0.34 bump itself. (4) Only then a native trellis PLE method, 20 GB against 52 of

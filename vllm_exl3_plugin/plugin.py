@@ -29,6 +29,7 @@ def register() -> None:
     _patch_offload_summary()
     _patch_offload_defaults()
     _patch_kernel_overlap()
+    _patch_qwen4exp_graph_default()
     _REGISTERED = True
 
 
@@ -218,3 +219,38 @@ def _patch_offload_defaults() -> None:
 
     UVAOffloader.wrap_modules = wrap_modules
     UVAOffloader._exl3_defaults_patched = True
+
+
+def _patch_qwen4exp_graph_default() -> None:
+    """Full CUDA graphs for decode only, by default, on an EXL3 Qwen4Exp checkpoint.
+
+    vLLM's default (`FULL_AND_PIECEWISE`) fails there under expert offload: capturing a piecewise graph
+    (compiled, the prefill and mixed-batch sizes) leaves torch's pinned-host allocator an event it cannot
+    query, and the next capture's `torch.cuda.graph.__enter__` raises `cudaErrorInvalidValue` from
+    `_host_emptyCache()`. Full decode graphs, compiled or not, capture and replay correctly (22 t/s against
+    8 eager, 2026-11-17); docs/upstream.md, "CUDA graphs and expert offload". Only when the user chose no
+    graph mode: an explicit `cudagraph_mode` stands.
+    """
+    from vllm.config import VllmConfig
+    from vllm.config.compilation import CUDAGraphMode
+
+    if getattr(VllmConfig, "_exl3_qwen4exp_graphs_patched", False):
+        return
+    original = VllmConfig.__post_init__
+
+    @wraps(original)
+    def __post_init__(self, *args, **kwargs):
+        mc, cc = getattr(self, "model_config", None), getattr(self, "compilation_config", None)
+        if mc is not None and cc is not None and cc.cudagraph_mode is None \
+                and getattr(mc, "quantization", None) == "exl3" \
+                and any(a.startswith("Qwen4Exp") for a in getattr(mc.hf_config, "architectures", None) or []):
+            from .log import init_logger
+
+            cc.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+            init_logger(__name__).info(
+                "EXL3 Qwen4Exp: CUDA graphs for decode only (piecewise capture fails under expert offload; "
+                "pass a cudagraph_mode to override)")
+        return original(self, *args, **kwargs)
+
+    VllmConfig.__post_init__ = __post_init__
+    VllmConfig._exl3_qwen4exp_graphs_patched = True

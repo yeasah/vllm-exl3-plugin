@@ -517,7 +517,8 @@ Not a survey: a throwaway venv at upstream `main` `960f5c1bb1` (torch 2.14.0, pr
 keeps the device guard in the `else` branch only) used to serve the Qwen4Exp hybrid (TODO `engram-ple`).
 What it ran into, for the bump to budget:
 
-- **CUDA graphs fail with expert offload.** `torch._C._host_emptyCache()` in `torch.cuda.graph.__enter__`
+- **CUDA graphs fail with expert offload.** *(Narrowed 2026-11-17: piecewise capture only, and on our fork too; see
+  "CUDA graphs and expert offload" below.)* `torch._C._host_emptyCache()` in `torch.cuda.graph.__enter__`
   returns `cudaErrorInvalidValue` during vLLM's graph-memory profile, before capture begins, with
   `CUDA_LAUNCH_BLOCKING=1` too. Dense EXL3 with no EXL3 tensor offloaded captures fine; Qwen3.6-35B-A3B
   with experts offloaded fails the same way as Qwen4Exp, before the expert cache exists. So our expert
@@ -994,3 +995,38 @@ an MTP drafter shares the target's embedding, so the mismatch never arises. It w
 the checkpoint, and it would make a good `full`-tier entry regardless.
 
 → [docs/upstream.md](upstream.md)
+
+---
+
+### CUDA graphs and expert offload (2026-11-17)
+
+The failure recorded for `main` above happens on our fork too, for the EXL3 Qwen4Exp body (turboderp's 2.05bpw_h4_ng4,
+28 GiB of experts hosted under the expert cache, TP=1, V2 runner), and it is narrower than it looked. Measured:
+
+| cudagraph mode | torch.compile | result |
+|---|---|---|
+| none (eager) | -- | runs, 8.2 t/s decode |
+| `FULL_AND_PIECEWISE` (vLLM's default) | on | fails during the graph-memory profile |
+| `FULL_DECODE_ONLY` | off | runs, 22.6 t/s, text identical to eager |
+| `FULL_DECODE_ONLY` | on | runs, 22.3 t/s |
+
+The error is `cudaEventQuery` returning `cudaErrorInvalidValue` inside the pinned-host caching allocator's
+`process_events_for_stream`, reached from `_host_emptyCache()` as the next graph opens (C++ stack with
+`TORCH_SHOW_CPP_STACKTRACES=1`; the same with `CUDA_LAUNCH_BLOCKING=1`): an event attached to one of torch's pinned
+blocks that can no longer be queried, as one recorded inside a stream capture cannot. So a piecewise capture is
+recording a host-allocator event -- a host-to-device copy staged through torch's pinned allocator inside compiled code.
+That is a correctness hazard as well as a crash (a captured copy replays from a staging buffer the allocator may have
+reused), so the error is not one to swallow.
+
+Ruled out: torch 2.14 (2.13 makes the same call); the V2 runner as such and our expert offload as such (Qwen3.6-35B-A3B
+4.00bpw with experts offloaded captures under V2 by default, with fixed slots and with the cache off; FP8 KV and
+`max_num_seqs=1` change nothing); our driver-allocated pinned memory (`cpu_offload._pinned` plus a UVA view, kernels
+reading it, pinned temporaries and their copies, leave `_host_emptyCache()` working in isolation); host-to-device
+copies made from Python during capture (none, by a `copy_`/`.to()`/`.cuda()` hook in the engine process). Not found:
+which compiled segment records the event -- something Qwen4Exp-specific, since Qwen3.6 passes.
+
+The plugin now defaults an EXL3 Qwen4Exp checkpoint to `FULL_DECODE_ONLY` when no `cudagraph_mode` was given
+(`plugin._patch_qwen4exp_graph_default`): decode gets graphs, prefill and mixed batches run compiled without them, where
+launch overhead matters least. Piecewise graphs help mixed prefill/decode batches under concurrency, so finding the
+segment is still worth doing (TODO.md `engram-ple`).
+
