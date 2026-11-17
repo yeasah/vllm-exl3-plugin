@@ -949,6 +949,29 @@ on swe buys nothing at 200 sessions: five draws could win at most ~2.4% from the
 selection trace whose own noise sits well under that -- on the order of 800 sessions, kept-reasoning. No multi-draw
 ladder; `quantize --draws` and `probe.py` stay, for yardsticks and the YAQA/recipe gate.
 
+## Tool rows calibrate with empty past thoughts (2026-11-16)
+
+The mix's tool rows (`ctx_trace`'s `conv_ctx_tool`, `conv_loop`) are scripted: their assistant turns are bare tool
+calls with no reasoning, so under a thinking template every past turn renders as an empty think block before the
+generator writes the scored turn. The eval fix (`--swe_reasoning match`) cannot reach them -- it keeps or strips
+*recorded* reasoning, and these turns have none -- so cal traces are unchanged by it (MiniCPM5-2B's rebuilt
+`cal.safetensors` came out byte-identical). On Qwen3.8-27B's calibration (bf16 generator, thinking on), 140 of 247 rows
+carry such turns, 267 in all, and the generator thinks far less after them:
+
+| rows | thinks | median thought | median response |
+|---|---|---|---|
+| no past turns (own voice, single-turn documents), 107 | 107 | 526 tokens | 1024 (the cap) |
+| past turns with empty thoughts, 140 | 140 | 62 tokens | 592 |
+
+The milder form of the Qwen3.6 collision: thinking shortened, not abandoned. Confounded with content -- a turn after a
+tool result may need less thought -- and nothing yet ties it to worse quants: the 27B's swe falloff at 2.5 bpw and the
+YAQA blend's extra recall cost over own voice alone each have other candidate causes, and on the MoE agentic
+calibration content moved swe less than a redraw. **Not acted on.** Thinking in the tool rows would be a change to the
+calibration itself (every ladder redone), wanted only on evidence of harm. The control that would separate content from
+format: regenerate some of these rows with each scripted turn given a short real thought (or the model writing its own
+turn with the documents fixed) and compare thought length and the quants calibrated on each. The other remedy is
+rendering tool rows with thinking off, consistent but giving up thinking-mode coverage of that content.
+
 ## Converter internals worth knowing
 
 **Sign vectors alias within a module.** `convert_model.py` seeds each module with its
