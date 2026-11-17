@@ -320,6 +320,7 @@ class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
         layer.register_parameter(
             "et_table",
             EXL3Parameter(
+                dtype=torch.int16,      # as stored: a bf16 placeholder made vLLM warn of a cast that never happens
                 num_shards=1,
                 device=device,
                 weight_loader=_blockq_weight_loader,
@@ -331,6 +332,7 @@ class EXL3TrellisEmbeddingMethod(QuantizeMethodBase):
         layer.register_parameter(
             "et_signs",
             EXL3Parameter(
+                dtype=torch.float16,
                 num_shards=1,
                 device=device,
                 weight_loader=_replicated_weight_loader,
