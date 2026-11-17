@@ -358,3 +358,46 @@ class TestMoEShardedMathMatches(unittest.TestCase):
             format.shard_bounds(512, 0, 8, "MoE intermediate")
         with self.assertRaises(format.EXL3FormatError):
             format.shard_bounds(512, 0, 8, "MoE intermediate", uneven=True)
+
+
+class TestUnevenMLPActivationCheck(unittest.TestCase):
+    """An uneven intermediate split is exact only between channel-pairwise activations: the post-load check
+    must refuse anything else rather than let it compute something different."""
+
+    @staticmethod
+    def _model(act_name, gate_uneven=True, down_uneven=True):
+        import torch
+
+        act_cls = type(act_name, (torch.nn.Module,), {}) if act_name else None
+        mlp = torch.nn.Module()
+        mlp.gate_up_proj, mlp.down_proj = torch.nn.Module(), torch.nn.Module()
+        mlp.gate_up_proj.exl3_uneven, mlp.down_proj.exl3_uneven = gate_uneven, down_uneven
+        if act_cls is not None:
+            mlp.act_fn = act_cls()
+        model = torch.nn.Module()
+        model.add_module("mlp", mlp)
+        return model
+
+    def test_pairwise_activation_passes(self):
+        from vllm_exl3_plugin.quantization.linear import check_uneven_mlps
+
+        for act in ("SiluAndMul", "GeluAndMul", "MulAndSilu"):
+            check_uneven_mlps(self._model(act))
+
+    def test_cross_channel_activation_refused(self):
+        from vllm_exl3_plugin.quantization.linear import check_uneven_mlps
+
+        for act in ("GeluAndMulSparse", "SomeFutureNormedAct", None):
+            with self.subTest(act=act), self.assertRaises(format.EXL3FormatError):
+                check_uneven_mlps(self._model(act))
+
+    def test_half_uneven_pair_refused(self):
+        from vllm_exl3_plugin.quantization.linear import check_uneven_mlps
+
+        with self.assertRaises(format.EXL3FormatError):
+            check_uneven_mlps(self._model("SiluAndMul", down_uneven=False))
+
+    def test_even_split_unchecked(self):
+        from vllm_exl3_plugin.quantization.linear import check_uneven_mlps
+
+        check_uneven_mlps(self._model("GeluAndMulSparse", gate_uneven=False, down_uneven=False))

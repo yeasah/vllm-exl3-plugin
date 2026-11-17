@@ -110,7 +110,12 @@ def _patch_offload_summary() -> None:
     def process_weights_after_loading(*args, **kwargs):
         result = original(*args, **kwargs)
         from .cpu_offload import build_staging, report_once
+        from .quantization.linear import check_uneven_mlps
 
+        # Before anything serves: an uneven MLP split is exact only for a channel-pairwise activation
+        model = args[0] if args else kwargs.get("model")
+        if model is not None:
+            check_uneven_mlps(model)
         build_staging()
         report_once()
         return result

@@ -199,6 +199,36 @@ class EXL3Parameter(BasevLLMParameter):
         self.data = torch.empty(0, device=self.exl3_device)
 
 
+#: Activations that act on each (gate, up) channel pair alone, so an intermediate split at any whole-block
+#: boundary gives the same values. Anything else may look across channels -- GeluAndMulSparse (Gemma3n) takes a
+#: Gaussian top-k over the whole intermediate -- and an uneven split would change its result silently.
+UNEVEN_SAFE_ACTIVATIONS = frozenset({"SiluAndMul", "GeluAndMul", "MulAndSilu"})
+
+
+def check_uneven_mlps(model) -> None:
+    """After the model is built and loaded: every MLP whose intermediate was split unevenly must be the plain
+    pair the split assumes -- gate_up and down both split that way, and between them an activation that only
+    pairs channels. Refuses the load otherwise, naming the module. Run once per load, from plugin's
+    end-of-load hook; the layers cannot check this themselves, since their parent's activation does not exist
+    yet when their weights are created."""
+    for name, module in model.named_modules():
+        gu, dn = getattr(module, "gate_up_proj", None), getattr(module, "down_proj", None)
+        flags = [getattr(m, "exl3_uneven", False) for m in (gu, dn) if m is not None]
+        if not any(flags):
+            continue
+        if len(flags) != 2 or not all(flags):
+            raise format.EXL3FormatError(
+                f"{name}: only one of gate_up_proj and down_proj split its intermediate unevenly, so their widths "
+                f"disagree on this rank; this tensor-parallel degree is not supported for it")
+        act = getattr(module, "act_fn", None)
+        if type(act).__name__ not in UNEVEN_SAFE_ACTIVATIONS:
+            raise format.EXL3FormatError(
+                f"{name}: its MLP intermediate splits unevenly at this tensor-parallel degree, which is exact only "
+                f"for an activation that acts on each channel pair alone ({', '.join(sorted(UNEVEN_SAFE_ACTIVATIONS))}); "
+                f"this one is {type(act).__name__ if act is not None else 'not found (no act_fn)'}. Use a degree "
+                f"whose equal shards are whole {format.HAD_BLOCK}-wide blocks")
+
+
 _UNEVEN_LOGGED: set = set()
 
 
@@ -283,6 +313,7 @@ class EXL3LinearMethod(LinearMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
             layer.register_parameter(name, param)
 
+        layer.exl3_uneven = uneven      # checked against the owning MLP's activation after load (check_uneven_mlps)
         layer.exl3_input_size = input_size_per_partition
         layer.exl3_output_sizes = list(output_partition_sizes)
         layer.exl3_params_dtype = params_dtype
