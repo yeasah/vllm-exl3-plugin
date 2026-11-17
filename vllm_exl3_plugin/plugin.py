@@ -224,12 +224,12 @@ def _patch_offload_defaults() -> None:
 def _patch_qwen4exp_graph_default() -> None:
     """Full CUDA graphs for decode only, by default, on an EXL3 Qwen4Exp checkpoint.
 
-    vLLM's default (`FULL_AND_PIECEWISE`) fails there under expert offload: capturing a piecewise graph
-    (compiled, the prefill and mixed-batch sizes) leaves torch's pinned-host allocator an event it cannot
-    query, and the next capture's `torch.cuda.graph.__enter__` raises `cudaErrorInvalidValue` from
-    `_host_emptyCache()`. Full decode graphs, compiled or not, capture and replay correctly (22 t/s against
-    8 eager, 2026-11-17); docs/upstream.md, "CUDA graphs and expert offload". Only when the user chose no
-    graph mode: an explicit `cudagraph_mode` stands.
+    vLLM runs Qwen4Exp with breakable CUDA graphs (no torch.compile; capture broken at attention, GDN and kin), and
+    for EXL3 models with GDN layers that capture leaves torch's pinned-host allocator an event it cannot query: the
+    next full capture's `torch.cuda.graph.__enter__` raises `cudaErrorInvalidValue` from `_host_emptyCache()`. Full
+    decode graphs capture and replay correctly (22 t/s against 8 eager, 2026-11-17); docs/upstream.md, "CUDA graphs
+    under breakable capture". Only when the user chose no graph mode: an explicit `cudagraph_mode` stands. The same
+    failure will meet every Qwen3.5/3.6 EXL3 checkpoint at the bump, where `main` makes them breakable too.
     """
     from vllm.config import VllmConfig
     from vllm.config.compilation import CUDAGraphMode
@@ -248,7 +248,7 @@ def _patch_qwen4exp_graph_default() -> None:
 
             cc.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
             init_logger(__name__).info(
-                "EXL3 Qwen4Exp: CUDA graphs for decode only (piecewise capture fails under expert offload; "
+                "EXL3 Qwen4Exp: CUDA graphs for decode only (breakable capture fails for EXL3 with GDN layers; "
                 "pass a cudagraph_mode to override)")
         return original(self, *args, **kwargs)
 

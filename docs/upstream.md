@@ -518,7 +518,7 @@ keeps the device guard in the `else` branch only) used to serve the Qwen4Exp hyb
 What it ran into, for the bump to budget:
 
 - **CUDA graphs fail with expert offload.** *(Narrowed 2026-11-17: piecewise capture only, and on our fork too; see
-  "CUDA graphs and expert offload" below.)* `torch._C._host_emptyCache()` in `torch.cuda.graph.__enter__`
+  "CUDA graphs under breakable capture" below: EXL3 with GDN layers, not offload.)* `torch._C._host_emptyCache()` in `torch.cuda.graph.__enter__`
   returns `cudaErrorInvalidValue` during vLLM's graph-memory profile, before capture begins, with
   `CUDA_LAUNCH_BLOCKING=1` too. Dense EXL3 with no EXL3 tensor offloaded captures fine; Qwen3.6-35B-A3B
   with experts offloaded fails the same way as Qwen4Exp, before the expert cache exists. So our expert
@@ -998,35 +998,40 @@ the checkpoint, and it would make a good `full`-tier entry regardless.
 
 ---
 
-### CUDA graphs and expert offload (2026-11-17)
+### CUDA graphs under breakable capture: EXL3 with GDN layers (2026-11-17)
 
-The failure recorded for `main` above happens on our fork too, for the EXL3 Qwen4Exp body (turboderp's 2.05bpw_h4_ng4,
-28 GiB of experts hosted under the expert cache, TP=1, V2 runner), and it is narrower than it looked. Measured:
+*First filed as "CUDA graphs and expert offload"; it is neither offload nor compile.* The failure recorded for `main`
+above happens on our fork too, and its trigger is **breakable CUDA graphs** (`vllm/compilation/breakable_cudagraph.py`):
+one capture of the whole forward that ends the capture at each attention, GDN, Mamba or sparse-indexer op, runs that op
+eagerly, and resumes. vLLM turns it on per architecture and switches torch.compile off with it
+(`DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES`): Qwen4Exp is on the list in our pin and on `main`, and `main` has since
+added the Qwen3.5/3.6 family on NVIDIA. That is why Qwen3.6 failed on `main` and passed on our fork, and why the bump
+will bring this to every Qwen3.5/3.6 EXL3 checkpoint under default graphs.
 
-| cudagraph mode | torch.compile | result |
-|---|---|---|
-| none (eager) | -- | runs, 8.2 t/s decode |
-| `FULL_AND_PIECEWISE` (vLLM's default) | on | fails during the graph-memory profile |
-| `FULL_DECODE_ONLY` | off | runs, 22.6 t/s, text identical to eager |
-| `FULL_DECODE_ONLY` | on | runs, 22.3 t/s |
+The breakable (piecewise) sizes capture; the first full-graph capture after them then fails in `torch.cuda.graph.__enter__`:
+`_host_emptyCache()` -> `process_events_for_stream` -> `cudaEventQuery` -> `cudaErrorInvalidValue` (C++ stack with
+`TORCH_SHOW_CPP_STACKTRACES=1`; the same with `CUDA_LAUNCH_BLOCKING=1`). A pinned-host block carries an event recorded
+during a breakable capture. Which models (fork, V2 runner, `VLLM_USE_BREAKABLE_CUDAGRAPH=1`):
 
-The error is `cudaEventQuery` returning `cudaErrorInvalidValue` inside the pinned-host caching allocator's
-`process_events_for_stream`, reached from `_host_emptyCache()` as the next graph opens (C++ stack with
-`TORCH_SHOW_CPP_STACKTRACES=1`; the same with `CUDA_LAUNCH_BLOCKING=1`): an event attached to one of torch's pinned
-blocks that can no longer be queried, as one recorded inside a stream capture cannot. So a piecewise capture is
-recording a host-allocator event -- a host-to-device copy staged through torch's pinned allocator inside compiled code.
-That is a correctness hazard as well as a crash (a captured copy replays from a staging buffer the allocator may have
-reused), so the error is not one to swallow.
+| model | EXL3 | GDN | MoE | offload | breakable |
+|---|---|---|---|---|---|
+| Qwen3-0.6B 4.00bpw | yes | no | no | none, or dense UVA | pass |
+| Qwen3.5-4B bf16 | no | yes | no | none | pass |
+| Qwen3.8-27B 2.50bpw | yes | yes | no | none | **fail** |
+| Qwen3.5-35B-A3B 2.00bpw | yes | yes | yes | none | **fail** |
+| Qwen3.6-35B-A3B 4.00bpw | yes | yes | yes | experts | **fail** (passes with breakable off) |
+| Qwen4Exp 2.05bpw (turboderp) | yes | yes | yes | experts | **fail** |
 
-Ruled out: torch 2.14 (2.13 makes the same call); the V2 runner as such and our expert offload as such (Qwen3.6-35B-A3B
-4.00bpw with experts offloaded captures under V2 by default, with fixed slots and with the cache off; FP8 KV and
-`max_num_seqs=1` change nothing); our driver-allocated pinned memory (`cpu_offload._pinned` plus a UVA view, kernels
-reading it, pinned temporaries and their copies, leave `_host_emptyCache()` working in isolation); host-to-device
-copies made from Python during capture (none, by a `copy_`/`.to()`/`.cuda()` hook in the engine process). Not found:
-which compiled segment records the event -- something Qwen4Exp-specific, since Qwen3.6 passes.
+So EXL3 and GDN layers together, under breakable capture; not MoE, offload, the expert cache, staging (all off: still
+fails), compile, the V2 runner, or torch 2.14. Ruled out as the recording site: host-to-device copies through Python
+`copy_`/`.to()`/`.cuda()` during capture (none); new pinned allocations inside any captured segment or eager break (none,
+by `torch.cuda.host_memory_stats()` around each); the grouped MoE path; host copies in our linear path (none); vLLM's GDN
+layer (no host copies or quantization-dependent branches). Not yet looked at: copies made in C++ (exllamav3's extension,
+or torch internals) during a segment, and reuse of an existing pinned block, which records an event without allocating.
 
-The plugin now defaults an EXL3 Qwen4Exp checkpoint to `FULL_DECODE_ONLY` when no `cudagraph_mode` was given
-(`plugin._patch_qwen4exp_graph_default`): decode gets graphs, prefill and mixed batches run compiled without them, where
-launch overhead matters least. Piecewise graphs help mixed prefill/decode batches under concurrency, so finding the
-segment is still worth doing (TODO.md `engram-ple`).
-
+**Parked, with a workaround.** The plugin defaults an EXL3 Qwen4Exp checkpoint to `FULL_DECODE_ONLY`
+(`plugin._patch_qwen4exp_graph_default`), which captures and replays correctly (decode 22 t/s against 8.2 eager,
+identical text). The next step when it is picked up -- and it must be before the bump -- is an `LD_PRELOAD` shim on
+`cudaEventRecord` (perhaps `cudaMemcpyAsync`) printing a Python stack when the stream is capturing, which sees what the
+Python hooks cannot. Reproduction in 40 s: Qwen3.8-27B 2.50bpw, `VLLM_USE_BREAKABLE_CUDAGRAPH=1
+VLLM_USE_V2_MODEL_RUNNER=1`, one short generation.
