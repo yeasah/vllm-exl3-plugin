@@ -269,6 +269,12 @@ class EXL3Config(QuantizationConfig):
             # Read in the process that builds the model, through the pickled config: engram.py patches vLLM's
             # Qwen4Exp only for that architecture (its import costs ~2 s, too much for every model)
             self._architectures = list(getattr(hf_config, "architectures", None) or [])
+            if any(a.startswith("Qwen4Exp") for a in self._architectures):
+                # The n-gram table (18-30 GiB) is fetched here, in the frontend, before the engine's startup
+                # watchdog runs; the engine then finds it in the cache
+                from .. import engram
+
+                logger.info("EXL3 n-gram table: %s", engram.ngram_source(model_name, revision))
             self._stamp_compile_factors(hf_config)
 
     def _stamp_compile_factors(self, hf_config: Any) -> None:

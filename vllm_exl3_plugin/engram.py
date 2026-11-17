@@ -87,8 +87,8 @@ def make_embedding_class():
             self._table = None
 
         def bind(self, model_dir: str) -> None:
-            """Open the checkpoint's n-gram table for streaming: exllamav3's own loader and RowTable,
-            on the file `util/convert_ngram.py` writes beside the indexed shards."""
+            """Open an n-gram table for streaming: exllamav3's own loader and RowTable, on a table file
+            (`util/convert_ngram.py` output) or a directory holding one (`_ngram_source`)."""
             from exllamav3.loader.safetensors import SafetensorsCollection
             from exllamav3.modules.quant.exl3_lib.ngram_codec import ROW_DIM, words_per_row
             from exllamav3.modules.row_table import RowTable
@@ -223,14 +223,46 @@ def patch_qwen4_exp() -> None:
     _patch_model_state(nvidia, Table)
 
 
-def _model_dir(vllm_config) -> str:
-    """The checkpoint directory the n-gram file sits in: the model path, or its resolved Hub snapshot"""
-    mc = vllm_config.model_config
-    if os.path.isdir(mc.model):
-        return mc.model
-    from huggingface_hub import snapshot_download
+NGRAM_FILE = "ngram_embedding.safetensors"
 
-    return snapshot_download(mc.model, revision=mc.revision, allow_patterns=["*.json", "ngram_embedding*.safetensors"])
+
+def ngram_source(model: str, revision: str | None) -> str:
+    """The n-gram table to serve: the checkpoint's own, or another one chosen by the user.
+
+    The table's bit depth trades host memory and disk or link bandwidth, not VRAM, so it need not follow the
+    body's (turboderp publishes each rate with its own and endorses mixing them). `EXL3_NGRAM_REVISION=<branch>`
+    takes that branch's table from the same repo, fetching only that file; `EXL3_NGRAM_FILE=<path>` takes a local
+    one (`util/convert_ngram.py` output). Any K works (it is read from the row width), and `check_layout` refuses
+    a table hashed for another model.
+
+    Called twice: by `EXL3Config.maybe_update_config` in the frontend, so a download happens there, before the
+    engine starts and vLLM's startup watchdog (VLLM_ENGINE_READY_TIMEOUT_S, 600 s) runs -- a table is 18-30 GiB --
+    and by `bind`'s caller in the engine, where it then resolves from the cache."""
+    path = os.environ.get("EXL3_NGRAM_FILE")
+    if path:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"EXL3_NGRAM_FILE={path}: no such file")
+        return path
+    revision = os.environ.get("EXL3_NGRAM_REVISION")
+    if revision:
+        import re
+
+        from huggingface_hub import hf_hub_download
+
+        repo = model
+        if os.path.isdir(repo):
+            m = re.search(r"/models--([^/]+?)--([^/]+)/snapshots/", os.path.abspath(repo) + "/")
+            if not m:
+                raise ValueError(f"EXL3_NGRAM_REVISION needs a Hub model id to fetch from; {repo} is a local "
+                                 "directory outside the HF cache (use EXL3_NGRAM_FILE)")
+            repo = f"{m.group(1)}/{m.group(2)}"
+        return hf_hub_download(repo, NGRAM_FILE, revision=revision)
+    if os.path.isdir(model):
+        own = os.path.join(model, NGRAM_FILE)
+        return own if os.path.isfile(own) else model
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(model, NGRAM_FILE, revision=revision)
 
 
 def _patch_model_state(nvidia, Table) -> None:
@@ -253,7 +285,8 @@ def _patch_model_state(nvidia, Table) -> None:
                     if table._table is None:
                         from vllm.config import get_current_vllm_config
 
-                        table.bind(_model_dir(get_current_vllm_config()))
+                        mc = get_current_vllm_config().model_config
+                        table.bind(ngram_source(mc.model, mc.revision))
                         table.check_layout(module)
                     found.append((module, table))
             self._exl3_tables = found
