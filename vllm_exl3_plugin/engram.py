@@ -243,8 +243,8 @@ def ngram_source(model: str, revision: str | None) -> str:
         if not os.path.isfile(path):
             raise FileNotFoundError(f"EXL3_NGRAM_FILE={path}: no such file")
         return path
-    revision = os.environ.get("EXL3_NGRAM_REVISION")
-    if revision:
+    override = os.environ.get("EXL3_NGRAM_REVISION")
+    if override:
         import re
 
         from huggingface_hub import hf_hub_download
@@ -256,12 +256,13 @@ def ngram_source(model: str, revision: str | None) -> str:
                 raise ValueError(f"EXL3_NGRAM_REVISION needs a Hub model id to fetch from; {repo} is a local "
                                  "directory outside the HF cache (use EXL3_NGRAM_FILE)")
             repo = f"{m.group(1)}/{m.group(2)}"
-        return hf_hub_download(repo, NGRAM_FILE, revision=revision)
+        return hf_hub_download(repo, NGRAM_FILE, revision=override)
     if os.path.isdir(model):
         own = os.path.join(model, NGRAM_FILE)
         return own if os.path.isfile(own) else model
     from huggingface_hub import hf_hub_download
 
+    # The body's own revision: EXL3 repos keep each rate on a branch, and `main` carries no table
     return hf_hub_download(model, NGRAM_FILE, revision=revision)
 
 
