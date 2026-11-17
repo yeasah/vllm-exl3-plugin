@@ -315,10 +315,10 @@ the same path for DeepSeek-V4.1-Flash's engram.
 
 **TP=2 (2026-11-17):** runs by uneven blocks (`tp-uneven-blocks`), exact against TP=1, 36 t/s decode on the 2.05bpw
 body; the 3.05bpw body does not fit this host at TP=2 (2x16 GiB VRAM, 40 GiB RAM: ~42 GiB of experts), a job for a
-larger-RAM host. **Open:** 3.05bpw at TP=2 elsewhere; graphs on `main` fail
-under expert offload, and `main`'s KV sizing disagrees with the expert cache (both in docs/upstream.md,
-"The 0.34 bump"). (2) is the 0.34 bump itself. (4) Only then a native trellis PLE method, 20 GB against 52 of
-table; its bit depth (`-ngb`) is the one question left from the retired `category-bits`.
+larger-RAM host. **Open:** 3.05bpw at TP=2 elsewhere; breakable CUDA graphs fail for EXL3 GDN models (ours and
+`main`'s, "CUDA graphs under breakable capture"), and `main`'s KV sizing disagrees with the expert cache (docs/upstream.md,
+"The 0.34 bump"). The native trellis PLE method is done (the plugin-owned table above); its bit depth per user
+(`EXL3_NGRAM_REVISION`/`_FILE`) answers most of the `-ngb` question left from the retired `category-bits`.
 
 ## `tied-embeddings` — An embedding policy for tied models
 
