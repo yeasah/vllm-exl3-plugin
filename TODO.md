@@ -303,7 +303,13 @@ experts in VRAM, 28 GiB hosted, VRAM hit climbing past 69%. Scripts and the venv
 decoded by `ngram_dequant` in the forward (`vllm_exl3_plugin/engram.py`). Milestone 1 done: the EXL3 body loads and
 runs on the fork with a stub table (73 s load, coherent output), and decodes under full CUDA graphs at 22 t/s; vLLM's
 default piecewise capture fails, so the plugin defaults this model to `FULL_DECODE_ONLY` (docs/upstream.md, "CUDA graphs
-and expert offload"; the piecewise segment that records a host-allocator event is unfound). Milestone 2: the disk table.
+and expert offload"; the piecewise segment that records a host-allocator event is unfound). Milestone 2 done: the
+table streams from disk; staged rows equal exllamav3's reference decode bit for bit and vLLM's hash equals exllamav3's
+on a 4096-token step. On a 5060 Ti (2.05bpw_h4_ng4, 28 GiB of experts hosted, 120 slots, batch 1): prefill 1,510 t/s on
+rows read fresh from disk, 1,708 with them in page cache (the reads are ~12% of a 3,500-token prefill); decode 21-32 t/s
+under full decode graphs (upstream's FP8 hybrid: 13.6-18.1 eager). Next: overlap prefill reads with compute
+(RowTable's prefetch worker, unused so far), the piecewise capture, TP, a test that does not need the 24 GiB table, and
+the same path for DeepSeek-V4.1-Flash's engram.
 
 **Open:** 3.05bpw needs TP=2, which needs expert parallelism or `tp-uneven-blocks` (640-wide experts); graphs on `main` fail
 under expert offload, and `main`'s KV sizing disagrees with the expert cache (both in docs/upstream.md,
