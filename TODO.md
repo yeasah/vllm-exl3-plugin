@@ -132,27 +132,28 @@ discarded by vLLM's existing padding mask. The alternative, an uneven split at b
 fights vLLM's equal-shard vocab layout. Evidence: [docs/tensor-parallel.md](docs/tensor-parallel.md),
 *Vocab-parallel `lm_head`* (the rule, and MiniCPM5 as the aligned case).
 
-## `tp-uneven-blocks` — TP at any degree for widths that do not split into whole blocks
+## `tp-uneven-blocks` — Balance an uneven expert split (the split itself is done)
 
-**Outcome:** TP>1 stops being a surprise refusal. Today the plugin refuses any split that would cut a 128-wide
-Hadamard block (`_validate_tp`), so whether a model runs at TP=2/4/8 depends on its widths: Qwen4Exp's 640-wide
-experts and shared expert (5 blocks) refuse TP=2 (`engram-ple`), and a dense MLP of 13824 (108 blocks) refuses TP=8.
+**Done (2026-11-17):** an MLP intermediate whose equal shards would cut a 128-wide block is dealt by whole blocks,
+the extra blocks to the lowest ranks, where vLLM never sees it: routed experts (any EXL3 MoE) and dense
+gate_up/down pairs (any model with that naming), refused unless the activation pairs channels only
+(`check_uneven_mlps`; GeluAndMulSparse looks across them). Qwen4Exp 2.05bpw at TP=2 (640 -> 384 + 256): 95 greedy
+tokens identical to TP=1, eager and full decode graphs; decode 36 t/s against ~21 at TP=1. The hosted-expert quota is
+shared so every rank keeps equal expert bytes in VRAM (`_host_quota`), which stopped rank 0 running out of VRAM.
 
-**Unblocks:** Qwen4Exp's 3.05bpw body at TP=2 without expert parallelism, and TP for dense models whose MLP width is
-a whole number of blocks but not of `128 x tp`.
-
-**Candidate:** split the intermediate unevenly at block boundaries where it never leaves plugin-owned code: gate/up
-(column-parallel, plugin) -> vLLM's activation (any width) -> down (row-parallel, plugin), whose all-reduce sums
-hidden-sized outputs equal on every rank. 640 at TP=2 becomes 384 + 256: no filler bits and no VRAM inflation, and
-the busiest rank does ceil(blocks / tp) blocks, which is what padding to equal shards would cost in latency anyway
-(640 -> 768 padded is also 3 blocks per rank, plus 20% more memory). The caveat becomes imbalance, not refusal.
-Padding stays the answer where vLLM sees the split dimension: the vocabulary (`tp-vocab-alignment`); attention and
-GDN split by heads, already whole blocks. Padding is exact either way, by whole blocks: zero `svh` makes padded
-outputs 0, and padded input rows meet zero activations. To check: vLLM state sized from `intermediate_size / tp`
-(MoE workspaces; the plugin's MoE path already sizes from `exl3_stored_intermediate`), loading at uneven offsets
-(the fused-shards patch lets parameters own their shards), and refusing what sums or gathers the intermediate across
-ranks (sequence-parallel MoE, LoRA). Possibly cheaper than EP for Qwen4Exp, which needs kernel-side expert masking;
-EP balances by whole experts instead, so which is faster is open.
+**Open: the imbalance.** Rank 0 does 3 of each expert's 5 blocks and, with equal VRAM over 1.5x the expert bytes, its
+expert cache covers less (54% against 84%): 209 us per decode MoE call against 122, ~2 ms a token, ~8% of decode at
+batch 1. The ways to balance it, by the busiest rank's share of a token's 50 expert blocks at batch 1:
+- *now*, every expert 3/2: 60%.
+- *B*, alternate the extra block by expert id: ~53%; needs two expert widths per rank, so per-width host blocks,
+  staging windows and expert-cache pools -- days, in the most intricate code.
+- *C*, deal each expert's five 128-wide blocks as sub-experts sharing its routing: ~53%, one width, so cache, staging
+  and offload unchanged; routing fans out 3x and the kernels run at 128 wide, whose speed is the unknown -- benchmark
+  first.
+- *EP*, whole experts per rank (vLLM's replicated-routing mode, local experts, the same all-reduce): ~63% expected at
+  batch 1 (10 active experts land binomially), balancing only at larger batches; our op would skip non-local experts.
+Parked: ~8% does not pay for days. Revisit C if it ever matters, EP if serving batches grow. Prefill's share
+unmeasured.
 
 ## `recipe-value` — When is a measurement worth its cost?
 
@@ -312,7 +313,9 @@ under full decode graphs (upstream's FP8 hybrid: 13.6-18.1 eager). Next: overlap
 (RowTable's prefetch worker, unused so far), the breakable-capture failure, TP, a test that does not need the 24 GiB table, and
 the same path for DeepSeek-V4.1-Flash's engram.
 
-**Open:** 3.05bpw needs TP=2, which needs expert parallelism or `tp-uneven-blocks` (640-wide experts); graphs on `main` fail
+**TP=2 (2026-11-17):** runs by uneven blocks (`tp-uneven-blocks`), exact against TP=1, 36 t/s decode on the 2.05bpw
+body; the 3.05bpw body does not fit this host at TP=2 (2x16 GiB VRAM, 40 GiB RAM: ~42 GiB of experts), a job for a
+larger-RAM host. **Open:** 3.05bpw at TP=2 elsewhere; graphs on `main` fail
 under expert offload, and `main`'s KV sizing disagrees with the expert cache (both in docs/upstream.md,
 "The 0.34 bump"). (2) is the 0.34 bump itself. (4) Only then a native trellis PLE method, 20 GB against 52 of
 table; its bit depth (`-ngb`) is the one question left from the retired `category-bits`.
