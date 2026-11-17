@@ -81,6 +81,14 @@ class EXL3MoEParameter(torch.nn.Parameter):
         self.exl3_blocks.clear()
 
 
+#: Per-rank intermediate widths of an uneven expert split, by TP size (one expert shape per model)
+_RANK_WIDTHS: dict[int, list[int]] = {}
+
+
+def rank_widths(tp_size: int) -> list[int] | None:
+    return _RANK_WIDTHS.get(tp_size)
+
+
 def _tp_shard(
     name: str, t: torch.Tensor, shard_id: str, tp_rank: int, tp_size: int
 ) -> torch.Tensor:
@@ -113,6 +121,10 @@ def _tp_shard(
     first, last = format.shard_bounds(
         dim, tp_rank, tp_size, f"MoE intermediate ({shard_id})", uneven=True
     )
+    if last - first != dim // tp_size:
+        # Uneven: every rank's width, for cpu_offload's per-rank hosting quota (equal VRAM, unequal host rows)
+        _RANK_WIDTHS[tp_size] = [b - a for a, b in (format.shard_bounds(
+            dim, r, tp_size, "MoE intermediate", uneven=True) for r in range(tp_size))]
     split = tp.shard_column if column else tp.shard_row
     return split(role, t, first, last)
 

@@ -430,6 +430,20 @@ def _exclusive_need(experts: int, loader) -> int | None:
     return max(0, min(experts, experts - in_vram + _SPARE_ROWS))
 
 
+def _uneven_widths():
+    """(every rank's expert intermediate width, this rank) under an uneven expert split, else (None, None)"""
+    try:
+        from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+
+        from .quantization.fused_moe import rank_widths
+
+        tp_size = get_tensor_model_parallel_world_size()
+        widths = rank_widths(tp_size) if tp_size > 1 else None
+        return (widths, get_tensor_model_parallel_rank()) if widths else (None, None)
+    except Exception:
+        return None, None
+
+
 def _host_quota(experts: int, nbytes: int) -> int:
     """How many experts per layer and projection the host holds, decided once.
 
@@ -448,6 +462,20 @@ def _host_quota(experts: int, nbytes: int) -> int:
                   if loader is not None else want)
         room = max(min(free, budget), 0)
         share = 1.0 if want <= room else room / want
+        widths, rank = _uneven_widths()
+        if widths is not None:
+            # An uneven expert split (fused_moe.rank_widths): the ranks' expert bytes differ, so an equal budget
+            # each would leave the widest rank the most in VRAM -- 60% of Qwen4Exp's at TP=2, which ran rank 0
+            # out of VRAM. The same total (the budget, or host RAM, times the ranks) is shared so that every
+            # rank keeps the same expert bytes in VRAM: the wider rank hosts more, the narrower less
+            wants = [want * w / widths[rank] for w in widths]
+            resident = max((sum(wants) - room * len(widths)) / len(widths), 0)
+            hosted = min(max(want - resident, 0), want)
+            share = hosted / want if want else 1.0
+            logger.info(
+                "cpu-offload: uneven expert split (widths %s): rank %d hosts %.2f of its %.2f GiB of routed experts, "
+                "so every rank keeps %.2f GiB in VRAM", widths, rank, hosted / (1 << 30), want / (1 << 30),
+                (want - hosted) / (1 << 30))
         _STATS["quota"] = math.floor(share * experts)
         need = _exclusive_need(experts, loader)
         if need is not None and need < _STATS["quota"]:
