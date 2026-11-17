@@ -108,8 +108,10 @@ def _tp_shard(
         # The other scale vector indexes the hidden dimension, which this split
         # leaves whole, and mcg/mul1 are scalars. Both replicate.
         return t
+    # Uneven where it has to be: the intermediate never leaves the MoE op (gate/up, the activation and down
+    # all run inside it), and vLLM only all-reduces the hidden-sized output (Qwen4Exp's 640 at TP=2: 384 + 256)
     first, last = format.shard_bounds(
-        dim, tp_rank, tp_size, f"MoE intermediate ({shard_id})"
+        dim, tp_rank, tp_size, f"MoE intermediate ({shard_id})", uneven=True
     )
     split = tp.shard_column if column else tp.shard_row
     return split(role, t, first, last)

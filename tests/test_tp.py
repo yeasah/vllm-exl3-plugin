@@ -60,6 +60,22 @@ class TestShardBounds(unittest.TestCase):
         with self.assertRaises(format.EXL3FormatError):
             format.shard_bounds(2048, 0, 3, "q_proj")
 
+    def test_uneven_deals_whole_blocks(self):
+        """Qwen4Exp's 640-wide experts at TP=2: 384 + 256, the extra block to rank 0."""
+        self.assertEqual([format.shard_bounds(640, r, 2, "e", uneven=True) for r in range(2)], [(0, 384), (384, 640)])
+        self.assertEqual([format.shard_bounds(640, r, 4, "e", uneven=True) for r in range(4)],
+                         [(0, 256), (256, 384), (384, 512), (512, 640)])
+        # an even whole-block split is unchanged by the flag
+        self.assertEqual(format.shard_bounds(768, 1, 2, "e", uneven=True), (384, 768))
+
+    def test_uneven_still_refuses(self):
+        with self.assertRaises(format.EXL3FormatError):
+            format.shard_bounds(640, 0, 2, "e")                     # not asked for
+        with self.assertRaises(format.EXL3FormatError):
+            format.shard_bounds(640, 0, 8, "e", uneven=True)        # 5 blocks cannot feed 8 ranks
+        with self.assertRaises(format.EXL3FormatError):
+            format.shard_bounds(700, 0, 2, "e", uneven=True)        # not whole blocks
+
 
 @requires_gpu
 class TestShardedMathMatches(unittest.TestCase):
@@ -84,11 +100,11 @@ class TestShardedMathMatches(unittest.TestCase):
         x = torch.randn((8, in_f), dtype=torch.half, device="cuda:0") * 0.1
         whole = ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1)
 
-        for tp_size in (2, 4):
+        for tp_size in (2, 3, 4):     # 3: 16 blocks deal unevenly, 6 + 5 + 5
             with self.subTest(tp_size=tp_size):
                 parts = []
                 for rank in range(tp_size):
-                    first, last = format.shard_bounds(out_f, rank, tp_size, "out")
+                    first, last = format.shard_bounds(out_f, rank, tp_size, "out", uneven=True)
                     parts.append(
                         ops.exl3_mm(
                             x,
@@ -118,11 +134,11 @@ class TestShardedMathMatches(unittest.TestCase):
         x = torch.randn((8, in_f), dtype=torch.half, device="cuda:0") * 0.1
         whole = ops.exl3_mm(x, t["trellis"], t["suh"], t["svh"], mcg, mul1)
 
-        for tp_size in (2, 4):
+        for tp_size in (2, 3, 4):
             with self.subTest(tp_size=tp_size):
                 total = None
                 for rank in range(tp_size):
-                    first, last = format.shard_bounds(in_f, rank, tp_size, "in")
+                    first, last = format.shard_bounds(in_f, rank, tp_size, "in", uneven=True)
                     part = ops.exl3_mm(
                         x[:, first:last].contiguous(),
                         tp.shard_row("trellis", t["trellis"], first, last),
@@ -314,7 +330,7 @@ class TestMoEShardedMathMatches(unittest.TestCase):
 
         whole = self._run(experts, x, topk_ids, topk_weights)
 
-        for tp_size in (2, 4):
+        for tp_size in (2, 3, 4):     # 3: the 512-wide intermediate deals unevenly, 256 + 128 + 128
             with self.subTest(tp_size=tp_size):
                 total = torch.zeros_like(whole, dtype=torch.float32)
                 for rank in range(tp_size):
@@ -337,6 +353,8 @@ class TestMoEShardedMathMatches(unittest.TestCase):
                 )
 
     def test_rejects_sub_hadamard_moe_split(self):
-        """512 // 8 = 64 cuts a Hadamard block, and must be refused."""
+        """512 // 8 = 64 cuts a Hadamard block, and must be refused -- also as an uneven split, 4 blocks for 8."""
         with self.assertRaises(format.EXL3FormatError):
             format.shard_bounds(512, 0, 8, "MoE intermediate")
+        with self.assertRaises(format.EXL3FormatError):
+            format.shard_bounds(512, 0, 8, "MoE intermediate", uneven=True)

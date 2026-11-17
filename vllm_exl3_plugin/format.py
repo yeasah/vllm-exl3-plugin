@@ -238,16 +238,40 @@ def infer_interm_divisor(ratio: float) -> float:
 
 
 def shard_bounds(
-    dim_size: int, tp_rank: int, tp_size: int, what: str = "dimension"
+    dim_size: int, tp_rank: int, tp_size: int, what: str = "dimension",
+    uneven: bool = False,
 ) -> tuple[int, int]:
     """Half-open [first, last) of `dim_size` belonging to `tp_rank`.
 
     Validates the split first, so an unsafe tensor-parallel degree fails here
-    rather than producing quietly wrong numbers.
+    rather than producing quietly wrong numbers. With `uneven`, a width of whole
+    Hadamard blocks that does not split evenly into whole blocks per rank is
+    dealt out by block instead (`uneven_bounds`) -- only for a dimension that
+    never leaves plugin code, since vLLM sizes it as `dim_size // tp_size`.
     """
+    if uneven and tp_size > 1 and not (
+        dim_size % tp_size == 0 and is_had_aligned(dim_size // tp_size)
+    ):
+        return uneven_bounds(dim_size, tp_rank, tp_size, what)
     check_tp_split(dim_size, tp_size, what)
     per_rank = dim_size // tp_size
     return tp_rank * per_rank, (tp_rank + 1) * per_rank
+
+
+def uneven_bounds(dim_size: int, tp_rank: int, tp_size: int, what: str = "dimension") -> tuple[int, int]:
+    """[first, last) of `dim_size` for `tp_rank`, dealt in whole Hadamard blocks, the extra blocks to the
+    lowest ranks: 640 at TP=2 is 384 + 256. Exact for the same reason an even split is (tp.py): every cut
+    falls on a block boundary. The busiest rank does ceil(blocks / tp) blocks, the latency padding to equal
+    shards would also cost, without padding's memory."""
+    if not is_had_aligned(dim_size):
+        raise EXL3FormatError(f"{what}: {dim_size} is not a whole number of {HAD_BLOCK}-wide blocks")
+    blocks = dim_size // HAD_BLOCK
+    base, extra = divmod(blocks, tp_size)
+    if base == 0:
+        raise EXL3FormatError(f"{what}: {blocks} blocks of {HAD_BLOCK} cannot give each of {tp_size} ranks one")
+    start = tp_rank * base + min(tp_rank, extra)
+    width = base + (1 if tp_rank < extra else 0)
+    return start * HAD_BLOCK, (start + width) * HAD_BLOCK
 
 
 def fused_shard_bounds(

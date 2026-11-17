@@ -112,17 +112,24 @@ class EXL3Parameter(BasevLLMParameter):
     # (see `_ColumnvLLMParameter` / `RowvLLMParameter` in vllm/parameter.py).
     # The sizes vLLM supplies are already per-rank.
 
+    #: Set on an MLP's gate_up and down (`EXL3LinearMethod._uneven_mlp`): the intermediate is dealt in whole
+    #: Hadamard blocks rather than vLLM's equal shards, and a rank's slice comes from `format.uneven_bounds`
+    exl3_uneven: bool = False
+
+    def _bounds(self, size: int, index: int) -> tuple[int, int]:
+        if self.exl3_uneven:
+            return format.shard_bounds(size * self.tp_size, index, self.tp_size, "MLP intermediate", uneven=True)
+        return index * size, (index + 1) * size
+
     def _take_column(self, t: torch.Tensor, size: int | None, index: int):
         if self.tp_size == 1 or size is None:
             return t
-        first = index * size
-        return tp.shard_column(self.role, t, first, first + size)
+        return tp.shard_column(self.role, t, *self._bounds(size, index))
 
     def _take_row(self, t: torch.Tensor, size: int | None, index: int):
         if self.tp_size == 1 or size is None:
             return t
-        first = index * size
-        return tp.shard_row(self.role, t, first, first + size)
+        return tp.shard_row(self.role, t, *self._bounds(size, index))
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor) -> None:
         self.store(self._take_column(loaded_weight, self.column_shard_size, self.tp_rank))
@@ -170,6 +177,10 @@ class EXL3Parameter(BasevLLMParameter):
         input scale whole, so `tp.shard_column` returns them untouched and every
         shard index stores the same tensor.
         """
+        if self.exl3_uneven:
+            raise format.EXL3FormatError(
+                "an uneven tensor-parallel split of a fused gate_up tensor is not implemented; the checkpoint "
+                "stores gate and up as one matrix")
         indices = (
             list(shard_id)
             if isinstance(shard_id, tuple)
@@ -186,6 +197,20 @@ class EXL3Parameter(BasevLLMParameter):
     def release(self) -> None:
         self.shards.clear()
         self.data = torch.empty(0, device=self.exl3_device)
+
+
+_UNEVEN_LOGGED: set = set()
+
+
+def _log_uneven(layer, tp_size: int) -> None:
+    """Once per shape: which MLP widths split unevenly, and the cost"""
+    key = (type(layer).__name__, tp_size)
+    if key in _UNEVEN_LOGGED:
+        return
+    _UNEVEN_LOGGED.add(key)
+    logger.info("EXL3 %s at TP=%d: the MLP intermediate splits by whole %d-wide blocks, unevenly across ranks "
+                "(exact; the busiest rank sets the latency, as padding to equal shards would)",
+                type(layer).__name__, tp_size, format.HAD_BLOCK)
 
 
 @register_weight_loader_v2_supported_method
@@ -213,7 +238,22 @@ class EXL3LinearMethod(LinearMethodBase):
         del input_size, output_size
 
         tp_size = getattr(layer, "tp_size", 1)
-        if tp_size > 1:
+        uneven = tp_size > 1 and self._uneven_mlp(layer, input_size_per_partition, output_partition_sizes)
+        # The parameters keep vLLM's equal sizes: their bounds arithmetic takes size x tp as the full width
+        even_input, even_outputs = input_size_per_partition, list(output_partition_sizes)
+        if uneven:
+            # This rank's own widths: vLLM's equal shards would cut a Hadamard block
+            from vllm.model_executor.layers.linear import RowParallelLinear
+
+            rank = layer.tp_rank
+            if isinstance(layer, RowParallelLinear):
+                a, b = format.uneven_bounds(input_size_per_partition * tp_size, rank, tp_size, "MLP down")
+                input_size_per_partition = b - a
+            else:
+                output_partition_sizes = [b - a for a, b in (
+                    format.uneven_bounds(o * tp_size, rank, tp_size, "MLP gate_up") for o in output_partition_sizes)]
+            _log_uneven(layer, tp_size)
+        elif tp_size > 1:
             self._validate_tp(layer, input_size_per_partition, output_partition_sizes)
 
         weight_loader = extra_weight_attrs.pop("weight_loader", None)
@@ -231,20 +271,42 @@ class EXL3LinearMethod(LinearMethodBase):
                 device=device,
                 weight_loader=weight_loader,
                 role=tp.role_of(name),
-                column_shard_size=output_partition_sizes[0],
-                row_shard_size=input_size_per_partition,
-                output_partition_sizes=list(output_partition_sizes),
+                column_shard_size=even_outputs[0],
+                row_shard_size=even_input,
+                output_partition_sizes=even_outputs,
             )
             # The dequantize path offloads its exl3_weight after load instead
             param.exl3_offloadable = not self.quant_config.dequantize
             param.exl3_prefix = cpu_offload.layer_prefix(layer)
             param.exl3_name = name
+            param.exl3_uneven = uneven
             set_weight_attrs(param, extra_weight_attrs)
             layer.register_parameter(name, param)
 
         layer.exl3_input_size = input_size_per_partition
         layer.exl3_output_sizes = list(output_partition_sizes)
         layer.exl3_params_dtype = params_dtype
+
+    @staticmethod
+    def _uneven_mlp(layer, input_size_per_partition, output_partition_sizes) -> bool:
+        """Whether this layer is an MLP's gate_up or down whose equal shards would cut a Hadamard block but a
+        whole-block split works. Only there: the intermediate passes from our gate_up through vLLM's activation
+        (any even width) to our down, whose all-reduce sums hidden-sized outputs, so no vLLM code sees the
+        uneven width. Attention, GDN and the vocabulary split by heads or rows that vLLM indexes; they refuse."""
+        from vllm.model_executor.layers.linear import MergedColumnParallelLinear, RowParallelLinear
+
+        prefix = cpu_offload.layer_prefix(layer)
+        tp_size = layer.tp_size
+        if isinstance(layer, RowParallelLinear) and prefix.endswith(".down_proj"):
+            widths = [input_size_per_partition]
+        elif isinstance(layer, MergedColumnParallelLinear) and prefix.endswith(".gate_up_proj"):
+            widths = list(output_partition_sizes)
+        else:
+            return False
+        if all(format.is_had_aligned(w) for w in widths):
+            return False            # the equal split is already whole blocks
+        return all(format.is_had_aligned(w * tp_size) and (w * tp_size) // format.HAD_BLOCK >= tp_size
+                   for w in widths)
 
     @staticmethod
     def _validate_tp(layer, input_size_per_partition, output_partition_sizes) -> None:
