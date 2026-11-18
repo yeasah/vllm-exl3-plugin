@@ -98,12 +98,20 @@ def target_in_vram(experts: int, streams: float) -> int:
     return max(0, min(experts, math.ceil(n)))
 
 
+def slot_row_bytes(layers: list) -> int:
+    """One slot's bytes per layer, the mean over the layers as they store their experts, rounded up so slots never
+    outgrow what was measured. Sized from the first layer alone, 1.66bpw Qwen3.8-Flash-Next (its first layer one of
+    eight wider ones) costed a slot at 56 MiB across the layers against 45, leaving 21% of the slots' VRAM to KV."""
+    total = sum(b.host[0].numel() * b.host.element_size() for l in layers for b in l.exl3_host_blocks.values())
+    return -(-total // max(len(layers), 1))
+
+
 def size_slots(available: int, reserve: int, hosted: int, slot_bytes: int,
                layers: int, per_layer_max: int, cap: int | None = None) -> int:
     """Slots per layer for the auto mode.
 
     `available` is the KV memory vLLM measured with every hosted expert off the device,
-    `reserve` the KV to keep, `hosted` the hosted experts' bytes, and `slot_bytes` one slot
+    `reserve` the KV to keep, `hosted` the hosted experts' bytes, and `slot_bytes` one slot's mean per layer
     across its projections.
 
     Slots take what the reserve leaves: nothing beyond the hosted experts, and nothing
@@ -856,9 +864,7 @@ def build(layers: list, available: int, worker) -> int:
     from . import cpu_offload
 
     E = layers[0].exl3_num_experts
-    first = layers[0]
-    slot_bytes = sum(b.host[0].numel() * b.host.element_size()
-                     for b in first.exl3_host_blocks.values())
+    slot_bytes = slot_row_bytes(layers)
     per_layer_max = max(max(len(b.rows) for b in l.exl3_host_blocks.values()) for l in layers)
     hosted = cpu_offload._STATS["expert_bytes"]
     given_back = 0   # bytes freed here that KV would otherwise not have had

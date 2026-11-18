@@ -943,3 +943,22 @@ def test_exclusive_cap_stands_down_when_vram_cannot_hold_it(offload, monkeypatch
         assert cpu_offload._exclusive_need(experts, loader) == expected, room
     monkeypatch.setattr(cpu_offload, "_vram_for_experts", lambda loader: None)
     assert cpu_offload._exclusive_need(experts, loader) is None
+
+
+def test_slot_rows_are_sized_over_every_layer():
+    """1.66bpw Qwen3.8-Flash-Next stores 8 of 48 layers' experts wider (1.172 MiB a row against 0.879), the first
+    among them; a slot priced from the first layer alone bought 21% fewer slots than the VRAM held."""
+    import types
+
+    import torch
+
+    from vllm_exl3_plugin import expert_cache
+
+    def layer(row_bytes):
+        third = torch.empty((4, row_bytes // 3), dtype=torch.uint8)
+        return types.SimpleNamespace(exl3_host_blocks={k: types.SimpleNamespace(host=third) for k in ("gate", "up", "down")})
+
+    layers = [layer(1200)] * 8 + [layer(900)] * 40
+    mean = expert_cache.slot_row_bytes(layers)
+    assert mean == -(-(8 * 1200 + 40 * 900) // 48)
+    assert mean * 48 >= 8 * 1200 + 40 * 900 and expert_cache.size_slots(10**9, 0, 10**9, mean, 48, 10**6) * mean * 48 <= 10**9
