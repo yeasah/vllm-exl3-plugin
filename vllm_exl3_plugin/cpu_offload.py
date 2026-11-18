@@ -405,6 +405,121 @@ _HOST_MARGIN = 4 << 30
 _SPARE_ROWS = int(os.environ.get("EXL3_CACHE_SPARE_ROWS", "16"))
 
 
+_ROUTED = re.compile(r"\.experts\.\d+\.")
+
+
+@functools.lru_cache(maxsize=4)
+def _checkpoint_census(model: str, revision: str | None, download_dir: str | None) -> dict[str, int] | None:
+    """Stored bytes by part (routed experts, mtp, visual, embed, other), from the local shards' headers.
+
+    By the time an expert weight arrives every shard is on disk, so this reads nothing remote. None when the
+    shards cannot be found, which the callers take as "not known"."""
+    import json
+    import struct
+
+    try:
+        if os.path.isdir(model):
+            root = model
+        else:
+            from huggingface_hub import snapshot_download
+
+            root = snapshot_download(model, revision=revision, cache_dir=download_dir, local_files_only=True,
+                                     allow_patterns=["*.safetensors", "*.safetensors.index.json"])
+        index = os.path.join(root, "model.safetensors.index.json")
+        if os.path.isfile(index):
+            with open(index) as f:
+                files = sorted(set(json.load(f)["weight_map"].values()))
+        else:
+            files = ["model.safetensors"]
+        parts = collections.Counter()
+        for name in files:
+            with open(os.path.join(root, name), "rb") as f:
+                (n,) = struct.unpack("<Q", f.read(8))
+                header = json.loads(f.read(n))
+            for key, info in header.items():
+                if key == "__metadata__":
+                    continue
+                a, b = info["data_offsets"]
+                part = ("mtp" if key.startswith("mtp.") else "visual" if ".visual." in key or key.startswith("visual.")
+                        else "experts" if _ROUTED.search(key) else "embed" if "embed_tokens" in key else "other")
+                parts[part] += b - a
+        return dict(parts)
+    except Exception as e:  # pragma: no cover - defensive; the caller falls back
+        logger.debug("cpu-offload: no checkpoint census (%s)", e)
+        return None
+
+
+def _census():
+    try:
+        from vllm.config import get_current_vllm_config
+
+        config = get_current_vllm_config()
+        mc = config.model_config
+        return _checkpoint_census(mc.model, mc.revision, getattr(config.load_config, "download_dir", None)), config
+    except Exception:
+        return None, None
+
+
+def _rank_expert_bytes() -> int | None:
+    """This rank's routed-expert bytes, as stored (projections and layers need not match in size)."""
+    census, config = _census()
+    if not census or not census.get("experts"):
+        return None
+    widths, rank = _uneven_widths()
+    if widths is not None:
+        return census["experts"] * widths[rank] // sum(widths)
+    return census["experts"] // max(config.parallel_config.tensor_parallel_size, 1)
+
+
+#: VRAM the exclusive cap leaves to vLLM beyond the weights and MoE activations it can count: the CUDA context,
+#: graphs, load-time buffers (Qwen4Exp's indexer takes 0.75 GiB) and the KV reserve. Generous on purpose:
+#: overstating it only hosts more, and the slots take back what is left at KV sizing; understating it is what ran a
+#: 16 GiB card out of memory (2026-11-18)
+_VRAM_ALLOWANCE = 2 << 30
+
+
+def _moe_activation_bytes(config) -> int:
+    """The routed MoE's activation peak at the batched-token budget: two fp32 buffers of tokens x top-k x this
+    rank's intermediate width (one is the 800 MiB profiling allocation that failed at 8192 tokens, top-10, 640)."""
+    try:
+        text = config.model_config.hf_text_config
+        tokens = config.scheduler_config.max_num_batched_tokens
+        topk = getattr(text, "num_experts_per_tok", None) or getattr(text, "moe_topk", None) or 8
+        width = getattr(text, "moe_intermediate_size", None) or getattr(text, "intermediate_size", 0)
+        widths, rank = _uneven_widths()
+        width = widths[rank] if widths is not None else width // max(config.parallel_config.tensor_parallel_size, 1)
+        return 2 * tokens * topk * width * 4 * 2
+    except Exception:
+        return 0
+
+
+def _vram_for_experts(loader) -> int | None:
+    """Bytes of this rank's VRAM the routed experts can have at most, resident rows, slots and staging windows
+    together; None when it cannot be estimated."""
+    census, config = _census()
+    if not census or not torch.cuda.is_available():
+        return None
+    tp = max(config.parallel_config.tensor_parallel_size, 1)
+    params = set(getattr(loader, "cpu_offload_params", None) or ())
+    other = census.get("other", 0)
+    if not embed_on_host():
+        other += census.get("embed", 0)
+    if config.speculative_config is not None:
+        other += census.get("mtp", 0)   # the drafter stays resident (`drafting`)
+    mm = getattr(config.model_config, "multimodal_config", None)
+    if mm is not None and not getattr(mm, "language_model_only", False) and "visual" not in params:
+        other += census.get("visual", 0)
+    total = torch.cuda.mem_get_info()[1]
+    return max(_usable_vram() - other // tp - max(_VRAM_ALLOWANCE, total // 10) - _moe_activation_bytes(config), 0)
+
+
+def _usable_vram() -> int:
+    """This device's memory times --gpu-memory-utilization."""
+    from vllm.config import get_current_vllm_config
+
+    return int(torch.cuda.mem_get_info()[1] * get_current_vllm_config().cache_config.gpu_memory_utilization)
+
+
 def _exclusive_need(experts: int, loader) -> int | None:
     """Experts per layer worth hosting under the exclusive cache, when that is known at load: with
     `--max-model-len auto` the cache stops at `target_share` in VRAM, so it needs host rows only for the
@@ -427,7 +542,25 @@ def _exclusive_need(experts: int, loader) -> int | None:
         return None
     streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
     in_vram = expert_cache.target_in_vram(experts, streams)
-    return max(0, min(experts, experts - in_vram + _SPARE_ROWS))
+    need = max(0, min(experts, experts - in_vram + _SPARE_ROWS))
+    # The target is a decode-speed goal and assumes VRAM can hold it; a 16 GiB card cannot hold 40% of 23 GiB of
+    # experts beside the rest, and resident rows are fixed once loaded. The cap is only a saving (smaller staging
+    # windows), and the VRAM it is checked against is an estimate that has missed by 1.2 GiB (load-time buffers),
+    # so it applies only with a quarter of usable VRAM to spare; otherwise everything offered is hosted and the
+    # slots take what VRAM is left at KV sizing (Qwen3.8-Flash-Next 1.66bpw on one card: OOM -> 119K tokens of KV)
+    rank_bytes, room = _rank_expert_bytes(), _vram_for_experts(loader)
+    if rank_bytes is None or room is None:
+        return None
+    L = max(len(_STATS["moe_layers"]), 1)
+    row = rank_bytes / (L * experts)   # one expert's three projections in one layer
+    used = row * (L * (experts - need + _SPARE_ROWS) + planned_windows(L) * need)
+    if used + _usable_vram() // 4 > room:
+        logger.info(
+            "cpu-offload: not capping hosting at the exclusive cache's target: its %.2f GiB of experts in VRAM "
+            "would not fit with a margin (~%.2f GiB for experts); hosting what --cpu-offload-gb allows",
+            used / (1 << 30), room / (1 << 30))
+        return None
+    return need
 
 
 def _uneven_widths():
@@ -455,7 +588,9 @@ def _host_quota(experts: int, nbytes: int) -> int:
     trellises are the same size, which holds for gate, up and down (k x n either way)."""
     if _STATS["quota"] is None:
         layers = max(len(_STATS["moe_layers"]), 1)
-        want = layers * experts * 3 * nbytes
+        # From the shards' headers: the first tensor times three overstated 1.66bpw's 22.71 GiB as 28.12, whose
+        # projections differ in size (2026-11-18)
+        want = _rank_expert_bytes() or layers * experts * 3 * nbytes
         # The margin protects the host, so it is taken once, not once per rank: per rank it reserved 8 GiB of a
         # 40 GiB host at TP=2 and left Qwen4Exp's 3.05bpw body short of host rows (2026-11-17)
         free = (_mem_available() - max(_HOST_MARGIN, _mem_total() // 10)) // _local_ranks()
@@ -495,8 +630,8 @@ def _host_quota(experts: int, nbytes: int) -> int:
                     ", shared so every rank keeps the same expert bytes in VRAM" if widths is not None else "")
             (logger.info if capped else logger.warning)(
                 "cpu-offload: hosting %d of %d experts per layer%s, %.2f of %.2f GiB; %.2f GiB stay resident: %s",
-                q, experts, split, layers * q * 3 * nbytes / (1 << 30), want / (1 << 30),
-                layers * (experts - q) * 3 * nbytes / (1 << 30), why)
+                q, experts, split, want * q / experts / (1 << 30), want / (1 << 30),
+                want * (experts - q) / experts / (1 << 30), why)
     return _STATS["quota"]
 
 

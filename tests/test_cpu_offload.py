@@ -860,6 +860,13 @@ def _vllm_config(monkeypatch, original_max_model_len):
     monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: cfg)
 
 
+def _roomy(monkeypatch, room=1 << 50, expert_bytes=1 << 20):
+    """A checkpoint census and a VRAM bound, which the exclusive cap needs before it hosts less than offered."""
+    monkeypatch.setattr(cpu_offload, "_rank_expert_bytes", lambda: expert_bytes)
+    monkeypatch.setattr(cpu_offload, "_vram_for_experts", lambda loader: room)
+    monkeypatch.setattr(cpu_offload, "_usable_vram", lambda: 0)
+
+
 def test_exclusive_cache_hosts_only_what_it_can_use(offload, monkeypatch):
     """At --max-model-len auto the exclusive cache stops at target_share in VRAM (103 of 256 for one
     stream), so it needs rows for the other 153 plus spare ones to swap through; an offer beyond that buys
@@ -869,6 +876,7 @@ def test_exclusive_cache_hosts_only_what_it_can_use(offload, monkeypatch):
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setattr(expert_cache, "EXCLUSIVE", True)
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    _roomy(monkeypatch)
     _vllm_config(monkeypatch, -1)
     loader = offload(_Loader({"experts"}))
     assert cpu_offload._exclusive_need(256, loader) == 256 - 103 + cpu_offload._SPARE_ROWS
@@ -896,6 +904,7 @@ def test_uneven_split_targets_equal_bytes_not_equal_counts(offload, monkeypatch)
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setattr(expert_cache, "EXCLUSIVE", True)
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    _roomy(monkeypatch)
     _vllm_config(monkeypatch, -1)
     loader = offload(_Loader({"experts"}))
     for i in range(48):
@@ -911,3 +920,26 @@ def test_uneven_split_targets_equal_bytes_not_equal_counts(offload, monkeypatch)
     assert abs(total[0] - total[1]) <= 48 * 384
     monkeypatch.setattr(cpu_offload, "_uneven_widths", lambda: (None, None))
     assert expert_cache.target_in_vram(512, 1.0) == 205
+
+
+def test_exclusive_cap_stands_down_when_vram_cannot_hold_it(offload, monkeypatch):
+    """Qwen3.8-Flash-Next 1.66bpw on one 16 GiB card: 40% of 22.7 GiB of experts cannot stay resident beside the
+    rest, and capping the offer at the target's rows ran the card out of memory. Without a margin's room the cap
+    stands down and the budget is hosted; with it, the cap stands."""
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(expert_cache, "EXCLUSIVE", True)
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    experts, layers, GiB = 512, 48, 1 << 30
+    _vllm_config(monkeypatch, -1)
+    loader = offload(_Loader({"experts"}))
+    for i in range(layers):
+        cpu_offload.declare_moe_layer(f"m.layers.{i}.mlp.experts")
+    target = experts - expert_cache.target_in_vram(experts, 1.0) + cpu_offload._SPARE_ROWS
+    for room, expected in ((7.9, None), (40.0, target)):
+        _roomy(monkeypatch, room=int(room * GiB), expert_bytes=int(22.71 * GiB))
+        monkeypatch.setattr(cpu_offload, "_usable_vram", lambda: int(14.9 * GiB))
+        assert cpu_offload._exclusive_need(experts, loader) == expected, room
+    monkeypatch.setattr(cpu_offload, "_vram_for_experts", lambda loader: None)
+    assert cpu_offload._exclusive_need(experts, loader) is None
