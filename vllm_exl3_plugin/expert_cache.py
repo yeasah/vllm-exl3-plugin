@@ -77,17 +77,25 @@ def target_share(streams: float) -> float:
 def target_in_vram(experts: int, streams: float) -> int:
     """Experts per layer this rank keeps in VRAM at `target_share`, resident and slots together.
 
-    Under an uneven expert split (fused_moe.rank_widths) the share applies to the mean width, so every rank spends the
-    same bytes on it, as `cpu_offload._host_quota` does for what stays resident: KV is sized to the fullest rank,
-    and an equal count on Qwen4Exp's 384 + 256 split left rank 0 2.3 GiB fuller than rank 1 at TP=2 (2026-11-17).
-    The wider rank covers less (33% against 50% there)."""
+    Under an uneven expert split (fused_moe.rank_widths) every rank spends the same expert bytes, as
+    `cpu_offload._host_quota` does for what stays resident: KV is sized to the fullest rank, and an equal count on
+    Qwen4Exp's 384 + 256 split left rank 0 2.3 GiB fuller than rank 1 at TP=2 (2026-11-17). The bytes counted are
+    the L layers' VRAM rows plus the k prefill staging windows, each a layer's hosted rows (E - n + spare): equal
+    totals at the mean width's share give n_r = (w_mean/w_r * (L n + k (E - n + s)) - k (E + s)) / (L - k), which is
+    the share itself when the widths agree. The wider rank covers less (32% against 51% there)."""
     from . import cpu_offload
 
-    share = target_share(streams)
+    n = target_share(streams) * experts
     widths, rank = cpu_offload._uneven_widths()
     if widths is not None:
-        share *= sum(widths) / len(widths) / widths[rank]
-    return min(experts, math.ceil(share * experts))
+        L = len(cpu_offload._STATS["moe_layers"])
+        k, s = cpu_offload.planned_windows(L), cpu_offload._SPARE_ROWS
+        scale = sum(widths) / len(widths) / widths[rank]
+        if L > k:
+            n = (scale * (L * n + k * (experts - n + s)) - k * (experts + s)) / (L - k)
+        else:   # layers not declared yet: VRAM rows alone
+            n *= scale
+    return max(0, min(experts, math.ceil(n)))
 
 
 def size_slots(available: int, reserve: int, hosted: int, slot_bytes: int,

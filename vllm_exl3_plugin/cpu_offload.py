@@ -474,29 +474,29 @@ def _host_quota(experts: int, nbytes: int) -> int:
             resident = max((sum(wants) - room * len(widths)) / len(widths), 0)
             hosted = min(max(want - resident, 0), want)
             share = hosted / want if want else 1.0
-            logger.info(
-                "cpu-offload: uneven expert split (widths %s): rank %d hosts %.2f of its %.2f GiB of routed experts, "
-                "so every rank keeps %.2f GiB in VRAM", widths, rank, hosted / (1 << 30), want / (1 << 30),
-                (want - hosted) / (1 << 30))
+        limited = share < 1.0
         _STATS["quota"] = math.floor(share * experts)
         need = _exclusive_need(experts, loader)
-        if need is not None and need < _STATS["quota"]:
-            logger.info(
-                "cpu-offload: hosting %d of %d experts per layer, not %d: the exclusive expert cache stops at "
-                "%d in VRAM at --max-model-len auto, and needs only the rest plus %d spare rows to swap through; "
-                "%.2f GiB of what was offered goes unused",
-                need, experts, _STATS["quota"], experts - need + _SPARE_ROWS, _SPARE_ROWS,
-                layers * (_STATS["quota"] - need) * 3 * nbytes / (1 << 30),
-            )
+        capped = need is not None and need < _STATS["quota"]
+        if capped:
             _STATS["quota"] = need
-            share = 1.0
-        if share < 1.0:
-            logger.warning(
-                "cpu-offload: %s holds %.2f of %.2f GiB of routed experts; offloading %d of %d "
-                "per layer for the expert cache, the rest stay in VRAM",
-                "--cpu-offload-gb" if budget <= free else "host RAM", room / (1 << 30),
-                want / (1 << 30), _STATS["quota"], experts,
-            )
+        if capped or limited:
+            # One line, after every decision: each used to log as it was made, and later ones contradicted earlier
+            q = _STATS["quota"]
+            split = f" (rank {rank}, {widths[rank]} of {sum(widths)} wide)" if widths is not None else ""
+            if capped:
+                why = (f"the exclusive expert cache keeps {experts - q + _SPARE_ROWS} in VRAM at --max-model-len auto "
+                       f"and swaps through {_SPARE_ROWS} spare rows")
+                if widths is not None:
+                    why += ", with every rank spending the same bytes on it"
+            else:
+                why = "{} allows {:.2f} GiB a rank{}".format(
+                    "--cpu-offload-gb" if budget <= free else "host RAM", room / (1 << 30),
+                    ", shared so every rank keeps the same expert bytes in VRAM" if widths is not None else "")
+            (logger.info if capped else logger.warning)(
+                "cpu-offload: hosting %d of %d experts per layer%s, %.2f of %.2f GiB; %.2f GiB stay resident: %s",
+                q, experts, split, layers * q * 3 * nbytes / (1 << 30), want / (1 << 30),
+                layers * (experts - q) * 3 * nbytes / (1 << 30), why)
     return _STATS["quota"]
 
 
@@ -641,6 +641,11 @@ def _layer_number(layer) -> int:
     return int(m.group(1)) if m else 0
 
 
+def planned_windows(layers: int) -> int:
+    """Prefill staging windows `build_staging` allocates for this many hosted layers."""
+    return 2 if PREFETCH and layers > 1 else 1
+
+
 def build_staging() -> None:
     """Allocate a VRAM staging window, sized to the largest layer's offloaded
     experts, and give each hosted layer a second set of trellis pointer tables
@@ -668,7 +673,7 @@ def build_staging() -> None:
         plans.append((layer, offsets))
         size = max(size, off)
     device = next(iter(_HOSTED[0].exl3_host_blocks.values())).view.device
-    count = 2 if PREFETCH and len(_HOSTED) > 1 else 1
+    count = planned_windows(len(_HOSTED))
     windows = [torch.empty(size, dtype=torch.uint8, device=device) for _ in range(count)]
 
     for layer, offsets in plans:

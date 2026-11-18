@@ -141,8 +141,9 @@ gate_up/down pairs (any model with that naming), refused unless the activation p
 tokens identical to TP=1, eager and full decode graphs; decode 36 t/s against ~21 at TP=1. The hosted-expert quota is
 shared so every rank keeps equal expert bytes in VRAM (`_host_quota`), which stopped rank 0 running out of VRAM. At
 `--max-model-len auto` the exclusive cache's 40% target applies to the mean width too (`expert_cache.target_in_vram`):
-an equal count each had left rank 0 2.3 GiB fuller, and KV is sized to the fullest rank. Rank 0 now covers 33% and
-rank 1 50%; KV 330K -> 490K tokens on the 2.05bpw body (user config, MTP off), decode 45.8 against 46.8 t/s.
+an equal count each had left rank 0 2.3 GiB fuller, and KV is sized to the fullest rank; the prefill staging windows
+(a layer's hosted rows each) count in the equal bytes. Rank 0 now covers 33% and rank 1 51%; KV 330K -> 507K tokens on
+the 2.05bpw body (user config, MTP off), decode 45.7 against 46.8 t/s; ~0.1 GiB of per-expert scales stays uneven.
 
 **Open: the imbalance.** Rank 0 does 3 of each expert's 5 blocks and, with equal VRAM over 1.5x the expert bytes, its
 expert cache covers less (54% against 84%): 209 us per decode MoE call against 122, ~2 ms a token, ~8% of decode at
