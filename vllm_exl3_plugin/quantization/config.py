@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,8 @@ class EXL3Config(QuantizationConfig):
         # index when there is one.
         self._blockq_modules: set[str] = set()
         self._trellis_embed_modules: set[str] = set()
+        # The body's layer count, which some MTP drafters add to their checkpoint layer indices
+        self._mtp_layer_offset = 0
         self._dense_embed_present: bool = False
         self._warned_dense_embed: bool = False
         # Modules the *checkpoint* quantizes, from the safetensors index. Takes
@@ -266,6 +269,7 @@ class EXL3Config(QuantizationConfig):
             # selection rather than at load.
             text = getattr(hf_config, "text_config", None) or hf_config
             self._hidden_size = getattr(text, "hidden_size", None)
+            self._mtp_layer_offset = getattr(text, "num_hidden_layers", None) or 0
             # Read in the process that builds the model, through the pickled config: engram.py patches vLLM's
             # Qwen4Exp only for that architecture (its import costs ~2 s, too much for every model)
             self._architectures = list(getattr(hf_config, "architectures", None) or [])
@@ -902,6 +906,15 @@ class EXL3Config(QuantizationConfig):
             return True
         candidates = self._unfuse(prefix)
         known = self._exl3_modules()
+        if not any(key in known for key in candidates) and self._mtp_layer_offset:
+            # Some MTP drafters (Qwen4Exp's) build `mtp.layers.{num_hidden_layers + i}` and rename the checkpoint's
+            # `mtp.layers.{i}` to match at load; vLLM shifts its own formats' layer lists the same way in the
+            # drafter's `_make_draft_vllm_config`, but nothing there knows about ours
+            candidates += [
+                re.sub(r"(?<=^mtp\.layers\.)\d+", lambda m: str(int(m.group(0)) - self._mtp_layer_offset), key)
+                for key in candidates
+                if re.match(r"mtp\.layers\.\d+", key) and int(key.split(".")[2]) >= self._mtp_layer_offset
+            ]
         if any(key in known for key in candidates):
             return True
         ancestors = self._quantized_ancestors()

@@ -302,3 +302,40 @@ class TestStorageMapCanOmitQuantizedModules(unittest.TestCase):
         self.assertTrue(c.head_is_quantized())
         c.tie_word_embeddings = True
         self.assertFalse(c.head_is_quantized())
+
+
+class TestOffsetMTPLayers(unittest.TestCase):
+    """Qwen4Exp's drafter builds `mtp.layers.48` for the checkpoint's `mtp.layers.0`.
+
+    Shapes from `turboderp/Qwen3.8-Flash-Next-exl3` @2.05bpw (48 body layers). Without the offset the MTP experts
+    looked unquantized, and loading died on `w2_mul1` missing from the unquantized method's parameters.
+    """
+
+    INDEX = {
+        "model.language_model.layers.0.mlp.experts.0.down_proj.trellis": "a",
+        "mtp.fc_embedding.trellis": "b",
+        "mtp.layers.0.mlp.experts.0.down_proj.trellis": "b",
+        "mtp.layers.0.mlp.experts.0.down_proj.mul1": "b",
+        "mtp.layers.0.input_layernorm.weight": "b",
+    }
+
+    def _config(self, offset):
+        from vllm_exl3_plugin.quantization.config import EXL3Config
+
+        c = EXL3Config(bits=2.05, head_bits=6, codebook="mul1")
+        c.quantized_modules = format.quantized_module_keys(self.INDEX)
+        c._mtp_layer_offset = offset
+        return c
+
+    def test_offset_layer_finds_its_checkpoint_name(self):
+        c = self._config(48)
+        self.assertTrue(c.is_quantized("mtp.layers.48.mlp.experts"))
+        self.assertTrue(c.is_quantized("mtp.fc_embedding"))
+        self.assertFalse(c.is_quantized("mtp.layers.48.input_layernorm"))
+
+    def test_unoffset_drafters_are_untouched(self):
+        """Qwen3.5's drafter numbers from zero; an index below the body's count is never shifted."""
+        c = self._config(48)
+        self.assertTrue(c.is_quantized("mtp.layers.0.mlp.experts"))
+        self.assertFalse(c.is_quantized("mtp.layers.1.mlp.experts"))
+        self.assertFalse(self._config(0).is_quantized("mtp.layers.48.mlp.experts"))
