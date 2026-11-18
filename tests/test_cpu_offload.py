@@ -885,3 +885,24 @@ def test_exclusive_cap_only_when_the_need_is_known(offload, monkeypatch, case):
     _vllm_config(monkeypatch, 32768 if case == "fixed length" else -1)
     loader = offload(_Loader({r"re:experts\..*gate"} if case == "regex selector" else {"experts"}))
     assert cpu_offload._exclusive_need(256, loader) is None
+
+
+def test_uneven_split_targets_equal_bytes_not_equal_counts(offload, monkeypatch):
+    """Qwen4Exp at TP=2 deals 640 as 384 + 256: an equal 40% count each left rank 0 2.3 GiB fuller, and KV is sized
+    to the fullest rank. The share applies to the mean width instead, so both ranks spend the same bytes on it."""
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(expert_cache, "EXCLUSIVE", True)
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    _vllm_config(monkeypatch, -1)
+    loader = offload(_Loader({"experts"}))
+    counts = {}
+    for rank in (0, 1):
+        monkeypatch.setattr(cpu_offload, "_uneven_widths", lambda rank=rank: ([384, 256], rank))
+        counts[rank] = expert_cache.target_in_vram(512, 1.0)
+        assert cpu_offload._exclusive_need(512, loader) == 512 - counts[rank] + cpu_offload._SPARE_ROWS
+    assert counts == {0: 171, 1: 256}
+    assert abs(counts[0] * 384 - counts[1] * 256) <= 384
+    monkeypatch.setattr(cpu_offload, "_uneven_widths", lambda: (None, None))
+    assert expert_cache.target_in_vram(512, 1.0) == 205

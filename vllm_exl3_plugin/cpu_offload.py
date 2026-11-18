@@ -426,7 +426,7 @@ def _exclusive_need(experts: int, loader) -> int | None:
     except Exception:
         return None
     streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
-    in_vram = math.ceil(expert_cache.target_share(streams) * experts)
+    in_vram = expert_cache.target_in_vram(experts, streams)
     return max(0, min(experts, experts - in_vram + _SPARE_ROWS))
 
 

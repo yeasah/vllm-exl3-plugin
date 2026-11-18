@@ -74,6 +74,22 @@ def target_share(streams: float) -> float:
     return min(1.0, 0.4 + 0.1 * math.log2(max(streams, 1.0)))
 
 
+def target_in_vram(experts: int, streams: float) -> int:
+    """Experts per layer this rank keeps in VRAM at `target_share`, resident and slots together.
+
+    Under an uneven expert split (fused_moe.rank_widths) the share applies to the mean width, so every rank spends the
+    same bytes on it, as `cpu_offload._host_quota` does for what stays resident: KV is sized to the fullest rank,
+    and an equal count on Qwen4Exp's 384 + 256 split left rank 0 2.3 GiB fuller than rank 1 at TP=2 (2026-11-17).
+    The wider rank covers less (33% against 50% there)."""
+    from . import cpu_offload
+
+    share = target_share(streams)
+    widths, rank = cpu_offload._uneven_widths()
+    if widths is not None:
+        share *= sum(widths) / len(widths) / widths[rank]
+    return min(experts, math.ceil(share * experts))
+
+
 def size_slots(available: int, reserve: int, hosted: int, slot_bytes: int,
                layers: int, per_layer_max: int, cap: int | None = None) -> int:
     """Slots per layer for the auto mode.
@@ -847,14 +863,15 @@ def build(layers: list, available: int, worker) -> int:
         if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
             # auto: slots up to the target share, counting the experts that stayed resident
             streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
-            cap = max(math.ceil(target_share(streams) * E) - (E - per_layer_max), 0)
-            how += f"; slots stop at {100 * target_share(streams):.0f}% of experts for {streams:g} stream(s)"
+            in_vram = target_in_vram(E, streams)
+            cap = max(in_vram - (E - per_layer_max), 0)
+            how += f"; slots stop at {100 * in_vram / E:.0f}% of experts for {streams:g} stream(s)"
         slots = size_slots(available, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
         extra = cpu_offload.prefetch_window_bytes()
         if extra:
             # EXL3_STAGE_PREFETCH=auto only (the default keeps the window): the second staging window is
             # dropped only when it is what takes residency below the target
-            target = target_share(float(os.environ.get("EXL3_KV_RESERVE", "1.0")))
+            target = target_in_vram(E, float(os.environ.get("EXL3_KV_RESERVE", "1.0"))) / E
             freed_slots = size_slots(available + extra, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
             kept, freed = (E - per_layer_max + slots) / E, (E - per_layer_max + freed_slots) / E
             if kept < target <= freed:
