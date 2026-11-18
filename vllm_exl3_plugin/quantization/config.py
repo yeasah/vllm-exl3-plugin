@@ -713,7 +713,24 @@ class EXL3Config(QuantizationConfig):
                 )
         return stored
 
+    #: exllamav3 splits a vision tower's fused `attn.qkv` (`key_fused_qkv = "qkv"` in its Qwen-VL / GLM-4V architecture
+    #: files) and stores `q_proj`/`k_proj`/`v_proj`; vLLM's tower keeps `qkv` and stacks the HF split names `attn.q.`
+    _VISION_QKV_SPLIT = re.compile(r"(\bvisual\.blocks\.\d+\.attn\.)([qkv])_proj\.")
+
     def get_cache_scale_mapper(self):
+        """The rules below, plus the vision tower's q/k/v rename (`_VISION_QKV_SPLIT`)."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        # Regex rules run before vLLM's stacked rules, so `attn.q_proj.trellis` reaches the tower's own
+        # `attn.q.` -> (`attn.qkv.`, "q") mapping
+        rules = {self._VISION_QKV_SPLIT: r"\1\2."}
+        if any(self._VISION_QKV_SPLIT.search(key + ".") for key in self._exl3_modules()):
+            # The converter also leaves the dense fused tensors behind; exllamav3 reads them only when no split is
+            # stored, so they go unread here too
+            rules[re.compile(r"\bvisual\.blocks\.\d+\.attn\.qkv\.(weight|bias)$")] = None
+        return self._embedding_mapper() | WeightsMapper(orig_to_new_regex=rules)
+
+    def _embedding_mapper(self):
         """Route a tied model's `lm_head.*` onto the embedding module.
 
         This hook is named for KV-cache scales, but it is the one place a
@@ -933,6 +950,9 @@ class EXL3Config(QuantizationConfig):
         `q_proj`/`k_proj`/`v_proj`. `packed_modules_mapping` is filled in by the
         model class as it initializes.
         """
+        if re.search(r"\bvisual\.blocks\.\d+\.attn\.qkv$", prefix):  # see _VISION_QKV_SPLIT
+            stem = prefix[: -len("qkv")]
+            return [stem + part for part in ("q_proj", "k_proj", "v_proj")]
         for fused, parts in self.packed_modules_mapping.items():
             if prefix.endswith(fused):
                 stem = prefix[: -len(fused)]

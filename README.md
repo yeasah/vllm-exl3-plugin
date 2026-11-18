@@ -127,7 +127,9 @@ checkpoint, so `--quantization` is not needed. The main differences:
   tower unquantized. Offloading it costs almost nothing, since it runs once per image:
   `--cpu-offload-gb N --cpu-offload-params visual`. `--language-model-only` drops it. An
   image-heavy request on a small card may still need a pixel cap through
-  `--mm-processor-kwargs`. See [docs/media-encoders.md](docs/media-encoders.md).
+  `--mm-processor-kwargs`. Third-party checkpoints with a quantized tower load too, and at TP>1
+  any EXL3 tower is replicated per rank (`--mm-encoder-tp-mode data`) rather than sharded. See
+  [docs/media-encoders.md](docs/media-encoders.md).
 - **`--cpu-offload-gb` runs MoE experts through a VRAM expert cache.** Offloaded experts load
   straight to host memory, so a checkpoint bigger than VRAM loads. The most-used experts are kept
   in VRAM slots, sized automatically against what KV needs at `--max-model-len`, and prefill copies

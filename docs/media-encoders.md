@@ -659,13 +659,28 @@ Two consequences, one of them convenient:
   rather than silently mismatched -- and the remaining 83 (`attn.proj`,
   `mlp.linear_fc1`, `mlp.linear_fc2`) do match and restore normally. A fully
   dense tower is those 83 restored plus the 81 trellis modules simply dropped.
-- **vLLM almost certainly cannot serve the split form**, and it no longer
-  matters enough to test. `Qwen3VisionBlock` builds one packed `attn.qkv`
-  (`qwen3_vl.py`: `"qkv": ["qkv"],  # For vision tower's already-packed QKV`),
-  and its only unpacking rule maps `attn.q.`/`attn.k.`/`attn.v.` onto
-  `attn.qkv.` with a shard id -- a dense weight-loader path, keyed on names the
-  checkpoint does not use (`q_proj`, not `q`). Left here as the reason not to
-  pursue it, not as a finding: it was never run.
+- **vLLM serves the split form now (2026-11-17).** The prediction here was that it
+  could not: `Qwen3VisionBlock` builds one packed `attn.qkv`, and its only
+  unpacking rule maps `attn.q.`/`attn.k.`/`attn.v.`, not `q_proj`. Both halves
+  were true and both were cheap to bridge. `EXL3Config` renames
+  `attn.{q,k,v}_proj.*` to `attn.{q,k,v}.*` ahead of the tower's own stacked
+  rule, so the trellis lands on `attn.qkv` with shard ids; `_unfuse` maps
+  `attn.qkv` back to the three for `is_quantized`; and the leftover dense
+  `attn.qkv.{weight,bias}` is dropped unread, as exllamav3 reads it only when no
+  split is stored (`modules/attn.py`, `fkey`). A tower without the split keeps
+  its fused tensors (`tests/test_vision_tower.py`). Found on
+  `turboderp/Qwen3.8-Flash-Next-exl3` @2.05bpw, where the user's question was
+  third-party checkpoints too expensive to reconvert, not our own output -- the
+  policy below is unchanged.
+- **At TP>1 the tower is replicated, not sharded.** Its widths never land on
+  Hadamard blocks (16 heads of 72 is 576 channels per rank at TP=2; the
+  4304-wide MLP is not whole blocks at all), so the plugin defaults EXL3
+  multimodal models to `mm_encoder_tp_mode="data"` when vLLM's mode is the
+  default and the model supports it (`plugin._wants_encoder_dp`). Each rank then
+  runs the tower exactly as TP=1 does. A synthetic three-shape image described
+  correctly at TP=1 and TP=2; the two agree for 85 tokens and part at an exact
+  tie in the TP=2 logits (-1.307 / -1.307, against a 0.75-nat margin at TP=1),
+  which is the language model's reduction order, not the tower.
 
 ## Policy: unquantized vision, always (2026-09-18)
 

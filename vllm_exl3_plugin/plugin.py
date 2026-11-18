@@ -30,6 +30,7 @@ def register() -> None:
     _patch_offload_defaults()
     _patch_kernel_overlap()
     _patch_qwen4exp_graph_default()
+    _patch_mm_encoder_dp_default()
     _REGISTERED = True
 
 
@@ -224,6 +225,47 @@ def _patch_offload_defaults() -> None:
 
     UVAOffloader.wrap_modules = wrap_modules
     UVAOffloader._exl3_defaults_patched = True
+
+
+def _wants_encoder_dp(model_config, parallel_config) -> bool:
+    """Whether an EXL3 multimodal model should replicate its vision encoder instead of sharding it.
+
+    Vision towers have widths no Hadamard-block split respects: Qwen4Exp's 16 heads of 72 put 576 channels on each
+    of two ranks, and its 4304-wide MLP is not a whole number of blocks. Sharded, they fail at load (format.check_tp_split);
+    replicated (`mm_encoder_tp_mode="data"`), each rank runs the tower exactly as TP=1 does, for ~0.1 GiB of EXL3
+    weights per rank. Only for vLLM's default mode: "weights" is indistinguishable from unset, so this is the one
+    choice a user cannot pin, and the sharded mode it replaces cannot load these towers anyway.
+    """
+    mm = getattr(model_config, "multimodal_config", None)
+    info = getattr(model_config, "_model_info", None)
+    return (getattr(model_config, "quantization", None) == "exl3" and mm is not None
+            and not getattr(mm, "language_model_only", False) and mm.mm_encoder_tp_mode == "weights"
+            and getattr(parallel_config, "tensor_parallel_size", 1) > 1
+            and bool(getattr(info, "supports_multimodal_encoder_tp_data", False)))
+
+
+def _patch_mm_encoder_dp_default() -> None:
+    """Replicate an EXL3 model's vision encoder across tensor-parallel ranks (`_wants_encoder_dp`)."""
+    from vllm.config import VllmConfig
+
+    if getattr(VllmConfig, "_exl3_encoder_dp_patched", False):
+        return
+    original = VllmConfig.__post_init__
+
+    @wraps(original)
+    def __post_init__(self, *args, **kwargs):
+        mc = getattr(self, "model_config", None)
+        if mc is not None and _wants_encoder_dp(mc, getattr(self, "parallel_config", None)):
+            from .log import init_logger
+
+            mc.multimodal_config.mm_encoder_tp_mode = "data"
+            init_logger(__name__).info(
+                "EXL3: vision encoder replicated on each rank (mm_encoder_tp_mode=data); its widths do not split "
+                "on Hadamard blocks")
+        return original(self, *args, **kwargs)
+
+    VllmConfig.__post_init__ = __post_init__
+    VllmConfig._exl3_encoder_dp_patched = True
 
 
 def _patch_qwen4exp_graph_default() -> None:
