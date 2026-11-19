@@ -2159,6 +2159,95 @@ def job_in_use(job):
             found.append((int(pid), line[:160]))
     return found
 
+def promote_plan(job, suffix, aside):
+    """The renames `promote` makes, as (kind, old, new): each `<rev>-<suffix>` takes `<rev>`'s place, and a `<rev>`
+    already there moves to `<rev>-<aside>` first. Raises ValueError for anything that would collide or is unfinished."""
+    tail = f"-{suffix}"
+    rungs = [r for r in job.revisions() if r.endswith(tail)]
+    if not rungs:
+        raise ValueError(f"no revision ends in {tail}")
+    plan, taken = [], set(job.revisions())
+    for rev in rungs:
+        canon = rev[:-len(tail)]
+        if not job.is_complete(rev):
+            raise ValueError(f"{rev} is not finished (no quantization_config.json)")
+        if canon in taken:
+            moved = f"{canon}-{aside}"
+            if moved in taken:
+                raise ValueError(f"{moved} already exists: pick another --aside")
+            plan.append(("rung", canon, moved))
+        plan.append(("rung", rev, canon))
+    return plan
+
+
+def _promote_files(job, old, new):
+    """A revision's own files named for it: its recipe, measurement and logs (not the baseline's, shared by bit rate)."""
+    out = []
+    for d, names in ((os.path.join(job.dir, "_recipes"), (".yaml", ".measurement.json")),
+                     (os.path.join(job.dir, "logs"), (".log", "-recipe.log"))):
+        for ext in names:
+            if os.path.isfile(os.path.join(d, old + ext)):
+                out.append((os.path.join(d, old + ext), os.path.join(d, new + ext)))
+    return out
+
+
+def do_promote(job, args):
+    """Make a suffixed variant the ladder's rung: each `<rev>-<suffix>` is renamed to `<rev>`, and the `<rev>` it replaces
+    moves to `<rev>-<aside>` (nothing is deleted). The scored rows in every main/qb_*.json are relabelled in the same
+    swap, so the card and compare see the promoted rung's scores under its new name without rescoring, and its recipe,
+    measurement and logs follow it. A dry run unless --yes; refused while a process is running against the job. The hub
+    is untouched: publishing the promoted rung is a new commit on its branch, a cutover like any republication."""
+    try:
+        plan = promote_plan(job, args.suffix, args.aside)
+    except ValueError as e:
+        print(f"=== promote refused: {e} ==="); return False
+    swap = {old: new for _, old, new in plan}
+    files = [f for _, old, new in plan for f in _promote_files(job, old, new)]
+    results = sorted(globmod.glob(os.path.join(job.main, "qb_*.json")) +
+                     globmod.glob(os.path.join(job.main, "_qbench_parts", "qb_*.json")))
+    relabel = {}
+    for path in results:
+        with open(path) as f:
+            rows = json.load(f)
+        hits = [r["label"] for r in rows if r.get("label") in swap]
+        if hits:
+            relabel[path] = (rows, hits)
+        clash = {swap[l] for l in hits} & {r.get("label") for r in rows if r.get("label") not in swap}
+        if clash:
+            print(f"=== promote refused: {os.path.relpath(path, job.dir)} already has rows for {', '.join(sorted(clash))} ===")
+            return False
+    for kind, old, new in plan:
+        print(f"   {kind:6s} {old} -> {new}")
+    for src, dst in files:
+        print(f"   file   {os.path.relpath(src, job.dir)} -> {os.path.basename(dst)}")
+    for path, (_, hits) in relabel.items():
+        print(f"   rows   {os.path.relpath(path, job.dir)}: {', '.join(f'{l} -> {swap[l]}' for l in hits)}")
+    if not args.yes:
+        print("=== dry run: --yes makes these renames ==="); return True
+    busy = job_in_use(job)
+    if busy:
+        for pid, line in busy:
+            print(f"!! pid {pid}: {line}")
+        print("=== promote refused: processes are running against this job ==="); return False
+    # Labels first, each file whole (both names swap in one write), then the renames in plan order: the rung moving
+    # aside before the one taking its name
+    for path, (rows, _) in relabel.items():
+        for r in rows:
+            if r.get("label") in swap:
+                r["label"] = swap[r["label"]]
+        tmp = path + ".promote"
+        with open(tmp, "w") as f:
+            json.dump(rows, f, indent=2)
+        os.replace(tmp, path)
+    for _, old, new in plan:
+        for src, dst in _promote_files(job, old, new):
+            os.rename(src, dst)
+        os.rename(job.revdir(old), job.revdir(new))
+    print(f"=== promoted {', '.join(new for _, old, new in plan if old.endswith('-' + args.suffix))}; "
+          "re-render the card (`card`) before publishing ===")
+    return True
+
+
 def do_clean(job, args):
     """After a ladder is published: remove what the job keeps that costs nothing to rebuild and was never
     uploaded -- the blended YAQA factor (re-averaged from its inputs by `yaqa`), the probe's factor and arms
@@ -4029,6 +4118,14 @@ def main():
                            help="also the reference logit cache: a bf16 pass per slice to rebuild")
     cmd_clean.add_argument('--logit-cache', default=None, help=argparse.SUPPRESS)
     cmd_clean.set_defaults(func=do_clean)
+
+    cmd_promote = subparsers.add_parser('promote', help="make a --suffix variant the ladder's rung: rename it into place, "
+                                        "move the rung it replaces aside, relabel its scores; a dry run unless --yes")
+    cmd_promote.add_argument('--suffix', required=True, help="the variant's suffix, as given to quantize")
+    cmd_promote.add_argument('--aside', default="prev",
+                             help="suffix for the rung being replaced (default: prev, so <rev>-prev)")
+    cmd_promote.add_argument('--yes', action='store_true', help='make the renames; without it, only list them')
+    cmd_promote.set_defaults(func=do_promote)
 
     cmd_compare = subparsers.add_parser('compare', help="table of scored revisions: per slice and composite, against the "
                                          "uncalibrated baseline or a --base revision (for exploring variants)")
