@@ -2648,6 +2648,11 @@ def do_recall_slice(job, args):
     reference pass, so that a model too thin for the metric is refused before any arm is scored. Each step is skipped
     when its output exists, and the reference's logits stay cached for `qbench --slices recall`."""
     x = args.exllamav3dir
+    chosen = job.eval_trace(RECALL_SLICE)
+    if os.path.isfile(chosen):
+        # Like every other target's output: a reselection (other --min-p or --min-questions) is a deliberate rm
+        print(f"=== recall slice {chosen}: present, kept ===")
+        return True
     path = job.base_snapshot()
     pool = job.eval_trace(RECALL_POOL)
     os.makedirs(os.path.dirname(pool), exist_ok=True)
@@ -2665,7 +2670,7 @@ def do_recall_slice(job, args):
         if run_logged([ "python3", os.path.join(x, "eval", "qbench.py"), os.path.abspath(yml), "-d", args.device.split(",")[0] ],
                       job.log("recall-reference"), None, True) or not os.path.isfile(results):
             print("=== recall reference pass failed ==="); return False
-    rc = run_logged([ "python3", os.path.join(x, "eval", "recall_select.py"), "-t", pool, "-r", results, "-o", job.eval_trace(RECALL_SLICE),
+    rc = run_logged([ "python3", os.path.join(x, "eval", "recall_select.py"), "-t", pool, "-r", results, "-o", chosen,
                       "--min_p", str(args.min_p), "--min_questions", str(args.min_questions) ] +
                     ([ "--allow_thin" ] if args.allow_thin else []), job.log("recall-select"), None, True)
     return rc == 0
@@ -3529,32 +3534,48 @@ def do_yaqa(job, args):
     return True
 
 def embed_bits_of(rung) -> int | None:
-    """A converted rung's token-embedding depth: 16 for a dense table, the trellis K otherwise (each row stores
-    K * hidden / 16 int16 words plus 8), None if the checkpoint has no recognizable embedding."""
-    from safetensors import safe_open
-    idx_path = os.path.join(rung, "model.safetensors.index.json")
-    if os.path.isfile(idx_path):
-        with open(idx_path) as f:
-            wm = json.load(f)["weight_map"]
-    else:
-        single = os.path.join(rung, "model.safetensors")
-        if not os.path.isfile(single):
+    """A converted rung's token-embedding depth: 16 for a dense table, the trellis K otherwise, None if the checkpoint
+    has no recognizable embedding. Read from quantization_config.json, which every rung has, falling back to the
+    safetensors manifest, which a rung need not have. A trellis row is one word plus 16 K per 256-wide group
+    (trellis_embed.depth_from_shape); the K * hidden / 16 + 8 this used to assume holds only at hidden 2048, so every
+    27B baseline read as K=None and stale."""
+    shapes = {}
+    try:
+        with open(os.path.join(rung, "quantization_config.json")) as f:
+            storage = json.load(f).get("tensor_storage") or {}
+        for key, entry in storage.items():
+            if key.endswith("embed_tokens") and not key.startswith("mtp."):
+                shapes = {n: t.get("shape") for n, t in (entry.get("stored_tensors") or {}).items()}
+                break
+    except (OSError, ValueError):
+        pass
+    if not shapes:
+        from safetensors import safe_open
+        idx_path = os.path.join(rung, "model.safetensors.index.json")
+        if os.path.isfile(idx_path):
+            with open(idx_path) as f:
+                wm = json.load(f)["weight_map"]
+        elif os.path.isfile(os.path.join(rung, "model.safetensors")):
+            with safe_open(os.path.join(rung, "model.safetensors"), "pt") as f:
+                wm = {n: "model.safetensors" for n in f.keys()}
+        else:
             return None
-        with safe_open(single, "pt") as f:
-            wm = {n: "model.safetensors" for n in f.keys()}
-    names = [n for n in wm if re.search(r"embed_tokens\.(weight|trellis)$", n) and not n.startswith("mtp.")]
-    if not names:
-        return None
-    n = names[0]
-    if n.endswith(".weight"):
-        return 16
-    with safe_open(os.path.join(rung, wm[n]), "pt") as f:
-        rows_words = f.get_slice(n).get_shape()[-1]
-    with open(os.path.join(rung, "config.json")) as f:
-        cfg = json.load(f)
-    hidden = (cfg.get("text_config") or cfg)["hidden_size"]
-    k = (rows_words - 8) * 16 / hidden
-    return int(k) if k == int(k) else None
+        for n in wm:
+            if re.search(r"embed_tokens\.(weight|trellis)$", n) and not n.startswith("mtp."):
+                with safe_open(os.path.join(rung, wm[n]), "pt") as f:
+                    shapes[n] = f.get_slice(n).get_shape()
+                break
+    for n, shape in shapes.items():
+        if n.endswith("embed_tokens.weight"):
+            return 16
+        if n.endswith("embed_tokens.trellis") and shape:
+            with open(os.path.join(rung, "config.json")) as f:
+                cfg = json.load(f)
+            groups = (cfg.get("text_config") or cfg)["hidden_size"] // 256
+            words = shape[-1] // groups if groups else 0
+            k = (words - 1) // 16
+            return k if groups and shape[-1] % groups == 0 and words == 1 + 16 * k and 1 <= k <= 8 else None
+    return None
 
 
 def embed_bits_for(bits, choice):
