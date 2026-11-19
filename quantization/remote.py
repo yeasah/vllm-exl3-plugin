@@ -13,7 +13,9 @@ every minute, so a box that dies mid-stage loses at most that much. Learned on r
 - --retries reruns the whole pipeline after a pause; quant.py skips what is already done, so a rerun resumes.
 
 Alerts ring the terminal bell and, with --notify (default $EXL3_NOTIFY, e.g. ntfy.sh/<topic>), post the message
-there. The record lives in ./record/<model>-exl3 (and <model>-exl3.log) under the current directory.
+there. The record lives in work/_remote/<model>-exl3, with the driver's own log beside it as <model>-exl3.log
+(--record-dir moves it): not work/<model>-exl3, which is quant.py's job directory for the same model, and syncing a
+remote job into it would merge it with a local one.
 """
 
 import argparse
@@ -24,6 +26,7 @@ import time
 import re
 
 RETRY_MIN = 5
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 def do_log(job, msg, do_stamp=True):
     stamp = time.strftime("[%Y-%m-%d %H:%M:%S] ") if do_stamp else ""
@@ -390,6 +393,8 @@ def main():
                         help='ladder low bitrate; below 3 only on evidence, such as the probe\'s low draw'),
     parser.add_argument('--max-bits', type=float, default=6, help='ladder high bitrate'),
     
+    parser.add_argument('--record-dir', default=os.path.join(HERE, "work", "_remote"),
+                        help='where the local record and the driver log go (default: work/_remote beside this script)')
     parser.add_argument('--dry-run', action='store_true',
                         help='log the stage commands without running them or syncing; still connects to the host and '
                              'runs its survey, which checks the ssh plumbing and changes nothing')
@@ -445,7 +450,7 @@ def main():
     parser.add_argument('--threshold-gguf', action='append', help='one GGUF file as a threshold line, REPO@QUANT')
 
     args = parser.parse_args()
-    recordpath="record"
+    recordpath=args.record_dir
     modelpath=f"{args.model.split('/')[1]}-exl3"
     remotepath=os.path.join(args.plugin_dir, "quantization")
     devlist=",".join(map(str, range(0, args.num_devices)))
