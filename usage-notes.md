@@ -96,6 +96,8 @@ The main other contender in this space is `MiniCPM5-2B`, which by model size is 
 
 LiquidAI's `LFM3-1.7B` (or its vision-enabled variant `LFM3-VL-2B`) is competitive as well: good KV efficiency (22KiB/t) and impressive looking (though thin) published benchmarks. There are currently no EXL3 quants available, however. Their prior LFM2.5 series are generally not as competitive, although the tiny MoE `LFM2.5-8B-A1B` deserves mention for being a much smaller MoE than any other model listed, with a KV efficiency that ties the best alternative (`Qwen3.5-2B`). With 1B active parameters, there are real questions about capability, but some benchmark scores look acceptable.
 
+XHToken's `Spark-X2.6-4B` is another recent impressive looking model. At 38KiB/tok, its KV efficiency is worse than other options in this class. There is no vision option.
+
 
 ### 8GiB
 
@@ -115,7 +117,7 @@ Two other MoEs deserve mention: poolside's `Laguna-XS-2.1` and zai-org's `GLM-4.
 
 The main model that opens up here is `Qwen3.8-27B`, although it is tight: KV costs more, and the model itself is much bigger in resident VRAM. However, the capability scores are potentially very worth it: it is a very strong model, especially for coding tasks. Likely it will be necessary to bump the body bitrate below 4bpw, which will affect quality; the main question is whether this degradation of a stronger model will be a fair trade as compared to a higher bitrate `Qwen3.6-35B-A3B`.
 
-The wildcard option is `Qwen3.8-Flash-Next`: a much larger model that doesn't seem like it would plausibly fit, but the architecture means it can, barely -- with a combination of disk offload and host cpu offload. It does require a large amount of host RAM available, and generation speed will naturally be lower. But the KV efficiency is shockingly good, and its capability scores are in a different class entirely from anything else that can be run. In order to fit on a 16GiB card, it is necessary to use a 2bpw or lower quant, and there is the very real question of how much damage that represents to the model, and whether it is better to use a less damaged smaller model on the balance. There isn't solid data on that, but there is reason to think that larger models can be considerably more resilient to aggressive quantization than smaller ones, so it's a plausibly good trade.
+The wildcard option is `Qwen3.8-Flash-Next`: a much larger model that doesn't seem like it would plausibly fit, but the architecture means it can, barely -- with a combination of disk offload and host cpu offload. It does require a large amount of host RAM available. But the KV efficiency is shockingly good, and its capability scores are in a different class entirely from anything else that can be run. In order to fit on a 16GiB card, it is necessary to use a 2bpw or lower quant, and there is the very real question of how much damage that represents to the model, and whether it is better to use a less damaged smaller model on the balance. There isn't solid data on that, but there is reason to think that larger models can be considerably more resilient to aggressive quantization than smaller ones, so it's a plausibly good trade.
 
 
 ### 24GiB+
@@ -295,7 +297,18 @@ Pytorch provides an option to enable "expandable segments", which reduces the ra
 
 ## Other knobs
 
-vLLM offers a performance tuning setting `--performance-mode`, which allows hinting of the expected usage patterns for it to optimize for: `interactivity` favors lower latency, `throughput` favors higher overall rate across multiple sessions, and `balanced` (the default) attempts to find a good balance between the two. This setting may or may not be appropriate or helpful for low-VRAM use cases, and I have not investigated in detail.
+vLLM offers a performance tuning setting `--performance-mode`, which allows hinting of the expected usage patterns for it to optimize for: `interactivity` favors lower latency, `throughput` favors higher overall rate across multiple sessions, and `balanced` (the default) attempts to find a good balance between the two. Testing on one particular configuration (serving Qwen3.6-35B-A3B on an RTX 5070ti) shows the following results:
+
+|Mode|Concurrency|Prefill|Decode|Prefill vs. default|Decode vs. default|
+|---|---|---|---|---|---|
+|balanced|1|5098.35|101.63|||
+|balanced|4|15521.81|173.26|||
+|interactivity|1|5094.41|100.64|0.99x|0.99x|
+|interactivity|4|15583.35|174.48|1.00x|1.01x|
+|throughput|1|5784.18|99.91|1.13x|0.98x|
+|throughput|4|17067.72|173.52|1.09x|1.00x|
+
+Which is to say, on this configuration, `throughput` gives a significant boost to prefill at a minimal cost to decode, and the setting is otherwise a wash.
 
 Prefix caching is of fundamental importance: without this, a session of any length will have its prefill latency increase dramatically as the session grows. This is enabled by default, and should in almost every case be left enabled.
 
