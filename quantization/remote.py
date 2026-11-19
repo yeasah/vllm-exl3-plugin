@@ -24,6 +24,7 @@ import sys
 import subprocess
 import time
 import re
+import shlex
 
 RETRY_MIN = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -262,8 +263,8 @@ def do_probe(job):
             args += f" --reserve-vram {job['args'].reserve_vram}"
     if job['args'].probe_draws:
         args += f" --draws {job['args'].probe_draws}"
-    if job['args'].probe_hq is not None:
-        args += f" --hq {job['args'].probe_hq}"
+    for arm in job['args'].probe_arm or []:
+        args += f" --arm {shlex.quote(arm)}"
 
     trace_args = ""
     if job['args'].traces_generator:
@@ -436,7 +437,8 @@ def main():
 
     # probe args
     parser.add_argument("--probe-draws", type=int, default=3)
-    parser.add_argument("--probe-hq", type=int, default=None, help="probe also a uniform rung at quantize --hq N")
+    parser.add_argument("--probe-arm", action="append", metavar="TAG=ARGS",
+                        help="probe also a rung at quantize ARGS (probe.py --arm); repeatable")
     
     # yaqa args
     parser.add_argument("--layers-per-run", help='YAQA number of layers per iteration')
