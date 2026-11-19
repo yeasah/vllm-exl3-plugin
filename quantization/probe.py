@@ -3,7 +3,11 @@
 
 Builds, at one rate (default 4.00):
   - N draws of the configuration the ladder would use (sign-draw offsets 0..N-1, EXL3_SEED_IDX_OFFSET),
-  - a uniform-bits rung at offset 0 (the recipe's control),
+  - a uniform-bits rung at offset 0 (the recipe's control), only when `measure` has run: with no measurement the draws
+    are uniform already (most MoEs), and this rung would be draw 0 again, byte for byte on the same host,
+  - with --hq N, a uniform rung converted with `quantize --hq N` at offset 0 (its control: the uniform rung, or draw 0
+    when the draws are uniform); -hq floors select layers above the rate, so it is larger, and its size is reported
+    beside its gain,
   - with --yaqa, a rung converted against `yaqa --probe`'s factor at offset 0 (its control is draw 0),
   - one draw at --low-bits (default 2.50, head 5 below 4 as the ladder has it), the ladder's configuration otherwise,
 then scores them with one restricted qbench and reports each slice's excess KLD, the draws' spread, and each gain
@@ -22,7 +26,7 @@ then the quantizes run as one wave, the draws on the first --draws GPUs and the 
 
     python3 probe.py -m openbmb/MiniCPM5-2B --draws 5 --yaqa
 """
-import argparse, json, os, re, shlex, subprocess, sys
+import argparse, json, os, re, shlex, subprocess, sys, types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUANT = os.path.join(HERE, "quant.py")
@@ -74,8 +78,16 @@ def main(a):
     base = rung(a.bits)
     draws = [f"{base}-probe-d{i}" for i in range(a.draws)]
     arms = list(draws)
-    uniform = f"{base}-probe-uniform"
-    arms.append(uniform)
+    # quantize's own test for a recipe: a "self" category measured
+    recipe = "self" in quant.measured_categories(types.SimpleNamespace(measure=os.path.join(W, "_measure")))
+    uniform = f"{base}-probe-uniform" if recipe else None
+    if uniform:
+        arms.append(uniform)
+    else:
+        print("=== no measurement: the draws are uniform bits, so there is no recipe to control for ===")
+    hq = f"{base}-probe-hq{a.hq}" if a.hq is not None else None
+    if hq:
+        arms.append(hq)
     yaqa = f"{base}-probe-yaqa"
     if a.yaqa:
         arms.append(yaqa)
@@ -111,7 +123,10 @@ def main(a):
     draw_lane = [(lambda: all(built(name)() for name in draws),
                   ["quantize", *common, "--suffix", "probe", "--draws", str(a.draws), "-d", draw_dev], None)]
     uniform_lane = [(built(uniform), ["quantize", *common, "--no-recipe", "--suffix", "probe-uniform", "-d", uniform_dev],
-                     {"EXL3_SEED_IDX_OFFSET": "0"})]
+                     {"EXL3_SEED_IDX_OFFSET": "0"})] if uniform else []
+    # -hq applies to uniform-bit rungs only, so --no-recipe whether or not the draws have one
+    uniform_lane += [(built(hq), ["quantize", *common, "--no-recipe", "--hq", str(a.hq), "--suffix", f"probe-hq{a.hq}",
+                                  "-d", uniform_dev], {"EXL3_SEED_IDX_OFFSET": "0"})] if hq else []
     # the low draw after the uniform rung: the ladder's configuration at that rate, seed offset 0 like the draws' first
     uniform_lane += [(built(low), ["quantize", "-b", low_spec, "--no-yaqa", "--suffix", "probe-low", "-d", uniform_dev],
                       {"EXL3_SEED_IDX_OFFSET": "0"})] if low else []
@@ -130,10 +145,10 @@ def main(a):
         slices.append("recall")
     run(["python3", QUANT, "-m", a.model, "qbench", "-d", a.device, "--slices", ",".join(slices), "--revisions", ",".join(arms),
          "--allow-converter-mismatch"])
-    report(W, slices, draws, uniform, yaqa if a.yaqa else None, low)
+    report(W, slices, draws, uniform, yaqa if a.yaqa else None, low, hq)
 
 
-def report(W, slices, draws, uniform, yaqa, low=None):
+def report(W, slices, draws, uniform, yaqa, low=None, hq=None):
     import math
     out = {"slices": {}}
     print(f"\n=== probe report: {os.path.basename(W)}, {len(draws)} draws ===")
@@ -177,11 +192,43 @@ def report(W, slices, draws, uniform, yaqa, low=None):
               f"  {'' if yq is None else f'{yq:.3f}':>10}{vs_noise(yq)}")
         out["slices"][sl] = {"draws": d, "mean": mean, "range": spread, "sd": sd,
                              "uniform_over_recipe": None if rec is None else 1 / rec, "yaqa_over_control": yq}
+    if hq:
+        out["hq"] = report_hq(W, slices, draws, uniform or draws[0], hq, out["slices"])
     if low:
         out["low"] = report_low(W, slices, draws, low)
     with open(os.path.join(W, "main", "probe.json"), "w") as f:
         json.dump(out, f, indent=1)
     print(f"-> {os.path.join(W, 'main', 'probe.json')}")
+
+
+def report_hq(W, slices, draws, control, hq, noise):
+    """The -hq arm against its control, its size beside its gain: -hq spends bytes outside the rate's budget, so a gain
+    smaller than what those bytes buy along the ladder is not one. Draw noise from the main report's spread."""
+    out = {"revision": hq, "control": control}
+    sized = {r["label"]: r for r in json.load(open(os.path.join(W, "main", f"qb_{slices[0]}.json")))}
+    if "vram_gb" in sized.get(hq, {}) and "vram_gb" in sized.get(control, {}):
+        out["size"] = sized[hq]["vram_gb"] / sized[control]["vram_gb"]
+    size = f", {100 * (out['size'] - 1):+.1f}% the size" if "size" in out else ""
+    print(f"\n=== {hq} against {control}{size} ===")
+    for sl in slices:
+        rows = {r["label"]: r for r in json.load(open(os.path.join(W, "main", f"qb_{sl}.json")))}
+        if hq not in rows or control not in rows:
+            continue
+        if sl == "recall":
+            if "recall_kept" in rows[hq] and "recall_kept" in rows[control]:
+                diff = 100 * (rows[hq]["recall_kept"] - rows[control]["recall_kept"])
+                sd = (noise.get("recall") or {}).get("sd", float("nan"))
+                within = " (within draw noise)" if sd == sd and abs(diff) < 200 * sd else ""
+                print(f"{'recall':8} kept {diff:+.1f} pts{within}")
+                out["recall_pts"] = diff
+            continue
+        fl = rows["Noise floor"]["kld"]
+        ratio = (rows[hq]["kld"] - fl) / (rows[control]["kld"] - fl)
+        sd = (noise.get(sl) or {}).get("sd", float("nan"))
+        within = " (within draw noise)" if sd == sd and abs(1 - ratio) < 2 * sd else ""
+        print(f"{sl:8} excess {ratio:.3f}x the control's{within}")
+        out[sl] = ratio
+    return out
 
 
 def report_low(W, slices, draws, low):
@@ -223,6 +270,9 @@ if __name__ == "__main__":
     p.add_argument("--low-bits", type=float, default=2.5,
                    help="one draw at this rate too, as evidence for a sub-3 rung (0: none); reported, not decided")
     p.add_argument("--yaqa", action="store_true", help="also the YAQA arm (yaqa --probe's factor)")
+    p.add_argument("--hq", type=int, default=None,
+                   help="also a uniform rung at quantize --hq N (the ladder's MoE default is 1), against the uniform "
+                        "rung or draw 0; reported with its size, since -hq spends bits outside the rate")
     p.add_argument("--layers-per-run", type=int, default=None, help="yaqa: decoder layers per factor pass")
     p.add_argument("--trace-args", default="",
                    help="yaqa-traces: its generator options, one string, e.g. "

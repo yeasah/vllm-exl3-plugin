@@ -262,6 +262,8 @@ def do_probe(job):
             args += f" --reserve-vram {job['args'].reserve_vram}"
     if job['args'].probe_draws:
         args += f" --draws {job['args'].probe_draws}"
+    if job['args'].probe_hq is not None:
+        args += f" --hq {job['args'].probe_hq}"
 
     trace_args = ""
     if job['args'].traces_generator:
@@ -434,6 +436,7 @@ def main():
 
     # probe args
     parser.add_argument("--probe-draws", type=int, default=3)
+    parser.add_argument("--probe-hq", type=int, default=None, help="probe also a uniform rung at quantize --hq N")
     
     # yaqa args
     parser.add_argument("--layers-per-run", help='YAQA number of layers per iteration')
@@ -445,7 +448,7 @@ def main():
     # qbench args
     parser.add_argument('--reference', action='append', help='reference repo to eval against')
     parser.add_argument('--threshold', action='append', help='threshold reference quant for eval')
-    parser.add_argument('--gguf-quants', help='GGUF quants to use for reference ladder')
+    parser.add_argument('--gguf-quants', help='GGUF quants to use for reference ladder. The usual lineup for a 3-6bpw ladder is the repo equivalent of IQ2_M,IQ3_XXS,IQ3_M,IQ4_XS,Q4_K_M,Q5_K_M')
     parser.add_argument('--reference-gguf', action='append', help='GGUF reference repo to eval against')
     parser.add_argument('--threshold-gguf', action='append', help='one GGUF file as a threshold line, REPO@QUANT')
 
