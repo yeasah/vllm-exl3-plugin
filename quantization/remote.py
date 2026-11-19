@@ -54,7 +54,7 @@ def sync_to(job):
                     (" --include *bpw*/*" if job["need_quants"] else "") +
                     " --include main/*" +
                     (" --include _hess/*" if job["need_yaqa"] else "") +
-                    (" --include _baseline/**" if job["need_baseline"] else ""))
+                    (" --include _baseline/*" if job["need_baseline"] else ""))
                     
     return True
 
@@ -109,7 +109,7 @@ def poll_log(job, self_pid, num_lines):
         # splitlines splits on '\r' too, and tail doesn't
         lines = res.stdout.split(b'\n')[:-1]
         if lines:
-            do_log(job, "\n".join(map(lambda x: f"  > {x.split(b'\r')[-1].decode()}", lines)), False)
+            do_log(job, "\n".join(map(lambda x: f"  > {x.split(b'\r')[-1].decode(errors='replace')}", lines)), False)
         num_lines += len(lines)
     return num_lines
 
@@ -118,7 +118,7 @@ def run_remote(job, cmd, text=True):
     failed = False
     while True:
         #print(f" running {cmd}...", end="")
-        res = subprocess.run(command, capture_output=True, text=text)
+        res = subprocess.run(command, capture_output=True, text=text, errors="replace" if text else None)
         #print(f" returned {res.returncode}")
         if res.returncode == 255:
             if not failed:
@@ -389,7 +389,9 @@ def main():
     parser.add_argument('--min-bits', type=float, default=2.5, help='ladder low bitrate'),
     parser.add_argument('--max-bits', type=float, default=6, help='ladder high bitrate'),
     
-    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='log the stage commands without running them or syncing; still connects to the host and '
+                             'runs its survey, which checks the ssh plumbing and changes nothing')
     parser.add_argument("--notify", default=os.environ.get("EXL3_NOTIFY"),
                         help="URL to POST alerts to, e.g. ntfy.sh/<topic> (default: $EXL3_NOTIFY; none if unset)")
     parser.add_argument("--retries", default=0, type=int)
