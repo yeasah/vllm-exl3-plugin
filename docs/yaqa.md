@@ -919,6 +919,27 @@ carries the documents, tool results and loops swe resembles, which a 60-row own-
 is largest there (12.5% on swe). Enough for an on/off call -- a probe that clears the noise means the real factor does
 by more -- not for sizing the gain. The published ladder has no lottery to exploit and nothing the probe would change.
 
+**Qwen3.8-27B at 2.50 (2026-11-19): the 4.00 result holds at the bottom of the ladder.** A `2.50bpw-H5-yaqa` rung,
+converted with the stored 27B blend factors (`_hess`), was otherwise identical to the card's `2.50bpw-H5` but a
+different draw. A second plain draw (`-redraw`) measured the noise. Composite (wild 0.3 / swe 0.7) excess-KLD
+ratios, lower better:
+
+| 2.50bpw-H5 | wild | swe | composite | vs SCP (card) | recall kept | confident errors |
+|---|---|---|---|---|---|---|
+| plain | 0.520 | 0.501 | 0.507 | 0.99 | 80.8% | 2.16% |
+| plain, redraw | 0.515 | 0.489 | 0.497 | | | |
+| YAQA blend | 0.524 | 0.468 | 0.484 | 0.95 | 74.3% | 3.60% |
+
+- **The gain is all swe:** 0.021 better than the better plain draw, about twice the 0.012 draw spread. Wild is slightly
+  worse than either plain draw. Excess KLD on the card barely moves (0.0305 vs 0.0298).
+- **Recall pays for it:** 6.5 points fewer facts kept and two thirds more confident errors, at a rung already
+  marginal on recall. Against the ladder, both 2.50 composites (0.95-0.99 vs SCP) sit above the 0.87-0.93 the
+  3.00-5.00 rungs hold, so YAQA does not restore the trend either.
+- **Not shipped.** The own-voice-only factor (4.00's smaller recall cost, 1.5 points against the blend's 3.9) was the
+  remaining variant. It would be worth testing only if turboderp's YAQA ladder (SCP) kept its recall against his
+  plain one (SC). It does not, so on this model the recall cost belongs to YAQA itself, not to the blend's calibration
+  half.
+
 
 ## Moved from TODO.md (2026-11-05)
 
