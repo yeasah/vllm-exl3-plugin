@@ -386,7 +386,8 @@ def main():
     parser.add_argument('--quant-parallel', default=2, type=int, help='number of concurrent quantizations to run')
 
     parser.add_argument('-m', '--model', required=True)
-    parser.add_argument('--min-bits', type=float, default=2.5, help='ladder low bitrate'),
+    parser.add_argument('--min-bits', type=float, default=3.0,
+                        help='ladder low bitrate; below 3 only on evidence, such as the probe\'s low draw'),
     parser.add_argument('--max-bits', type=float, default=6, help='ladder high bitrate'),
     
     parser.add_argument('--dry-run', action='store_true',

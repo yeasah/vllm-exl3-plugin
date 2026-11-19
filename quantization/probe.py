@@ -5,10 +5,16 @@ Builds, at one rate (default 4.00):
   - N draws of the configuration the ladder would use (sign-draw offsets 0..N-1, EXL3_SEED_IDX_OFFSET),
   - a uniform-bits rung at offset 0 (the recipe's control),
   - with --yaqa, a rung converted against `yaqa --probe`'s factor at offset 0 (its control is draw 0),
+  - one draw at --low-bits (default 2.50, head 5 below 4 as the ladder has it), the ladder's configuration otherwise,
 then scores them with one restricted qbench and reports each slice's excess KLD, the draws' spread, and each gain
 measured against that spread. A gain smaller than what a redraw does is labelled as such: on Qwen3.6-35B-A3B's swe a
 redraw moved a 4.00 by 10-17%, mostly draw x trace interaction (docs/calibration.md, "A draw's swe rank does not
 transfer") -- noise an arm's gain has to clear either way.
+
+The low draw is evidence for a sub-3 rung, not a verdict: the ladder starts at 3.00 unless one is chosen. It is reported
+against the draws -- each slice's excess KLD as a multiple of theirs, recall kept and confident errors beside theirs --
+so the gradient from the probe rate down is in view. One draw: recall varies by a few points between draws at a rate,
+so a result near the line is the reviewer's call.
 
 Mechanical by design: it only drives `quant.py quantize`, `yaqa --probe` and `qbench`, and every step is skipped when
 its output exists, so a rerun picks up where one stopped. With --yaqa the factor is collected first, on every GPU;
@@ -73,6 +79,10 @@ def main(a):
     yaqa = f"{base}-probe-yaqa"
     if a.yaqa:
         arms.append(yaqa)
+    low_spec = f"{a.low_bits}:5" if a.low_bits and a.low_bits < 4 else (str(a.low_bits) if a.low_bits else None)
+    low = quant.bit_specs(low_spec, "probe-low")[0][0] if low_spec else None
+    if low:
+        arms.append(low)
     common = ["-b", str(a.bits)] + (["--no-yaqa"])
     built = lambda name: lambda: os.path.isfile(os.path.join(W, name, "quantization_config.json"))
     devs = a.device.split(",")
@@ -102,6 +112,9 @@ def main(a):
                   ["quantize", *common, "--suffix", "probe", "--draws", str(a.draws), "-d", draw_dev], None)]
     uniform_lane = [(built(uniform), ["quantize", *common, "--no-recipe", "--suffix", "probe-uniform", "-d", uniform_dev],
                      {"EXL3_SEED_IDX_OFFSET": "0"})]
+    # the low draw after the uniform rung: the ladder's configuration at that rate, seed offset 0 like the draws' first
+    uniform_lane += [(built(low), ["quantize", "-b", low_spec, "--no-yaqa", "--suffix", "probe-low", "-d", uniform_dev],
+                      {"EXL3_SEED_IDX_OFFSET": "0"})] if low else []
     yaqa_lane = [(built(yaqa), ["quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa",
                                 "-d", yaqa_rung_dev], {"EXL3_SEED_IDX_OFFSET": "0"})] if a.yaqa else []
     if not spare:
@@ -117,10 +130,10 @@ def main(a):
         slices.append("recall")
     run(["python3", QUANT, "-m", a.model, "qbench", "-d", a.device, "--slices", ",".join(slices), "--revisions", ",".join(arms),
          "--allow-converter-mismatch"])
-    report(W, slices, draws, uniform, yaqa if a.yaqa else None)
+    report(W, slices, draws, uniform, yaqa if a.yaqa else None, low)
 
 
-def report(W, slices, draws, uniform, yaqa):
+def report(W, slices, draws, uniform, yaqa, low=None):
     import math
     out = {"slices": {}}
     print(f"\n=== probe report: {os.path.basename(W)}, {len(draws)} draws ===")
@@ -164,9 +177,42 @@ def report(W, slices, draws, uniform, yaqa):
               f"  {'' if yq is None else f'{yq:.3f}':>10}{vs_noise(yq)}")
         out["slices"][sl] = {"draws": d, "mean": mean, "range": spread, "sd": sd,
                              "uniform_over_recipe": None if rec is None else 1 / rec, "yaqa_over_control": yq}
+    if low:
+        out["low"] = report_low(W, slices, draws, low)
     with open(os.path.join(W, "main", "probe.json"), "w") as f:
         json.dump(out, f, indent=1)
     print(f"-> {os.path.join(W, 'main', 'probe.json')}")
+
+
+def report_low(W, slices, draws, low):
+    """The low draw beside the probe-rate draws, for the reviewer: no verdict, since one draw near the line is a call."""
+    out = {"revision": low}
+    print(f"\n=== {low}, one draw, against the {len(draws)} {draws[0].split('-')[0]} draws ===")
+    for sl in slices:
+        rows = {r["label"]: r for r in json.load(open(os.path.join(W, "main", f"qb_{sl}.json")))}
+        if low not in rows:
+            continue
+        if sl == "recall":
+            pick = lambda key: [rows[l][key] for l in draws if key in rows.get(l, {})]
+            kept, errs = pick("recall_kept"), pick("recall_confident_errors")
+            if not kept:
+                continue
+            r = rows[low]
+            print(f"{'recall':8} kept {100 * r['recall_kept']:.1f}% against {100 * sum(kept) / len(kept):.1f}% "
+                  f"({100 * (r['recall_kept'] - sum(kept) / len(kept)):+.1f} pts); confident errors "
+                  f"{100 * r['recall_confident_errors']:.2f}% against {100 * sum(errs) / max(len(errs), 1):.2f}%")
+            out["recall"] = {"kept": r["recall_kept"], "draws_kept": sum(kept) / len(kept),
+                             "confident_errors": r["recall_confident_errors"],
+                             "draws_confident_errors": sum(errs) / max(len(errs), 1)}
+            continue
+        fl = rows["Noise floor"]["kld"]
+        d = [rows[l]["kld"] - fl for l in draws if l in rows]
+        if not d:
+            continue
+        ex, mean = rows[low]["kld"] - fl, sum(d) / len(d)
+        print(f"{sl:8} excess {ex:.5f}, {ex / mean:.2f}x the draws' {mean:.5f}")
+        out[sl] = {"excess": ex, "over_draws": ex / mean}
+    return out
 
 
 if __name__ == "__main__":
@@ -174,6 +220,8 @@ if __name__ == "__main__":
     p.add_argument("-m", "--model", required=True)
     p.add_argument("-b", "--bits", type=float, default=4.0)
     p.add_argument("--draws", type=int, default=5)
+    p.add_argument("--low-bits", type=float, default=2.5,
+                   help="one draw at this rate too, as evidence for a sub-3 rung (0: none); reported, not decided")
     p.add_argument("--yaqa", action="store_true", help="also the YAQA arm (yaqa --probe's factor)")
     p.add_argument("--layers-per-run", type=int, default=None, help="yaqa: decoder layers per factor pass")
     p.add_argument("--trace-args", default="",
@@ -183,8 +231,8 @@ if __name__ == "__main__":
     p.add_argument("--slices", default="wild,swe,self")
     p.add_argument("-d", "--device", default="0",
                    help="GPUs for the probe: the YAQA factor pass and qbench use all of them; the quantizes go one GPU each, "
-                        "the draws on the first --draws and the uniform and YAQA rungs on the next two (in turn on one spare, "
-                        "or after the draws with none)")
+                        "the draws on the first --draws and the uniform (then the low draw) and YAQA rungs on the next two "
+                        "(in turn on one spare, or after the draws with none)")
     p.add_argument("--yaqa-devices", default=None,
                    help="GPUs for the YAQA rows and factor pass instead of all of -d")
     a = p.parse_args()
