@@ -270,7 +270,7 @@ def do_probe(job):
     if job['args'].traces_generator:
         trace_args += f" --generator {job['args'].traces_generator}"
     if job['args'].traces_vllm_args:
-        trace_args += f" --vllm-args '{job['args'].traces_vllm_args}'"
+        trace_args += f" --vllm-args '{shlex.quote(job['args'].traces_vllm_args)}'"
     if job['args'].traces_backend:
         trace_args += f" --backend {job['args'].traces_backend}"
     if trace_args:
@@ -344,7 +344,7 @@ def attempt_pipeline(job):
     job['need_qbench'] = args.qbench or job['need_card']
     job['need_quants'] = args.quantize or job['need_qbench']
     job['need_yaqa'] = job['need_quants'] and args.yaqa
-    job['need_measure'] = (job['need_quants'] and args.measure) or args.probe
+    job['need_measure'] = (job['need_quants'] or args.probe) and args.measure
     job['need_baseline'] = job['need_measure'] or job['need_qbench']
     job['need_recall'] = (job['need_qbench'] or args.probe) and args.recall
     job['need_traces'] = job['need_qbench'] or job['need_quants'] or args.yaqa or args.measure or args.probe
