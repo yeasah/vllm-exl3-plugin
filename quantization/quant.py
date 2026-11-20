@@ -1772,9 +1772,11 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     missing the cache together would each compute it), then the quants split across the GPUs
     reading it from the shared cache, then their results merged into qb_<slice>.json in arm
     order. The reference and floor come from the reference pass; every part recomputes neither.
-    GGUF arms are not split: llama.cpp holds a model whole, and a 27B Q4_K_M (16 GB) fills more than one
-    16 GiB card where exllamav3 streams it. They run last, in one part that sees every GPU, as
-    qbench_parity runs a bf16 GGUF.
+    GGUF arms go one card each, beside the rest, when the file is at most GGUF_CARD_SHARE of a card's free VRAM (each
+    card listed, divided by its scorers). One bigger -- llama.cpp holds a model whole, and a 27B Q4_K_M (16 GB) fills
+    more than one 16 GiB card where exllamav3 streams it -- or one that fails on a card, runs last, in one part that
+    sees every GPU, as qbench_parity runs a bf16 GGUF. All of them went there until 2026-11-20, where a 12B's four
+    GGUF arms ran one after another over 4x 24 GB.
 
     A card listed twice scores two parts side by side, as quantize converts two: a 12B's scorer peaked at 8 of 24 GiB
     and left the card mostly idle (2026-11-20). A scorer keeps row states on the card up to half its free VRAM, read
@@ -1798,41 +1800,57 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
         report_failures(["reference"], f"qbench {sl}", {"reference": job.log(f"qbench-{sl}-ref")})
         return False
     split = [a for a in sl_arms if not a[1].endswith(".gguf")]
-    whole = [a for a in sl_arms if a[1].endswith(".gguf")]
-    k = min(len(slots), len(split))
-    groups = [split[i::k] for i in range(k)]                  # round-robin: neighbouring bitrates spread
-    results = {}
-    def task(i):
-        def run(slot, echo):
-            results[i] = part(f"p{i}", groups[i], slot)
-            return results[i] is not None
-        return f"{sl} part {i} ({len(groups[i])} quants)", run
-    tasks = [task(i) for i in range(k)]
+    gguf = [a for a in sl_arms if a[1].endswith(".gguf")]
     from collections import Counter
-    shared = {g: n for g, n in Counter(slots[:k]).items() if n > 1}
+    width = Counter(slots)
+    free = gpu_free_gib()
+    # A GGUF arm a card holds runs on one card, beside the others; one too big (or failing there) runs last on all
+    room = min((free.get(int(g), 0) / n for g, n in width.items()), default=0)
+    local = [a for a in gguf if gguf_gib(a[1]) <= GGUF_CARD_SHARE * room]
+    whole = [a for a in gguf if a not in local]
+    k = min(len(slots), len(split))
+    groups = [split[i::k] for i in range(k)] if k else []      # round-robin: neighbouring bitrates spread
+    results = {}
+    def task(key, name, arms):
+        def run(slot, echo):
+            results[key] = part(name, arms, slot)
+            return results[key] is not None
+        return run
+    tasks = [(f"{sl} part {i} ({len(groups[i])} quants)", task(i, f"p{i}", groups[i])) for i in range(k)]
+    logs = {f"{sl} part {i} ({len(groups[i])} quants)": job.log(f"qbench-{sl}-p{i}") for i in range(k)}
+    for n, a in enumerate(local):
+        tasks.append((f"{sl} GGUF {a[0]}", task(f"g{n}", f"g{n}", [a])))
+    used = slots if local else slots[:k]
+    shared = {g: n for g, n in Counter(used).items() if n > 1}
     if shared and not os.environ.get("QBENCH_STATE_BUDGET_GB"):
-        free = gpu_free_gib()
         for g, n in shared.items():
             if int(g) in free:
                 budgets[g] = f"{0.5 * free[int(g)] / n:.2f}"
         print(f"=== qbench {sl}: " + ", ".join(f"{n} scorers on gpu {g}" + (f", {budgets[g]} GiB of row states each"
               if g in budgets else "") for g, n in shared.items()) + " ===", flush=True)
-    failed = run_jobs(tasks, slots[:k], "qbench")
-    if not report_failures(failed, "qbench", {name: job.log(f"qbench-{sl}-p{i}") for i, (name, _) in enumerate(tasks)}):
+    if local:
+        print(f"=== qbench {sl}: {len(local)} GGUF quant(s) one card each, beside the rest ===", flush=True)
+    failed = run_jobs(tasks, used, "qbench") if tasks else []
+    retry = [a for n, a in enumerate(local) if f"{sl} GGUF {a[0]}" in failed]
+    if retry:
+        print(f"=== qbench {sl}: {', '.join(a[0] for a in retry)} failed on one card; retrying on all of them ===", flush=True)
+        whole += retry
+    if not report_failures([f for f in failed if f in logs], "qbench", logs):
         return False
     if whole:
         cards = ",".join(dict.fromkeys(slots))
         print(f"=== qbench {sl}: {len(whole)} GGUF quants on gpu {cards} ===", flush=True)
-        results[k] = part("gguf", whole, cards)
-        if results[k] is None:
+        results["gguf"] = part("gguf", whole, cards)
+        if results["gguf"] is None:
             report_failures([f"{sl} GGUF part"], "qbench", {f"{sl} GGUF part": job.log(f"qbench-{sl}-gguf")})
             return False
-        k += 1
     with open(ref) as f:
         merged = [r for r in json.load(f) if r.get("group") in ("reference", "noise_floor")]
     by_label = {}
-    for i in range(k):
-        with open(results[i]) as f:
+    for res in results.values():
+        if res is None:
+            continue
+        with open(res) as f:
             by_label.update({r["label"]: r for r in json.load(f) if r.get("group") not in ("reference", "noise_floor")})
     missing = [label for label, _ in sl_arms if label not in by_label]
     if missing:
@@ -2550,6 +2568,17 @@ def device_slots(spec):
     listed twice ('0,0,1,1') runs two jobs on it (conversions only: they leave the GPU idle
     through their CPU-bound stretches, and fit twice on a large card)."""
     return [d.strip() for d in str(spec).split(",") if d.strip()]
+
+#: A GGUF arm is scored on one card when its file is at most this share of that card's free VRAM (per scorer sharing
+#: it): llama.cpp's KV cache and compute buffers come on top and depend on the model and the trace's length, so the
+#: share is a guess, and an arm that fails on one card is retried on all of them
+GGUF_CARD_SHARE = 0.5
+
+def gguf_gib(path):
+    """A GGUF's size in GiB, every shard of a split one (-00001-of-0000N.gguf) counted."""
+    m = re.match(r"(.*)-\d{5}-of-(\d{5})\.gguf$", path)
+    files = [f"{m.group(1)}-{i:05d}-of-{m.group(2)}.gguf" for i in range(1, int(m.group(2)) + 1)] if m else [path]
+    return sum(os.path.getsize(f) for f in files if os.path.isfile(f)) / 2**30
 
 def gpu_free_gib():
     """{nvidia-smi index: free GiB} now, or {} where it cannot be read."""
