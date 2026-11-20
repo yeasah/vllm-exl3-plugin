@@ -3514,6 +3514,57 @@ def range_logged_ok(log_path, a, b, ranged):
     after = lines[starts[-1] + 1:starts[-1] + 2]
     return bool(after) and re.search(r" exit 0 after ", after[0]) is not None
 
+#: What the factor pass needs beside the weights on a card, besides the vocabulary-wide softmax: activations, the
+#: factors themselves and allocator slack. A starting point (LFM2.5-8B-A1B ran out at 4 GiB kept free and fit at 6,
+#: 2026-11-20), used only to warn
+_YAQA_WORKING_GB = 3.0
+_DTYPE_BYTES = {"F64": 8, "F32": 4, "I32": 4, "U32": 4, "F16": 2, "BF16": 2, "I16": 2, "U16": 2,
+                "F8_E4M3": 1, "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1}
+
+def yaqa_reserve(path, rows, devices):
+    """The --reserve-vram a user would pick for the factor pass over several GPUs, as (GiB, how): the most each listed
+    card can keep free while the cards still hold the model in bf16, capped at the tool's own default of 8. The weights
+    are every tensor but mtp.* (the causal-LM class does not load it) at 2 bytes an element whatever it is stored in;
+    accelerate's sequential map fills layer by layer, so each card boundary strands up to one layer. Free VRAM is read
+    now, so other processes count. None when anything it needs cannot be read."""
+    try:
+        files = sorted(set(json.load(open(os.path.join(path, "model.safetensors.index.json")))["weight_map"].values())) \
+            if os.path.isfile(os.path.join(path, "model.safetensors.index.json")) else ["model.safetensors"]
+        elements = 0
+        for name in files:
+            with open(os.path.join(path, name), "rb") as f:
+                header = json.loads(f.read(int.from_bytes(f.read(8), "little")))
+            for key, info in header.items():
+                if key != "__metadata__" and not key.startswith("mtp."):
+                    a, b = info["data_offsets"]
+                    elements += (b - a) // _DTYPE_BYTES.get(info["dtype"], 2)
+        weights = 2 * elements / 2**30
+        cfg = json.load(open(os.path.join(path, "config.json")))
+        text = cfg.get("text_config") or cfg
+        layer = weights / max(int(text["num_hidden_layers"]), 1)
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=True, env={**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        free = {int(i): int(m) / 1024 for i, m in (line.split(",") for line in out.stdout.strip().splitlines())}
+        cards = [free[int(d)] for d in devices]
+        from safetensors import safe_open
+        with safe_open(rows, "pt") as r:
+            cols = r.get_slice("input_ids").get_shape()[1]
+        vocab = int(text.get("vocab_size") or cfg.get("vocab_size"))
+    except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as e:
+        print(f"=== yaqa: no reserve estimate ({e}); the tool's default applies ===")
+        return None, None
+    fit = (sum(cards) - weights - layer * (len(cards) - 1)) / len(cards)
+    reserve = math.floor(min(8.0, fit) * 2) / 2
+    # two fp32 copies of one row's logits (the docs' 3.8 GiB at 248k x 2048 is about two), plus the rest
+    need = 2 * cols * vocab * 4 / 2**30 + _YAQA_WORKING_GB
+    how = (f"{weights:.1f} GiB of bf16 weights over {len(cards)} cards with {' + '.join(f'{c:.1f}' for c in cards)} GiB "
+           f"free, a {layer:.2f} GiB layer stranded per boundary: {reserve:.1f} GiB kept free each "
+           f"(the pass wants ~{need:.1f})")
+    if 0 < reserve < need:
+        print(f"=== yaqa: !! only {reserve:.1f} GiB per card left beside the weights, under the ~{need:.1f} the pass is "
+              f"estimated to want; it may run out of memory: more devices, or --reserve-vram to override ===")
+    return reserve, how
+
 def collect_hout(job, args, path, rows, out, name):
     """util/yaqa_hessians.py at its defaults (output side, weighted, seed 0) over `rows` into `out`,
     --layers-per-run decoder layers at a time when the factors do not fit beside the model."""
@@ -3523,6 +3574,17 @@ def collect_hout(job, args, path, rows, out, name):
     n_layers = (cfg.get("text_config") or cfg)["num_hidden_layers"]
     step = args.layers_per_run or n_layers
     tool = os.path.join(args.exllamav3dir, "util", "yaqa_hessians.py")
+    reserve = args.reserve_vram
+    devices = args.device.split(",")
+    if reserve is None and len(devices) > 1:
+        # One device holds the model whole and keeps no reserve; several split it, and the tool's 8 GiB a card left
+        # LFM2.5-8B-A1B's 16.6 GB no room on 2x16 (2026-11-20)
+        r, how = yaqa_reserve(path, rows, devices)
+        if r is not None:
+            if r <= 0:
+                print(f"=== yaqa: the model does not fit on {args.device} in bf16 ({how}) ==="); return False
+            reserve = f"{r:g}"
+            print(f"=== yaqa: --reserve-vram {reserve} from {how} ===")
     for a in range(0, n_layers, step):
         b = min(a + step, n_layers)
         mark = os.path.join(out, f".range-{a}-{b}.done")
@@ -3531,7 +3593,7 @@ def collect_hout(job, args, path, rows, out, name):
             continue
         rc = run_logged([ "python3", tool, "-m", path, "-c", rows, "-o", out, "-d", args.device, "--tf32" ] +
                         ([ "-l", f"{a}:{b}" ] if step < n_layers else []) +
-                        ([ "-rv", args.reserve_vram ] if args.reserve_vram else []),
+                        ([ "-rv", reserve ] if reserve else []),
                         job.log(f"yaqa-{name}-{a}"), {"CUDA_DEVICE_ORDER": "PCI_BUS_ID",
                         # The pass's peak is one row's vocabulary-wide softmax on top of every collected layer's
                         # activations, and fixed-size segments fragment around it: Qwen3.5-2B ran out on a 15.5 GiB card
@@ -3995,7 +4057,9 @@ def main():
                           help='decoder layers per factor pass, when every layer\'s factors do not fit beside the model and '
                                'its backward pass (default: all at once). A 9B on 48 GB: 4')
     cmd_yaqa.add_argument('--reserve-vram', default=None,
-                          help='with several devices: GB per device kept free of weights (util/yaqa_hessians.py -rv)')
+                          help='with several devices: GB per device kept free of weights (util/yaqa_hessians.py -rv); '
+                               'default: the most each card can keep while the cards still hold the bf16 model, at '
+                               'most 8, warned when under what the pass is estimated to need')
     cmd_yaqa.set_defaults(func=do_yaqa)
 
     cmd_quantize = subparsers.add_parser('quantize', help="the calibrated ladder")
