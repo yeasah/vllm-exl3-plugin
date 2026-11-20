@@ -2434,6 +2434,15 @@ class Stamped:
 _STOP = threading.Event()
 _LIVE, _LIVE_LOCK = set(), threading.Lock()
 
+def interrupt_on_sigterm():
+    """SIGTERM raises KeyboardInterrupt in the main thread, as Ctrl-C does, so the same path stops the children.
+    remote.py ends a stage by signalling its process group, and children run in their own sessions (run_logged), so
+    they never saw it and were left running. SIGHUP is not taken: remote.py runs stages under nohup so that a dropped
+    ssh session does not end one, and a handler here would override that."""
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupt)
+
 def stop_children(grace=60):
     """No child starts from here on; each live one's process group gets SIGINT (what the terminal would have
     sent: it lets a nested quant.py stop its own children the same way), then SIGTERM, then SIGKILL, each
@@ -2481,17 +2490,18 @@ def run_logged(cmd, log_path, env=None, echo=True):
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
                                     env=None if env is None else {**os.environ, **env})
             _LIVE.add(proc)
-        try:
-            while chunk := os.read(proc.stdout.fileno(), 65536):
-                if echo:
-                    sys.stdout.buffer.write(chunk)
-                    sys.stdout.buffer.flush()
-                log.write(chunk)
-                log.flush()
-            rc = proc.wait()
-        finally:
-            with _LIVE_LOCK:
-                _LIVE.discard(proc)
+        # Deregistered only once it has exited: an interrupt arriving here (Ctrl-C, or SIGTERM through
+        # interrupt_on_sigterm) unwinds through this frame before stop_children runs, and a `finally` that
+        # dropped the child first left stop_children nothing to stop in single-threaded steps (2026-11-20)
+        while chunk := os.read(proc.stdout.fileno(), 65536):
+            if echo:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+            log.write(chunk)
+            log.flush()
+        rc = proc.wait()
+        with _LIVE_LOCK:
+            _LIVE.discard(proc)
         dt = time.time() - t0
         took = f"{dt / 60:.1f} min" if dt >= 60 else f"{dt:.0f} s"
         log.write(f"\n=== {stamp()} exit {rc} after {took}\n".encode())
@@ -4182,6 +4192,7 @@ def main():
     sys.exit(0 if ok else 1)
 
 if __name__ == "__main__":
+    interrupt_on_sigterm()
     try:
         main()
     except KeyboardInterrupt:
