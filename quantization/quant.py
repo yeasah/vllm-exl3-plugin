@@ -3212,6 +3212,85 @@ def rfn_at_k2(probe, k, out):
     with open(out, "w") as f:
         json.dump(data, f, indent=2)
 
+def measure_split(job, args, path, gpus, rows, hess, rfn):
+    """sc_measure -gs when --gpu-split is not given and the model is more than one card holds comfortably, else None
+    (one card: sc_measure itself loads it resident or streams it, slowly but surely, as before). The split leaves every
+    card the same headroom once the weights (bf16, mtp.* excluded) and, on the last, the logits are placed: the split
+    least likely to fail, and about what an operator converges on (9,10 for Ornith-1.5-9B on 2x16 GB, the help's own
+    example). Its headroom cannot be predicted -- sc_measure's own estimate puts Ornith at 34.2 GiB, which measures on
+    31 -- so one check run measures only the largest weight in the first and last layers, with the full Hessian
+    capture -- on the first chunk's own rows, since part of each row's state stays on the cards -- and a split that
+    fails it is not used. Recorded, so later chunks and reruns reuse it."""
+    record = os.path.join(job.measure, ".gpu_split")
+    if os.path.isfile(record):
+        split = open(record).read().strip()
+        return split or None
+    gpus = list(dict.fromkeys(gpus))             # a card listed twice is two conversion slots, not two cards
+    try:
+        idx = os.path.join(path, "model.safetensors.index.json")
+        files = sorted(set(json.load(open(idx))["weight_map"].values())) if os.path.isfile(idx) else ["model.safetensors"]
+        weights, biggest = 0, {}
+        for name in files:
+            with open(os.path.join(path, name), "rb") as f:
+                header = json.loads(f.read(int.from_bytes(f.read(8), "little")))
+            for key, info in header.items():
+                if key == "__metadata__" or key.startswith("mtp."):
+                    continue
+                a, b = info["data_offsets"]
+                n = math.prod(info["shape"])
+                weights += max(2 * n, b - a)
+                m = re.search(r"\blayers\.(\d+)\.", key)
+                if m and key.endswith(".weight") and len(info["shape"]) == 2 and "visual" not in key:
+                    l = int(m.group(1))
+                    if n > biggest.get(l, (0, ""))[0]:
+                        biggest[l] = (n, key[:-len(".weight")])
+        cfg = json.load(open(os.path.join(path, "config.json")))
+        vocab = int((cfg.get("text_config") or cfg).get("vocab_size") or cfg["vocab_size"])
+        smi = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=True, env={**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        free = {int(i): int(m) * 2**20 for i, m in (l.split(",") for l in smi.stdout.strip().splitlines())}
+        cards = [free[int(g)] for g in gpus]
+    except (OSError, KeyError, ValueError, StopIteration, subprocess.CalledProcessError) as e:
+        print(f"=== measure: no split estimate ({e}); one card, as sc_measure decides ===")
+        return None
+    GiB = 2**30
+    if weights <= 0.6 * cards[0]:
+        return None
+    logits = 2 * 1024 * vocab + 16 * 256 * vocab          # sc_measure's own figure, at its default length
+    head = (sum(cards) - weights - logits - len(cards) * GiB) / len(cards)
+    caps = [(c - GiB - head) / GiB for c in cards[:-1]]
+    caps = [math.floor(c * 10) / 10 for c in caps]
+    caps.append(math.ceil((weights / GiB - sum(caps)) * 10) / 10)
+    split = ",".join(f"{c:g}" for c in caps)
+    how = (f"{weights / GiB:.1f} GiB of weights over {len(cards)} cards with "
+           f"{' + '.join(f'{c / GiB:.1f}' for c in cards)} GiB free: {head / GiB:.1f} GiB of headroom each")
+    if head < 2 * GiB or min(caps) <= 0:
+        print(f"=== measure: no split leaves room ({how}); one card, as sc_measure decides ===")
+        return None
+    ends = [biggest[l][1] for l in (min(biggest), max(biggest))] if biggest else []
+    check = os.path.join(job.measure, "_split_check")
+    os.makedirs(check, exist_ok=True)
+    from safetensors.torch import save_file
+    import torch
+    rows_file = os.path.join(check, "rows.safetensors")
+    save_file({"input_ids": torch.cat([torch.tensor(rows, dtype=torch.long), hess], 0).contiguous()}, rows_file)
+    print(f"=== measure: checking --gpu-split {split} ({how}) on {', '.join(ends) or 'no target'} ===")
+    log = job.log("measure-split-check")
+    rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_measure.py"), "-m", path, "-gs", split,
+                      "-r", str(len(rows)), "-hr", str(MEASURE_H_ROWS), "--shaped", "-rk", "-g", MEASURE_GROUPS, "-tr", rows_file,
+                      "-o", os.path.join(check, "out.json") ] +
+                    ([ "--only", "|".join(re.escape(k) + "$" for k in ends) ] if ends else []) +
+                    (["-bc"] if args.boundary_cpu else []) +
+                    (["-rr", rfn, "-rs", "1.0,0.5"] if os.path.isfile(rfn) else []),
+                    log, gpu_env(",".join(gpus)), echo=False)
+    shutil.rmtree(check, ignore_errors=True)
+    if rc:
+        print(f"=== measure: --gpu-split {split} failed its check (log {log}); one card, as sc_measure decides ===")
+        split = ""
+    with open(record, "w") as f:
+        f.write(split)
+    return split or None
+
 def do_measure(job, args):
     """Per-tensor sensitivity of the unquantized model per content category (see MEASURE_ROWS;
     --rows raises or lowers a category's count, e.g. 'ctx_*:code=10'). Reused by every later
@@ -3261,18 +3340,22 @@ def do_measure(job, args):
             plan.append((cat, a, min(a + MEASURE_CHUNK, n)))
     print(f"=== measuring {len(plan)} run(s): " + ", ".join(f"{c}[{a}:{b}]" for c, a, b in plan) + " ===" if plan
           else "=== every category measured to its row count ===")
+    split = args.gpu_split
+    if plan and split is None and len(gpus) > 1:
+        cat, a, b = plan[0]
+        split = measure_split(job, args, path, gpus, cats[cat][a:b], hess, rfn)
     for cat, a, b in plan:
         name = f"{cat.replace(':', '__')}.{a}-{b}"
         rows_file = os.path.join(category_dir(job), name + ".safetensors")
         save_file({"input_ids": torch.cat([torch.tensor(cats[cat][a:b], dtype=torch.long), hess], 0).contiguous()}, rows_file)
         out = os.path.join(category_dir(job), name + ".json")
-        dev = ["-gs", args.gpu_split] if args.gpu_split else ["-d", "0"]
+        dev = ["-gs", split] if split else ["-d", "0"]
         rc = run_logged([ "python3", os.path.join(args.exllamav3dir, "sc_measure.py"), "-m", path, *dev,
                           "-r", str(b - a), "-hr", str(MEASURE_H_ROWS), "--shaped", "-rk", "-g", MEASURE_GROUPS,
                           "-tr", rows_file, "-o", out + ".part" ] +
                         (["-bc"] if args.boundary_cpu else []) +
                         (["-rr", rfn, "-rs", "1.0,0.5"] if os.path.isfile(rfn) else []),
-                        job.log(f"measure-{name}"), gpu_env(",".join(gpus)) if args.gpu_split else gpu_env(gpus[0]))
+                        job.log(f"measure-{name}"), gpu_env(",".join(gpus)) if split else gpu_env(gpus[0]))
         os.remove(rows_file)
         if rc or not os.path.isfile(out + ".part"):
             print(f"=== measurement {name} FAILED (log {job.log(f'measure-{name}')}) ==="); return False
@@ -4065,7 +4148,9 @@ def main():
                                   "e.g. 'self=40,ctx_*=10' to explore mixes. "
                                   "Categories: self, ctx_user:<kind>, ctx_tool:<kind>, loop, raw, random")
     cmd_measure.add_argument('--gpu-split', default=None,
-                             help='GB per listed GPU to split the unquantized model across: load caps, filled in order '
+                             help='GB per listed GPU to split the unquantized model across (default with several GPUs and a '
+                                  'model over ~60%% of one: equal headroom on every card, kept if a short check run of the '
+                                  'first chunk passes, else one card, streamed; recorded): load caps, filled in order '
                                   'and lifted once loaded, so a card keeps (its VRAM - what it was given) for the '
                                   'measurement. Cap every card but the last at VRAM minus its working set and ~1 GB of '
                                   'CUDA context; the last takes the remainder, and with it the head and the logits, the '
