@@ -25,7 +25,7 @@ def _plan(tmp_path, monkeypatch, *, measured, arms=(), low_bits=0.0, yaqa=False)
     monkeypatch.setattr(probe, "report", lambda W, slices, draws, arms, low=None: reported.update(arms=arms, low=low))
     a = types.SimpleNamespace(model="org/M", bits=4.0, draws=2, yaqa=yaqa, arm=[probe.parse_arm(x) for x in arms],
                               low_bits=low_bits, slices="wild", device="0,1,2", yaqa_devices=None, trace_args="",
-                              layers_per_run=None, reserve_vram=None, quant_parallel=1)
+                              layers_per_run=None, reserve_vram=None, quant_parallel=1, qbench_parallel=1)
     probe.main(a)
     cmds = {}
     for _, _, cmd, env in lanes:
