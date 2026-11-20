@@ -58,6 +58,7 @@ def sync_to(job):
                     (" --include *bpw*/*" if job["need_quants"] else "") +
                     " --include main/*" +
                     (" --include _hess/*" if job["need_yaqa"] else "") +
+                    (" --include _hess/probe/*" if job["args"].probe else "") +
                     (" --include _baseline/*" if job["need_baseline"] else ""))
                     
     return True
@@ -140,7 +141,7 @@ def monitor(job, cmd, cmd_name):
     self_pid = os.getpid()
     do_log(job, f"*** RUNNING BACKGROUND {cmd_name} ({cmd}) ***")
     bgcmd=cmd.replace('"', r'\"')
-    command = f'rm -f /tmp/monitor.{self_pid}.*; nohup sh -c "{bgcmd}; echo \\$? > /tmp/monitor.{self_pid}.res" > /tmp/monitor.{self_pid}.log 2>&1 & echo $!,`ps -o pgid= -p $$`'
+    command = f'rm -f /tmp/monitor.{self_pid}.*; nohup sh -c "{bgcmd}; echo \\$? > /tmp/monitor.{self_pid}.res" > /tmp/monitor.{self_pid}.log 2>&1 & echo $!'
     if job['args'].dry_run:
         return True
 
@@ -149,12 +150,12 @@ def monitor(job, cmd, cmd_name):
     if res.returncode != 0:
         do_log(job, f"*** COMMAND {cmd_name} FAILED TO START ***")
         return False
-    (pid, pgid) = map(int, res.stdout.split(','))
+    pid = int(res.stdout)
     if not pid:
         do_log(job, f"*** COMMAND {cmd_name} FAILED TO START, NO PID REPORTED ***")
         return False;
 
-    #print(f"*** RAN BACKGROUND COMMAND {' '.join(command)} PID={pid} PGID={pgid} ***")
+    #print(f"*** RAN BACKGROUND COMMAND {' '.join(command)} PID={pid} ***")
 
     # monitor loop
     num_lines = 0
@@ -170,9 +171,9 @@ def monitor(job, cmd, cmd_name):
             iter += 1
             time.sleep(10)
     except:
-        # kill the whole process group
-        do_log(job, f"*** ABORTING {cmd_name} (pgid {pgid}) ***")
-        run_command(job, f"kill -- -{pgid}")
+        # kill the whole process group as it exists now, as well as the direct pid
+        do_log(job, f"*** ABORTING {cmd_name} (pid {pid}) ***")
+        run_command(job, f"pgid=`ps -o pgid= -p {pid}` && kill -- -`echo $pgid | tr -d ' '`; kill {pid}")
         raise
 
     # final sync
@@ -284,6 +285,10 @@ def do_quantize(job):
     args = ""
     if job['args'].quantize_args:
         args += f" {job['args'].quantize_args}"
+    if not job['args'].yaqa:
+        args += f" --no-yaqa"
+    if not job['args'].measure:
+        args += f" --no-recipe"
     return run_quant(job, f"quantize --retries 0 -b {job['bits']} -d {job['quant_devlist']}{args}")
 
 def do_qbench(job, reference):
@@ -461,7 +466,7 @@ def main():
     modelpath=f"{args.model.split('/')[1]}-exl3"
     remotepath=os.path.join(args.plugin_dir, "quantization")
     devlist=",".join(map(str, range(0, args.num_devices)))
-    quant_devlist=devlist * args.quant_parallel
+    quant_devlist=",".join([devlist] * args.quant_parallel)
     job = { "args": args,
             "devlist": devlist,
             "quant_devlist": quant_devlist,
