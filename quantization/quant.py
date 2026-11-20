@@ -2439,10 +2439,16 @@ def interrupt_on_sigterm():
     """SIGTERM raises KeyboardInterrupt in the main thread, as Ctrl-C does, so the same path stops the children.
     remote.py ends a stage by signalling its process group, and children run in their own sessions (run_logged), so
     they never saw it and were left running. SIGHUP is not taken: remote.py runs stages under nohup so that a dropped
-    ssh session does not end one, and a handler here would override that."""
+    ssh session does not end one, and a handler here would override that.
+
+    SIGINT is restored too. A command a shell backgrounds without job control -- `ssh host 'cmd &'`, which is how
+    remote.py starts a stage -- starts with SIGINT ignored, and an ignored signal survives exec into every child:
+    stop_children's SIGINT then reached nothing, and each level sat out its grace before SIGTERM (2026-11-20). A
+    handler, unlike an ignore, resets to the default in a child, so everything started from here can be interrupted."""
     def interrupt(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
 def stop_children(grace=60):
     """No child starts from here on; each live one's process group gets SIGINT (what the terminal would have
