@@ -3029,6 +3029,45 @@ def build_generator(job, args, path, env, echo=True):
         record_converter(job.generator, args)
     return ok
 
+#: What a rung's conversion was started with, beside convert.py's own args.json in its work directory
+INTENT_FILE = "quant_intent.json"
+
+def conversion_intent(recipe, bits, headbits, hq, hess, out_scales, embed_bits):
+    """The settings that make a rung what it is, as compared before a resume. A work directory resumes with only -w -r,
+    so convert.py finishes whatever it was started with: the LFM2.5-8B-A1B probe's draws were started as recipe rungs
+    under the old probe layout, resumed after it changed to uniform bits, and finished as recipe rungs that every arm
+    was then measured against (2026-11-20)."""
+    if recipe:
+        return {"recipe": True, "hessians": hess or None, "out_scales": out_scales, "embed_bits": int(embed_bits)}
+    return {"recipe": False, "bits": float(bits), "head_bits": float(headbits), "hq": int(hq),
+            "hessians": hess or None, "out_scales": out_scales, "embed_bits": int(embed_bits)}
+
+def started_intent(workdir):
+    """conversion_intent of a work directory: recorded at its start, or for one started before that was recorded, read
+    back from convert.py's args.json (only the fields it holds)."""
+    rec = os.path.join(workdir, INTENT_FILE)
+    if os.path.isfile(rec):
+        return json.load(open(rec))
+    try:
+        a = json.load(open(os.path.join(workdir, "args.json")))
+    except (OSError, ValueError):
+        return {}
+    out = {"recipe": bool(a.get("recipe")), "hessians": a.get("hessians") or None}
+    if not a.get("recipe"):
+        for k, cast in (("bits", float), ("head_bits", float), ("hq", int)):
+            if a.get(k) is not None:
+                out[k] = cast(a[k])
+    if a.get("out_scales"):
+        out["out_scales"] = a["out_scales"]
+    if a.get("embed_bits") is not None:
+        out["embed_bits"] = int(a["embed_bits"])
+    return out
+
+def intent_mismatch(workdir, intent):
+    """{setting: (started with, wanted now)} where a work directory's start differs from `intent`."""
+    started = started_intent(workdir)
+    return {k: (started.get(k), v) for k, v in intent.items() if k in started and started[k] != v}
+
 def bit_specs(spec, suffix=None):
     """'2:5,3:5,4' -> [(rev, bits, headbits)]; a suffix is appended to every revision name"""
     out = []
@@ -3973,6 +4012,14 @@ def do_quantize(job, args):
             # usual failure is a host OOM at the head, the job's memory peak, and resuming is
             # safe: a conversion OOM-killed there and resumed came out byte-identical to an
             # uninterrupted one (single GPU, 2026-09-21).
+            intent = conversion_intent(recipe, bits, headbits, args.hq, hess, OUT_SCALES, embed_bits_for(bits, args.embed_bits))
+            if not os.path.isfile(donefile) and os.path.isfile(os.path.join(workdir, "args.json")):
+                diff = intent_mismatch(workdir, intent)
+                if diff:
+                    say(f"=== {revdir}: its work directory was started with other settings ("
+                        + ", ".join(f"{k} {a!r}, now {b!r}" for k, (a, b) in diff.items())
+                        + f"); resuming would finish that conversion. Remove {workdir} to start this one ===")
+                    return False
             attempt = 0
             while not os.path.isfile(donefile) and attempt <= args.retries:
                 if attempt:
@@ -3983,6 +4030,9 @@ def do_quantize(job, args):
                     run_logged([ "python3", script, "-w", workdir, "-r", "-d", "0" ], log_path, env(slot), echo)
                 else:
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
+                    os.makedirs(workdir, exist_ok=True)
+                    with open(os.path.join(workdir, INTENT_FILE), "w") as f:
+                        json.dump(intent, f, indent=1)
                     run_logged([ "python3", script,
                                  "-vb", "16", "--out_scales", OUT_SCALES,
                                  "-eb", str(embed_bits_for(bits, args.embed_bits)),
