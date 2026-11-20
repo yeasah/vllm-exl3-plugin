@@ -292,6 +292,8 @@ def do_probe(job):
         args += f" --arm {shlex.quote(arm)}"
     if job['args'].quant_parallel:
         args += f" --quant-parallel {job['args'].quant_parallel}"
+    if job['args'].qbench_parallel:
+        args += f" --qbench-parallel {job['args'].qbench_parallel}"
 
     trace_args = ""
     if job['args'].traces_generator:
@@ -334,7 +336,7 @@ def do_qbench(job, reference):
                 args += f" --reference-gguf {r}"
             if job['args'].gguf_quants:
                 args += f" --gguf-quants {job['args'].gguf_quants}"
-    return run_quant(job, f"qbench -d {job['devlist']}{args}")
+    return run_quant(job, f"qbench -d {job['qbench_devlist']}{args}")
 
 def do_card(job):
     return run_quant(job, f"card --gguf-kld")
@@ -421,6 +423,7 @@ def main():
     parser.add_argument('--plugin-dir', default="~/vllm-exl3-plugin")
     parser.add_argument('--num-devices', default=1, type=int, help='number of CUDA devices present')
     parser.add_argument('--quant-parallel', default=2, type=int, help='number of concurrent quantizations to run')
+    parser.add_argument('--qbench-parallel', default=2, type=int, help='number of concurrent qbenches to run')
 
     parser.add_argument('-m', '--model', required=True)
     parser.add_argument('--min-bits', type=float, default=3.0,
@@ -491,9 +494,11 @@ def main():
     remotepath=os.path.join(args.plugin_dir, "quantization")
     devlist=",".join(map(str, range(0, args.num_devices)))
     quant_devlist=",".join([devlist] * args.quant_parallel)
+    qbench_devlist=",".join([devlist] * args.qbench_parallel)
     job = { "args": args,
             "devlist": devlist,
             "quant_devlist": quant_devlist,
+            "qbench_devlist": qbench_devlist,
             "modelpath": modelpath,
             "localpath": os.path.join(recordpath, modelpath),
             "remotepath": remotepath,

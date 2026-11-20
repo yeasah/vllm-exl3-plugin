@@ -159,7 +159,8 @@ def main(a):
     slices = a.slices.split(",")
     if os.path.isfile(os.path.join(W, "_traces", "eval_recall.json")) and "recall" not in slices:
         slices.append("recall")
-    run(["python3", QUANT, "-m", a.model, "qbench", "-d", a.device, "--slices", ",".join(slices), "--revisions", ",".join(arms),
+    qbench_devs = devlist * (a.qbench_parallel)
+    run(["python3", QUANT, "-m", a.model, "qbench", "-d", ",".join(qbench_devs), "--slices", ",".join(slices), "--revisions", ",".join(arms),
          "--allow-converter-mismatch"])
     report(W, slices, draws, [x for x in [recipe, yaqa if a.yaqa else None, *extra] if x], low)
 
@@ -302,6 +303,8 @@ if __name__ == "__main__":
                         "scheduled over them, the draws first, each other arm on one")
     p.add_argument("--quant-parallel", type=int, default=1,
                    help="Maximum number of quantize runs to allow per GPU")
+    p.add_argument("--qbench-parallel", type=int, default=1,
+                   help="Maximum number of qbench runs to allow per GPU")
     a = p.parse_args()
     if not a.model or "/" not in a.model:
         raise SystemExit("-m takes the base model's repo id, as quant.py does")
