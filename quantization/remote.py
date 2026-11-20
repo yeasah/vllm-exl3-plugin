@@ -171,7 +171,7 @@ def monitor(job, cmd, cmd_name):
             time.sleep(10)
     except:
         # kill the whole process group
-        do_log(job, f"*** ABORTING {cmd_name} ***")
+        do_log(job, f"*** ABORTING {cmd_name} (pgid {pgid}) ***")
         run_command(job, f"kill -- -{pgid}")
         raise
 
@@ -265,6 +265,8 @@ def do_probe(job):
         args += f" --draws {job['args'].probe_draws}"
     for arm in job['args'].probe_arm or []:
         args += f" --arm {shlex.quote(arm)}"
+    if job['args'].quant_parallel:
+        args += f" --quant-parallel {job['args'].quant_parallel}"
 
     trace_args = ""
     if job['args'].traces_generator:

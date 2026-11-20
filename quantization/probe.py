@@ -114,6 +114,7 @@ def main(a):
     # past them (a dependency split, not a scheduler: quantize still deals the draws within its share); with no
     # spare GPU they run in turn on all of them
     spare = devs[a.draws:]
+    spare += list(reversed(devs)) * (a.quant_parallel - 1)
     draw_dev = ",".join(devs[:a.draws]) if spare else a.device
     uniform_dev = spare[0] if spare else a.device
     yaqa_rung_dev = spare[1] if len(spare) > 1 else uniform_dev
@@ -302,6 +303,8 @@ if __name__ == "__main__":
                    help="GPUs for the probe: the YAQA factor pass and qbench use all of them; the quantizes go one GPU each, "
                         "the draws on the first --draws and the uniform (then the low draw) and YAQA rungs on the next two "
                         "(in turn on one spare, or after the draws with none)")
+    p.add_argument("--quant-parallel", type=int, default=1,
+                   help="Maximum number of quantize runs to allow per GPU")
     p.add_argument("--yaqa-devices", default=None,
                    help="GPUs for the YAQA rows and factor pass instead of all of -d")
     a = p.parse_args()
