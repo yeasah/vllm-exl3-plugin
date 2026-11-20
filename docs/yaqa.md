@@ -887,6 +887,26 @@ run to run, so a regenerated own-voice set differs in text (same prompts) and th
 Fused MoE experts are not covered by the factor tool and stay one-sided. Work: `quant_work/_yaqa`,
 `quant_work/_yaqa9`; factors and measurements in the `yeasah/yaqa-9b-hess` bucket.
 
+**Sizing the factor pass (2026-11-20).** `quant.py yaqa` picks `--reserve-vram` and `--layers-per-run` itself when
+they are not given. The reserve is arithmetic: the most each card can keep free while the cards still hold the bf16
+weights (shard headers, `mtp.*` excluded), less the largest module accelerate places whole, per card (an untied
+embedding or head is 1.89 GiB on Ornith-1.5-9B, against 0.55 a decoder layer), at most the tool's 8. Layers per run are
+measured, because the working set beside the weights is not predictable from the headers: dry runs of the tool on one
+row over the bottom range (the deepest backward), from all layers down by halves, until one peaks at least 1 GiB under
+every card; the result is recorded with the factor. What a run costs and what fewer layers save:
+
+| | factors, all layers | working set, 1 layer / all | one run, 8 rows | one layer per run |
+|---|---|---|---|---|
+| LFM2.5-8B-A1B (MoE, 2x16 GB, reserve 6.5-7) | 0.48 GiB | ~4 GB a card, +0.5 | 13.9 s (6.5 of it loading) | ~15x the time at 54 rows |
+| Qwen3-0.6B (dense, one card) | 2.8 GiB | 5.6 / 10.5 GB | 9.4 s | |
+| Ornith-1.5-9B (dense, 2x16 GB) | | one layer does not fit at any reserve | | |
+
+Each run reloads the model and passes every row through the full forward and a backward down to its first layer, so
+one layer per run costs roughly N/2 to N times one run, and what it saves is only the factors -- the least of the
+working set on both measured models, whose activations above the range and logits do not shrink. Routed experts are not
+collected, so a MoE's factors are small (Qwen3.6-35B-A3B 13 GiB, the dense 27B 192). The probes take seconds: 8 s on
+LFM (all 24 layers fit), 35 s to refuse Ornith.
+
 `yaqa-traces --probe` and `yaqa --probe` (2026-11-15) build only the cheap half: one own-voice pass of 60 rows and its factor, into
 `_hess/probe`, for `quantize --yaqa-source probe` against a `--no-yaqa` control (TODO.md `yaqa-probe`). Under WSL a
 factor pass larger than the card still completes -- a 12 GiB 3060 finished MiniCPM5-2B's -- because the driver pages
