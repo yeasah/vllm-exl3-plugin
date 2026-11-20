@@ -203,6 +203,7 @@ def test_expert_plan_takes_matching_ids_in_order_under_the_budget(offload):
     # deliver in reverse: the plan must not depend on arrival order
     placed = {e: cpu_offload.place_expert(param, _expert_tensor(e), "gate", e)
               for e in reversed(range(8))}
+    cpu_offload.drain_host_copies()  # host copies are asynchronous: reading a row before this raced them (flaked ~1 in 10)
     block = param.exl3_blocks["gate"]
     assert block.rows == {1: 0, 3: 1, 5: 2}
     assert [e for e in range(8) if _on_host(param, "gate", placed[e])] == [1, 3, 5]
