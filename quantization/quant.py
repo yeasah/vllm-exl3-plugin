@@ -1774,15 +1774,23 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
     order. The reference and floor come from the reference pass; every part recomputes neither.
     GGUF arms are not split: llama.cpp holds a model whole, and a 27B Q4_K_M (16 GB) fills more than one
     16 GiB card where exllamav3 streams it. They run last, in one part that sees every GPU, as
-    qbench_parity runs a bf16 GGUF."""
+    qbench_parity runs a bf16 GGUF.
+
+    A card listed twice scores two parts side by side, as quantize converts two: a 12B's scorer peaked at 8 of 24 GiB
+    and left the card mostly idle (2026-11-20). A scorer keeps row states on the card up to half its free VRAM, read
+    at each pass, so two reading the same card would each claim the same half: each sharer gets a fixed share of
+    that half instead (QBENCH_STATE_BUDGET_GB; one set by hand wins). Past its budget a row waits in host memory,
+    which costs time, not results. Whether two scorers fit at all is the operator's call, as for conversions."""
     part_dir = os.path.join(job.main, "_qbench_parts")
     os.makedirs(part_dir, exist_ok=True)
+    budgets = {}
     def part(name, part_arms, slot):
         yml = os.path.join(part_dir, f"qbench-{sl}-{name}.yaml")
         res = os.path.join(part_dir, f"qb_{sl}-{name}.json")
         with open(yml, "w") as f:
             yaml.safe_dump(qbench_project(job, args, sl, part_arms, results=res), f, sort_keys=False)
-        rc = run_logged([ "python3", script, yml, "-d", "0" ], job.log(f"qbench-{sl}-{name}"), gpu_env(slot), echo=False)
+        env = {**gpu_env(slot), **({"QBENCH_STATE_BUDGET_GB": budgets[slot]} if slot in budgets else {})}
+        rc = run_logged([ "python3", script, yml, "-d", "0" ], job.log(f"qbench-{sl}-{name}"), env, echo=False)
         return res if rc == 0 and os.path.isfile(res) else None
     print(f"=== qbench {sl}: reference and noise floor on gpu {slots[0]} ===", flush=True)
     ref = part("ref", [], slots[0])
@@ -1800,12 +1808,22 @@ def qbench_parallel(job, args, sl, sl_arms, slots, script, out=None):
             return results[i] is not None
         return f"{sl} part {i} ({len(groups[i])} quants)", run
     tasks = [task(i) for i in range(k)]
+    from collections import Counter
+    shared = {g: n for g, n in Counter(slots[:k]).items() if n > 1}
+    if shared and not os.environ.get("QBENCH_STATE_BUDGET_GB"):
+        free = gpu_free_gib()
+        for g, n in shared.items():
+            if int(g) in free:
+                budgets[g] = f"{0.5 * free[int(g)] / n:.2f}"
+        print(f"=== qbench {sl}: " + ", ".join(f"{n} scorers on gpu {g}" + (f", {budgets[g]} GiB of row states each"
+              if g in budgets else "") for g, n in shared.items()) + " ===", flush=True)
     failed = run_jobs(tasks, slots[:k], "qbench")
     if not report_failures(failed, "qbench", {name: job.log(f"qbench-{sl}-p{i}") for i, (name, _) in enumerate(tasks)}):
         return False
     if whole:
-        print(f"=== qbench {sl}: {len(whole)} GGUF quants on gpu {','.join(slots)} ===", flush=True)
-        results[k] = part("gguf", whole, ",".join(slots))
+        cards = ",".join(dict.fromkeys(slots))
+        print(f"=== qbench {sl}: {len(whole)} GGUF quants on gpu {cards} ===", flush=True)
+        results[k] = part("gguf", whole, cards)
         if results[k] is None:
             report_failures([f"{sl} GGUF part"], "qbench", {f"{sl} GGUF part": job.log(f"qbench-{sl}-gguf")})
             return False
@@ -2042,13 +2060,12 @@ def do_qbench(job, args):
             json.dump(info, f, indent=1)
     base_arms = [(baseline_label(rev), p) for rev, p in baseline.items()]
     script = os.path.join(args.exllamav3dir, "eval", "qbench.py")
-    slots = list(dict.fromkeys(device_slots(args.device)))
-    if not subset and baseline and args.canary and not qbench_canary(job, args, revisions, baseline, slots, script):
+    slots = device_slots(args.device)        # a card listed twice scores two parts side by side (qbench_parallel)
+    cards = list(dict.fromkeys(slots))
+    if not subset and baseline and args.canary and not qbench_canary(job, args, revisions, baseline, cards, script):
         return False
     print(f"=== running bench on {' '.join(label for label, _ in arms + base_arms)}; slices: {' '.join(slices)} ===")
     series_start = datetime.datetime.now().replace(microsecond=0)
-    # One scorer per GPU (`slots`, above): a second on the same card would size its memory budgets from the same
-    # free VRAM as the first
     for sl in slices:
         sl_arms = arms + (base_arms if sl.split(".")[0] in EVAL_SLICES else [])   # the baseline only enters through the composite
         if sl.split(".")[0] == RECALL_SLICE:
@@ -2062,7 +2079,7 @@ def do_qbench(job, args):
             # a lone GGUF arm still gets every GPU given: llama.cpp holds it whole (see qbench_parallel)
             gguf = any(p.endswith(".gguf") for _, p in sl_arms)
             rc = run_logged([ "python3", script, qbench_file, "-d", "0" ], job.log(f"qbench-{sl}"),
-                            gpu_env(",".join(slots) if gguf else slots[0]))
+                            gpu_env(",".join(cards) if gguf else slots[0]))
             if rc:
                 print(f"=== qbench on {sl} FAILED (exit {rc}) ===")
                 return False
@@ -2073,7 +2090,7 @@ def do_qbench(job, args):
             print(f"=== qbench {sl}: {', '.join(l for l, _ in sl_arms)} merged into {os.path.basename(final)} ===")
     if parity_arms:
         for sl in slices:
-            qbench_parity(job, args, sl, parity_arms, slots, script)
+            qbench_parity(job, args, sl, parity_arms, cards, script)
     # The series succeeded: reference logits it did not use (a superseded eval trace, a dropped
     # reference) can only be dead weight. Results and KL vectors are never pruned.
     record_slice_stats(job)
@@ -2533,6 +2550,15 @@ def device_slots(spec):
     listed twice ('0,0,1,1') runs two jobs on it (conversions only: they leave the GPU idle
     through their CPU-bound stretches, and fit twice on a large card)."""
     return [d.strip() for d in str(spec).split(",") if d.strip()]
+
+def gpu_free_gib():
+    """{nvidia-smi index: free GiB} now, or {} where it cannot be read."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=True, env={**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        return {int(i): int(m) / 1024 for i, m in (l.split(",") for l in out.stdout.strip().splitlines())}
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return {}
 
 def gpu_env(slot):
     """Each job sees only its own GPU, as device 0 -- one device per process, so nothing here
@@ -4264,7 +4290,9 @@ def main():
     cmd_qbench.add_argument('--prune', default=True, action=argparse.BooleanOptionalAction,
                             help='after a successful series, evict reference logits it did not use')
     cmd_qbench.add_argument('-d', '--device', default='0',
-                            help='GPUs, e.g. 0 or 0,1,2,3: one scorer per GPU at a time, the quants of each slice split across them (nvidia-smi numbering)')
+                            help='GPUs, e.g. 0 or 0,1,2,3, the quants of each slice split across them (nvidia-smi numbering); a GPU '
+                                 'listed twice (0,0,1,1) scores two parts side by side, each with half its share of row-state '
+                                 'memory (the reference pass still runs alone)')
     cmd_qbench.add_argument('--reference-gguf', action='append',
                             help='a GGUF repo to compare against (repeatable): the --gguf-quants files, scored by llama.cpp')
     # The best GGUF per byte at each size: below ~3.5 bpw the lattice-codebook I-quants (EXL3's
