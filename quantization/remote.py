@@ -29,10 +29,10 @@ import shlex
 RETRY_MIN = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-def do_log(job, msg, do_stamp=True):
+def do_log(job, msg, do_stamp=True, do_record=True):
     stamp = time.strftime("[%Y-%m-%d %H:%M:%S] ") if do_stamp else ""
     print(f"{stamp}{msg}")
-    if "logfile" in job:
+    if "logfile" in job and do_record:
         job["logfile"].write(f"{stamp}{msg}\n")
 
 def sync_to(job):
@@ -103,6 +103,16 @@ def sync_from(job, cmd_name):
     return True
 
 def poll_log(job, self_pid, num_lines):
+    # include any updates on remaining time for batched quantize, but not to file
+    command = (f'[ -f {job["tsfile"]} ] && args="-newer {job["tsfile"]}"; for i in `find {job["remotework"]}/logs -type f -name \\*.log $args`; do '
+        'remain=`grep "Estimated remaining time" $i | tail -1 | sed -e "s/.*time: \\(.*\\?\\) (.*/\\1/"`; '
+        f'tag=`basename $i`; [ -n "$remain" ] && echo "$tag: $remain"; done; touch {job["tsfile"]}')
+    res = run_remote(job, command, False)
+    if res.returncode == 0:
+        loglines = res.stdout.split(b'\n')[:-1]
+        if loglines:
+            do_log(job, "\n".join(map(lambda x: f"  >> {x.split(b'\r')[-1].decode(errors='replace')}", loglines)), True, True)
+
     # show log, and sync generated files
     command = f'tail -n +{num_lines+1} /tmp/monitor.{self_pid}.log'
     res = run_remote(job, command, False)
@@ -155,7 +165,7 @@ def monitor(job, cmd, cmd_name):
         do_log(job, f"*** COMMAND {cmd_name} FAILED TO START, NO PID REPORTED ***")
         return False;
 
-    #print(f"*** RAN BACKGROUND COMMAND {' '.join(command)} PID={pid} ***")
+    #print(f"*** RAN BACKGROUND COMMAND {command} PID={pid} ***")
 
     # monitor loop
     num_lines = 0
@@ -170,10 +180,10 @@ def monitor(job, cmd, cmd_name):
                 sync_from(job, cmd_name)
             iter += 1
             time.sleep(10)
-    except:
+    except KeyboardInterrupt:
         # kill the whole process group as it exists now, as well as the direct pid
         do_log(job, f"*** ABORTING {cmd_name} (pid {pid}) ***")
-        run_command(job, f"pgid=`ps -o pgid= -p {pid}` && kill -- -`echo $pgid | tr -d ' '`; kill {pid}")
+        run_command(job, f"pgid=`ps -o pgid= -p {pid} | tr -d ' '` && kill -- -$pgid; kill {pid}")
         raise
 
     # final sync
@@ -214,8 +224,10 @@ def setup_host(job):
     res = run_remote(job, os.path.join(job["args"].plugin_dir, "tools", "host_survey.py"))
     if res.stdout:
         do_log(job, res.stdout)
-        
-    return run_remote(job, f"mkdir -p {job['remotework']}").returncode == 0 and sync_to(job)
+
+    self_pid = os.getpid()
+    job['tsfile'] = f'/tmp/last_remote_log.{self_pid}'
+    return run_remote(job, f"mkdir -p {job['remotework']}; touch {job['tsfile']}").returncode == 0 and sync_to(job)
 
 def do_traces(job):
     args = ""
