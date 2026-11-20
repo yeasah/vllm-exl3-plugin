@@ -182,8 +182,20 @@ def monitor(job, cmd, cmd_name):
             time.sleep(10)
     except KeyboardInterrupt:
         # kill the whole process group as it exists now, as well as the direct pid
-        do_log(job, f"*** ABORTING {cmd_name} (pid {pid}) ***")
-        run_command(job, f"pgid=`ps -o pgid= -p {pid} | tr -d ' '` && kill -- -$pgid; kill {pid}")
+        # waiting for the process group to die, with escalating signals
+        res = run_remote(job, f"ps -o pgid= -p {pid} | tr -d ' '")
+        if res.returncode == 0:
+            pgid = int(res.stdout)
+            if pgid:
+                do_log(job, f"*** ABORTING {cmd_name} ***")
+                iter = 0
+                while run_remote(job, f"kill -0 -{pgid} > /dev/null 2>&1").returncode == 0:
+                    sig='KILL' if iter > 5 else 'TERM'
+                    run_command(job, f"kill -s {sig} -- -{pgid} {pid} 2>&1")
+                    iter += 1
+                    do_log(job, f"*** SENT {sig} TO pgid {pgid} and pid {pid} ***")
+                    time.sleep(1)
+                do_log(job, f"*** COMMAND {cmd_name} EXITED ***")
         raise
 
     # final sync
