@@ -26,7 +26,7 @@ then the quantizes run as one wave, the draws on the first --draws GPUs and the 
 
     python3 probe.py -m openbmb/MiniCPM5-2B --draws 5 --yaqa
 """
-import argparse, json, os, re, shlex, subprocess, sys, types
+import argparse, json, os, re, shlex, subprocess, sys, types, queue
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUANT = os.path.join(HERE, "quant.py")
@@ -42,25 +42,54 @@ def run(cmd, env=None):
         raise SystemExit(f"=== failed ({rc}): {' '.join(cmd)}")
 
 
-def run_lanes(model, lanes):
-    """Each lane's steps in turn, the lanes side by side; a step whose output exists is skipped when it is reached.
-    One lane failing lets the others finish (their outputs stand for a rerun), then fails the probe."""
+def run_jobs(devs, model, jobs):
+    """Schedule the list of jobs across the listed devices.
+    One job failing lets the others finish (their outputs stand for a rerun), then fails the probe."""
     import threading
     failed = []
-    def lane(steps):
+    def job_thread(job, job_devs, job_id, q):
         try:
-            for done, cmd, env in steps:
-                if not done():
-                    run(["python3", QUANT, "-m", model, *cmd], env=env)
+            (done, _, cmd, env) = job
+            if not done():
+                run(["python3", QUANT, "-m", model, *cmd, "-d", ",".join(job_devs)], env=env)
         except SystemExit as e:
             failed.append(str(e))
-    if len(lanes) > 1:          # side by side, every quant.py job reports in start/finish lines, its output in its log
-        lanes = [[(done, cmd, {**(env or {}), "QUANT_LOG_ONLY": "1"}) for done, cmd, env in steps] for steps in lanes]
-    threads = [threading.Thread(target=lane, args=(steps,)) for steps in lanes]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+        finally:
+            q.put(job_id)
+
+    if len(jobs) > 1:          # side by side, every quant.py job reports in start/finish lines, its output in its log
+        jobs = [(done, job_devs, cmd, {**(env or {}), "QUANT_LOG_ONLY": "1"}) for done, job_devs, cmd, env in jobs]
+    available_devs = devs
+    running_jobs = {}
+    thread_q = queue.Queue()
+    job_id = 0
+    while running_jobs or jobs:
+        # schedule as many jobs as fit in available devices, satisfying device requests as much as possible.
+        # fully optimizing this in general is a 2D packing exercise with one dimension (time) not currently predictable
+        # and correlated with another dimension (number of devices) which is flexible. we're not going there,
+        # heuristics could hurt as much as they help, and the normal case is one big bunch (the draws) followed by
+        # a whole bunch of singletons, so the only packing that matters comes first, and it already gets the most
+        # devices it can get. so: just go through the list in order
+        while available_devs:
+            next_job = jobs[0]
+            num_assigned_devs = min(next_job[1], len(available_devs))
+            if (num_assigned_devs == 0):
+                raise SystemExit("Invalid job defined with zero devices")
+            assigned_devs = available_devs[:num_assigned_devs]
+            available_devs = available_devs[num_assigned_devs:]
+            thread = threading.Thread(target=job_thread, args=(next_job,assigned_devs,job_id,thread_q))
+            thread.start()
+            jobs = jobs[1:]
+            running_jobs[job_id] = (thread, assigned_devs)
+            job_id += 1
+
+        # wait for a job to finish, and return the devices to the pool
+        finished_id = thread_q.get()
+        (thread, assigned_devs) = running_jobs[finished_id]
+        thread.join()
+        available_devs += assigned_devs
+        del running_jobs[finished_id]
+
     if failed:
         raise SystemExit("\n".join(failed))
 
@@ -96,49 +125,37 @@ def main(a):
         arms.append(low)
     common = ["-b", str(a.bits)] + (["--no-yaqa"])
     built = lambda name: lambda: os.path.isfile(os.path.join(W, name, "quantization_config.json"))
-    devs = a.device.split(",")
+    devlist = a.device.split(",")
     if a.yaqa:
         # the factor first, alone: its pass wants every GPU it can get (a box is sized for it, so there is nothing to
         # share it with), and it is the YAQA rung's only dependency -- after it, every quantize can go in one wave
         factored = lambda: os.path.isfile(os.path.join(W, "_hess", "probe", "DONE.json"))
-        yaqa_dev = a.yaqa_devices or a.device
         trace_args = shlex.split(a.trace_args)
-        if not {"-d", "--device"} & set(trace_args):
-            trace_args += ["-d", yaqa_dev]
         # the probe rows through the eval generator, then their factor
-        run_lanes(a.model, [[(factored, ["yaqa-traces", "--probe", *trace_args], None),
-                             (factored, ["yaqa", "--probe", "-d", yaqa_dev] +
-                              (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []) +
-                              (["--reserve-vram", a.reserve_vram] if a.reserve_vram else []), None)]])
-    # then the quantizes, one GPU each: the draws on the first --draws GPUs, the uniform and YAQA rungs on the GPUs
-    # past them (a dependency split, not a scheduler: quantize still deals the draws within its share); with no
-    # spare GPU they run in turn on all of them
-    spare = devs[a.draws:]
-    spare += list(reversed(devs)) * (a.quant_parallel - 1)
-    draw_dev = ",".join(devs[:a.draws]) if spare else a.device
-    uniform_dev = spare[0] if spare else a.device
-    yaqa_rung_dev = spare[1] if len(spare) > 1 else uniform_dev
+        run_jobs(devlist, a.model, [(factored, len(a.device), ["yaqa-traces", "--probe", *trace_args], None)])
+        run_jobs(devlist, a.model, [(factored, len(a.device), ["yaqa", "--probe"] +
+                                    (["--layers-per-run", str(a.layers_per_run)] if a.layers_per_run else []) +
+                                    (["--reserve-vram", a.reserve_vram] if a.reserve_vram else []), None)])
     # draws: the ladder's own configuration (recipe when measured), no YAQA, one seed offset each -- one quantize
     # call, so quant.py deals them to the GPUs like a ladder (finished draws are skipped there)
-    draw_lane = [(lambda: all(built(name)() for name in draws),
-                  ["quantize", *common, "--suffix", "probe", "--draws", str(a.draws), "-d", draw_dev], None)]
-    uniform_lane = [(built(uniform), ["quantize", *common, "--no-recipe", "--suffix", "probe-uniform", "-d", uniform_dev],
-                     {"EXL3_SEED_IDX_OFFSET": "0"})] if uniform else []
+    jobs = []
+    jobs.append((lambda: all(built(name)() for name in draws), a.draws,
+            ["quantize", *common, "--suffix", "probe", "--draws", str(a.draws)], None))
+    if uniform:
+        jobs.append((built(uniform), 1, ["quantize", *common, "--no-recipe", "--suffix", "probe-uniform"],
+                    {"EXL3_SEED_IDX_OFFSET": "0"}))
     # the extra arms after the uniform rung, each one quantize with its own arguments
-    uniform_lane += [(built(name), ["quantize", *common, *argv, "--suffix", "probe-" + name.split("-probe-", 1)[1], "-d", uniform_dev],
-                      {"EXL3_SEED_IDX_OFFSET": "0"}) for name, argv in extra.items()]
+    jobs += ((built(name), 1, ["quantize", *common, *argv, "--suffix", "probe-" + name.split("-probe-", 1)[1]],
+             {"EXL3_SEED_IDX_OFFSET": "0"}) for name, argv in extra.items())
     # the low draw after the uniform rung: the ladder's configuration at that rate, seed offset 0 like the draws' first
-    uniform_lane += [(built(low), ["quantize", "-b", low_spec, "--no-yaqa", "--suffix", "probe-low", "-d", uniform_dev],
-                      {"EXL3_SEED_IDX_OFFSET": "0"})] if low else []
-    yaqa_lane = [(built(yaqa), ["quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa",
-                                "-d", yaqa_rung_dev], {"EXL3_SEED_IDX_OFFSET": "0"})] if a.yaqa else []
-    if not spare:
-        lanes = [draw_lane + uniform_lane + yaqa_lane]
-    elif yaqa_rung_dev == uniform_dev:
-        lanes = [draw_lane, uniform_lane + yaqa_lane]
-    else:
-        lanes = [draw_lane, uniform_lane, yaqa_lane]
-    run_lanes(a.model, [l for l in lanes if l])
+    if low:
+        jobs.append((built(low), 1, ["quantize", "-b", low_spec, "--no-yaqa", "--suffix", "probe-low"],
+                    {"EXL3_SEED_IDX_OFFSET": "0"}))
+    if a.yaqa:
+        jobs.append((built(yaqa), 1, ["quantize", "-b", str(a.bits), "--yaqa-source", "probe", "--suffix", "probe-yaqa"],
+                    {"EXL3_SEED_IDX_OFFSET": "0"}))
+    quant_devs = devlist * (a.quant_parallel)
+    run_jobs(quant_devs, a.model, jobs)
     # recall too, when the model has a slice: YAQA has cost recall that KL read as a win (Qwen3.8-27B)
     slices = a.slices.split(",")
     if os.path.isfile(os.path.join(W, "_traces", "eval_recall.json")) and "recall" not in slices:
@@ -305,8 +322,6 @@ if __name__ == "__main__":
                         "(in turn on one spare, or after the draws with none)")
     p.add_argument("--quant-parallel", type=int, default=1,
                    help="Maximum number of quantize runs to allow per GPU")
-    p.add_argument("--yaqa-devices", default=None,
-                   help="GPUs for the YAQA rows and factor pass instead of all of -d")
     a = p.parse_args()
     if not a.model or "/" not in a.model:
         raise SystemExit("-m takes the base model's repo id, as quant.py does")
