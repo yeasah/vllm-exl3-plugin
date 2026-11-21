@@ -1127,6 +1127,55 @@ beats serializing unless time to first token is free.
 prototype; this is a replay with modelled times. If a model justifies building it, the next step is
 a measured prototype on one such split, not more simulation.
 
+### Design note: what a disk tier changes (2026-11-21)
+
+**The invariant it breaks.** Today every offloaded expert always has a valid address -- a VRAM slot, or its host row
+read over UVA -- and "both addresses hold the same bytes, so output never depends on which one is used"
+(`expert_cache.py`). That is what lets decode run inside a CUDA graph with the controller acting only between steps,
+two steps behind the routing. An expert on disk has no address until it is read, and the routing that says it is
+needed is known only inside the forward. Everything below follows from that.
+
+**Backing store: the checkpoint itself.** EXL3 MoE checkpoints store each expert's projections as separate tensors, so
+the shards are the disk tier: no second copy, offsets from the headers (as `_checkpoint_census` reads them). O_DIRECT
+wants 4 KiB-aligned offsets and lengths, which safetensors offsets are not, so a read takes the aligned superset into a
+pinned bounce buffer and copies the expert out (~1.2 MiB; the copy is cheap next to the read).
+
+**RAM tier: host rows become a cache.** `HostBlock` rows already map expert to row, and the exclusive cache already
+swaps rows and slots (`row_of`, `free_rows`). A disk tier adds one state, "on disk" (no row): eviction from RAM drops
+the row (disk still holds it), a load preads into a free row. `_host_quota` becomes the RAM tier's size rather than the
+set of hosted experts; every routed expert is hosted.
+
+**Prefill: contained.** Prefill already learns its routing on the host each layer: `stage_routed` copies in only the
+experts the grouped kernel's per-expert counts name. Disk-resident routed experts are read into the staging window
+there, straight through, without entering RAM (the simulation's `--prefill-bypass`: caching them flushed decode's hot
+set). `prefetch_next` copies only RAM-resident rows; disk-resident ones are read once the layer's counts are known, with
+the next layer's reads queued deep. Prefill runs outside graphs, so nothing there changes how it is captured.
+
+**Decode: the hard part, three ways.**
+- **A. A host round trip per MoE layer.** Route, read the routing back, make every routed disk expert addressable (pread
+  into a row, point its table entry at it), then run the GEMM. Simple and obviously correct, but it needs the MoE layer
+  outside a captured graph: eager decode, or vLLM's breakable capture with the break at the MoE op (itself parked on the
+  EXL3-with-GDN capture bug). Eager decode on Qwen4Exp ran ~8 t/s against ~22 with full decode graphs, so this mostly
+  measures, and does not serve.
+- **B. A wait inside the graph.** The graph copies a layer's routing to mapped host memory, then waits on a host-set
+  flag with a stream memory operation (`cuStreamWaitValue32`, capturable into graphs) before the expert GEMM. A host
+  service thread polls the routing, makes any routed disk expert addressable, and releases the flag at once when none
+  is. The cost when nothing is on disk is a handshake per layer (microseconds; ~48 a token), and graphs stay. It is the
+  most intrusive: driver memory operations through ctypes, a latency-critical host thread, the pointer table written
+  mid-forward from another stream, and graph capture to validate. Probably the production design if A's numbers hold.
+- **C. Skip disk-resident experts.** Drop them from the token's top-k and renormalize: graph-friendly and nearly free to
+  build, but output then depends on cache state -- lossy, and different from run to run. It breaks the invariant on
+  purpose, and would need its own quality measurement. Not a default.
+
+**Guard first.** Whatever the path, a routed expert must never execute from a stale or missing address: extend
+`EXL3_CACHE_VERIFY` to assert that every routed expert's table entry is valid at execution time, and put the failure
+back (a deliberately missed load) to see it fire before trusting any number.
+
+**Prototype order.** (1) The RAM-as-cache state and the checkpoint reader, with prefill's bypass reads: contained in
+`cpu_offload` and the exclusive cache, and enough to measure prefill against the simulation. (2) Decode path A, eager,
+to measure real disk reads and latency per token against the replay's figures -- the check that the simulation holds.
+(3) Only if both hold, path B.
+
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
 "Output identical to resident" holds in **eager mode**, at TP=1 and TP=2, for all-hosted and partial hosting:
