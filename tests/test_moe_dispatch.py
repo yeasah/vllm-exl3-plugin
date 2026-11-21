@@ -59,8 +59,10 @@ def test_disk_tier_layers_run_grouped_whatever_the_batch(paths, monkeypatch):
     monkeypatch.setattr(cpu_offload, "has_disk", lambda idx: True)
     assert run(1, stage=0) == "grouped"
     assert run(ops._GROUPED_MIN_TOKENS - 1, stage=0) == "grouped"
-    with pytest.raises(RuntimeError, match="EXL3_DISK_TIER"):
-        run(4096, activation="relu2", stage=0)
+    staged = []
+    monkeypatch.setattr(cpu_offload, "stage_routed", lambda idx, counts, tables: staged.append(counts) or tables)
+    assert run(4096, activation="relu2", stage=0) == "per_row"   # no fused kernel: staged by routing all the same
+    assert staged and staged[0][0] == 2 * 4096
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     with pytest.raises(RuntimeError, match="graph capture"):
         run(1, stage=0)
