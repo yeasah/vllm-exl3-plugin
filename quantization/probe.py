@@ -166,22 +166,27 @@ def main(a):
 
 
 def report(W, slices, draws, arms, low=None):
-    """The draws' spread, then every arm against draw 0 in one table: excess KLD as arm / draw 0 (below 1 better), recall
-    as points kept over draw 0's, "~" where a redraw could do as much (2 sd), and each arm's size over draw 0's."""
+    """The draws' spread, then every arm against the draws' mean in one table: excess KLD as arm / mean (below 1 better),
+    recall as points kept over the mean's, "~" where a redraw could do as much (2 sd of one draw against the mean of N:
+    sd * sqrt(1 + 1/N)), and each arm's size over draw 0's. Against the mean, not draw 0: an arm shares draw 0's seed,
+    but nothing shows a seed's luck carries over to another configuration (draw rank does not even transfer across
+    traces), and on the 35B's swe draw 0 sat 7.6% above the mean, which went into every ratio. probe.json keeps the
+    ratio over draw 0 too."""
     out = {"slices": {}, "arms": {name: {} for name in arms}}
     d0 = draws[0]
     short = lambda name: name.split("-probe-", 1)[1]
     loaded = {sl: {r["label"]: r for r in json.load(open(os.path.join(W, "main", f"qb_{sl}.json")))} for sl in slices}
     excess = {}
-    print(f"\n=== probe report: {os.path.basename(W)}, {len(draws)} draws; arms over draw 0, below 1 better, "
+    print(f"\n=== probe report: {os.path.basename(W)}, {len(draws)} draws; arms over the draws' mean, below 1 better, "
           f"~ within draw noise ===")
+    widen = (1 + 1 / len(draws)) ** 0.5           # one draw against the mean of N
     print(f"{'slice':8} {'draws':>10} {'range':>7} {'sd':>6}  " + "".join(f"{short(n):>10}" for n in arms))
     for sl in slices:
         rows = loaded[sl]
         if sl == "recall":
             kept = {l: rows[l]["recall_kept"] for l in draws + arms if "recall_kept" in rows.get(l, {})}
             d = [kept[l] for l in draws if l in kept]
-            if not d or d0 not in kept:
+            if not d:
                 continue
             mean = sum(d) / len(d)
             sd = (sum((x - mean) ** 2 for x in d) / (len(d) - 1)) ** 0.5 if len(d) > 2 else float("nan")
@@ -190,8 +195,9 @@ def report(W, slices, draws, arms, low=None):
                 if n not in kept:
                     cells += f"{'':>10}"
                     continue
-                diff = 100 * (kept[n] - kept[d0])
-                tilde = "~" if sd == sd and abs(diff) < 200 * sd else " "
+                diff = 100 * (kept[n] - mean)
+                tilde = "~" if sd == sd and abs(diff) < 200 * sd * widen else " "
+                out["arms"][n]["recall_pts_over_d0"] = 100 * (kept[n] - kept[d0])
                 cells += f"{diff:+8.1f}{tilde} "
                 out["arms"][n]["recall_pts"] = diff
             print(f"{'recall':8} {100 * mean:9.1f}% {100 * (max(d) - min(d)):5.1f}pt {100 * sd:4.1f}pt  {cells}")
@@ -201,7 +207,7 @@ def report(W, slices, draws, arms, low=None):
         ex = {l: rows[l]["kld"] - fl for l in draws + arms + ([low] if low else []) if l in rows}
         excess[sl] = ex
         d = [ex[l] for l in draws if l in ex]
-        if not d or d0 not in ex:
+        if not d:
             continue
         mean = sum(d) / len(d)
         spread = (max(d) - min(d)) / mean if len(d) > 1 else float("nan")
@@ -211,10 +217,12 @@ def report(W, slices, draws, arms, low=None):
             if n not in ex:
                 cells += f"{'':>10}"
                 continue
-            ratio = ex[n] / ex[d0]
-            tilde = "~" if sd == sd and abs(1 - ratio) < 2 * sd else " "
+            ratio = ex[n] / mean
+            tilde = "~" if sd == sd and abs(1 - ratio) < 2 * sd * widen else " "
             cells += f"{ratio:8.3f}{tilde} "
             out["arms"][n][sl] = ratio
+            if d0 in ex:
+                out["arms"][n].setdefault("over_d0", {})[sl] = ex[n] / ex[d0]
         print(f"{sl:8} {mean:10.5f} {100 * spread:6.1f}% {100 * sd:5.1f}%  {cells}")
         out["slices"][sl] = {"draws": d, "mean": mean, "range": spread, "sd": sd}
     sized = loaded[slices[0]]
@@ -257,7 +265,7 @@ def size_matched(out, excess, sized, draws, arms, low, short):
     else:
         per_bit, how = gb(d0) / rate, "size / rate"
     bits = {n: (gb(n) - gb(d0)) / per_bit for n in moved}
-    print(f"\n=== size-matched (projected): arm / draw 0 at the arm's size, bits from {how} ("
+    print(f"\n=== size-matched (projected): arm / the draws' mean at the arm's size, bits from {how} ("
           + ", ".join(f"{short(n)} {b:+.3f} bpw" for n, b in bits.items()) + "); from the low draw's own rate per half "
           f"bit (capped at {_PER_HALF_BIT:g}; a chord, so it leans high) to the rule's {_PER_HALF_BIT:g}x ===")
     print(f"{'slice':8} " + "".join(f"{short(n):>14}" for n in moved))
@@ -265,13 +273,16 @@ def size_matched(out, excess, sized, draws, arms, low, short):
         # the slice's own rate, when its low draw is below the rule: no knee between, and the curve steepens toward
         # low bits, so the chord bounds the slope at the probe rate from above
         own = None
-        if low in ex and d0 in ex and low_rate is not None and rate > low_rate:
-            own = min((ex[low] / ex[d0]) ** (1 / (2 * (rate - low_rate))), _PER_HALF_BIT)
+        ref = [ex[l] for l in draws if l in ex]
+        if low in ex and ref and low_rate is not None and rate > low_rate:
+            own = min((ex[low] / (sum(ref) / len(ref))) ** (1 / (2 * (rate - low_rate))), _PER_HALF_BIT)
         rates = sorted({_PER_HALF_BIT} | ({own} if own else set()))
         cells = ""
         for n in moved:
-            if n in ex and d0 in ex:
-                adj = sorted(ex[n] / ex[d0] * r ** (2 * bits[n]) for r in rates)
+            ref = [ex[l] for l in draws if l in ex]
+            if n in ex and ref:
+                base = sum(ref) / len(ref)
+                adj = sorted(ex[n] / base * r ** (2 * bits[n]) for r in rates)
                 cells += f"{adj[0]:6.3f}-{adj[-1]:.3f} " if adj[-1] - adj[0] >= 0.005 else f"{adj[0]:13.3f} "
                 out["arms"][n].setdefault("size_matched", {})[sl] = [adj[0], adj[-1]]
             else:
