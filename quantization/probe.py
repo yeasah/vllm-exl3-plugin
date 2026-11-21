@@ -235,42 +235,50 @@ def report(W, slices, draws, arms, low=None):
     print(f"-> {os.path.join(W, 'main', 'probe.json')}")
 
 
+#: The rule of thumb above the knee: excess KLD halves per half bit
+_PER_HALF_BIT = 2.0
+
 def size_matched(out, excess, sized, draws, arms, low, short):
-    """Each arm against draw 0 projected to the arm's size, for arms that are not the same size: excess KLD taken as a
-    power of size, with the exponent each slice's own low draw gives (draws to low draw: the same configuration at
-    another rate), or without one the rule of thumb of 2x per half bit at the probe rate (bits in proportion to size).
-    A projection, not a measurement: it assumes the curve is straight in log-log between those points; the
-    budget-matched rung is the measurement (docs/moe.md). LFM2.5-8B-A1B: its recipe at -2.2% and --hq 2 at +2.2%
-    both came out near even once matched."""
+    """Each arm against draw 0 projected to the arm's size, for arms that are not the same size: the size difference
+    turned into bits, and the bits into excess KLD by the rule of thumb (2x per half bit). The bits come from the low
+    draw's size (the same configuration at another rate, so bytes per bpw with the head and every fixed part counted),
+    or without one from size / rate. Not from the low draw's KLD: it is there because it may be at or past the knee,
+    and a slope through a knee over-corrects near the probe rate. A projection, not a measurement; the budget-matched
+    rung is the measurement (docs/moe.md)."""
     d0 = draws[0]
-    size = lambda n: sized[n]["vram_gb"] / sized[d0]["vram_gb"] if "vram_gb" in sized.get(n, {}) and \
-        "vram_gb" in sized.get(d0, {}) else None
-    moved = [n for n in arms if size(n) is not None and abs(size(n) - 1) >= 0.005]
+    gb = lambda n: sized[n]["vram_gb"] if "vram_gb" in sized.get(n, {}) else None
+    moved = [n for n in arms if gb(n) and gb(d0) and abs(gb(n) / gb(d0) - 1) >= 0.005]
     if not moved:
         return
     rate = float(re.match(r"([\d.]+)bpw", d0).group(1))
-    slopes = {}
+    low_rate = float(re.match(r"([\d.]+)bpw", low).group(1)) if low else None
+    if low and gb(low) and low_rate != rate:
+        per_bit, how = (gb(d0) - gb(low)) / (rate - low_rate), f"the {low_rate:.2f} draw's size"
+    else:
+        per_bit, how = gb(d0) / rate, "size / rate"
+    bits = {n: (gb(n) - gb(d0)) / per_bit for n in moved}
+    print(f"\n=== size-matched (projected): arm / draw 0 at the arm's size, bits from {how} ("
+          + ", ".join(f"{short(n)} {b:+.3f} bpw" for n, b in bits.items()) + "); from the low draw's own rate per half "
+          f"bit (capped at {_PER_HALF_BIT:g}; a chord, so it leans high) to the rule's {_PER_HALF_BIT:g}x ===")
+    print(f"{'slice':8} " + "".join(f"{short(n):>14}" for n in moved))
     for sl, ex in excess.items():
-        z = size(low) if low else None
-        if low in ex and d0 in ex and z and z != 1:
-            slopes[sl] = (math.log(ex[low] / ex[d0]) / math.log(z), "low draw")
-        else:
-            slopes[sl] = (-2 * rate * math.log(2), "2x per half bit")
-    print(f"\n=== size-matched (projected): arm / draw 0 at the arm's size; exponent per slice: "
-          + ", ".join(f"{sl} {k:.1f} ({how})" for sl, (k, how) in slopes.items()) + " ===")
-    print(f"{'slice':8} " + "".join(f"{short(n):>10}" for n in moved))
-    for sl, ex in excess.items():
-        k = slopes[sl][0]
+        # the slice's own rate, when its low draw is below the rule: no knee between, and the curve steepens toward
+        # low bits, so the chord bounds the slope at the probe rate from above
+        own = None
+        if low in ex and d0 in ex and low_rate is not None and rate > low_rate:
+            own = min((ex[low] / ex[d0]) ** (1 / (2 * (rate - low_rate))), _PER_HALF_BIT)
+        rates = sorted({_PER_HALF_BIT} | ({own} if own else set()))
         cells = ""
         for n in moved:
             if n in ex and d0 in ex:
-                adj = ex[n] / ex[d0] / size(n) ** k
-                cells += f"{adj:9.3f} "
-                out["arms"][n].setdefault("size_matched", {})[sl] = adj
+                adj = sorted(ex[n] / ex[d0] * r ** (2 * bits[n]) for r in rates)
+                cells += f"{adj[0]:6.3f}-{adj[-1]:.3f} " if adj[-1] - adj[0] >= 0.005 else f"{adj[0]:13.3f} "
+                out["arms"][n].setdefault("size_matched", {})[sl] = [adj[0], adj[-1]]
             else:
-                cells += f"{'':>10}"
+                cells += f"{'':>14}"
         print(f"{sl:8} {cells}")
-    out["size_matched_exponents"] = {sl: {"exponent": k, "from": how} for sl, (k, how) in slopes.items()}
+    for n in moved:
+        out["arms"][n]["bits_over_d0"] = bits[n]
 
 
 def report_low(W, slices, draws, low):
@@ -299,8 +307,11 @@ def report_low(W, slices, draws, low):
         if not d:
             continue
         ex, mean = rows[low]["kld"] - fl, sum(d) / len(d)
-        print(f"{sl:8} excess {ex:.5f}, {ex / mean:.2f}x the draws' {mean:.5f}")
-        out[sl] = {"excess": ex, "over_draws": ex / mean}
+        # in the rule of thumb's units: well over 2x per half bit is a knee between the two rates
+        drop = 2 * (float(re.match(r"([\d.]+)bpw", draws[0]).group(1)) - float(re.match(r"([\d.]+)bpw", low).group(1)))
+        per_half = (ex / mean) ** (1 / drop) if drop > 0 else float("nan")
+        print(f"{sl:8} excess {ex:.5f}, {ex / mean:.2f}x the draws' {mean:.5f} ({per_half:.2f}x per half bit)")
+        out[sl] = {"excess": ex, "over_draws": ex / mean, "per_half_bit": per_half}
     return out
 
 
