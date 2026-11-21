@@ -26,7 +26,7 @@ then the quantizes are scheduled over -d (each GPU listed --quant-parallel times
 
     python3 probe.py -m openbmb/MiniCPM5-2B --draws 5 --yaqa
 """
-import argparse, json, os, re, shlex, subprocess, sys, types, queue
+import argparse, json, math, os, re, shlex, subprocess, sys, types, queue
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUANT = os.path.join(HERE, "quant.py")
@@ -172,6 +172,7 @@ def report(W, slices, draws, arms, low=None):
     d0 = draws[0]
     short = lambda name: name.split("-probe-", 1)[1]
     loaded = {sl: {r["label"]: r for r in json.load(open(os.path.join(W, "main", f"qb_{sl}.json")))} for sl in slices}
+    excess = {}
     print(f"\n=== probe report: {os.path.basename(W)}, {len(draws)} draws; arms over draw 0, below 1 better, "
           f"~ within draw noise ===")
     print(f"{'slice':8} {'draws':>10} {'range':>7} {'sd':>6}  " + "".join(f"{short(n):>10}" for n in arms))
@@ -197,7 +198,8 @@ def report(W, slices, draws, arms, low=None):
             out["slices"]["recall"] = {"draws": d, "mean": mean, "sd": sd}
             continue
         fl = rows["Noise floor"]["kld"]
-        ex = {l: rows[l]["kld"] - fl for l in draws + arms if l in rows}
+        ex = {l: rows[l]["kld"] - fl for l in draws + arms + ([low] if low else []) if l in rows}
+        excess[sl] = ex
         d = [ex[l] for l in draws if l in ex]
         if not d or d0 not in ex:
             continue
@@ -225,11 +227,50 @@ def report(W, slices, draws, arms, low=None):
             cells += f"{'':>10}"
     if arms:
         print(f"{'size':8} {'':>10} {'':>7} {'':>6}  {cells}")
+    size_matched(out, excess, sized, draws, arms, low, short)
     if low:
         out["low"] = report_low(W, slices, draws, low)
     with open(os.path.join(W, "main", "probe.json"), "w") as f:
         json.dump(out, f, indent=1)
     print(f"-> {os.path.join(W, 'main', 'probe.json')}")
+
+
+def size_matched(out, excess, sized, draws, arms, low, short):
+    """Each arm against draw 0 projected to the arm's size, for arms that are not the same size: excess KLD taken as a
+    power of size, with the exponent each slice's own low draw gives (draws to low draw: the same configuration at
+    another rate), or without one the rule of thumb of 2x per half bit at the probe rate (bits in proportion to size).
+    A projection, not a measurement: it assumes the curve is straight in log-log between those points; the
+    budget-matched rung is the measurement (docs/moe.md). LFM2.5-8B-A1B: its recipe at -2.2% and --hq 2 at +2.2%
+    both came out near even once matched."""
+    d0 = draws[0]
+    size = lambda n: sized[n]["vram_gb"] / sized[d0]["vram_gb"] if "vram_gb" in sized.get(n, {}) and \
+        "vram_gb" in sized.get(d0, {}) else None
+    moved = [n for n in arms if size(n) is not None and abs(size(n) - 1) >= 0.005]
+    if not moved:
+        return
+    rate = float(re.match(r"([\d.]+)bpw", d0).group(1))
+    slopes = {}
+    for sl, ex in excess.items():
+        z = size(low) if low else None
+        if low in ex and d0 in ex and z and z != 1:
+            slopes[sl] = (math.log(ex[low] / ex[d0]) / math.log(z), "low draw")
+        else:
+            slopes[sl] = (-2 * rate * math.log(2), "2x per half bit")
+    print(f"\n=== size-matched (projected): arm / draw 0 at the arm's size; exponent per slice: "
+          + ", ".join(f"{sl} {k:.1f} ({how})" for sl, (k, how) in slopes.items()) + " ===")
+    print(f"{'slice':8} " + "".join(f"{short(n):>10}" for n in moved))
+    for sl, ex in excess.items():
+        k = slopes[sl][0]
+        cells = ""
+        for n in moved:
+            if n in ex and d0 in ex:
+                adj = ex[n] / ex[d0] / size(n) ** k
+                cells += f"{adj:9.3f} "
+                out["arms"][n].setdefault("size_matched", {})[sl] = adj
+            else:
+                cells += f"{'':>10}"
+        print(f"{sl:8} {cells}")
+    out["size_matched_exponents"] = {sl: {"exponent": k, "from": how} for sl, (k, how) in slopes.items()}
 
 
 def report_low(W, slices, draws, low):

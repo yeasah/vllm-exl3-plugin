@@ -79,3 +79,27 @@ def test_scheduler_with_more_devices_than_jobs(monkeypatch):
     jobs = [(lambda: False, 1, ["quantize", "--suffix", f"j{i}"], None) for i in range(3)]
     probe.run_jobs(["0", "1", "0", "1"], "org/M", jobs)
     assert sorted(ran) == ["0", "0", "1"]
+
+
+def test_size_matched_projection(capsys):
+    """An arm 2% smaller with 4% more excess, on a slice whose low draw is 0.68x the size at 5x the excess: draw 0 shrunk
+    2% would be (0.98)^(ln 5 / ln 0.68) = 1.087x worse, so the arm is 4% better at its size."""
+    import math
+    d = ["4.00bpw-probe-d0"]
+    excess = {"wild": {"4.00bpw-probe-d0": 1.0, "4.00bpw-probe-r": 1.04, "2.50bpw-H5-probe-low": 5.0}}
+    sized = {"4.00bpw-probe-d0": {"vram_gb": 10.0}, "4.00bpw-probe-r": {"vram_gb": 9.8},
+             "2.50bpw-H5-probe-low": {"vram_gb": 6.8}}
+    out = {"arms": {"4.00bpw-probe-r": {}}}
+    short = lambda n: n.split("-probe-", 1)[1]
+    probe.size_matched(out, excess, sized, d, ["4.00bpw-probe-r"], "2.50bpw-H5-probe-low", short)
+    k = math.log(5.0) / math.log(0.68)
+    assert abs(out["arms"]["4.00bpw-probe-r"]["size_matched"]["wild"] - 1.04 / 0.98 ** k) < 1e-9
+    assert out["size_matched_exponents"]["wild"]["from"] == "low draw"
+    # no low draw: 2x per half bit at 4.00 bpw, bits in proportion to size
+    out = {"arms": {"4.00bpw-probe-r": {}}}
+    probe.size_matched(out, {"wild": excess["wild"]}, sized, d, ["4.00bpw-probe-r"], None, short)
+    assert abs(out["size_matched_exponents"]["wild"]["exponent"] + 8 * math.log(2)) < 1e-9
+    # an arm the same size gets no projection
+    out = {"arms": {"4.00bpw-probe-r": {}}}
+    probe.size_matched(out, excess, {**sized, "4.00bpw-probe-r": {"vram_gb": 10.01}}, d, ["4.00bpw-probe-r"], None, short)
+    assert "size_matched" not in out["arms"]["4.00bpw-probe-r"]
