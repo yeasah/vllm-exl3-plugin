@@ -18,6 +18,9 @@ fused_moe.EXL3MoEMethod.apply = apply
 from vllm import LLM, SamplingParams
 kw = dict(max_model_len=6000, max_num_seqs=1, enforce_eager=True, gpu_memory_utilization=0.9,
           max_num_batched_tokens=2048, language_model_only=True, enable_prefix_caching=False)
+# A model that needs expert offload to load (Qwen3.8-Flash-Next on one card) passes it here, as JSON:
+# ROUTING_LLM_KW='{"cpu_offload_gb": 24, "cpu_offload_params": ["experts"]}'
+kw.update(json.loads(os.environ.get("ROUTING_LLM_KW") or "{}"))
 llm = LLM(model, revision=rev, **kw)
 tok = llm.get_tokenizer()
 import exllamav3

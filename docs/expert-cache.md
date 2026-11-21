@@ -1064,6 +1064,42 @@ The write-backs cost nothing measurable at these promotion rates, on one copy en
 
 ---
 
+## A disk tier below host RAM: simulated, not built (2026-11-21)
+
+**The question.** Models like Hy4-flash (220B / 12B active, ~156 B of routed experts) need more host RAM than many
+hosts have even below 3 bpw. Would a third tier, experts read from the SSD on use, be a disaster or usable? Answered by
+replay before any code: `routing_trace.py` recorded Qwen3.8-Flash-Next 2.05bpw on one card (41 jobs, 10.8K decode and
+38.9K prefill tokens; `ROUTING_LLM_KW` passes the offload settings it needs), and `tier_replay.py` replays it through
+VRAM (the exclusive cache exactly as `routing_replay.py` validates it, lag 2, 32 promotions a token), a host RAM LRU
+holding a fraction of each layer's experts (exclusive with VRAM), and disk for the rest. Its VRAM hit rates match
+`routing_replay.py`'s on the same trace (70.5 / 80.9 / 87.5% against 70.5 / 80.9 / 87.6% at 20 / 30 / 40%).
+
+**Decode: usable.** Routing recency is strong enough that a small RAM tier catches nearly everything above it. One
+expert is 1.19 MiB (all three projections, 2.05 bpw); 480 expert reads a token:
+
+| VRAM / RAM / disk share | disk reads / token | added @ 2 GB/s | @ 6 GB/s |
+|---|---|---|---|
+| 30 / 60 / 10 | 2.3 | +1.4 ms | +0.5 ms |
+| 30 / 40 / 30 | 9.5 | +5.9 ms | +2.0 ms |
+| 30 / 30 / 40 | 15.0 | +9.3 ms | +3.1 ms |
+| 30 / 20 / 50 | 22.8 | +14.2 ms | +4.7 ms |
+| 40 / 20 / 40 | 15.2 | +9.5 ms | +3.2 ms |
+
+Against ~29 ms a token for this model at TP=1, a 30/30/40 split (8.6 GiB of experts in RAM) costs ~10-25%.
+
+**Prefill: where it hurts.** A chunk touches most of a layer's experts, so the disk share comes from disk nearly every
+chunk: at 30/30/40, ~2 GiB from RAM and 7.3 GiB from disk per chunk (the trace's average ~720 tokens), 4.0 s at 2 GB/s,
+1.4 s at 6 GB/s, against 0.5-0.7 s all from RAM.
+
+**This host's SSD** (`ssd_probe.py`: random expert-sized reads, O_DIRECT, from the HF cache's shards): 1.96 GB/s at
+queue depth 1 (0.64 ms a read), 5.44 GB/s at 8. Decode's reads land about one every three layers, so they are depth-1
+reads, the 2 GB/s column; prefill's staging is bulk and runs deep. `/home/cache` is a VM disk on the hypervisor's
+dm-cache, so O_DIRECT in the guest may still be helped by host caching: a best case for this box.
+
+**Not settled:** concurrency (one stream here; more requests spread routing and raise disk reads), and whether decode
+disk reads could be issued ahead (routing is only known per layer). If a model justifies building it, the next step is
+a measured prototype on one such split, not more simulation.
+
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
 "Output identical to resident" holds in **eager mode**, at TP=1 and TP=2, for all-hosted and partial hosting:

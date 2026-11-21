@@ -1,0 +1,127 @@
+"""Replay a routing trace (routing_trace.py) against an expert cache with a disk tier below host RAM.
+
+usage: tier_replay.py TRACE EXPERT_MIB [--vram 0.2,0.3,0.4] [--ram 1.0,0.75,0.5,0.4,0.3]
+
+Three tiers, per layer: VRAM slots (the exclusive cache as routing_replay.py validates it: a miss is read from below
+this token and promoted `lag` tokens later, the 32 most-wanted misses per token over all layers), host RAM holding a
+fraction of each layer's experts (an LRU, exclusive with VRAM: promoted experts leave it, evicted ones return), and disk
+for the rest. An expert used while on disk is read first, then held in RAM. Decode counts the reads each tier serves
+per token; prefill counts what each chunk stages from RAM and from disk (it touches most of a layer's experts). Times
+come from bandwidths, not measurement: they say whether a disk tier is a disaster or usable, not what it would serve.
+EXPERT_MIB is one expert's three projections in one layer, as stored.
+"""
+import argparse, collections, sys
+
+import numpy as np
+
+ap = argparse.ArgumentParser()
+ap.add_argument("trace")
+ap.add_argument("expert_mib", type=float)
+ap.add_argument("--vram", default="0.2,0.3,0.4")
+ap.add_argument("--ram", default="1.0,0.75,0.6,0.5,0.4,0.3")
+ap.add_argument("--lag", type=int, default=2)
+ap.add_argument("--budget", type=int, default=32)
+ap.add_argument("--link-gbs", type=float, default=20.0, help="UVA reads and staging copies from host RAM, GB/s")
+ap.add_argument("--ssd-gbs", default="2,6", help="disk read rates to bracket, GB/s (random ~1 MiB reads)")
+a = ap.parse_args()
+
+Z = np.load(a.trace + ".npz", allow_pickle=True)
+tags, layers, topk = Z["tags"], Z["layers"], Z["topk"]
+E = int(max(t.max() for t in topk)) + 1
+L = int(layers.max()) + 1
+steps, cur = [], None
+for tag, l, t in zip(tags, layers, topk):
+    if tag == "none":
+        continue
+    j = int(tag.split(":")[0])
+    ph = "prefill" if t.shape[0] > 1 else "decode"
+    if cur is None or l <= cur[-1][1] or j != cur[-1][0]:
+        cur = []
+        steps.append(cur)
+    cur.append((j, int(l), ph, t))
+dec_tokens = sum(1 for st in steps if st[0][2] == "decode")
+chunks = sum(1 for st in steps if st[0][2] == "prefill")
+print(f"E={E} L={L} k={topk[0].shape[1]} decode tokens {dec_tokens} prefill chunks {chunks}; "
+      f"one expert {a.expert_mib:.2f} MiB, all {E * L * a.expert_mib / 1024:.1f} GiB")
+
+
+def replay(fv, fr):
+    """(per decode token: vram, ram, disk reads; per prefill chunk: MiB from ram, MiB from disk)"""
+    cv, cr = int(fv * E), int(fr * E)
+    vram = [dict() for _ in range(L)]
+    ram = [dict() for _ in range(L)]          # experts on the host, not in VRAM; the rest are on disk
+    for l in range(L):                        # cold start: the lowest ids in RAM, as a load would leave them
+        for i in range(min(cr, E)):
+            ram[l][i] = 0
+    clock, pending = 0, collections.deque()
+    dv = dr = dd = 0
+    pr_ram = pr_disk = 0
+
+    def to_ram(l, i):
+        r = ram[l]
+        if cr <= 0:
+            return
+        if len(r) >= cr:
+            del r[min(r, key=r.get)]          # its copy goes back to disk, which holds everything
+        r[i] = clock
+
+    for st in steps:
+        clock += 1
+        ph = st[0][2]
+        while pending and pending[0][0] <= clock:
+            _, l, i = pending.popleft()
+            v = vram[l]
+            if i in v:
+                continue
+            if len(v) >= cv:
+                out = min(v, key=v.get)
+                del v[out]
+                to_ram(l, out)                 # exclusive: an evicted expert returns to host rows
+            v[i] = clock
+            ram[l].pop(i, None)
+        want = collections.Counter()
+        for _, l, _, t in st:
+            ids = t.ravel().tolist() if ph == "decode" else np.unique(t).tolist()
+            v, r = vram[l], ram[l]
+            for i in ids:
+                if i in v:
+                    v[i] = clock
+                    dv += ph == "decode"
+                    continue
+                if i in r:
+                    r[i] = clock
+                    if ph == "decode":
+                        dr += 1
+                    else:
+                        pr_ram += a.expert_mib
+                else:
+                    if ph == "decode":
+                        dd += 1
+                    else:
+                        pr_disk += a.expert_mib
+                    to_ram(l, i)
+                if ph == "decode":
+                    want[(l, i)] += 1
+        if ph == "decode":
+            for l, i in sorted(want, key=lambda k: (-want[k], (k[0] - clock) % L))[:a.budget]:
+                pending.append((clock + a.lag, l, i))
+    return dv / dec_tokens, dr / dec_tokens, dd / dec_tokens, pr_ram / max(chunks, 1), pr_disk / max(chunks, 1)
+
+
+ssd = [float(x) for x in a.ssd_gbs.split(",")]
+mib = 1024 ** 2
+print(f"\nper decode token: reads from VRAM / RAM / disk, and the time the RAM and disk reads add at {a.link_gbs:g} GB/s "
+      f"link and {' or '.join(f'{s:g}' for s in ssd)} GB/s disk; per prefill chunk: GiB staged from RAM / disk, seconds")
+for fv in [float(x) for x in a.vram.split(",")]:
+    print(f"\n-- VRAM {fv:.0%} of each layer's experts --")
+    print(f"{'RAM':>5}  {'vram':>6} {'ram':>6} {'disk':>6}  {'+ms ram':>8} " + " ".join(f"{f'+ms @{s:g}':>9}" for s in ssd)
+          + f"   {'chunk ram':>9} {'disk':>6} " + " ".join(f"{f's @{s:g}':>7}" for s in ssd))
+    for fr in [float(x) for x in a.ram.split(",")]:
+        if fv + fr > 1.0 + 1e-9:
+            fr = 1.0 - fv
+        v, r, d, pr, pd = replay(fv, fr)
+        ms_ram = r * a.expert_mib * mib / (a.link_gbs * 1e9) * 1e3
+        ms_disk = [d * a.expert_mib * mib / (s * 1e9) * 1e3 for s in ssd]
+        s_chunk = [pr * mib / (a.link_gbs * 1e9) + pd * mib / (s * 1e9) for s in ssd]
+        print(f"{fr:5.0%}  {v:6.1f} {r:6.1f} {d:6.1f}  {ms_ram:8.2f} " + " ".join(f"{m:9.2f}" for m in ms_disk)
+              + f"   {pr / 1024:9.2f} {pd / 1024:6.2f} " + " ".join(f"{t:7.2f}" for t in s_chunk), flush=True)
