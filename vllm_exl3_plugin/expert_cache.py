@@ -405,6 +405,10 @@ def _checksum(t: torch.Tensor) -> int:
     return int((v.to(torch.int64) * w).sum())
 
 
+#: `row_of` for an expert with no host row: the disk tier's (cpu_offload.disk_tier), read from the checkpoint on use
+DISK = -2
+
+
 class ExclusiveCache(ExpertCache):
     """Every expert in exactly one place: a VRAM slot or a host row.
 
@@ -442,8 +446,8 @@ class ExclusiveCache(ExpertCache):
         owners, updates, stage_updates = [], [], []
         for l, layer in enumerate(self.layers):
             blocks = [layer.exl3_host_blocks[label] for label in _LABELS]
-            rows = blocks[0].rows
-            resident = [e for e in range(E) if e not in rows]
+            rows, disk = blocks[0].rows, blocks[0].disk
+            resident = [e for e in range(E) if e not in rows and e not in disk]
             views = [tuple(getattr(layer, f"_exl3_{label}_trellis")[e] for label in _LABELS) for e in resident]
             cap = int(self.capacity[l])
             views += [tuple(self.slot_tensors[l][j][s] for j in range(3)) for s in range(cap)]
@@ -464,6 +468,8 @@ class ExclusiveCache(ExpertCache):
                 free.append(rows[e])
             for e in hosted[cap:]:
                 self.row_of[l, e] = rows[e]
+            for e in disk:
+                self.row_of[l, e] = DISK
             self.free_rows.append(free)
             self.views.append(views)
             self.reserved.append({})
@@ -489,7 +495,8 @@ class ExclusiveCache(ExpertCache):
             for l in range(L):
                 for e in range(E):
                     for j in range(3):
-                        self.ref[l, j, e] = _checksum(self._home(l, j, e))
+                        if self.row_of[l, e] != DISK:
+                            self.ref[l, j, e] = _checksum(self._home(l, j, e))
             self._verify(range(L), full=True)
 
     @property
@@ -670,6 +677,11 @@ class ExclusiveCache(ExpertCache):
         todo = [(l, e) for l in layers for e in range(self.E)] if full else sorted(experts)
         for l, e in todo:
             row = self.row_of[l, e]
+            if row == DISK:
+                # no home but the checkpoint: its entries stay null, so an unstaged use faults
+                if any(table[l, j, e] != 0 for j in range(3)):
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} is on disk but has a live entry")
+                continue
             for j in range(3):
                 if row >= 0:
                     want, want_stage = self._host_addr(l, j, row), self._window_addr(l, j, row) if stage is not None else None

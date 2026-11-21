@@ -92,7 +92,7 @@ _STATS: dict[str, int | bool] = {}
 def _reset_stats() -> None:
     _STATS.clear()
     _STATS.update(requested=False, selective=False, bytes=0, tensors=0, layers=set(),
-                  expert_bytes=0, moe_layers=set(), quota=None)
+                  expert_bytes=0, moe_layers=set(), quota=None, disk_experts=0)
 
 
 def cache_mode() -> str:
@@ -353,12 +353,28 @@ def place_embedding(tensors: dict[str, torch.Tensor], label: str) -> dict[str, t
 class HostBlock:
     """Pinned host rows for one MoE layer's offloaded experts, for one projection
     and one component. `rows` maps expert id to row; `view` is the UVA view the
-    pointer tables address, `host` the CPU side the loader writes."""
+    pointer tables address, `host` the CPU side the loader writes. With the disk
+    tier, `disk` holds the offloaded experts that have no row: they stay in the
+    checkpoint and are read on use (expert_store)."""
 
-    def __init__(self, rows: dict[int, int], shape, dtype):
+    def __init__(self, rows: dict[int, int], shape, dtype, disk: frozenset = frozenset()):
         self.rows = rows
+        self.disk = disk
         self.host = _pinned((len(rows), *shape), dtype)
         self.view = get_accelerator_view_from_cpu_tensor(self.host)
+
+
+def disk_tier() -> float | None:
+    """``EXL3_DISK_TIER``: the share of each layer's experts kept in host rows when the rest stay in the
+    checkpoint, read on use (docs/expert-cache.md, "A disk tier below host RAM"); None when off. Under the
+    exclusive cache only, whose rows already move between experts. Prefill only, for now: decode is refused."""
+    spec = os.environ.get("EXL3_DISK_TIER", "").strip()
+    if not spec:
+        return None
+    share = float(spec)
+    if not 0 < share <= 1:
+        raise ValueError(f"EXL3_DISK_TIER={spec}: a share of each layer's experts in host rows, in (0, 1]")
+    return share
 
 
 def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
@@ -378,6 +394,21 @@ def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
         return None
     nbytes = t.numel() * t.element_size()
     cached = cache_mode() != "off"
+    share = disk_tier()
+    if share is not None:
+        from . import expert_cache
+        if not cached or not expert_cache.EXCLUSIVE:
+            raise ValueError("EXL3_DISK_TIER needs the exclusive expert cache (EXL3_CACHE_EXCLUSIVE on, slots not 0)")
+        # every matching expert leaves the device: the first share of them to host rows, the rest stay on disk
+        taken = [e for e in range(param.exl3_num_experts)
+                 if _matches(loader.cpu_offload_params, f".{param.exl3_prefix}.{e}.{label}_proj.{param.exl3_name}.")]
+        rows = taken[:math.ceil(share * param.exl3_num_experts)]
+        for _ in rows:
+            _count(loader, param.exl3_prefix, nbytes, budget=False)
+        _STATS["disk_experts"] += len(taken) - len(rows)
+        if not taken:
+            return None
+        return HostBlock({e: row for row, e in enumerate(rows)}, t.shape, t.dtype, frozenset(taken[len(rows):]))
     quota = _host_quota(param.exl3_num_experts, nbytes) if cached else param.exl3_num_experts
     taken = []
     for e in range(param.exl3_num_experts):
@@ -672,6 +703,10 @@ def place_expert(param, t: torch.Tensor, label: str, expert_id: int) -> torch.Te
     block = param.exl3_blocks.get(label, _UNPLANNED)
     if block is _UNPLANNED:
         block = param.exl3_blocks[label] = _plan_block(param, t, label)
+    if block is not None and expert_id in block.disk:
+        # read on use from the checkpoint: no storage here, and a meta tensor's address is 0, so a pointer table
+        # entry for it is null and an unstaged read faults rather than computing on someone else's bytes
+        return torch.empty(t.shape, dtype=t.dtype, device="meta")
     row = block.rows.get(expert_id) if block is not None else None
     if row is None:
         return t.to(param.exl3_device).contiguous()

@@ -963,3 +963,66 @@ def test_slot_rows_are_sized_over_every_layer():
     mean = expert_cache.slot_row_bytes(layers)
     assert mean == -(-(8 * 1200 + 40 * 900) // 48)
     assert mean * 48 >= 8 * 1200 + 40 * 900 and expert_cache.size_slots(10**9, 0, 10**9, mean, 48, 10**6) * mean * 48 <= 10**9
+
+
+def test_disk_tier_keeps_a_share_in_host_rows_and_leaves_the_rest_on_disk(offload, monkeypatch):
+    """EXL3_DISK_TIER: every matching expert leaves the device, the first share of each layer's to host rows (rounded
+    up) and the rest to the checkpoint, as meta tensors -- address 0, so a pointer table entry for one is null and an
+    unstaged read faults rather than computing on whatever sits at a stale address. Only the rows count as hosted."""
+    import torch
+
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setenv("EXL3_DISK_TIER", "0.3")
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    loader = offload(_Loader({"experts"}))
+    cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
+    param = _Collector()
+    placed = [cpu_offload.place_expert(param, _expert_tensor(e), "gate", e) for e in range(8)]
+    block = param.exl3_blocks["gate"]
+    assert block.rows == {0: 0, 1: 1, 2: 2}
+    assert block.disk == frozenset(range(3, 8))
+    assert block.host.shape[0] == 3
+    assert all(_on_host(param, "gate", placed[e]) for e in range(3))
+    for e in range(3, 8):
+        assert placed[e].device.type == "meta" and placed[e].data_ptr() == 0
+        assert placed[e].shape == (4, 2, 32) and placed[e].dtype == torch.int16
+    cpu_offload.drain_host_copies()
+    assert torch.equal(block.host[2], _expert_tensor(2))
+    assert cpu_offload._STATS["expert_bytes"] == 3 * 512
+    assert cpu_offload._STATS["disk_experts"] == 5
+    assert loader.cpu_offload_bytes == 0
+
+
+def test_disk_tier_needs_the_exclusive_cache(offload, monkeypatch):
+    """The inclusive cache keeps a host copy of every hosted expert, and cache-off placement never moves one: neither
+    has anywhere to put an expert read from disk."""
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setenv("EXL3_DISK_TIER", "0.5")
+    offload(_Loader({"experts"}))
+    cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
+    with pytest.raises(ValueError, match="exclusive"):
+        cpu_offload.place_expert(_Collector(), _expert_tensor(0), "gate", 0)
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setattr(expert_cache, "EXCLUSIVE", False)
+    with pytest.raises(ValueError, match="exclusive"):
+        cpu_offload.place_expert(_Collector(), _expert_tensor(0), "gate", 0)
+
+
+@pytest.mark.parametrize("spec", ["0", "1.5", "-0.2"])
+def test_disk_tier_share_is_checked(monkeypatch, spec):
+    monkeypatch.setenv("EXL3_DISK_TIER", spec)
+    with pytest.raises(ValueError, match="EXL3_DISK_TIER"):
+        cpu_offload.disk_tier()
+
+
+def test_pointer_table_lives_on_a_real_device_when_experts_are_on_disk():
+    """A disk expert's meta tensor leads the list when expert 0 is on disk; the table must not follow it to meta,
+    whose tensors hold no values, and its entry is the null that marks the expert unstaged."""
+    import torch
+    from vllm_exl3_plugin.quantization.fused_moe import EXL3MoEMethod
+
+    real = [torch.zeros(4, dtype=torch.int16) for _ in range(2)]
+    table = EXL3MoEMethod._pointers([torch.empty(4, dtype=torch.int16, device="meta"), *real])
+    assert table.device.type == "cpu"
+    assert table.tolist() == [0, real[0].data_ptr(), real[1].data_ptr()]

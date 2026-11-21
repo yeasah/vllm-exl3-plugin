@@ -260,9 +260,11 @@ class EXL3MoEMethod(FusedMoEMethodBase):
         card during load. exllamav3's own `MultiLinear` builds its tables the
         same way, from separately allocated tensors.
         """
-        return torch.tensor(
-            [t.data_ptr() for t in tensors], dtype=torch.long, device=tensors[0].device
-        )
+        # on a real device: with the disk tier an expert's tensor can be a meta tensor (address 0), the first among them
+        device = next((t.device for t in tensors if t.device.type != "meta"), None)
+        if device is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        return torch.tensor([t.data_ptr() for t in tensors], dtype=torch.long, device=device)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         cpu_offload.drain_host_copies()   # host rows are written asynchronously during load
