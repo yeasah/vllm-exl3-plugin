@@ -1163,6 +1163,16 @@ the next layer's reads queued deep. Prefill runs outside graphs, so nothing ther
   is. The cost when nothing is on disk is a handshake per layer (microseconds; ~48 a token), and graphs stay. It is the
   most intrusive: driver memory operations through ctypes, a latency-critical host thread, the pointer table written
   mid-forward from another stream, and graph capture to validate. Probably the production design if A's numbers hold.
+- **A with breakable capture: probably the way.** vLLM's breakable capture is driven by a decorator,
+  `eager_break_during_capture` (`vllm/compilation/breakable_cudagraph.py`; attention, MLA and the sparse indexer use
+  it): a decorated custom op ends the current graph segment, runs eagerly at replay, and a new segment starts. Wrapping
+  the EXL3 MoE op in it when a disk tier is on puts A's round trip in that eager gap while everything else replays as
+  graphs -- most of B's benefit with none of its in-graph machinery. Three conditions: it applies only under breakable
+  capture, not FULL, which EXL3 Qwen4Exp is forced to today because breakable capture fails for EXL3 with GDN layers
+  (docs/upstream.md), so this waits on that fix, which the vLLM bump needs anyway; the op must write into a
+  caller-provided output (a fresh tensor changes address each replay), so the MoE apply needs adapting; and an MoE break
+  per layer roughly doubles Qwen4Exp's eager gaps, perhaps a few ms a token, to measure against full graphs. B becomes the
+  fallback if those breaks measure too slow.
 - **C. Skip disk-resident experts.** Drop them from the token's top-k and renormalize: graph-friendly and nearly free to
   build, but output then depends on cache state -- lossy, and different from run to run. It breaks the invariant on
   purpose, and would need its own quality measurement. Not a default.
@@ -1174,7 +1184,8 @@ back (a deliberately missed load) to see it fire before trusting any number.
 **Prototype order.** (1) The RAM-as-cache state and the checkpoint reader, with prefill's bypass reads: contained in
 `cpu_offload` and the exclusive cache, and enough to measure prefill against the simulation. (2) Decode path A, eager,
 to measure real disk reads and latency per token against the replay's figures -- the check that the simulation holds.
-(3) Only if both hold, path B.
+(3) If both hold: A through a breakable MoE op, once the breakable-capture fix lands with the vLLM bump; B only if its
+breaks cost too much.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
