@@ -405,6 +405,10 @@ def _checksum(t: torch.Tensor) -> int:
     return int((v.to(torch.int64) * w).sum())
 
 
+#: Disk experts decode may move into host rows a step (``EXL3_DISK_ADMIT_PER_STEP``); 0, the default, admits every
+#: routed one, as tier_replay.py models it. Each admission is one more checkpoint read, at the next step's start.
+_ADMIT_BUDGET = int(os.environ.get("EXL3_DISK_ADMIT_PER_STEP", "0"))
+
 #: `row_of` for an expert with no host row: the disk tier's (cpu_offload.disk_tier), read from the checkpoint on use
 DISK = -2
 
@@ -439,6 +443,10 @@ class ExclusiveCache(ExpertCache):
         self.reserved: list[dict[int, int]] = []      # per layer: slot -> incoming X
         self.pending_d: list = []
         self.pending_p: list = []
+        self.pending_a: list = []                     # admissions from disk: (event, [(l, x, z, r)])
+        self.admitting: list[set] = [set() for _ in self.layers]
+        self.admitted = 0
+        self.disk_on = any(getattr(layer, "exl3_disk_pos", None) for layer in self.layers)
         self.stage = None
         if self.layers[0].exl3_stage is not None:
             self.stage = torch.empty((L, 3, E), dtype=torch.long, device=self.device)
@@ -494,9 +502,15 @@ class ExclusiveCache(ExpertCache):
             self.ref = numpy.zeros((L, 3, E), dtype=object)
             for l in range(L):
                 for e in range(E):
+                    if self.row_of[l, e] == DISK:
+                        # from the checkpoint, so an admission's fill is checked against bytes it did not read itself
+                        from . import cpu_offload
+                        got = cpu_offload._DISK["store"].read(self.layers[l].exl3_store_key, e)
+                        for j in range(3):
+                            self.ref[l, j, e] = _checksum(got[_LABELS[j]])
+                        continue
                     for j in range(3):
-                        if self.row_of[l, e] != DISK:
-                            self.ref[l, j, e] = _checksum(self._home(l, j, e))
+                        self.ref[l, j, e] = _checksum(self._home(l, j, e))
             self._verify(range(L), full=True)
 
     @property
@@ -551,6 +565,13 @@ class ExclusiveCache(ExpertCache):
 
     def step_begin(self) -> None:
         moved, updates, stage_updates = set(), [], []
+        # 4. admissions whose rows nothing queued can read any more: X read from disk into its row
+        while self.pending_a and self.pending_a[0][0].query():
+            _, done = self.pending_a.pop(0)
+            d, st = self._fill_rows(done)
+            updates += d
+            stage_updates += st
+            moved.update((l, x) for l, x, _, _ in done)
         # 3. landed promotions: X onto its slot, and its old row is free
         while self.pending_p and self.pending_p[0][0].query():
             _, done = self.pending_p.pop(0)
@@ -638,6 +659,81 @@ class ExclusiveCache(ExpertCache):
             issued.append((l, x, y, s, f))
         if issued:
             self._write_back(issued)
+        if self.disk_on:
+            self._admit(rows, flat_ids)
+
+    # ------------------------------------------------------------ the disk tier
+
+    def _admit(self, rows, flat_ids) -> None:
+        """Decode's routed disk experts move into host rows, the most-routed first (up to `_ADMIT_BUDGET`): each evicts
+        the least recently used expert in a row (Z), which goes back to disk-only -- the checkpoint holds it, so
+        nothing is written back. Z flips now: later ops read it from disk, staged at the vacated row's window
+        position. X is read into the row only once everything already queued, which could still be copying Z's
+        row into the window, has run (`_fill_rows`, from step_begin); until then it is read per use, as before.
+        Prefill routing never reaches here (the routing ring holds decode rows), so prefill bypasses RAM."""
+        want = self.row_of[rows, flat_ids] == DISK
+        keys, counts = numpy.unique(rows[want] * self.E + flat_ids[want], return_counts=True)
+        issued, updates, stage_updates = [], [], []
+        for i in numpy.argsort(-counts, kind="stable"):
+            if _ADMIT_BUDGET and len(issued) >= _ADMIT_BUDGET:
+                break
+            l, x = divmod(int(keys[i]), self.E)
+            if x in self.admitting[l]:
+                continue
+            z = self._row_victim(l)
+            if z is None:
+                continue
+            r = int(self.row_of[l, z])
+            self.row_of[l, z] = DISK
+            self.offloaded[l, z] = False
+            self.layers[l].exl3_disk_pos[z] = r     # the row's window position, unused until X lands there
+            updates += [(self._entry(l, j, z), 0) for j in range(3)]
+            stage_updates += [(self._entry(l, j, z), self._window_addr(l, j, r)) for j in range(3)]
+            self.admitting[l].add(x)
+            issued.append((l, x, z, r))
+        if not issued:
+            return
+        self._write(updates)
+        self._write_stage(stage_updates)
+        ready = torch.cuda.Event()
+        ready.record(torch.cuda.current_stream(self.device))
+        self.pending_a.append((ready, issued))
+
+    def _row_victim(self, l: int) -> int | None:
+        """The least recently used expert in a host row that no promotion has reserved, and not used this step."""
+        row_of, slot_of, use = self.row_of[l], self.slot_of[l], self.last_use[l]
+        cand = numpy.flatnonzero((row_of >= 0) & (slot_of < 0) & (use < self.clock))
+        if not len(cand):
+            return None
+        return int(cand[numpy.argmin(use[cand])])
+
+    def _fill_rows(self, done):
+        """Read each admitted X into its row, then flip it there; Z takes X's window position on disk."""
+        from . import cpu_offload
+
+        store = cpu_offload._DISK["store"]
+
+        def one(item):
+            l, x, _, r = item
+            layer = self.layers[l]
+            parts = store.index[(layer.exl3_store_key, x)][3]
+            out = {label: layer.exl3_host_blocks[label].host[r].view(-1).view(cpu_offload._STORE_DTYPES[dt]).view(shape)
+                   for label, (_, _, dt, shape) in parts.items()}
+            store.read(layer.exl3_store_key, x, out)
+
+        list(cpu_offload._DISK["pool"].map(one, done))
+        updates, stage_updates = [], []
+        for l, x, z, r in done:
+            pos = self.layers[l].exl3_disk_pos
+            pos[z] = pos.pop(x)
+            stage_updates += [(self._entry(l, j, z), self._window_addr(l, j, pos[z])) for j in range(3)]
+            d, st = self._to_host(l, x, r)
+            updates += d
+            stage_updates += st
+            self.admitting[l].discard(x)
+        self.admitted += len(done)
+        cpu_offload._STATS["disk_admitted"] = cpu_offload._STATS.get("disk_admitted", 0) + len(done)
+        return updates, stage_updates
 
     def _victim(self, l: int) -> int | None:
         best, best_use = None, None
@@ -678,9 +774,14 @@ class ExclusiveCache(ExpertCache):
         for l, e in todo:
             row = self.row_of[l, e]
             if row == DISK:
-                # no home but the checkpoint: its entries stay null, so an unstaged use faults
+                # no home but the checkpoint: its entries stay null, so an unstaged use faults, and its staged
+                # entries point at its window position, where routed staging reads it
                 if any(table[l, j, e] != 0 for j in range(3)):
                     raise RuntimeError(f"expert cache: layer {l} expert {e} is on disk but has a live entry")
+                pos = self.layers[l].exl3_disk_pos[e]
+                if stage is not None and any(stage[l, j, e] != self._window_addr(l, j, pos) for j in range(3)):
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} is on disk but its staged entry is not "
+                                       f"its window position {pos}")
                 continue
             for j in range(3):
                 if row >= 0:

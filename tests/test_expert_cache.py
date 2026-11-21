@@ -133,3 +133,100 @@ def test_detector_fires_on_an_unordered_copy(monkeypatch):
     monkeypatch.setattr(expert_cache.ExclusiveCache, "_write_back", eager)
     with pytest.raises(RuntimeError, match="expert cache"):
         _drive(cache, 200)
+
+
+ROWS, DISK = 8, (8, 9, 10, 11)   # disk-tier layers: experts 0-7 in rows, 8-11 in the checkpoint, 12-15 resident
+
+
+def _disk_layers(monkeypatch, tmp_path, layers=3):
+    """Layers as `build_staging` leaves them with EXL3_DISK_TIER: disk experts have null decode entries and staged
+    entries at window positions past the rows, and a real checkpoint behind them for admissions to read."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from safetensors.torch import save_file
+
+    from vllm_exl3_plugin.expert_store import ExpertStore
+
+    out, tensors = [], {}
+    row_bytes = 8 * 64 * 2
+    for n in range(layers):
+        g = torch.Generator().manual_seed(2000 + n)
+        layer = types.SimpleNamespace(exl3_num_experts=E, top_k=2, prefix=f"m.layers.{n}.mlp.experts")
+        window = torch.zeros(3 * (ROWS + len(DISK)) * row_bytes, dtype=torch.uint8, device="cuda")
+        blocks, plan, stage_tables = {}, {}, []
+        layer.exl3_disk_pos = {e: ROWS + k for k, e in enumerate(DISK)}
+        layer.exl3_store_key = f"model.layers.{n}.mlp.experts"
+        for j, label in enumerate(LABELS):
+            data = [torch.randint(-30000, 30000, (8, 64), generator=g, dtype=torch.int16) for _ in range(E)]
+            for e in range(E):
+                tensors[f"model.layers.{n}.mlp.experts.{e}.{label}_proj.trellis"] = data[e]
+            block = cpu_offload.HostBlock({e: e for e in range(ROWS)}, (8, 64), torch.int16, frozenset(DISK))
+            for e in range(ROWS):
+                block.host[e].copy_(data[e])
+            decode = ([block.view[e].data_ptr() for e in range(ROWS)] + [0] * len(DISK)
+                      + [data[e].cuda() for e in range(ROWS + len(DISK), E)])
+            keep = [t for t in decode if isinstance(t, torch.Tensor)]
+            ptrs = [t.data_ptr() if isinstance(t, torch.Tensor) else t for t in decode]
+            setattr(layer, f"_exl3_{label}_trellis",
+                    [block.view[e] for e in range(ROWS)] + [torch.empty((8, 64), dtype=torch.int16, device="meta")
+                                                            for _ in DISK] + keep)
+            setattr(layer, f"exl3_{label}_trellis_ptrs", torch.tensor(ptrs, device="cuda"))
+            dst = window[j * (ROWS + len(DISK)) * row_bytes:(j + 1) * (ROWS + len(DISK)) * row_bytes]
+            plan[label] = (dst, row_bytes)
+            t = torch.tensor(ptrs)
+            for e in range(ROWS):
+                t[e] = dst.data_ptr() + e * row_bytes
+            for e, pos in layer.exl3_disk_pos.items():
+                t[e] = dst.data_ptr() + pos * row_bytes
+            stage_tables.append(t.cuda())
+            blocks[label] = block
+        layer.exl3_host_blocks = blocks
+        layer.exl3_stage = ([], tuple(stage_tables))
+        layer.exl3_stage_plan = plan
+        layer._window = window
+        out.append(layer)
+    for label in LABELS:   # the checkpoint also carries scales between trellises, as real ones do
+        for n in range(layers):
+            for e in range(E):
+                tensors[f"model.layers.{n}.mlp.experts.{e}.{label}_proj.suh"] = torch.ones(16, dtype=torch.half)
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    monkeypatch.setattr(cpu_offload, "_DISK", {"store": ExpertStore(str(tmp_path)), "done": None,
+                                               "pool": ThreadPoolExecutor(4)})
+    return out
+
+
+def _disk_cache(monkeypatch, tmp_path, slots=3):
+    monkeypatch.setattr(expert_cache, "VERIFY", True)
+    return expert_cache.ExclusiveCache(_disk_layers(monkeypatch, tmp_path), slots, 8)
+
+
+def test_disk_admissions_keep_every_expert_on_its_own_bytes(monkeypatch, tmp_path):
+    """Decode's routed disk experts move into host rows, evicting the coldest row expert to disk; the detector,
+    whose references for disk experts come from the checkpoint, checks each filled row and every entry."""
+    cache = _disk_cache(monkeypatch, tmp_path)
+    big = torch.randn(2048, 2048, device="cuda", dtype=torch.half)
+    _drive(cache, 300, busy=lambda: [big @ big for _ in range(3)])
+    assert cache.admitted > 20, "routing should have pulled disk experts into rows"
+    assert cache.promoted > 20
+    cache._verify(range(len(cache.layers)), full=True)
+    for l, layer in enumerate(cache.layers):
+        on_disk = set(numpy.flatnonzero(cache.row_of[l] == expert_cache.DISK).tolist())
+        assert len(on_disk) == len(DISK), "admission swaps one expert in for one out"
+        assert set(layer.exl3_disk_pos) == on_disk
+        assert sorted(layer.exl3_disk_pos.values()) == [ROWS + k for k in range(len(DISK))], \
+            "once admissions land, disk experts hold the window positions past the rows"
+        on_host = int((cache.row_of[l] >= 0).sum())
+        in_vram = int((cache.slot_of[l] >= 0).sum())
+        assert on_host + in_vram + len(on_disk) == E
+        assert len(cache.free_rows[l]) == ROWS - on_host
+
+
+def test_detector_fires_on_an_admission_that_reads_the_wrong_expert(monkeypatch, tmp_path):
+    """The failure put back: an admitted row filled with another expert's bytes."""
+    cache = _disk_cache(monkeypatch, tmp_path)
+    store = cpu_offload._DISK["store"]
+    real = store.read
+    monkeypatch.setattr(store, "read", lambda key, e, out=None: real(key, e ^ 1, out) if out is not None
+                        and out["gate"].is_pinned() else real(key, e, out))
+    with pytest.raises(RuntimeError, match="wrong bytes"):
+        _drive(cache, 200)

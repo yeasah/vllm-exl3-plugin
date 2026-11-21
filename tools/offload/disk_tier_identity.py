@@ -64,7 +64,7 @@ def run_arm(arm):
         c = o.outputs[0]
         res.append({"n": len(p), "prompt_logprobs": plp, "tokens": list(c.token_ids),
                     "logprobs": [d[t].logprob for d, t in zip(c.logprobs, c.token_ids)]})
-    stats = {k: cpu_offload._STATS.get(k) for k in ("disk_experts", "disk_reads", "expert_bytes")}
+    stats = {k: cpu_offload._STATS.get(k) for k in ("disk_experts", "disk_reads", "disk_admitted", "expert_bytes")}
     store = cpu_offload._DISK.get("store")
     if store is not None:
         stats.update(store_reads=store.reads, store_gib=store.bytes / 2**30)

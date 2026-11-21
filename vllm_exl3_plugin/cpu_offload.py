@@ -1099,47 +1099,51 @@ def _open_disk_tier(layers) -> None:
 def _read_disk(layer, want) -> list:
     """Read the layer's disk experts `want` accepts into their window positions; returns (position, expert)
     pairs. Synchronous: the reads run on a thread pool, a deep queue being what an SSD needs, then one copy a
-    run of positions on the current stream. The pinned sources are reused by the next layer's reads, so
-    those wait for this layer's copies to land first."""
+    run of positions on the current stream. The pinned sources are reused by the next batch's reads, so
+    those wait for this batch's copies to land first. They hold a layer's disk experts as loaded; while an
+    admission is pending (expert_cache, `_admit`) a layer has one more on disk per admission, so the reads
+    go in batches of what the sources hold."""
     pos = getattr(layer, "exl3_disk_pos", None)
     if not pos:
         return []
-    es = [e for e in sorted(pos) if want(e)]
+    es = sorted((e for e in pos if want(e)), key=pos.__getitem__)   # by position, so runs coalesce
     if not es:
         return []
-    t0 = time.perf_counter()
-    if _DISK["done"] is not None:
-        _DISK["done"].synchronize()
-    t1 = time.perf_counter()
     store, key, pinned = _DISK["store"], layer.exl3_store_key, _DISK["pinned"]
     plan = layer.exl3_stage_plan
     parts = store.index[(key, es[0])][3]
+    cap = min(pinned[label].numel() // nbytes for label, (_, nbytes, _, _) in parts.items())
 
     def one(k, e):
         out = {}
-        for label, (_, nbytes, _, shape) in parts.items():
-            src = pinned[label][k * nbytes:(k + 1) * nbytes]
-            out[label] = src.view(_STORE_DTYPES[parts[label][2]]).view(shape)
+        for label, (_, nbytes, dt, shape) in parts.items():
+            out[label] = pinned[label][k * nbytes:(k + 1) * nbytes].view(_STORE_DTYPES[dt]).view(shape)
         store.read(key, e, out)
 
-    list(_DISK["pool"].map(one, range(len(es)), es))
-    t2 = time.perf_counter()
-    # where a disk-tier step's time goes: waiting for the last layer's copies out of the pinned sources, then reading
-    _STATS["disk_wait_s"] = _STATS.get("disk_wait_s", 0.0) + t1 - t0
-    _STATS["disk_read_s"] = _STATS.get("disk_read_s", 0.0) + t2 - t1
-    for label, (dst, row_bytes) in plan.items():
-        i = 0
-        while i < len(es):
-            k = i
-            while k + 1 < len(es) and pos[es[k + 1]] == pos[es[k]] + 1:
-                k += 1
-            a = pos[es[i]] * row_bytes
-            dst[a:a + (k - i + 1) * row_bytes].copy_(pinned[label][i * row_bytes:(k + 1) * row_bytes],
-                                                     non_blocking=True)
-            i = k + 1
-    done = torch.cuda.Event()
-    done.record()
-    _DISK["done"] = done
+    for b in range(0, len(es), cap):
+        batch = es[b:b + cap]
+        t0 = time.perf_counter()
+        if _DISK["done"] is not None:
+            _DISK["done"].synchronize()
+        t1 = time.perf_counter()
+        list(_DISK["pool"].map(one, range(len(batch)), batch))
+        t2 = time.perf_counter()
+        # where a disk-tier step's time goes: waiting for earlier copies out of the pinned sources, then reading
+        _STATS["disk_wait_s"] = _STATS.get("disk_wait_s", 0.0) + t1 - t0
+        _STATS["disk_read_s"] = _STATS.get("disk_read_s", 0.0) + t2 - t1
+        for label, (dst, row_bytes) in plan.items():
+            i = 0
+            while i < len(batch):
+                k = i
+                while k + 1 < len(batch) and pos[batch[k + 1]] == pos[batch[k]] + 1:
+                    k += 1
+                a = pos[batch[i]] * row_bytes
+                dst[a:a + (k - i + 1) * row_bytes].copy_(pinned[label][i * row_bytes:(k + 1) * row_bytes],
+                                                         non_blocking=True)
+                i = k + 1
+        done = torch.cuda.Event()
+        done.record()
+        _DISK["done"] = done
     _STATS["disk_reads"] = _STATS.get("disk_reads", 0) + len(es)
     return [(pos[e], e) for e in es]
 

@@ -45,7 +45,8 @@ ids = (ids * (need // len(ids) + 1))[:need]
 def snap():
     store = cpu_offload._DISK["store"]
     return dict(reads=store.reads, bytes=store.bytes, read_s=cpu_offload._STATS.get("disk_read_s", 0.0),
-                wait_s=cpu_offload._STATS.get("disk_wait_s", 0.0))
+                wait_s=cpu_offload._STATS.get("disk_wait_s", 0.0), staged=cpu_offload._STATS.get("disk_reads", 0),
+                admitted=cpu_offload._STATS.get("disk_admitted", 0))
 
 
 def run(name, prompt, sp):
@@ -66,8 +67,11 @@ n = a.chunk * a.chunks
 _, took, d = run(f"prefill {n} tokens", ids[600:600 + n], SamplingParams(temperature=0, max_tokens=1))
 print(f"  per {a.chunk}-token chunk: {took / a.chunks:.2f} s wall, {d['bytes'] / a.chunks / 2**30:.2f} GiB and "
       f"{d['read_s'] / a.chunks:.2f} s from disk; {n / took:.0f} tok/s")
-out, took, d = run(f"decode {a.decode} tokens", ids[:200], SamplingParams(temperature=0, max_tokens=a.decode,
-                                                                           ignore_eos=True))
-toks = len(out.outputs[0].token_ids)
-print(f"  per token: {1e3 * took / toks:.1f} ms wall (incl. a 200-token prefill), {d['reads'] / toks:.1f} disk reads, "
-      f"{1e3 * d['read_s'] / toks:.1f} ms reading")
+for name, start in (("cold", 0), ("warm", 300)):
+    # the second request decodes other text after the first warmed the RAM tier with its decode reads
+    out, took, d = run(f"decode {a.decode} tokens, {name}", ids[start:start + 200],
+                       SamplingParams(temperature=0, max_tokens=a.decode, ignore_eos=True))
+    toks = len(out.outputs[0].token_ids)
+    print(f"  per token: {1e3 * took / toks:.1f} ms wall (incl. a 200-token prefill); disk reads {d['reads'] / toks:.1f} "
+          f"({d['staged'] / toks:.1f} staged for use, {d['admitted'] / toks:.1f} filling admitted rows), "
+          f"{1e3 * d['read_s'] / toks:.1f} ms staging reads", flush=True)

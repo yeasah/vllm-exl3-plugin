@@ -1121,3 +1121,19 @@ def test_disk_tier_refuses_sliced_experts(offload, monkeypatch, tmp_path):
                         lambda param, t, label, e: real(param, t[:, :, :16].contiguous(), label, e))
     with pytest.raises(RuntimeError, match="sliced"):
         _disk_layer(offload, monkeypatch, tmp_path)
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="events need CUDA")
+def test_disk_reads_batch_past_what_the_pinned_sources_hold(offload, monkeypatch, tmp_path):
+    """A pending admission leaves a layer one more expert on disk than at load, past what the pinned sources were
+    sized for: the reads go in batches, and each still lands at its own window position."""
+    layer, window = _disk_layer(offload, monkeypatch, tmp_path)
+    for label in list(cpu_offload._DISK["pinned"]):
+        cpu_offload._DISK["pinned"][label] = cpu_offload._DISK["pinned"][label][:2 * 512]   # room for two
+    layer.exl3_disk_pos[2] = 2      # expert 2 evicted to disk, staged at its old row's position
+    counts = [0, 0, 1, 0, 1, 1, 0, 1, 0]
+    staged = cpu_offload.stage_routed(layer.exl3_stage_idx, counts, _decode(layer))
+    for j, label in enumerate(("gate", "up", "down")):
+        for e in (2, 4, 5, 7):
+            _check_staged(staged[j], None, {}, window, label, e)
+    assert cpu_offload._DISK["store"].reads == 4
