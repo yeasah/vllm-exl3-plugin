@@ -168,6 +168,18 @@ and trade slices on Qwen3.6-35B-A3B. The models where they win scale near rfn^2 
 rows (Ornith: 1.9 at every depth; 27B: 1.45-1.9). The others don't: the MoE at 0.44-1.45, and gemma
 before its chaos was explained.
 
+**A MoE where the recipe wins (LFM2.5-8B-A1B probe, 4.00, 2026-11-20).** At equal size, measured: the recipe
+against uniform bits without the -hq floor (`--arm hq0`, both 0.096 bpw under -hq 1) is 0.65 / 0.69 / 0.69 (wild / swe
+/ self). Against the -hq 1 default, size-matched (the probe's projection, recipe 2.2% smaller): 0.950-0.975 /
+0.904-0.948 / 1.010-1.029. So -hq 1 captures most of what the recipe finds, and the recipe still adds 5-10% on the
+real-use slices, against 0.6-1.0% draw sd. -hq 2 does not pay for its bytes (1.02-1.09 size-matched). Two things
+this changes:
+- **The exponent predictor fails here.** LFM's own-voice rows scale at median 1.13 (0.34-1.97), the losing MoE's
+  profile, yet the recipe wins. Candidate (1) below needs more than the exponent.
+- **Face-value comparisons with -hq are size-confounded.** The recipe is 2.2% smaller than -hq 1 at the same nominal
+  rate, and read at face value it lost on two slices of three (1.085 / 1.033 / 1.154). Check whether the 35B's
+  "trades slices" compared rungs of equal size before treating it as a loss.
+
 **Candidates:** (1) the exponent profile as a cheap predictor: a 20-row own-voice measurement, or a few
 tensors per depth band, before committing to the full one. (2) Per-tensor or per-family exponents in
 `sc_optimize` instead of the pinned `-al 2.0`, tested on the 35B. The near-linear regime there (and
