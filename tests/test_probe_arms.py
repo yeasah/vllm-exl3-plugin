@@ -155,3 +155,18 @@ def test_size_matched_projection(capsys):
     assert "size_matched" not in out["arms"]["r"]
 
 
+
+
+def test_a_draw_job_asks_for_the_draws_still_to_build(tmp_path):
+    names = [f"4.00bpw-probe-d{k}" for k in range(5)]
+    for n in names[:3]:
+        (tmp_path / n).mkdir()
+        (tmp_path / n / "quantization_config.json").write_text("{}")
+    built = lambda name: lambda: (tmp_path / name / "quantization_config.json").exists()
+    done, slots, cmd, env = probe.draw_job(built, names, ["-b", "4.0"], "probe")
+    assert slots == 2 and cmd[cmd.index("--draws") + 1] == "5" and not done()
+    for n in names[3:]:
+        (tmp_path / n).mkdir()
+        (tmp_path / n / "quantization_config.json").write_text("{}")
+    done, slots, _, _ = probe.draw_job(built, names, ["-b", "4.0"], "probe")
+    assert slots == 1 and done()

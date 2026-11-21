@@ -166,11 +166,15 @@ def arm_names(spec, tag, n):
 
 def draw_job(built, names, args, suffix):
     """The quantize job for a set of draws at seed offsets 0 .. n-1: quantize --draws names them -d0.., and one draw is
-    a singleton named -d0 at offset 0, the same rung --draws would build first."""
+    a singleton named -d0 at offset 0, the same rung --draws would build first. It asks the scheduler for one slot per
+    draw still to build, not per draw: quantize skips finished ones at once, and five draws with three done held four
+    slots of 0,1,0,1 for two conversions (2026-11-21). That reads quantize's own test for a finished rung (`built`,
+    its quantization_config.json, as Job.is_complete); were they to disagree, a slot is under-asked, nothing worse."""
     done = lambda: all(built(n)() for n in names)
+    pending = sum(not built(n)() for n in names)
     if len(names) == 1:
         return (done, 1, ["quantize", *args, "--suffix", f"{suffix}-d0"], {"EXL3_SEED_IDX_OFFSET": "0"})
-    return (done, len(names), ["quantize", *args, "--suffix", suffix, "--draws", str(len(names))], None)
+    return (done, max(pending, 1), ["quantize", *args, "--suffix", suffix, "--draws", str(len(names))], None)
 
 
 def adopt_singleton(W, old, new):
