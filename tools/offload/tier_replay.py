@@ -23,6 +23,7 @@ ap.add_argument("--lag", type=int, default=2)
 ap.add_argument("--budget", type=int, default=32)
 ap.add_argument("--link-gbs", type=float, default=20.0, help="UVA reads and staging copies from host RAM, GB/s")
 ap.add_argument("--ssd-gbs", default="2,6", help="disk read rates to bracket, GB/s (random ~1 MiB reads)")
+ap.add_argument("--concurrent", default=None, help="e.g. 1,2,4: decode with n requests sharing each step instead")
 ap.add_argument("--prefill-bypass", action="store_true",
                 help="prefill's disk reads are staged and used but not kept in RAM")
 ap.add_argument("--deep-gbs", default="5.4", help="disk rate for prefill staging, which can run deep queues, GB/s")
@@ -48,8 +49,11 @@ print(f"E={E} L={L} k={topk[0].shape[1]} decode tokens {dec_tokens} prefill chun
       f"one expert {a.expert_mib:.2f} MiB, all {E * L * a.expert_mib / 1024:.1f} GiB")
 
 
-def replay(fv, fr):
-    """(per decode token: vram, ram, disk reads; per prefill chunk: MiB from ram, MiB from disk)"""
+def replay(fv, fr, steps=steps, budget=None, unique=False):
+    """(per decode step: vram, ram, disk reads; per prefill chunk: MiB from ram, MiB from disk). With merged steps
+    (several requests' tokens a step), `unique` counts an expert once per layer per step, as a batched step reads it."""
+    budget = a.budget if budget is None else budget
+    n_dec = max(sum(1 for st in steps if st[0][2] == "decode"), 1)
     cv, cr = int(fv * E), int(fr * E)
     vram = [dict() for _ in range(L)]
     ram = [dict() for _ in range(L)]          # experts on the host, not in VRAM; the rest are on disk
@@ -86,7 +90,7 @@ def replay(fv, fr):
         want = collections.Counter()
         before = (pr_ram, pr_disk)
         for _, l, _, t in st:
-            ids = t.ravel().tolist() if ph == "decode" else np.unique(t).tolist()
+            ids = t.ravel().tolist() if ph == "decode" and not unique else np.unique(t).tolist()
             v, r = vram[l], ram[l]
             for i in ids:
                 if i in v:
@@ -110,13 +114,54 @@ def replay(fv, fr):
                 if ph == "decode":
                     want[(l, i)] += 1
         if ph == "decode":
-            for l, i in sorted(want, key=lambda k: (-want[k], (k[0] - clock) % L))[:a.budget]:
+            for l, i in sorted(want, key=lambda k: (-want[k], (k[0] - clock) % L))[:budget]:
                 pending.append((clock + a.lag, l, i))
         elif st[0][3].shape[0] >= 1536:
             full.append((st[0][3].shape[0], pr_ram - before[0], pr_disk - before[1]))
     replay.full = full
-    return dv / dec_tokens, dr / dec_tokens, dd / dec_tokens, pr_ram / max(chunks, 1), pr_disk / max(chunks, 1)
+    return dv / n_dec, dr / n_dec, dd / n_dec, pr_ram / max(chunks, 1), pr_disk / max(chunks, 1)
 
+
+def batched_steps(n):
+    """Decode only: n requests at a time share each step, a new one joining as one ends (routing_replay.py's)."""
+    jobs = collections.defaultdict(list)
+    cur = {}
+    for st in steps:
+        if st[0][2] != "decode":
+            continue
+        jobs[st[0][0]].append(st)
+    queue = collections.deque(sorted(jobs))
+    active, out = [], []
+    while queue or active:
+        while queue and len(active) < n:
+            active.append(collections.deque(jobs[queue.popleft()]))
+        merged = {}
+        for q in active:
+            for _, l, _, t in q.popleft():
+                merged.setdefault(l, []).append(t)
+        active = [q for q in active if q]
+        out.append([(0, l, "decode", np.vstack(v)) for l, v in sorted(merged.items())])
+    return out
+
+
+if a.concurrent:
+    ssd = [float(x) for x in a.ssd_gbs.split(",")]
+    print(f"\nconcurrent decode (no prefill): n requests a step, an expert read once per layer per step, promotion "
+          f"budget {a.budget} x n; disk time at {' or '.join(f'{x:g}' for x in ssd)} GB/s, per step and per token")
+    for fv in [float(x) for x in a.vram.split(",")]:
+        print(f"\n-- VRAM {fv:.0%} --")
+        print(f"{'RAM':>5} {'n':>2}  {'vram':>6} {'ram':>6} {'disk':>6}  " +
+              " ".join(f"{f'ms/step @{x:g}':>13} {f'ms/tok @{x:g}':>12}" for x in ssd) + f"  {'disk/tok vs n=1':>15}")
+        for fr in [float(x) for x in a.ram.split(",")]:
+            fr = min(fr, 1.0 - fv)
+            base = None
+            for n in [int(x) for x in a.concurrent.split(",")]:
+                v, r, d, _, _ = replay(fv, fr, batched_steps(n), a.budget * n, unique=True)
+                ms = [d * a.expert_mib * 2**20 / (x * 1e9) * 1e3 for x in ssd]
+                base = base or d
+                print(f"{fr:5.0%} {n:2d}  {v:6.1f} {r:6.1f} {d:6.1f}  " +
+                      " ".join(f"{m:13.2f} {m / n:12.2f}" for m in ms) + f"  {d / n / base:15.2f}x", flush=True)
+    sys.exit(0)
 
 ssd = [float(x) for x in a.ssd_gbs.split(",")]
 deep = [float(x) for x in a.deep_gbs.split(",")]

@@ -1108,9 +1108,23 @@ queue depth 1 (0.64 ms a read), 5.44 GB/s at 8. Decode's reads land about one ev
 reads, the 2 GB/s column; prefill's staging is bulk and runs deep. `/home/cache` is a VM disk on the hypervisor's
 dm-cache, so O_DIRECT in the guest may still be helped by host caching: a best case for this box.
 
-**Not settled:** concurrency (one stream here; more requests spread routing and raise disk reads -- set against
-serializing requests and paying it in time to first token), and whether decode disk reads could be issued ahead (routing
-is only known per layer). If a model justifies building it, the next step is
+**Concurrency degrades it gently** (`--concurrent 1,2,4,8`: n requests' decode tokens a step, an expert read once per
+layer per step, the promotion budget 32 x n). Disk time per token at 30% VRAM, at the depth-1 rate (2 GB/s):
+
+| RAM (disk) share | n = 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| 60% (10%) | 1.65 ms | 1.64 | 1.60 | 1.58 |
+| 40% (30%) | 6.3 ms | 6.4 | 7.0 | 8.4 |
+| 30% (40%) | 9.9 ms | 10.5 | 12.5 | 15.5 |
+| 20% (50%) | 15.0 ms | 16.9 | 21.3 | 27.0 |
+
+Requests share hot experts, and a batched step reads each once, so 2-4 requests cost 2-27% more disk time a token,
+nothing more at 60% in RAM. The per-step reads grow (about 80 at n = 4, 30/30/40: nearly two a layer, issued together),
+which moves the reads toward the deep-queue rate, so the depth-1 figures overstate higher n. No collapse: concurrency
+beats serializing unless time to first token is free.
+
+**Not settled:** whether decode disk reads could be issued ahead (routing is only known per layer), and a measured
+prototype; this is a replay with modelled times. If a model justifies building it, the next step is
 a measured prototype on one such split, not more simulation.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
