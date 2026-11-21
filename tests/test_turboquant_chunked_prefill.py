@@ -72,9 +72,20 @@ SLAB = 128
 MAX_ULP = 4.0
 
 
+def _fork_has_slabbing() -> bool:
+    """Slabbed continuation prefill is a fork optimization (docs/vllm-patches.md); a stock vLLM has none to test."""
+    try:
+        from vllm.config.attention import AttentionConfig
+    except ImportError:
+        return False
+    return "tq_prefill_workspace_mib" in getattr(AttentionConfig, "__dataclass_fields__", {}) or hasattr(
+        AttentionConfig, "tq_prefill_workspace_mib")
+
+
 @unittest.skipUnless(
     HAVE_CUDA and HAVE_EXT and HAVE_VLLM, "needs CUDA, exllamav3 and vLLM"
 )
+@unittest.skipUnless(HAVE_VLLM and _fork_has_slabbing(), "stock vLLM: slabbed continuation prefill is a fork optimization")
 class TestChunkedContinuationPrefill(unittest.TestCase):
     def test_chunked_matches_monolithic_per_call(self):
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"

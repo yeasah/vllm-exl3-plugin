@@ -41,9 +41,19 @@ assertion.
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="vision tower forward needs a GPU"
-)
+def _fork_has_chunking() -> bool:
+    """The chunked vision MLP is a fork optimization (docs/vllm-patches.md); a stock vLLM has none to test."""
+    try:
+        from vllm.model_executor.models.vision import mm_encoder_mlp_chunk_rows  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="vision tower forward needs a GPU"),
+    pytest.mark.skipif(not _fork_has_chunking(), reason="stock vLLM: the vision-MLP chunking is a fork optimization"),
+]
 
 CHUNK_ENV = "VLLM_MM_ENCODER_MLP_CHUNK_MB"
 
