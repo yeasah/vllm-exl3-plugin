@@ -99,6 +99,30 @@ suspect on our side: `b5e5eb4be3` makes `_tq_full_dequant_kv`'s slab offset a `t
 compiles a variant per distinct offset (the "JIT compilation during inference" warning seen in these
 runs) -- a cost that grows with context, though on the prefill side.
 
+## `disk-tier` — Experts below host RAM, read from the checkpoint on use
+
+**Outcome:** a MoE whose experts outgrow VRAM plus host RAM serves at usable speed, the checkpoint shards being the
+bottom tier.
+
+**Done (2026-11-21):** step 1, `EXL3_DISK_TIER`, eager only, TP=1. Bit-identical to all-in-RAM on gemma-4-26B-A4B.
+QFN 2.05bpw prefill matches the simulation (10.78 GiB and 1.94 s from disk a 2K chunk). Decode reads 313 experts a
+token from disk against the replay's 22.5, because nothing caches or promotes a disk read.
+
+**Next:** (1) a decode read of a disk expert lands in a host row (evicting the coldest back to disk-only) and can be
+promoted from there, matching the replay, then re-measure decode against its 22.5 reads; (2) the per-MoE-layer
+breakable-graph break cost on a GDN-free MoE (gemma-4-26B), to choose A-breakable over B; (3) TP>1 reads a rank's
+slice.
+
+→ [docs/expert-cache.md](docs/expert-cache.md), "A disk tier below host RAM"
+
+## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
+
+**Outcome:** checkpoints whose model ties `lm_head` to the embedding load. LFM2.5-8B-A1B (our pipeline's 4.00 probe
+quants) fails in `Lfm2MoeForCausalLM.__init__`: `tie_weights` wants `embed_tokens.weight`, which a quantized embedding
+does not have. qbench scores with exllamav3, so the probe never met it. Which tensor the `-eb` pipeline emits for a
+tied model is unchecked; one direction is to untie in the pipeline and emit both flavours, each format serving its
+own purpose, which means measuring each tensor in the other's role first.
+
 ## `moe-tp` — Finish the job on MoE + TP
 
 Not new, but still outstanding. TP=2/4/8 are validated on hardware, MoE+TP is no

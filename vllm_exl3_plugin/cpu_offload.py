@@ -52,6 +52,7 @@ import functools
 import math
 import os
 import re
+import time
 
 import numpy
 import torch
@@ -405,7 +406,8 @@ def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
         rows = taken[:math.ceil(share * param.exl3_num_experts)]
         for _ in rows:
             _count(loader, param.exl3_prefix, nbytes, budget=False)
-        _STATS["disk_experts"] += len(taken) - len(rows)
+        if label == "gate":   # once per expert, not once per projection
+            _STATS["disk_experts"] += len(taken) - len(rows)
         if not taken:
             return None
         return HostBlock({e: row for row, e in enumerate(rows)}, t.shape, t.dtype, frozenset(taken[len(rows):]))
@@ -1105,8 +1107,10 @@ def _read_disk(layer, want) -> list:
     es = [e for e in sorted(pos) if want(e)]
     if not es:
         return []
+    t0 = time.perf_counter()
     if _DISK["done"] is not None:
         _DISK["done"].synchronize()
+    t1 = time.perf_counter()
     store, key, pinned = _DISK["store"], layer.exl3_store_key, _DISK["pinned"]
     plan = layer.exl3_stage_plan
     parts = store.index[(key, es[0])][3]
@@ -1119,6 +1123,10 @@ def _read_disk(layer, want) -> list:
         store.read(key, e, out)
 
     list(_DISK["pool"].map(one, range(len(es)), es))
+    t2 = time.perf_counter()
+    # where a disk-tier step's time goes: waiting for the last layer's copies out of the pinned sources, then reading
+    _STATS["disk_wait_s"] = _STATS.get("disk_wait_s", 0.0) + t1 - t0
+    _STATS["disk_read_s"] = _STATS.get("disk_read_s", 0.0) + t2 - t1
     for label, (dst, row_bytes) in plan.items():
         i = 0
         while i < len(es):

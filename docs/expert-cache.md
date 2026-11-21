@@ -1064,7 +1064,7 @@ The write-backs cost nothing measurable at these promotion rates, on one copy en
 
 ---
 
-## A disk tier below host RAM: simulated, not built (2026-11-21)
+## A disk tier below host RAM: simulated, then a prototype (2026-11-21)
 
 **The question.** Models like Hy4-flash (220B / 12B active, ~156 B of routed experts) need more host RAM than many
 hosts have even below 3 bpw. Would a third tier, experts read from the SSD on use, be a disaster or usable? Answered by
@@ -1186,6 +1186,35 @@ back (a deliberately missed load) to see it fire before trusting any number.
 to measure real disk reads and latency per token against the replay's figures -- the check that the simulation holds.
 (3) If both hold: A through a breakable MoE op, once the breakable-capture fix lands with the vLLM bump; B only if its
 breaks cost too much.
+
+### Step 1 built and measured (2026-11-21)
+
+`EXL3_DISK_TIER=<share>` (exclusive cache only) keeps that share of each layer's experts in host rows and leaves the
+rest in the checkpoint as meta tensors, whose null addresses make an unstaged use fault rather than compute on stale
+bytes. Each disk expert has a staging-window position past the host rows; routed staging reads the routed ones
+through `expert_store` (8 reads deep, into pinned sources, one copy per run of positions). Every batch on a disk-tier
+layer stages by routing, the per-row path included (gemma-4's gelu_tanh has no grouped kernel), since the per-row
+path's decode entries are null and `stage_all`'s window positions for disk experts are unwritten. So decode works,
+eagerly; graph capture is refused, as is TP > 1 (sliced experts are not read whole). `EXL3_CACHE_VERIFY` checks that
+no routed expert reaches the kernels through a null entry, and a test leaves a read out to see it fire.
+
+**Identity** (`tools/offload/disk_tier_identity.py`): gemma-4-26B-A4B 2.54bpw, 20% slots, 40% of experts in rows and
+60% on disk, against all in RAM with the same slots: bit-identical prompt logprobs and greedy tokens over prompts of
+7-4429 tokens plus 16 decode tokens each. With a neighbour's bytes read instead, 6849 differences.
+
+**QFN 2.05bpw, TP=1, VRAM 20% / RAM 30% / disk 50%** (`tools/offload/disk_tier_prefill.py --slots 0.2 --share 0.5`;
+30% slots would not fit beside the windows on a 16 GiB card), HF cache NVMe:
+
+| | measured | tier_replay.py |
+|---|---|---|
+| prefill, per full 2K chunk from disk | 10.78 GiB in 1.94 s (5.98 GB/s) | 11.18 GiB, +2.22 s at 5.4 GB/s |
+| prefill wall | 3.81 s a chunk, 537 tok/s | |
+| decode disk reads per token | 313.5 (3.42 GB/s; 114 ms) | 22.5 |
+
+Prefill holds the simulation. Decode does not, by construction: the replay moves a disk expert into RAM when decode
+uses it, and promotes from there; step 1 does neither, so every routed disk expert is read again each token. That
+caching, disk to host row on a decode read and promotion out of it, is step 2's first job, with these 22.5 as the
+target.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
