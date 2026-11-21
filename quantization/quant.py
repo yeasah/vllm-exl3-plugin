@@ -4056,7 +4056,10 @@ def do_quantize(job, args):
                 attempt += 1
                 if os.path.isfile(os.path.join(workdir, "args.json")):
                     say(f"=== RESUMING QUANTIZTION OF {revdir} ===")
-                    run_logged([ "python3", script, "-w", workdir, "-r", "-d", "0" ], log_path, env(slot), echo)
+                    # --out_scales again: convert.py takes it from the command line on every start, resumes included,
+                    # and a resume without it converted the rest of the rung at its default, auto (2026-11-20)
+                    run_logged([ "python3", script, "-w", workdir, "-r", "-d", "0", "--out_scales", OUT_SCALES ],
+                               log_path, env(slot), echo)
                 else:
                     say(f"=== QUANTIZING {revdir} ({calibration['calibration']}) ===")
                     os.makedirs(workdir, exist_ok=True)
