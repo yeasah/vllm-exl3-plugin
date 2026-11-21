@@ -1216,6 +1216,23 @@ uses it, and promotes from there; step 1 does neither, so every routed disk expe
 caching, disk to host row on a decode read and promotion out of it, is step 2's first job, with these 22.5 as the
 target.
 
+**Decode admissions, and where a token's time goes (2026-11-21).** A decode read of a disk expert now moves it into a
+host row (the least recently used row expert goes back to disk-only; the fill waits on an event for queued copies
+of the row). Prefetch had been copying the next layer's whole RAM tier on every decode batch the disk dispatch sent
+through the grouped path (~0.5 GiB a layer); it is now for prefill-sized batches only. Decode, ms a token, 20%
+slots, `tools/offload/disk_tier_prefill.py`:
+
+| | gemma-4-26B-A4B (30 MoE layers) | QFN 2.05bpw (48) |
+|---|---|---|
+| graphs, all in RAM | 17.4 | 30.4 |
+| eager, all in RAM | 25.9 | 53.1 |
+| eager, disk-tier dispatch, nothing on disk (`EXL3_STAGE_ROUTED_ALWAYS=1`) | 35.0 | 74.0 |
+| eager, disk tier (gemma 40% / QFN 30% in RAM) | 56-67 | 110-128 |
+
+The disk-tier dispatch alone, readback and routed staging every layer, costs 0.3-0.45 ms a MoE layer over eager;
+the reads (staging reads 28-41 ms on QFN, plus row fills) most of the rest. QFN's warm decode reads 76.8 experts a
+token from disk (52.1 staged, 24.6 row fills) against the replay's 22.5, after only 256 decode tokens of warming.
+
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
 "Output identical to resident" holds in **eager mode**, at TP=1 and TP=2, for all-hosted and partial hosting:

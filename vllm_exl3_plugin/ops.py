@@ -505,6 +505,9 @@ def _out_features(trellis: torch.Tensor) -> int:
 
 
 #: Batches at least this large, outside graph capture, run grouped by expert (`_moe_grouped`)
+#: ``EXL3_STAGE_ROUTED_ALWAYS=1``, a measurement switch: every staged layer takes the disk tier's dispatch (routing read
+#: back each layer, routed staging, every batch) with nothing on disk, so that path's own cost can be timed. Eager only.
+_ROUTED_ALWAYS = os.environ.get("EXL3_STAGE_ROUTED_ALWAYS", "0") == "1"
 _GROUPED_MIN_TOKENS = int(os.environ.get("EXL3_MOE_GROUPED_MIN", "48"))  # crossover on Qwen3.6-35B-A3B (256 x top-8)
 
 _FORWARD_STREAM: list = [None, None]   # (forward context, raw stream) of the last launch
@@ -910,8 +913,11 @@ def _moe_grouped(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up
             base[i], kind[i] = n_slots + b * cmax, 2
         n_slots += len(grp) * cmax
     tables = torch.tensor([base, starts, kind], dtype=torch.long).pin_memory().to(dev, non_blocking=True)
-    if stage >= 0:
-        # after this layer's readback and uploads, before its kernels: on a card with one copy engine
+    if stage >= 0 and M >= _GROUPED_MIN_TOKENS:
+        # Prefill-sized batches only: the next layer's routing is unknown, so this copies all its offloaded experts,
+        # which a prefill chunk mostly uses and a decode batch on the disk tier's dispatch does not -- that copied
+        # ~0.5 GiB a layer a token on QFN, 834 ms a token against 52 eager (2026-11-21).
+        # After this layer's readback and uploads, before its kernels: on a card with one copy engine
         # (GeForce under WDDM) any transfer queues behind the prefetch, so issued earlier it stalled this
         # layer's own readback until the next layer's copy landed (0.3% overlap on a 3060 under WSL)
         cpu_offload.prefetch_next(stage)
@@ -997,7 +1003,7 @@ def _exl3_moe_mm(
         return torch.empty((0, x.shape[1]), dtype=x.dtype, device=x.device)
     args = (x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh, down_trellis,
             down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg, mul1, activation)
-    if stage >= 0 and cpu_offload.has_disk(stage):
+    if stage >= 0 and (cpu_offload.has_disk(stage) or _ROUTED_ALWAYS):
         # experts on the disk tier are read only by routed staging, which needs the routing on the host: elsewhere
         # their entries are null (decode) or point at window positions nothing wrote (stage_all). So every batch
         # stages by routing, and capture, which cannot read it back, is refused (docs/expert-cache.md, the disk
