@@ -15,12 +15,13 @@ def paths(monkeypatch):
     monkeypatch.setattr(ops, "_moe_per_row", lambda *a, **k: taken.append("per_row") or a[0])
     monkeypatch.setattr(ops, "_one_stream", lambda x: None)
 
-    def run(tokens, activation="silu"):
+    def run(tokens, activation="silu", stage=-1):
         x = torch.zeros(tokens, 8)
         ids = torch.zeros(tokens, 2, dtype=torch.int32)
         w = torch.zeros(tokens, 2)
         t = torch.zeros(4, dtype=torch.long)
-        ops._exl3_moe_mm(x, ids, w, t, t, t, t, t, t, t, t, t, 2.0, 2.0, 16, 4, False, True, activation)
+        ops._exl3_moe_mm(x, ids, w, t, t, t, t, t, t, t, t, t, 2.0, 2.0, 16, 4, False, True, activation,
+                         stage=stage)
         return taken.pop()
 
     return ops, run
@@ -47,3 +48,19 @@ def test_graph_capture_runs_per_row(paths, monkeypatch):
     _, run = paths
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     assert run(4096) == "per_row"
+
+
+def test_disk_tier_layers_run_grouped_whatever_the_batch(paths, monkeypatch):
+    """Experts on the disk tier are read only by the grouped path's routed staging; a decode-sized batch taking
+    the per-row path would follow their null entries, and a mid-sized one stage_all's unwritten window."""
+    from vllm_exl3_plugin import cpu_offload
+
+    ops, run = paths
+    monkeypatch.setattr(cpu_offload, "has_disk", lambda idx: True)
+    assert run(1, stage=0) == "grouped"
+    assert run(ops._GROUPED_MIN_TOKENS - 1, stage=0) == "grouped"
+    with pytest.raises(RuntimeError, match="EXL3_DISK_TIER"):
+        run(4096, activation="relu2", stage=0)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="graph capture"):
+        run(1, stage=0)

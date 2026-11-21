@@ -439,6 +439,16 @@ _SPARE_ROWS = int(os.environ.get("EXL3_CACHE_SPARE_ROWS", "16"))
 _ROUTED = re.compile(r"\.experts\.\d+\.")
 
 
+def _checkpoint_root(model: str, revision: str | None, download_dir: str | None) -> str:
+    """The local directory holding a checkpoint's shards; raises when they are not all on disk."""
+    if os.path.isdir(model):
+        return model
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model, revision=revision, cache_dir=download_dir, local_files_only=True,
+                             allow_patterns=["*.safetensors", "*.safetensors.index.json"])
+
+
 @functools.lru_cache(maxsize=4)
 def _checkpoint_census(model: str, revision: str | None, download_dir: str | None) -> dict[str, int] | None:
     """Stored bytes by part (routed experts, mtp, visual, embed, other), from the local shards' headers.
@@ -449,13 +459,7 @@ def _checkpoint_census(model: str, revision: str | None, download_dir: str | Non
     import struct
 
     try:
-        if os.path.isdir(model):
-            root = model
-        else:
-            from huggingface_hub import snapshot_download
-
-            root = snapshot_download(model, revision=revision, cache_dir=download_dir, local_files_only=True,
-                                     allow_patterns=["*.safetensors", "*.safetensors.index.json"])
+        root = _checkpoint_root(model, revision, download_dir)
         index = os.path.join(root, "model.safetensors.index.json")
         if os.path.isfile(index):
             with open(index) as f:
@@ -839,9 +843,12 @@ def build_staging() -> None:
         offsets, off = {}, 0
         for label, block in layer.exl3_host_blocks.items():
             offsets[label] = off
-            off += -(-block.host.numel() * block.host.element_size() // _ALIGN) * _ALIGN
+            # a disk expert has a window position past the host rows, where it is read to when routed
+            off += -(-(block.host.shape[0] + len(block.disk)) * _row_bytes(block) // _ALIGN) * _ALIGN
         plans.append((layer, offsets))
         size = max(size, off)
+    if any(b.disk for layer in _HOSTED for b in layer.exl3_host_blocks.values()):
+        _open_disk_tier(_HOSTED)
     device = next(iter(_HOSTED[0].exl3_host_blocks.values())).view.device
     count = planned_windows(len(_HOSTED))
     windows = [torch.empty(size, dtype=torch.uint8, device=device) for _ in range(count)]
@@ -855,13 +862,15 @@ def build_staging() -> None:
             block = layer.exl3_host_blocks.get(label)
             if block is not None:
                 nbytes = block.host.numel() * block.host.element_size()
-                row_bytes = nbytes // block.host.shape[0]
-                dst = window[offsets[label]:offsets[label] + nbytes]
-                copies.append((dst, block.host.view(-1).view(torch.uint8)))
+                row_bytes = _row_bytes(block)
+                dst = window[offsets[label]:offsets[label] + (block.host.shape[0] + len(block.disk)) * row_bytes]
+                copies.append((dst[:nbytes], block.host.view(-1).view(torch.uint8)))
                 plan[label] = (dst, row_bytes)
                 table = table.cpu()
                 for e, row in block.rows.items():
                     table[e] = base + offsets[label] + row * row_bytes
+                for e, pos in getattr(layer, "exl3_disk_pos", {}).items():
+                    table[e] = base + offsets[label] + pos * row_bytes
                 table = table.to(device)
             tables.append(table)
         layer.exl3_stage = (copies, tuple(tables))
@@ -993,7 +1002,142 @@ def stage_routed(idx: int, counts: list[int], tables: tuple) -> tuple:
     if moved is None:
         moved = _wanted_rows(layer, lambda e: counts[e] > 0)
         _copy_rows(layer, moved)
-    return _point_at_window(layer, moved, tables)
+    read = _read_disk(layer, lambda e: counts[e] > 0)
+    if read:
+        moved = {label: moved.get(label, []) + read for label in layer.exl3_host_blocks}
+    out = _point_at_window(layer, moved, tables)
+    from . import expert_cache
+
+    if expert_cache.VERIFY:
+        _verify_routed(idx, counts, out)
+    return out
+
+
+def has_disk(idx: int) -> bool:
+    """Whether a staged layer has experts on the disk tier, which only `stage_routed` can read."""
+    return bool(getattr(STAGED[idx], "exl3_disk_pos", None))
+
+
+def _verify_routed(idx: int, counts: list[int], tables: tuple) -> None:
+    """EXL3_CACHE_VERIFY: every routed expert's entry in the tables the kernels get is live. A disk expert's
+    decode entry is null, so one that `stage_routed` failed to read and point at the window shows here."""
+    routed = [e for e, c in enumerate(counts[:len(tables[0])]) if c > 0]
+    for j, label in enumerate(("gate", "up", "down")):
+        entries = tables[j].cpu()[routed]
+        dead = [e for e, v in zip(routed, entries.tolist()) if v == 0]
+        if dead:
+            raise RuntimeError(f"expert cache: staged layer {idx} routes {label} of experts {dead[:8]} "
+                               f"through null entries (on disk and not read)")
+
+
+#: The disk tier's reader and its pinned sources (`_open_disk_tier`); empty when no expert is on disk
+_DISK: dict = {}
+
+
+def _row_bytes(block) -> int:
+    return math.prod(block.host.shape[1:]) * block.host.element_size()
+
+
+def _store_key(layer, store) -> str:
+    """The checkpoint stem of a layer's experts. vLLM's module path need not be the checkpoint's (a weight
+    mapper can rename the trunk), so match on the part from `layers.` on; a drafter's `mtp.` layers share
+    those numbers and are never hosted, so they are left out."""
+    mine = layer_prefix(layer)
+    tail = mine[mine.find("layers."):] if "layers." in mine else mine
+    hits = {stem for stem, _ in store.index if not stem.startswith("mtp.")
+            and (stem == tail or stem.endswith("." + tail))}
+    if len(hits) != 1:
+        raise RuntimeError(f"disk tier: {mine} matches {sorted(hits) or 'no'} expert stems in the checkpoint")
+    return hits.pop()
+
+
+def _model_root() -> str:
+    """The served checkpoint's local directory."""
+    from vllm.config import get_current_vllm_config
+
+    config = get_current_vllm_config()
+    mc = config.model_config
+    return _checkpoint_root(mc.model, mc.revision, getattr(config.load_config, "download_dir", None))
+
+
+def _open_disk_tier(layers) -> None:
+    """The reader for experts left on disk, each layer's window positions for them, and one pinned source per
+    projection sized for the layer with the most. A read is one span per expert (expert_store), so each
+    must hold the expert whole: under TP the experts are sliced, which the size check refuses."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .expert_store import ExpertStore
+
+    root = _model_root()
+    store = ExpertStore(root)
+    most = {}
+    for layer in layers:
+        blocks = layer.exl3_host_blocks
+        disk = next(iter(blocks.values())).disk
+        if any(b.disk != disk for b in blocks.values()):
+            raise RuntimeError(f"disk tier: {layer_prefix(layer)}'s projections put different experts on disk")
+        if not disk:
+            continue
+        key = _store_key(layer, store)
+        rows = next(iter(blocks.values())).host.shape[0]
+        layer.exl3_disk_pos = {e: rows + k for k, e in enumerate(sorted(disk))}
+        layer.exl3_store_key = key
+        for label, block in blocks.items():
+            stored = store.index[(key, min(disk))][3][label][1]
+            if stored != _row_bytes(block):
+                raise RuntimeError(f"disk tier: {layer_prefix(layer)} {label} holds {_row_bytes(block)} bytes an "
+                                   f"expert, the checkpoint {stored}: a sliced expert (TP > 1) is not read whole")
+            most[label] = max(most.get(label, 0), len(disk) * _row_bytes(block))
+    _DISK.update(store=store, pinned={label: _pinned((n,), torch.uint8) for label, n in most.items()},
+                 pool=ThreadPoolExecutor(int(os.environ.get("EXL3_DISK_QUEUE", "8")), "exl3-disk"), done=None)
+    logger.info("expert cache disk tier: %d experts read from %s on use, through %.0f MiB of pinned sources",
+                _STATS["disk_experts"], root, sum(most.values()) / (1 << 20))
+
+
+def _read_disk(layer, want) -> list:
+    """Read the layer's disk experts `want` accepts into their window positions; returns (position, expert)
+    pairs. Synchronous: the reads run on a thread pool, a deep queue being what an SSD needs, then one copy a
+    run of positions on the current stream. The pinned sources are reused by the next layer's reads, so
+    those wait for this layer's copies to land first."""
+    pos = getattr(layer, "exl3_disk_pos", None)
+    if not pos:
+        return []
+    es = [e for e in sorted(pos) if want(e)]
+    if not es:
+        return []
+    if _DISK["done"] is not None:
+        _DISK["done"].synchronize()
+    store, key, pinned = _DISK["store"], layer.exl3_store_key, _DISK["pinned"]
+    plan = layer.exl3_stage_plan
+    parts = store.index[(key, es[0])][3]
+
+    def one(k, e):
+        out = {}
+        for label, (_, nbytes, _, shape) in parts.items():
+            src = pinned[label][k * nbytes:(k + 1) * nbytes]
+            out[label] = src.view(_STORE_DTYPES[parts[label][2]]).view(shape)
+        store.read(key, e, out)
+
+    list(_DISK["pool"].map(one, range(len(es)), es))
+    for label, (dst, row_bytes) in plan.items():
+        i = 0
+        while i < len(es):
+            k = i
+            while k + 1 < len(es) and pos[es[k + 1]] == pos[es[k]] + 1:
+                k += 1
+            a = pos[es[i]] * row_bytes
+            dst[a:a + (k - i + 1) * row_bytes].copy_(pinned[label][i * row_bytes:(k + 1) * row_bytes],
+                                                     non_blocking=True)
+            i = k + 1
+    done = torch.cuda.Event()
+    done.record()
+    _DISK["done"] = done
+    _STATS["disk_reads"] = _STATS.get("disk_reads", 0) + len(es)
+    return [(pos[e], e) for e in es]
+
+
+_STORE_DTYPES = {"I16": torch.int16, "F16": torch.float16, "BF16": torch.bfloat16, "F32": torch.float32,
+                 "I32": torch.int32}
 
 
 def prefetch_window_bytes() -> int:
@@ -1015,20 +1159,21 @@ def drop_prefetch() -> int:
     for layer in STAGED:
         if getattr(layer, "exl3_stage_window", 0) != 1 or layer.exl3_stage is None:
             continue
-        moved = {}
-        for label, (dst, row_bytes) in layer.exl3_stage_plan.items():
+        def rebase(dst):
             off = dst.data_ptr() - second.data_ptr()
-            moved[id(dst)] = first[off:off + dst.numel()]
-            layer.exl3_stage_plan[label] = (moved[id(dst)], row_bytes)
+            return first[off:off + dst.numel()]
+
+        for label, (dst, row_bytes) in layer.exl3_stage_plan.items():
+            layer.exl3_stage_plan[label] = (rebase(dst), row_bytes)
         copies, tables = layer.exl3_stage
-        copies = [(moved[id(dst)], src) for dst, src in copies]
+        copies = [(rebase(dst), src) for dst, src in copies]
         tables = list(tables)
         for j, label in enumerate(("gate", "up", "down")):
             block = layer.exl3_host_blocks.get(label)
             if block is None:
                 continue   # that entry is the decode table itself, not a staged copy of it
             table = tables[j].cpu()
-            for e in block.rows:
+            for e in (*block.rows, *block.disk):
                 table[e] += delta
             tables[j] = table.to(tables[j].device)
         layer.exl3_stage = (copies, tuple(tables))

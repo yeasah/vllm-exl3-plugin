@@ -877,7 +877,8 @@ def build(layers: list, available: int, worker) -> int:
 
     E = layers[0].exl3_num_experts
     slot_bytes = slot_row_bytes(layers)
-    per_layer_max = max(max(len(b.rows) for b in l.exl3_host_blocks.values()) for l in layers)
+    # off the device per layer: host rows, and with the disk tier the experts left in the checkpoint
+    per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
     hosted = cpu_offload._STATS["expert_bytes"]
     given_back = 0   # bytes freed here that KV would otherwise not have had
     if cpu_offload.cache_mode() == "fixed":
@@ -919,6 +920,9 @@ def build(layers: list, available: int, worker) -> int:
     cls = ExpertCache
     if EXCLUSIVE and slots < per_layer_max and _uniform_hosting(layers):
         cls = ExclusiveCache
+    if cls is not ExclusiveCache and any(b.disk for l in layers for b in l.exl3_host_blocks.values()):
+        raise RuntimeError("EXL3_DISK_TIER: experts are on disk but the exclusive cache cannot run (hosting is "
+                           "uneven across projections, or the slots would hold every expert); unset it")
     cache = cls(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
     used = sum(t.numel() * t.element_size() for d in cache.slot_tensors for t in d.values())
     if cache.holds_everything:

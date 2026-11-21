@@ -997,6 +997,14 @@ def _exl3_moe_mm(
         return torch.empty((0, x.shape[1]), dtype=x.dtype, device=x.device)
     args = (x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh, down_trellis,
             down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg, mul1, activation)
+    if stage >= 0 and cpu_offload.has_disk(stage):
+        # experts on the disk tier are read only by the grouped path's routed staging: elsewhere their entries are
+        # null (decode) or point at window positions nothing wrote (stage_all), so every batch takes it, and
+        # capture, which cannot read the routing, is refused (docs/expert-cache.md, the disk tier's design note)
+        if torch.cuda.is_current_stream_capturing() or activation not in _MOE_ACT:
+            raise RuntimeError("EXL3_DISK_TIER: experts on disk are read only outside graph capture (enforce_eager) "
+                               f"and for gated activations ({activation})")
+        return _moe_grouped(*args, stage=stage)
     if (num_tokens >= _GROUPED_MIN_TOKENS and activation in _MOE_ACT
             and not torch.cuda.is_current_stream_capturing()):
         return _moe_grouped(*args, stage=stage)

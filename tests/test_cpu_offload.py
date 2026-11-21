@@ -1026,3 +1026,98 @@ def test_pointer_table_lives_on_a_real_device_when_experts_are_on_disk():
     table = EXL3MoEMethod._pointers([torch.empty(4, dtype=torch.int16, device="meta"), *real])
     assert table.device.type == "cpu"
     assert table.tolist() == [0, real[0].data_ptr(), real[1].data_ptr()]
+
+
+def _disk_layer(offload, monkeypatch, tmp_path):
+    """One layer of eight experts, each projection's trellis filled with its expert id, saved as a checkpoint and
+    placed with EXL3_DISK_TIER=0.3: experts 0-2 in host rows, 3-7 on disk. vLLM's module path (`m.layers.3...`)
+    is not the checkpoint's (`model.layers.3...`), as under a weight mapper."""
+    import types
+
+    import torch
+    from safetensors.torch import save_file
+
+    tensors = {}
+    for e in range(8):
+        for label in ("gate", "up", "down"):
+            tensors[f"model.layers.3.mlp.experts.{e}.{label}_proj.suh"] = torch.ones(16, dtype=torch.half)
+            tensors[f"model.layers.3.mlp.experts.{e}.{label}_proj.trellis"] = _expert_tensor(e)
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    monkeypatch.setattr(cpu_offload, "_model_root", lambda: str(tmp_path))
+    monkeypatch.setattr(cpu_offload, "STAGED", [])
+    monkeypatch.setattr(cpu_offload, "PREFETCH", False)
+    monkeypatch.setattr(cpu_offload, "_DISK", {})
+    monkeypatch.setattr(cpu_offload, "_HOSTED", [])   # a refused build leaves its layers there
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setenv("EXL3_DISK_TIER", "0.3")
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 1 << 40)
+    # staging hands the layers to the cache, which patches vLLM's worker to build from them: not these
+    from vllm_exl3_plugin import expert_cache
+    monkeypatch.setattr(expert_cache, "prepare", lambda layers: None)
+    offload(_Loader({"experts"}))
+    cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
+    layer = types.SimpleNamespace(prefix="m.layers.3.mlp.experts")
+    blocks = {}
+    for label in ("gate", "up", "down"):
+        param = _Collector()
+        placed = [cpu_offload.place_expert(param, _expert_tensor(e), label, e) for e in range(8)]
+        setattr(layer, f"exl3_{label}_trellis_ptrs", torch.tensor([t.data_ptr() for t in placed]))
+        blocks[label] = param.exl3_blocks[label]
+    cpu_offload.register_experts(layer, blocks)
+    decode = {label: getattr(layer, f"exl3_{label}_trellis_ptrs").clone() for label in blocks}
+    cpu_offload.build_staging()
+    for label, table in decode.items():
+        # on CPU `.cpu()` is the tensor itself, so building the staged tables rewrote these in place
+        setattr(layer, f"exl3_{label}_trellis_ptrs", table)
+    window = cpu_offload._STATS["windows"][0]
+    window.zero_()
+    return layer, window
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="events need CUDA")
+def test_routed_staging_reads_disk_experts_into_their_window_positions(offload, monkeypatch, tmp_path):
+    """A routed disk expert is read from the checkpoint into a window position past the host rows, and its entry
+    points there; unrouted disk experts keep their null decode entries and nothing reads them."""
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setattr(expert_cache, "VERIFY", True)
+    layer, window = _disk_layer(offload, monkeypatch, tmp_path)
+    assert window.numel() == 3 * 8 * 512
+    assert layer.exl3_disk_pos == {3: 3, 4: 4, 5: 5, 6: 6, 7: 7}
+    assert cpu_offload.has_disk(layer.exl3_stage_idx)
+    decode = _decode(layer)
+    assert [int(t[e]) for t in decode for e in range(3, 8)] == [0] * 15, [t.tolist() for t in decode]
+    counts = [0, 2, 0, 0, 1, 3, 0, 1, 0]                # host row 1, disk 4, 5 and 7
+    staged = cpu_offload.stage_routed(layer.exl3_stage_idx, counts, decode)
+    for j, label in enumerate(("gate", "up", "down")):
+        for e in range(8):
+            if counts[e]:
+                _check_staged(staged[j], decode[j], {}, window, label, e)
+            else:
+                assert staged[j][e] == decode[j][e], f"unrouted {label} {e} was redirected"
+    assert cpu_offload._DISK["store"].reads == 3
+    assert cpu_offload._STATS["disk_reads"] == 3
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="events need CUDA")
+def test_verify_catches_a_routed_disk_expert_left_unread(offload, monkeypatch, tmp_path):
+    """The guard, with the failure put back: a disk expert routed but not read keeps its null entry, and
+    EXL3_CACHE_VERIFY refuses the step instead of letting the kernel follow it."""
+    from vllm_exl3_plugin import expert_cache
+
+    monkeypatch.setattr(expert_cache, "VERIFY", True)
+    layer, _ = _disk_layer(offload, monkeypatch, tmp_path)
+    monkeypatch.setattr(cpu_offload, "_read_disk", lambda layer, want: [])
+    with pytest.raises(RuntimeError, match=r"experts \[4\] through null entries"):
+        cpu_offload.stage_routed(layer.exl3_stage_idx, [0, 2, 0, 0, 1, 0, 0, 0, 0], _decode(layer))
+
+
+def test_disk_tier_refuses_sliced_experts(offload, monkeypatch, tmp_path):
+    """Under TP an expert's trellis is a slice of the stored one, and a disk read is the whole span: refused."""
+    import torch
+
+    real = cpu_offload.place_expert
+    monkeypatch.setattr(cpu_offload, "place_expert",
+                        lambda param, t, label, e: real(param, t[:, :, :16].contiguous(), label, e))
+    with pytest.raises(RuntimeError, match="sliced"):
+        _disk_layer(offload, monkeypatch, tmp_path)
