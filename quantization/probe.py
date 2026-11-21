@@ -235,7 +235,8 @@ def report(W, slices, draws, arms, low=None):
             cells += f"{'':>10}"
     if arms:
         print(f"{'size':8} {'':>10} {'':>7} {'':>6}  {cells}")
-    size_matched(out, excess, sized, draws, arms, low, short)
+    size_matched(out, excess, sized, draws, arms, low, short,
+                 {sl: v["sd"] * (1 + 1 / len(draws)) ** 0.5 for sl, v in out["slices"].items() if sl != "recall"})
     if low:
         out["low"] = report_low(W, slices, draws, low)
     with open(os.path.join(W, "main", "probe.json"), "w") as f:
@@ -246,7 +247,7 @@ def report(W, slices, draws, arms, low=None):
 #: The rule of thumb above the knee: excess KLD halves per half bit
 _PER_HALF_BIT = 2.0
 
-def size_matched(out, excess, sized, draws, arms, low, short):
+def size_matched(out, excess, sized, draws, arms, low, short, noise=None):
     """Each arm against draw 0 projected to the arm's size, for arms that are not the same size: the size difference
     turned into bits, and the bits into excess KLD by the rule of thumb (2x per half bit). The bits come from the low
     draw's size (the same configuration at another rate, so bytes per bpw with the head and every fixed part counted),
@@ -268,7 +269,7 @@ def size_matched(out, excess, sized, draws, arms, low, short):
     print(f"\n=== size-matched (projected): arm / the draws' mean at the arm's size, bits from {how} ("
           + ", ".join(f"{short(n)} {b:+.3f} bpw" for n, b in bits.items()) + "); from the low draw's own rate per half "
           f"bit (capped at {_PER_HALF_BIT:g}; a chord, so it leans high) to the rule's {_PER_HALF_BIT:g}x ===")
-    print(f"{'slice':8} " + "".join(f"{short(n):>14}" for n in moved))
+    print(f"{'slice':8} " + "".join(f"{short(n):>14} " for n in moved))
     for sl, ex in excess.items():
         # the slice's own rate, when its low draw is below the rule: no knee between, and the curve steepens toward
         # low bits, so the chord bounds the slope at the probe rate from above
@@ -283,7 +284,12 @@ def size_matched(out, excess, sized, draws, arms, low, short):
             if n in ex and ref:
                 base = sum(ref) / len(ref)
                 adj = sorted(ex[n] / base * r ** (2 * bits[n]) for r in rates)
-                cells += f"{adj[0]:6.3f}-{adj[-1]:.3f} " if adj[-1] - adj[0] >= 0.005 else f"{adj[0]:13.3f} "
+                # "~" when the bracket's worse end for the arm (nearer 1) is within the noise: then even the
+                # pessimistic projection cannot be told from a redraw
+                sd = (noise or {}).get(sl, float("nan"))
+                near = min(adj, key=lambda v: abs(1 - v))
+                tilde = "~" if sd == sd and abs(1 - near) < 2 * sd else " "
+                cells += (f"{adj[0]:6.3f}-{adj[-1]:.3f}{tilde}" if adj[-1] - adj[0] >= 0.005 else f"{adj[0]:13.3f}{tilde}")
                 out["arms"][n].setdefault("size_matched", {})[sl] = [adj[0], adj[-1]]
             else:
                 cells += f"{'':>14}"
