@@ -108,10 +108,13 @@ bottom tier.
 QFN 2.05bpw prefill matches the simulation (10.78 GiB and 1.94 s from disk a 2K chunk). Decode reads 313 experts a
 token from disk against the replay's 22.5, because nothing caches or promotes a disk read.
 
-**Next:** (1) a decode read of a disk expert lands in a host row (evicting the coldest back to disk-only) and can be
-promoted from there, matching the replay, then re-measure decode against its 22.5 reads; (2) the per-MoE-layer
-breakable-graph break cost on a GDN-free MoE (gemma-4-26B), to choose A-breakable over B; (3) TP>1 reads a rank's
-slice.
+**Since:** decode reads now land in host rows (QFN warm decode 76.8 disk reads a token, 110 ms); the breakable-graph
+measurement chose A: on gemma 30 MoE eager breaks cost ~0.3 ms a token, and the disk tier runs bit-identically under
+breakable capture (`EXL3_MOE_EAGER_BREAK=1`). B is not needed.
+
+**Next:** (1) QFN under breakable capture, once EXL3+GDN capture works (the vLLM bump); (2) the read gap -- 76.8 against
+the replay's 22.5 -- over longer decode, and filling admitted rows from bytes already staged instead of a second read;
+(3) make the eager break the default whenever the disk tier is on; (4) TP>1 reads a rank's slice.
 
 → [docs/expert-cache.md](docs/expert-cache.md), "A disk tier below host RAM"
 

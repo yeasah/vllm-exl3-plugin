@@ -24,6 +24,9 @@ ap.add_argument("--chunk", type=int, default=2048, help="max_num_batched_tokens"
 ap.add_argument("--offload-gb", type=float, default=64)
 ap.add_argument("--decode", type=int, default=16, help="greedy tokens per prompt")
 ap.add_argument("--out", default=None)
+ap.add_argument("--disk-graphs", action="store_true",
+                help="the disk arm under breakable piecewise graphs, the MoE op an eager break (decode path A)")
+ap.add_argument("--graphs-both", action="store_true", help="both arms under --disk-graphs' capture, the fair comparison")
 ap.add_argument("--arm", default=None, help=argparse.SUPPRESS)
 a = ap.parse_args()
 
@@ -50,7 +53,9 @@ def run_arm(arm):
 
     from vllm_exl3_plugin import cpu_offload
 
-    llm = LLM(a.model, enforce_eager=True, max_num_batched_tokens=a.chunk, max_model_len=8192,
+    graphs = os.environ.get("EXL3_MOE_EAGER_BREAK") == "1"
+    llm = LLM(a.model, enforce_eager=not graphs,
+              **({"compilation_config": {"cudagraph_mode": "PIECEWISE"}} if graphs else {}), max_num_batched_tokens=a.chunk, max_model_len=8192,
               cpu_offload_gb=a.offload_gb, gpu_memory_utilization=0.85, seed=0, max_num_seqs=8,
               limit_mm_per_prompt={"image": 0, "video": 0, "audio": 0})   # text only: no encoder budget per chunk
     ps = prompts(llm.get_tokenizer())
@@ -81,6 +86,10 @@ os.makedirs(a.out, exist_ok=True)
 base = dict(os.environ, EXL3_EXPERT_SLOTS=a.slots, EXL3_MOE_GROUPED_MIN="1")
 base.pop("EXL3_DISK_TIER", None)
 arms = {"ram": base, "disk": dict(base, EXL3_DISK_TIER=a.share, EXL3_CACHE_VERIFY="1")}
+if a.disk_graphs or a.graphs_both:
+    # graph replay pads decode batches to capture sizes, so against an eager arm its numbers differ by that alone
+    for arm in (("ram", "disk") if a.graphs_both else ("disk",)):
+        arms[arm].update(VLLM_USE_BREAKABLE_CUDAGRAPH="1", EXL3_MOE_EAGER_BREAK="1")
 for arm, env in arms.items():
     cmd = [sys.executable, os.path.abspath(__file__), a.model, "--arm", arm, "--out", a.out, "--chunk", str(a.chunk),
            "--offload-gb", str(a.offload_gb), "--decode", str(a.decode)]

@@ -22,9 +22,11 @@ ap.add_argument("--chunks", type=int, default=4)
 ap.add_argument("--decode", type=int, default=64)
 ap.add_argument("--gpu-util", type=float, default=0.92)
 ap.add_argument("--offload-gb", type=float, default=64)
-ap.add_argument("--graphs", action="store_true", help="CUDA graphs rather than eager (no disk tier)")
+ap.add_argument("--graphs", action="store_true", help="CUDA graphs rather than eager (the disk tier needs breakable "
+                "capture with EXL3_MOE_EAGER_BREAK=1)")
 ap.add_argument("--force-routed", action="store_true", help="EXL3_STAGE_ROUTED_ALWAYS: the disk path, nothing on disk")
 ap.add_argument("--skip-prefill", action="store_true")
+ap.add_argument("--cudagraph-mode", default=None, help="with --graphs: e.g. PIECEWISE, so breakable capture breaks")
 a = ap.parse_args()
 
 os.environ.update(VLLM_ENABLE_V1_MULTIPROCESSING="0", EXL3_EXPERT_SLOTS=a.slots)
@@ -42,7 +44,8 @@ from vllm_exl3_plugin import cpu_offload  # noqa: E402
 
 llm = LLM(a.model, enforce_eager=not a.graphs, max_num_batched_tokens=a.chunk, max_model_len=a.chunk * a.chunks + 512,
           cpu_offload_gb=a.offload_gb, gpu_memory_utilization=a.gpu_util, seed=0, max_num_seqs=4,
-          enable_prefix_caching=False, limit_mm_per_prompt={"image": 0, "video": 0, "audio": 0})
+          enable_prefix_caching=False, limit_mm_per_prompt={"image": 0, "video": 0, "audio": 0},
+          **({"compilation_config": {"cudagraph_mode": a.cudagraph_mode}} if a.cudagraph_mode else {}))
 docs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs")
 text = "\n\n".join(open(os.path.join(docs, n)).read() for n in sorted(os.listdir(docs)) if n.endswith(".md"))
 ids = llm.get_tokenizer()(text)["input_ids"]

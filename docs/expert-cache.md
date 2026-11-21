@@ -1233,6 +1233,28 @@ The disk-tier dispatch alone, readback and routed staging every layer, costs 0.3
 the reads (staging reads 28-41 ms on QFN, plus row fills) most of the rest. QFN's warm decode reads 76.8 experts a
 token from disk (52.1 staged, 24.6 row fills) against the replay's 22.5, after only 256 decode tokens of warming.
 
+**Path A through breakable capture: the breaks are nearly free (gemma, 2026-11-21).** `EXL3_MOE_EAGER_BREAK=1` routes
+the MoE through `exl3_moe_mm_out`, which writes into the caller's buffer and is wrapped in vLLM's
+`eager_break_during_capture`; under `VLLM_USE_BREAKABLE_CUDAGRAPH=1` with a PIECEWISE decode (FULL skips the breaks),
+each MoE op ends its graph segment and runs eagerly at replay, where it can read routing back -- so the disk tier runs
+unchanged, its capture guard never tripping. gemma-4-26B-A4B 2.54bpw, 20% slots, decode ms a token (cold / warm):
+
+| | ms a token |
+|---|---|
+| PIECEWISE graphs, compiled | 17.3 / 17.7 |
+| breakable capture (breaks at attention) | 17.8 / 18.9 |
+| breakable, plus an eager break at each of the 30 MoE layers | 18.1 / 19.2 |
+| the same, 60% of experts on disk | 41.6 / 52.5 |
+| eager, 60% on disk | 55.9 / 66.8 |
+
+Thirty extra breaks cost ~0.3 ms a token: A-breakable is the decode path, and B (an in-graph wait) is not needed on
+this evidence. With the disk tier on, it saves ~14 ms a token over eager; what is left is the reads themselves.
+Identity: both arms under breakable PIECEWISE graphs, disk tier against all in RAM, bit-identical over 64 decode
+tokens on each of five prompts (6978 admissions, `EXL3_CACHE_VERIFY` on); with a neighbour's bytes read, 6909
+differences. (Against an *eager* all-in-RAM arm decode differs everywhere: graph replay pads batches to capture sizes,
+so that comparison is not an identity test.) QFN cannot be measured this way until breakable capture works for EXL3
+with GDN layers (docs/upstream.md), which the vLLM bump has to fix anyway.
+
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
 "Output identical to resident" holds in **eager mode**, at TP=1 and TP=2, for all-hosted and partial hosting:

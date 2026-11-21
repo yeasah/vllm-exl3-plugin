@@ -695,6 +695,24 @@ def _register_ops() -> None:
         fake_impl=_exl3_moe_mm_fake,
         target_lib=_EXL3_LIB,
     )
+    import inspect
+
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    moe_out = eager_break_during_capture(_exl3_moe_mm_out)
+    if moe_out is not _exl3_moe_mm_out:
+        # schema inference reads the signature through __wrapped__ (this module's annotation strings) but evaluates
+        # it in the wrapper's globals, vLLM's module: hand it the evaluated signature
+        moe_out.__signature__ = inspect.signature(_exl3_moe_mm_out, eval_str=True)
+    direct_register_custom_op(
+        op_name="exl3_moe_mm_out",
+        # under breakable capture (VLLM_USE_BREAKABLE_CUDAGRAPH=1) each call ends the graph segment and runs eagerly
+        # at replay, so it may read routing back; outside one the decorator is a no-op
+        op_func=moe_out,
+        mutates_args=["out", "route"],
+        fake_impl=_exl3_moe_mm_out_fake,
+        target_lib=_EXL3_LIB,
+    )
     direct_register_custom_op(
         op_name="exl3_embed_rows",
         op_func=_embed_rows,
@@ -1076,7 +1094,50 @@ def _exl3_moe_mm_fake(
 
 def exl3_moe_mm(*args) -> torch.Tensor:
     """Routed-expert MLP over EXL3 weights, without materializing any of them."""
+    if MOE_EAGER_BREAK:
+        out = torch.empty_like(args[0])
+        torch.ops.vllm_exl3.exl3_moe_mm_out(out, *args)
+        return out
     return torch.ops.vllm_exl3.exl3_moe_mm(*args)
+
+
+#: ``EXL3_MOE_EAGER_BREAK=1``: the routed-expert op writes into a caller's buffer and, under breakable capture, is an
+#: eager break -- the disk tier's decode path A inside otherwise captured graphs (docs/expert-cache.md, the disk tier's
+#: design note). Off by default; set before the plugin loads.
+MOE_EAGER_BREAK = os.environ.get("EXL3_MOE_EAGER_BREAK", "0") == "1"
+
+
+def _exl3_moe_mm_out(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_trellis: torch.Tensor,
+    gate_suh: torch.Tensor,
+    gate_svh: torch.Tensor,
+    up_trellis: torch.Tensor,
+    up_suh: torch.Tensor,
+    up_svh: torch.Tensor,
+    down_trellis: torch.Tensor,
+    down_suh: torch.Tensor,
+    down_svh: torch.Tensor,
+    gate_bits: float,
+    down_bits: float,
+    intermediate: int,
+    num_experts: int,
+    mcg: bool,
+    mul1: bool,
+    activation: str,
+    route: Optional[torch.Tensor] = None,
+    stage: int = -1,
+) -> None:
+    out.copy_(_exl3_moe_mm(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh,
+                           down_trellis, down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg,
+                           mul1, activation, route, stage))
+
+
+def _exl3_moe_mm_out_fake(out: torch.Tensor, *args, **kwargs) -> None:
+    return None
 
 
 # Registered at import rather than on first use: registering a custom op while
