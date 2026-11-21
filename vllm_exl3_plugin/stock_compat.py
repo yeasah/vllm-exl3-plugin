@@ -76,7 +76,7 @@ def _fused_shard_loading(MergedColumnParallelLinear, QKVParallelLinear) -> None:
         @functools.wraps(merged)
         def merged_loader(self, param, loaded_weight, loaded_shard_id=None):
             if isinstance(param, EXL3Parameter) and (loaded_shard_id is None or isinstance(loaded_shard_id, tuple)):
-                self.validate_shard_id(loaded_shard_id, param)
+                _validate_shard_id(self, loaded_shard_id, param)
                 param.load_merged_column_weight(loaded_weight=loaded_weight, shard_id=loaded_shard_id)
                 return
             return merged(self, param, loaded_weight, loaded_shard_id)
@@ -89,13 +89,24 @@ def _fused_shard_loading(MergedColumnParallelLinear, QKVParallelLinear) -> None:
         @functools.wraps(qkv)
         def qkv_loader(self, param, loaded_weight, loaded_shard_id=None):
             if isinstance(param, EXL3Parameter) and loaded_shard_id is None:
-                self.validate_shard_id(loaded_shard_id, param)
+                _validate_shard_id(self, loaded_shard_id, param)
                 param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=loaded_shard_id)
                 return
             return qkv(self, param, loaded_weight, loaded_shard_id)
 
         qkv_loader._exl3_patched = True
         QKVParallelLinear.weight_loader_v2 = qkv_loader
+
+
+def _validate_shard_id(layer, shard_id, param) -> None:
+    """vLLM's own shard-id check, as the running version spells it: v0.34 passes the parameter too, v0.32 does not."""
+    validate = getattr(layer, "validate_shard_id", None)
+    if validate is None:
+        return
+    if len(inspect.signature(validate).parameters) >= 2:
+        validate(shard_id, param)
+    else:
+        validate(shard_id)
 
 
 def _replicated_linear_loading(ReplicatedLinear) -> None:

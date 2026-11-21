@@ -125,3 +125,26 @@ def test_graph_default_follows_vllm_choice_of_breakable(monkeypatch):
     assert plugin._breakable_by_default(["LlamaForCausalLM"])
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
     assert plugin._breakable_by_default(["Qwen4ExpForConditionalGeneration"])
+
+
+def test_fused_shards_check_the_shard_id_as_the_running_vllm_spells_it(monkeypatch):
+    """v0.32's validate_shard_id takes the shard id alone, v0.34's the parameter too; calling the new form on the
+    old one broke every fused EXL3 load on the 0.32 fork."""
+    class Old(_Merged):
+        def validate_shard_id(self, shard_id):
+            self.validated = shard_id
+
+    class New(_Merged):
+        def validate_shard_id(self, shard_id, param):
+            self.validated = (shard_id, type(param).__name__)
+
+    class Qkv(_Merged):
+        pass
+
+    monkeypatch.setattr(EXL3Parameter, "load_merged_column_weight", lambda self, loaded_weight, **kw: None)
+    for cls, want in ((Old, (0, 1)), (New, ((0, 1), "EXL3Parameter"))):
+        stock_compat._fused_shard_loading(cls, Qkv)
+        layer = cls()
+        layer.calls = []
+        layer.weight_loader_v2(_param(), torch.zeros(4), (0, 1))
+        assert layer.validated == want
