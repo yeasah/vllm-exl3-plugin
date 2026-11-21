@@ -1087,17 +1087,30 @@ expert is 1.19 MiB (all three projections, 2.05 bpw); 480 expert reads a token:
 
 Against ~29 ms a token for this model at TP=1, a 30/30/40 split (8.6 GiB of experts in RAM) costs ~10-25%.
 
-**Prefill: where it hurts.** A chunk touches most of a layer's experts, so the disk share comes from disk nearly every
-chunk: at 30/30/40, ~2 GiB from RAM and 7.3 GiB from disk per chunk (the trace's average ~720 tokens), 4.0 s at 2 GB/s,
-1.4 s at 6 GB/s, against 0.5-0.7 s all from RAM.
+**Prefill: where it costs, and the policy it needs.** A chunk touches most of a layer's experts, so the disk share
+comes from disk nearly every chunk. Letting those reads into the RAM tier is wrong: a chunk flushes decode's hot set out of
+RAM, and full 2K chunks then read *more* than the disk share (14.8 GiB at 30/30/40, against 11.4 GiB of experts on disk).
+Streaming prefill's disk reads through the staging window without caching them (`--prefill-bypass`) leaves decode as it
+was (15.2 disk reads a token) and cuts a full 2K chunk's disk reads to:
+
+| VRAM / RAM / disk share | per 2K chunk from disk | added at 5.4 GB/s |
+|---|---|---|
+| 30 / 60 / 10 | 2.3 GiB | +0.45 s |
+| 30 / 40 / 30 | 6.6 GiB | +1.3 s |
+| 30 / 30 / 40 | 9.1 GiB | +1.8 s |
+| 30 / 20 / 50 | 11.5 GiB | +2.3 s |
+
+A 2K chunk takes ~1.37 s at today's ~1.5K t/s at TP=1. With staging overlapped against compute, as it already is from
+RAM, 30/40/30 stays near today's rate and 30/30/40 becomes disk-bound at ~1.1K t/s (~640 without overlap).
 
 **This host's SSD** (`ssd_probe.py`: random expert-sized reads, O_DIRECT, from the HF cache's shards): 1.96 GB/s at
 queue depth 1 (0.64 ms a read), 5.44 GB/s at 8. Decode's reads land about one every three layers, so they are depth-1
 reads, the 2 GB/s column; prefill's staging is bulk and runs deep. `/home/cache` is a VM disk on the hypervisor's
 dm-cache, so O_DIRECT in the guest may still be helped by host caching: a best case for this box.
 
-**Not settled:** concurrency (one stream here; more requests spread routing and raise disk reads), and whether decode
-disk reads could be issued ahead (routing is only known per layer). If a model justifies building it, the next step is
+**Not settled:** concurrency (one stream here; more requests spread routing and raise disk reads -- set against
+serializing requests and paying it in time to first token), and whether decode disk reads could be issued ahead (routing
+is only known per layer). If a model justifies building it, the next step is
 a measured prototype on one such split, not more simulation.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)

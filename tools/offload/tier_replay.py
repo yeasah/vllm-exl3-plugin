@@ -23,6 +23,9 @@ ap.add_argument("--lag", type=int, default=2)
 ap.add_argument("--budget", type=int, default=32)
 ap.add_argument("--link-gbs", type=float, default=20.0, help="UVA reads and staging copies from host RAM, GB/s")
 ap.add_argument("--ssd-gbs", default="2,6", help="disk read rates to bracket, GB/s (random ~1 MiB reads)")
+ap.add_argument("--prefill-bypass", action="store_true",
+                help="prefill's disk reads are staged and used but not kept in RAM")
+ap.add_argument("--deep-gbs", default="5.4", help="disk rate for prefill staging, which can run deep queues, GB/s")
 a = ap.parse_args()
 
 Z = np.load(a.trace + ".npz", allow_pickle=True)
@@ -56,6 +59,7 @@ def replay(fv, fr):
     clock, pending = 0, collections.deque()
     dv = dr = dd = 0
     pr_ram = pr_disk = 0
+    full = []                                  # (tokens, MiB from RAM, MiB from disk) for chunks of >= 1536 tokens
 
     def to_ram(l, i):
         r = ram[l]
@@ -80,6 +84,7 @@ def replay(fv, fr):
             v[i] = clock
             ram[l].pop(i, None)
         want = collections.Counter()
+        before = (pr_ram, pr_disk)
         for _, l, _, t in st:
             ids = t.ravel().tolist() if ph == "decode" else np.unique(t).tolist()
             v, r = vram[l], ram[l]
@@ -99,16 +104,23 @@ def replay(fv, fr):
                         dd += 1
                     else:
                         pr_disk += a.expert_mib
-                    to_ram(l, i)
+                    # a prefill-only read streams through the staging window without displacing RAM's decode-hot set
+                    if ph == "decode" or not a.prefill_bypass:
+                        to_ram(l, i)
                 if ph == "decode":
                     want[(l, i)] += 1
         if ph == "decode":
             for l, i in sorted(want, key=lambda k: (-want[k], (k[0] - clock) % L))[:a.budget]:
                 pending.append((clock + a.lag, l, i))
+        elif st[0][3].shape[0] >= 1536:
+            full.append((st[0][3].shape[0], pr_ram - before[0], pr_disk - before[1]))
+    replay.full = full
     return dv / dec_tokens, dr / dec_tokens, dd / dec_tokens, pr_ram / max(chunks, 1), pr_disk / max(chunks, 1)
 
 
 ssd = [float(x) for x in a.ssd_gbs.split(",")]
+deep = [float(x) for x in a.deep_gbs.split(",")]
+fulls = []
 mib = 1024 ** 2
 print(f"\nper decode token: reads from VRAM / RAM / disk, and the time the RAM and disk reads add at {a.link_gbs:g} GB/s "
       f"link and {' or '.join(f'{s:g}' for s in ssd)} GB/s disk; per prefill chunk: GiB staged from RAM / disk, seconds")
@@ -125,3 +137,15 @@ for fv in [float(x) for x in a.vram.split(",")]:
         s_chunk = [pr * mib / (a.link_gbs * 1e9) + pd * mib / (s * 1e9) for s in ssd]
         print(f"{fr:5.0%}  {v:6.1f} {r:6.1f} {d:6.1f}  {ms_ram:8.2f} " + " ".join(f"{m:9.2f}" for m in ms_disk)
               + f"   {pr / 1024:9.2f} {pd / 1024:6.2f} " + " ".join(f"{t:7.2f}" for t in s_chunk), flush=True)
+        if replay.full:
+            tok = sum(c[0] for c in replay.full) / len(replay.full)
+            gd = sum(c[2] for c in replay.full) / len(replay.full) / 1024
+            gr = sum(c[1] for c in replay.full) / len(replay.full) / 1024
+            add = [gd * 2**30 / (x * 1e9) for x in deep]
+            fulls.append((fv, fr, tok, gr, gd, add))
+    if fulls:
+        print(f"  full chunks (>= 1536 tokens, n={len(replay.full)}): per chunk GiB from RAM / disk, and the seconds the "
+              f"disk part adds at {' or '.join(f'{x:g}' for x in deep)} GB/s")
+        for fv_, fr_, tok, gr, gd, add in fulls:
+            print(f"    RAM {fr_:4.0%}: {tok:5.0f} tokens, {gr:5.2f} / {gd:5.2f} GiB, +" + " / +".join(f"{t:.2f} s" for t in add))
+        fulls.clear()
