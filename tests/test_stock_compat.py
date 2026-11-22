@@ -148,3 +148,25 @@ def test_fused_shards_check_the_shard_id_as_the_running_vllm_spells_it(monkeypat
         layer.calls = []
         layer.weight_loader_v2(_param(), torch.zeros(4), (0, 1))
         assert layer.validated == want
+
+
+def test_importing_exllamav3_under_the_plugin_leaves_the_allocator_alone(monkeypatch):
+    """The lazy `import exllamav3` in the MoE path used to switch on expandable segments mid-process."""
+    import importlib
+    import sys
+
+    monkeypatch.delenv("EXL3_EXPANDABLE_SEGMENTS", raising=False)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    plugin._leave_allocator_alone()
+    import os
+
+    assert os.environ["EXL3_EXPANDABLE_SEGMENTS"] == "0"
+    calls = []
+    monkeypatch.setattr(torch._C, "_accelerator_setAllocatorSettings", lambda s: calls.append(s), raising=False)
+    sys.modules.pop("exllamav3", None)
+    importlib.import_module("exllamav3")
+    assert calls == [], "exllamav3 changed the allocator settings"
+    monkeypatch.setenv("EXL3_EXPANDABLE_SEGMENTS", "1")
+    sys.modules.pop("exllamav3", None)
+    importlib.import_module("exllamav3")
+    assert calls == ["expandable_segments:True"], "the probe must see exllamav3's setter when it is allowed"

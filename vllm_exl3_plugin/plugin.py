@@ -20,6 +20,7 @@ def register() -> None:
     if _REGISTERED:
         return
 
+    _leave_allocator_alone()
     from vllm.model_executor.layers.quantization import register_quantization_config
 
     from .quantization.config import EXL3Config
@@ -270,6 +271,21 @@ def _patch_mm_encoder_dp_default() -> None:
 
     VllmConfig.__post_init__ = __post_init__
     VllmConfig._exl3_encoder_dp_patched = True
+
+
+def _leave_allocator_alone() -> None:
+    """Keep torch's allocator as vLLM and the user configured it.
+
+    Importing the `exllamav3` package turns on expandable segments unless told not to (`exllamav3/__init__.py`), and
+    the plugin imports it lazily -- the MoE and engram paths -- so under vLLM a MoE model switched allocators partway
+    through the process and a dense one never did. Expandable segments are not safe everywhere: with torch's
+    unpatched libc10_cuda.so (PyTorch #196258, open through 2.14.0) freed pages are unmapped across GPUs, so at TP > 1
+    another GPU's queued kernels write into memory that is gone or reused. So the plugin leaves the setting alone; a
+    user who wants them sets PYTORCH_CUDA_ALLOC_CONF, which exllamav3 also defers to.
+    """
+    import os
+
+    os.environ.setdefault("EXL3_EXPANDABLE_SEGMENTS", "0")
 
 
 def _has_gdn_layers(hf_config) -> bool:
