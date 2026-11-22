@@ -122,6 +122,9 @@ def offload(monkeypatch):
     monkeypatch.setattr(cpu_offload, "get_accelerator_view_from_cpu_tensor", lambda t: t)
     # budget-driven placement, the cache-off mode; cache-mode tests set it themselves
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "0")
+    # no disk tier unless a test asks for one; when it does, nothing here stands in the way of spilling
+    monkeypatch.setenv("EXL3_DISK_TIER", "off")
+    monkeypatch.setattr(cpu_offload, "_spill_ready", lambda: None)
     cpu_offload._reset_stats()
 
     def install(loader):
@@ -993,6 +996,52 @@ def test_disk_tier_keeps_a_share_in_host_rows_and_leaves_the_rest_on_disk(offloa
     assert loader.cpu_offload_bytes == 0
 
 
+def _spill_layer(offload, monkeypatch, tier, budget_experts, mem=1 << 40):
+    """One 8-expert layer under the exclusive cache, --cpu-offload-gb holding `budget_experts` experts."""
+    monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
+    monkeypatch.setenv("EXL3_DISK_TIER", tier)
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: mem)
+    monkeypatch.setattr(cpu_offload, "_mem_total", lambda: 8 << 30)   # so the margin is the 4 GiB floor
+    offload(_Loader({"experts"}, max_bytes=budget_experts * 3 * 512))
+    cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
+    param = _Collector()
+    for e in range(8):
+        cpu_offload.place_expert(param, _expert_tensor(e), "gate", e)
+    cpu_offload.drain_host_copies()
+    return param.exl3_blocks["gate"]
+
+
+def test_disk_tier_by_default_spills_what_the_host_budget_cannot_hold(offload, monkeypatch):
+    """The default: --cpu-offload-gb sizes the host rows and only the rest goes to disk -- not residents in VRAM."""
+    block = _spill_layer(offload, monkeypatch, "auto", 3)
+    assert block.rows == {0: 0, 1: 1, 2: 2} and block.disk == frozenset(range(3, 8))
+    assert cpu_offload._STATS["disk_experts"] == 5
+
+
+def test_disk_tier_spills_nothing_when_the_host_holds_every_expert(offload, monkeypatch):
+    block = _spill_layer(offload, monkeypatch, "auto", 64)
+    assert len(block.rows) == 8 and not block.disk
+
+
+def test_disk_tier_respects_the_host_margin(offload, monkeypatch):
+    """A share asks for host rows; host RAM above the margin bounds them. EXL3_DISK_TIER=1 on a model larger than
+    the host pinned it past physical memory."""
+    margin = cpu_offload._HOST_MARGIN
+    block = _spill_layer(offload, monkeypatch, "1", 64, mem=margin + 2 * 3 * 512)
+    assert len(block.rows) == 2 and block.disk == frozenset(range(2, 8))
+
+
+def test_disk_tier_that_cannot_spill(offload, monkeypatch):
+    """With a graph mode the disk tier cannot run under (or no local checkpoint), the default keeps the rest resident,
+    as before, and an explicit share refuses."""
+    monkeypatch.setattr(cpu_offload, "_spill_ready", lambda: "CUDA graphs here would capture the MoE op")
+    block = _spill_layer(offload, monkeypatch, "auto", 3)
+    assert len(block.rows) == 3 and not block.disk
+    cpu_offload._reset_stats()
+    with pytest.raises(ValueError, match="cannot spill"):
+        _spill_layer(offload, monkeypatch, "0.3", 3)
+
+
 def test_disk_tier_needs_the_exclusive_cache(offload, monkeypatch):
     """The inclusive cache keeps a host copy of every hosted expert, and cache-off placement never moves one: neither
     has anywhere to put an expert read from disk."""
@@ -1009,7 +1058,7 @@ def test_disk_tier_needs_the_exclusive_cache(offload, monkeypatch):
         cpu_offload.place_expert(_Collector(), _expert_tensor(0), "gate", 0)
 
 
-@pytest.mark.parametrize("spec", ["0", "1.5", "-0.2"])
+@pytest.mark.parametrize("spec", ["1.5", "-0.2", "2"])
 def test_disk_tier_share_is_checked(monkeypatch, spec):
     monkeypatch.setenv("EXL3_DISK_TIER", spec)
     with pytest.raises(ValueError, match="EXL3_DISK_TIER"):

@@ -279,17 +279,13 @@ def _patch_mm_encoder_dp_default() -> None:
 
 
 def _disk_tier_graph_defaults() -> None:
-    """With the disk tier on, CUDA graphs that leave the routed-expert op eager: breakable capture with the op as an
-    eager break (`ops.MOE_EAGER_BREAK`, which defaults on with the disk tier) and PIECEWISE decode graphs, since a FULL
-    decode graph captures across the breaks. The disk tier reads routing back on the host and refuses capture, so
-    without these every graph mode but `enforce_eager` fails at capture. Each is a default: an explicit
-    VLLM_USE_BREAKABLE_CUDAGRAPH or cudagraph_mode stands. QFN 2.05bpw, 50% on disk: 67.5-77.5 ms a token, against
-    110-128 eager (docs/expert-cache.md, "QFN under breakable capture")."""
-    import os
-
-    if not os.environ.get("EXL3_DISK_TIER", "").strip():
-        return
-    os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    """When experts will spill to disk, CUDA graphs that leave the routed-expert op eager: breakable capture with the
+    op as an eager break (`ops.moe_eager_break`, on once anything spilled) and PIECEWISE decode graphs, since a FULL
+    decode graph captures across the breaks. The disk tier reads routing back on the host and refuses capture. Whether
+    anything spills is decided at load, so this predicts it from the config (`cpu_offload.spill_expected`); load
+    spills only into a graph path that can run it, and otherwise keeps the rest resident. Each is a default: an
+    explicit VLLM_USE_BREAKABLE_CUDAGRAPH or cudagraph_mode stands. QFN 2.05bpw, 50% on disk: 67.5-77.5 ms a token,
+    against 110-128 eager (docs/expert-cache.md, "QFN under breakable capture")."""
     from vllm.config import VllmConfig
     from vllm.config.compilation import CUDAGraphMode
 
@@ -300,9 +296,16 @@ def _disk_tier_graph_defaults() -> None:
     @wraps(original)
     def __post_init__(self, *args, **kwargs):
         mc, cc = getattr(self, "model_config", None), getattr(self, "compilation_config", None)
-        if mc is not None and cc is not None and cc.cudagraph_mode is None and os.environ.get("EXL3_DISK_TIER", "").strip() \
-                and getattr(mc, "quantization", None) == "exl3" and not mc.enforce_eager:
-            cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if mc is not None and cc is not None and getattr(mc, "quantization", None) == "exl3" \
+                and not mc.enforce_eager:
+            from .cpu_offload import spill_expected
+
+            if spill_expected(self):
+                import os
+
+                os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+                if cc.cudagraph_mode is None:
+                    cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
         return original(self, *args, **kwargs)
 
     VllmConfig.__post_init__ = __post_init__

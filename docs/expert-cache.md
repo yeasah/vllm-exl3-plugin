@@ -1278,7 +1278,8 @@ itself differs as much); a QFN path that depends on batch composition (TODO `eng
 The breaks themselves cost ~0.4 ms a token on QFN (all in RAM: 33.8 / 30.1 with them, 33.3 / 29.7 without), so the
 disk tier defaults its graph path: with `EXL3_DISK_TIER` set, `EXL3_MOE_EAGER_BREAK`, `VLLM_USE_BREAKABLE_CUDAGRAPH`
 and a PIECEWISE `cudagraph_mode` (a FULL decode graph captures across the breaks) default on, each overridable; QFN
-and gemma serve graphs from the one switch (`plugin._disk_tier_graph_defaults`).
+and gemma serve graphs from the one switch (`plugin._disk_tier_graph_defaults`). *(Since superseded: the disk tier is
+the default, and its graph path follows a predicted spill; next section.)*
 
 **The read gap, closed (2026-11-22).** Over 1,024 decode tokens the reads staged for use settle at 20.5 a token,
 already under `tier_replay.py`'s 22.5; the rest of the gap was admissions. Every routed disk expert was admitted
@@ -1302,6 +1303,27 @@ experts shared a position. Pending victims now wait. The verifier also checks by
 exclusion dropped, the identity test showed 303 differences while the entry checks passed; the byte check raises.
 gemma-4-26B-A4B, 60% on disk, against all in RAM under breakable graphs: bit-identical, checkpoint reads 16,016 ->
 12,172. QFN under the verifier: clean over 85,959 reads and 14,450 admissions.
+
+**The disk tier is the default, sized by the host budget (2026-11-22).** As built, `EXL3_DISK_TIER=<share>` pinned that
+share of every layer in host rows without asking `_host_quota`: `--cpu-offload-gb` only switched offload on, the host
+margin did not apply, and a share past what the host holds (a model larger than host RAM at `EXL3_DISK_TIER=1`) pinned
+the VM to death. Now `--cpu-offload-gb` sizes the host tier, within host RAM less the margin, as it does without a disk
+tier; the expert cache takes VRAM by its own policy; and only what neither holds stays on disk:
+
+- Unset (or `auto`), experts the host quota leaves out spill to disk instead of staying resident in VRAM ahead of KV
+  sizing. Filling slots from rows frees rows; beyond the spares promotions swap through, they refill from disk
+  (`ExclusiveCache._backfill`, at build and after late slots grow). If the host holds every offloaded expert, nothing
+  spills. `off` (or `0`) keeps the old resident remainder; a share caps the rows below the quota.
+- The graph path (breakable capture, PIECEWISE decode graphs) is chosen when the config is built, before load decides
+  anything, so it follows a prediction (`cpu_offload.spill_expected`: the checkpoint's expert bytes against 80% of
+  what the budget and host RAM hold, since MemAvailable dips during load). Load spills only into a graph path that can
+  run it, or under `enforce_eager`; otherwise it keeps the rest resident and says why. The MoE eager break is on
+  exactly when something spilled (`ops.moe_eager_break`).
+
+QFN 2.05bpw with only `--cpu-offload-gb 8`: 143 of 512 experts a layer in host rows (7.98 GiB), breakable capture on
+by itself, 4,128 experts refilled into rows the slots freed; decode 67.6 ms a token warm, prefill 511 tok/s. gemma-4
+with a 64 GiB budget spills nothing and keeps vLLM's FULL_AND_PIECEWISE graphs. Backfill under the verifier (gemma, a
+60% share, both arms breakable): bit-identical, 1,530 -> 1,260 experts on disk, checkpoint reads 12,172 -> 9,877.
 
 What is left of the disk tier's ~32 ms a token over all-in-RAM is the staging reads (14.3 ms: 0.4 experts a layer, read
 synchronously one layer at a time, ~0.8 ms each at 1.6 GB/s) and the disk dispatch itself.

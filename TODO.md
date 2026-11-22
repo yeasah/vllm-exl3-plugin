@@ -121,6 +121,8 @@ v0.34 (QFN is not deterministic run to run, so it cannot be identity-tested; TOD
 
 The read gap is closed: decode admits disk experts at read time, straight into their rows, so each is read once --
 QFN warm decode 18.2 reads a token (replay 22.5), 61.7 ms against 65.7 (2026-11-22).
+The disk tier is the default and `--cpu-offload-gb` sizes the host tier within the host margin; only what VRAM and
+host RAM leave spills (2026-11-22). Not yet seen on a host-RAM-limited box with an over-large explicit share.
 
 **Next:** (1) the staging reads, 14.3 ms of the ~32 the disk tier adds to QFN's decode: ~0.4 experts a layer, read
 synchronously at queue depth 1, ~0.8 ms each -- reads that cannot start before their layer's routing is known; (2) the

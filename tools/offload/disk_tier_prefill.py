@@ -15,7 +15,7 @@ import time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("model")
-ap.add_argument("--share", default="0.5", help="EXL3_DISK_TIER, or 0 for no disk tier")
+ap.add_argument("--share", default="0.5", help="EXL3_DISK_TIER: a share, auto, or 0/off for no disk tier")
 ap.add_argument("--slots", default="0.2")
 ap.add_argument("--chunk", type=int, default=2048)
 ap.add_argument("--chunks", type=int, default=4)
@@ -31,9 +31,7 @@ a = ap.parse_args()
 
 os.environ.update(VLLM_ENABLE_V1_MULTIPROCESSING="0", EXL3_EXPERT_SLOTS=a.slots)
 os.environ.pop("EXL3_CACHE_VERIFY", None)
-os.environ.pop("EXL3_DISK_TIER", None)
-if float(a.share):
-    os.environ["EXL3_DISK_TIER"] = a.share
+os.environ["EXL3_DISK_TIER"] = a.share if a.share in ("auto", "off") or float(a.share) else "off"
 if a.force_routed:
     os.environ["EXL3_STAGE_ROUTED_ALWAYS"] = "1"
 

@@ -365,17 +365,89 @@ class HostBlock:
         self.view = get_accelerator_view_from_cpu_tensor(self.host)
 
 
-def disk_tier() -> float | None:
-    """``EXL3_DISK_TIER``: the share of each layer's experts kept in host rows when the rest stay in the
-    checkpoint, read on use (docs/expert-cache.md, "A disk tier below host RAM"); None when off. Under the
-    exclusive cache only, whose rows already move between experts. Prefill only, for now: decode is refused."""
-    spec = os.environ.get("EXL3_DISK_TIER", "").strip()
-    if not spec:
+def disk_tier() -> float | str | None:
+    """``EXL3_DISK_TIER``: what of the experts host RAM cannot hold stays in the checkpoint, read on use
+    (docs/expert-cache.md, "A disk tier below host RAM"). Under the exclusive cache only, whose rows already move
+    between experts. Unset or "auto" (the default): host rows are what --cpu-offload-gb and host RAM allow
+    (`_host_quota`, margin included), the expert cache takes VRAM by its own policy, and only the rest spills to disk
+    -- nothing when the host holds every offloaded expert. "0" or "off": no disk tier; what the host cannot hold stays
+    resident in VRAM. A share in (0, 1]: at most that share of each layer in host rows, still within the host quota."""
+    spec = os.environ.get("EXL3_DISK_TIER", "").strip().lower()
+    if spec in ("", "auto"):
+        return "auto"
+    if spec in ("0", "off"):
         return None
     share = float(spec)
     if not 0 < share <= 1:
-        raise ValueError(f"EXL3_DISK_TIER={spec}: a share of each layer's experts in host rows, in (0, 1]")
+        raise ValueError(f"EXL3_DISK_TIER={spec}: auto, off, or a share of each layer's experts in host rows, in (0, 1]")
     return share
+
+
+def _graph_path_ready() -> bool:
+    """Whether this engine can run disk-tier layers: eager, or breakable capture with PIECEWISE decode graphs, in which
+    the MoE op is an eager break (`plugin._disk_tier_graph_defaults`). Anything else captures across the routing
+    readback the disk tier needs."""
+    try:
+        from vllm.config import get_current_vllm_config
+        from vllm.config.compilation import CUDAGraphMode
+
+        config = get_current_vllm_config()
+        if config.model_config.enforce_eager:
+            return True
+        cc = config.compilation_config
+        return bool(getattr(cc, "use_breakable_cudagraph", False)) and cc.cudagraph_mode in (
+            CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE)
+    except Exception:
+        return False
+
+
+def _spill_ready() -> str | None:
+    """None if this engine can spill experts to disk, else why not; decided once."""
+    if "spill_blocker" not in _STATS:
+        from . import expert_cache
+
+        why = None
+        if cache_mode() == "off" or not expert_cache.EXCLUSIVE:
+            why = "it needs the exclusive expert cache"
+        elif not _graph_path_ready():
+            why = ("CUDA graphs here would capture the MoE op (the disk tier needs breakable capture with PIECEWISE "
+                   "decode graphs, or enforce_eager)")
+        else:
+            try:
+                _model_root()
+            except Exception as e:
+                why = f"the checkpoint is not in a local directory ({e})"
+        _STATS["spill_blocker"] = why
+    return _STATS["spill_blocker"]
+
+
+def spill_expected(config) -> bool:
+    """At config time, whether the automatic disk tier will spill: the routed experts' bytes exceed what
+    --cpu-offload-gb and host RAM (less the margin) can hold, with a fifth to spare, since load decides at the first
+    expert, when MemAvailable sits below what it is now (loading's own transient memory). Erring toward spilling
+    costs the graph path a few percent (breakable PIECEWISE graphs and an eager break per MoE layer); erring the other
+    way leaves load to keep the rest resident, as without the disk tier."""
+    try:
+        mode = disk_tier()
+        if mode is None:
+            return False
+        if isinstance(mode, float):
+            return True
+        uva = config.offload_config.uva
+        params = uva.cpu_offload_params or set()
+        if uva.cpu_offload_gb <= 0 or (params and not any("expert" in p for p in params)):
+            return False
+        mc = config.model_config
+        census = _checkpoint_census(mc.model, mc.revision, getattr(config.load_config, "download_dir", None))
+        if not census or not census.get("experts"):
+            return False
+        ranks = max(config.parallel_config.tensor_parallel_size, 1)
+        want = census["experts"] / ranks
+        free = (_mem_available() - max(_HOST_MARGIN, _mem_total() // 10)) / ranks
+        room = min(free, uva.cpu_offload_gb * (1 << 30))
+        return want > 0.8 * room
+    except Exception:
+        return False
 
 
 def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
@@ -395,22 +467,37 @@ def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
         return None
     nbytes = t.numel() * t.element_size()
     cached = cache_mode() != "off"
-    share = disk_tier()
-    if share is not None:
+    mode = disk_tier()
+    if isinstance(mode, float):
         from . import expert_cache
+
         if not cached or not expert_cache.EXCLUSIVE:
             raise ValueError("EXL3_DISK_TIER needs the exclusive expert cache (EXL3_CACHE_EXCLUSIVE on, slots not 0)")
-        # every matching expert leaves the device: the first share of them to host rows, the rest stay on disk
+    elif not cached:
+        mode = None
+    if mode is not None:
+        explicit = isinstance(mode, float)
+        quota = _host_quota(param.exl3_num_experts, nbytes)
         taken = [e for e in range(param.exl3_num_experts)
                  if _matches(loader.cpu_offload_params, f".{param.exl3_prefix}.{e}.{label}_proj.{param.exl3_name}.")]
-        rows = taken[:math.ceil(share * param.exl3_num_experts)]
-        for _ in rows:
-            _count(loader, param.exl3_prefix, nbytes, budget=False)
-        if label == "gate":   # once per expert, not once per projection
-            _STATS["disk_experts"] += len(taken) - len(rows)
-        if not taken:
-            return None
-        return HostBlock({e: row for row, e in enumerate(rows)}, t.shape, t.dtype, frozenset(taken[len(rows):]))
+        n = min(math.ceil(mode * param.exl3_num_experts), quota) if explicit else quota
+        if taken and n < len(taken) and (explicit or _STATS.get("host_limited")):
+            blocker = _spill_ready()
+            if blocker is None:
+                # the host's rows, then every other matching expert to disk; the expert cache's slots fill from the rows
+                # and the rows refill from disk (`ExclusiveCache._backfill`), so only what neither holds stays there
+                rows = taken[:n]
+                for _ in rows:
+                    _count(loader, param.exl3_prefix, nbytes, budget=False)
+                if label == "gate":   # once per expert, not once per projection
+                    _STATS["disk_experts"] += len(taken) - len(rows)
+                return HostBlock({e: row for row, e in enumerate(rows)}, t.shape, t.dtype, frozenset(taken[len(rows):]))
+            if explicit:
+                raise ValueError(f"EXL3_DISK_TIER={mode}: cannot spill to disk: {blocker}")
+            if not _STATS.get("spill_warned"):
+                _STATS["spill_warned"] = True
+                logger.warning("cpu-offload: not spilling experts to disk, so what host RAM cannot hold stays resident "
+                               "in VRAM: %s", blocker)
     quota = _host_quota(param.exl3_num_experts, nbytes) if cached else param.exl3_num_experts
     taken = []
     for e in range(param.exl3_num_experts):
@@ -663,6 +750,8 @@ def _host_quota(experts: int, nbytes: int) -> int:
         capped = need is not None and need < _STATS["quota"]
         if capped:
             _STATS["quota"] = need
+        # host RAM or the budget, not the cache's cap, is what leaves experts out: the automatic disk tier takes them
+        _STATS["host_limited"] = limited and not capped
         if capped or limited:
             # One line, after every decision: each used to log as it was made, and later ones contradicted earlier
             q = _STATS["quota"]
@@ -676,10 +765,12 @@ def _host_quota(experts: int, nbytes: int) -> int:
                 why = "{} allows {:.2f} GiB a rank{}".format(
                     "--cpu-offload-gb" if budget <= free else "host RAM", room / (1 << 30),
                     ", shared so every rank keeps the same expert bytes in VRAM" if widths is not None else "")
-            (logger.info if capped else logger.warning)(
-                "cpu-offload: hosting %d of %d experts per layer%s, %.2f of %.2f GiB; %.2f GiB stay resident: %s",
+            spills = not capped and disk_tier() is not None and _spill_ready() is None
+            (logger.info if capped or spills else logger.warning)(
+                "cpu-offload: hosting %d of %d experts per layer%s, %.2f of %.2f GiB; %.2f GiB %s: %s",
                 q, experts, split, want * q / experts / (1 << 30), want / (1 << 30),
-                want * (experts - q) / experts / (1 << 30), why)
+                want * (experts - q) / experts / (1 << 30),
+                "spill to disk, less what the expert cache's slots take" if spills else "stay resident", why)
     return _STATS["quota"]
 
 

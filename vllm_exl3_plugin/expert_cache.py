@@ -500,6 +500,7 @@ class ExclusiveCache(ExpertCache):
         self._write(updates)
         self._write_stage(stage_updates)
         torch.cuda.synchronize(self.device)
+        self._backfill()
         self.ref = None
         if VERIFY:
             self.ref = numpy.zeros((L, 3, E), dtype=object)
@@ -719,11 +720,55 @@ class ExclusiveCache(ExpertCache):
         self._write(updates)
         self._write_stage(stage_updates)
         torch.cuda.synchronize(self.device)
+        self._backfill()
         if self.ref is not None:
             self._verify(range(len(self.layers)), full=True)
         return added
 
     # ------------------------------------------------------------ the disk tier
+
+    def _backfill(self) -> None:
+        """Refill free host rows from disk, keeping the spares promotions swap through (`cpu_offload._SPARE_ROWS`).
+        Filling slots from rows frees rows; under the disk tier the host should still hold all its budget allows, so
+        what stays on disk is only what neither VRAM nor host RAM holds. Only while nothing runs: at build, and after
+        late slots grow, both synchronized."""
+        if not self.disk_on:
+            return
+        from . import cpu_offload
+
+        store, spare = cpu_offload._DISK.get("store"), cpu_offload._SPARE_ROWS
+        if store is None:
+            return
+        todo = []
+        for l, layer in enumerate(self.layers):
+            disk = [int(e) for e in numpy.flatnonzero(self.row_of[l] == DISK)]
+            while len(self.free_rows[l]) > spare and disk:
+                todo.append((l, disk.pop(0), self.free_rows[l].pop()))
+        if not todo:
+            return
+
+        def one(item):
+            l, x, r = item
+            layer = self.layers[l]
+            parts = store.index[(layer.exl3_store_key, x)][3]
+            out = {label: layer.exl3_host_blocks[label].host[r].view(-1).view(cpu_offload._STORE_DTYPES[dt]).view(shape)
+                   for label, (_, _, dt, shape) in parts.items()}
+            store.read(layer.exl3_store_key, x, out)
+
+        list(cpu_offload._DISK["pool"].map(one, todo))
+        updates, stage_updates = [], []
+        for l, x, r in todo:
+            self.layers[l].exl3_disk_pos.pop(x)
+            d, st = self._to_host(l, x, r)
+            updates += d
+            stage_updates += st
+        self._write(updates)
+        self._write_stage(stage_updates)
+        torch.cuda.synchronize(self.device)
+        left = int((self.row_of == DISK).sum())
+        cpu_offload._STATS["disk_experts"] = left
+        logger.info("expert cache: %d disk experts refilled freed host rows; %d stay on disk (%.1f per layer)",
+                    len(todo), left, left / max(len(self.layers), 1))
 
     def _admit(self, rows, flat_ids) -> None:
         """Decode's routed disk experts move into host rows, the most-routed first (up to `_ADMIT_BUDGET`): each evicts

@@ -108,32 +108,55 @@ def test_eager_break_does_nothing_at_capture_time(monkeypatch):
     assert len(calls) == 1 and out.eq(1).all(), "replay computes"
 
 
-def test_disk_tier_defaults_its_graph_path(monkeypatch):
-    """With EXL3_DISK_TIER set, graphs mean breakable capture with the MoE op as an eager break; without these the disk
-    tier refuses capture. Explicit settings stand."""
-    import os
-    import subprocess
-    import sys
+def test_disk_tier_eager_break_follows_what_spilled(monkeypatch):
+    """The MoE op is an eager break exactly when experts were spilled to disk at load; EXL3_MOE_EAGER_BREAK forces it."""
+    from vllm_exl3_plugin import cpu_offload, ops
 
-    from vllm_exl3_plugin import plugin
+    monkeypatch.setattr(ops, "_EAGER_BREAK_ENV", None)
+    monkeypatch.setitem(cpu_offload._STATS, "disk_experts", 0)
+    assert not ops.moe_eager_break()
+    monkeypatch.setitem(cpu_offload._STATS, "disk_experts", 12)
+    assert ops.moe_eager_break()
+    monkeypatch.setattr(ops, "_EAGER_BREAK_ENV", "0")
+    assert not ops.moe_eager_break()
 
-    def eager_break(env):
-        code = "from vllm_exl3_plugin import ops; print(ops.MOE_EAGER_BREAK)"
-        e = {k: v for k, v in os.environ.items() if k not in ("EXL3_DISK_TIER", "EXL3_MOE_EAGER_BREAK")}
-        return subprocess.run([sys.executable, "-c", code], env={**e, **env}, capture_output=True, text=True,
-                              check=True).stdout.split()[-1]
 
-    assert eager_break({}) == "False"
-    assert eager_break({"EXL3_DISK_TIER": "0.5"}) == "True"
-    assert eager_break({"EXL3_DISK_TIER": "0.5", "EXL3_MOE_EAGER_BREAK": "0"}) == "False"
+def test_disk_tier_setting(monkeypatch):
+    from vllm_exl3_plugin import cpu_offload
 
-    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    for spec, want in (("", "auto"), ("auto", "auto"), ("0", None), ("off", None), ("0.25", 0.25)):
+        monkeypatch.setenv("EXL3_DISK_TIER", spec)
+        assert cpu_offload.disk_tier() == want
+    monkeypatch.setenv("EXL3_DISK_TIER", "1.5")
+    with pytest.raises(ValueError):
+        cpu_offload.disk_tier()
+
+
+def test_spill_is_predicted_from_expert_bytes_against_host_room(monkeypatch):
+    """The graph path is chosen before load, so the spill is predicted: experts beyond 80% of what --cpu-offload-gb
+    and host RAM (less the margin) hold."""
+    import types
+
+    from vllm_exl3_plugin import cpu_offload
+
+    gib = 1 << 30
     monkeypatch.delenv("EXL3_DISK_TIER", raising=False)
-    plugin._disk_tier_graph_defaults()
-    assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ, "no disk tier, no default"
-    monkeypatch.setenv("EXL3_DISK_TIER", "0.5")
-    plugin._disk_tier_graph_defaults()
-    assert os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "1"
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-    plugin._disk_tier_graph_defaults()
-    assert os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0", "an explicit opt-out stands"
+    monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 36 * gib)
+    monkeypatch.setattr(cpu_offload, "_mem_total", lambda: 40 * gib)
+    experts = {"experts": 20 * gib}
+    monkeypatch.setattr(cpu_offload, "_checkpoint_census", lambda *a: experts)
+
+    def config(gb, params=("experts",), tp=1):
+        return types.SimpleNamespace(
+            offload_config=types.SimpleNamespace(uva=types.SimpleNamespace(cpu_offload_gb=gb, cpu_offload_params=set(params))),
+            model_config=types.SimpleNamespace(model="m", revision=None), load_config=types.SimpleNamespace(),
+            parallel_config=types.SimpleNamespace(tensor_parallel_size=tp))
+
+    assert not cpu_offload.spill_expected(config(64)), "host RAM holds 20 GiB of experts"
+    assert cpu_offload.spill_expected(config(8)), "an 8 GiB budget does not"
+    assert not cpu_offload.spill_expected(config(0)), "no offload, nothing to spill"
+    assert not cpu_offload.spill_expected(config(8, params=("visual",))), "experts not offloaded"
+    experts["experts"] = 40 * gib
+    assert cpu_offload.spill_expected(config(64)), "more experts than host RAM less the margin"
+    monkeypatch.setenv("EXL3_DISK_TIER", "off")
+    assert not cpu_offload.spill_expected(config(8))

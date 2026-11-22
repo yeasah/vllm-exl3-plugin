@@ -83,8 +83,7 @@ if a.arm:
 
 a.out = a.out or os.path.join(os.environ.get("TMPDIR", "/tmp"), "disk_tier_identity")
 os.makedirs(a.out, exist_ok=True)
-base = dict(os.environ, EXL3_EXPERT_SLOTS=a.slots, EXL3_MOE_GROUPED_MIN="1")
-base.pop("EXL3_DISK_TIER", None)
+base = dict(os.environ, EXL3_EXPERT_SLOTS=a.slots, EXL3_MOE_GROUPED_MIN="1", EXL3_DISK_TIER="off")
 arms = {"ram": base, "disk": dict(base, EXL3_DISK_TIER=a.share, EXL3_CACHE_VERIFY="1")}
 if a.disk_graphs or a.graphs_both:
     # graph replay pads decode batches to capture sizes, so against an eager arm its numbers differ by that alone
