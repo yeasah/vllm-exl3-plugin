@@ -556,6 +556,13 @@ ENTRIES: list[Entry] = [
         tensor_parallel_size=2,
         gpu_memory_utilization=0.92,
         tp_reference="qwen3.5-35B-A3B-2.0bpw-MoE",
+        # v0.34 (2026-11-22): KL max vs TP=1 0.403 at one low-confidence position (argmax same, greedy same, KL mean
+        # 9.7e-3 inside the global bound), against 0.039 on v0.32. Shown not to be a sharding bug: the plugin's MoE
+        # is bit-identical between v0.32 and v0.34 at TP=2 (layer 0's routed, shared and gate outputs exactly), the
+        # first divergence is inside layer 1's GDN mixer (vLLM code), and discrete routing turns it into expert
+        # flips layer after layer; stock dense Qwen3.5-4B's TP gap did not move. docs/upstream.md, "What the 0.34
+        # bump actually cost". A real sharding bug lands orders of magnitude above this, as the global bound says.
+        tp_tolerance={"kl_max": 0.5},
         exercises="MoE under TP: exl3_mgemm on each rank's expert shards, and "
         "the unquantized router and shared-expert gate through ReplicatedLinear "
         "-- the loader 2261ea826 fixed after it had crashed every bf16 model "
