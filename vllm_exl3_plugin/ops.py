@@ -1026,6 +1026,7 @@ def _exl3_moe_mm(
     stage: int = -1,
 ) -> torch.Tensor:
     _one_stream(x)
+    topk_ids, topk_weights = _skip_padding_rows(topk_ids, topk_weights)
     if route is not None:
         # The expert cache's routing capture (expert_cache.py), done here rather than in `apply`: a
         # second consumer of `topk_ids` in the compiled forward changed how Inductor fused the router,
@@ -1080,6 +1081,19 @@ def _gated_activation(name: str, gate: torch.Tensor, up: torch.Tensor):
             f"{sorted(_GATED_ACTIVATIONS)}"
         )
     return fn(gate) * up
+
+
+def _skip_padding_rows(topk_ids: torch.Tensor, topk_weights: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rows vLLM marks as padding (CUDA-graph and DP padding, dummy batches) arrive with expert id -1 since v0.34
+    (`VLLM_MOE_SKIP_PADDING`, on by default: routers mask them so kernels skip them). Every path here indexes by
+    expert id -- the grouped path's bincount raised on them, the per-row kernels would read the pointer tables out of
+    bounds, and the expert cache's routing capture would count them as the last expert -- so they become expert 0
+    at weight 0: no out-of-bounds index anywhere, and exactly no contribution. Capturable, no host sync."""
+    if topk_ids.dtype.is_floating_point or topk_ids.numel() == 0:
+        return topk_ids, topk_weights
+    pad = topk_ids < 0
+    return (torch.where(pad, torch.zeros_like(topk_ids), topk_ids),
+            torch.where(pad, torch.zeros_like(topk_weights), topk_weights))
 
 
 def _exl3_moe_mm_fake(

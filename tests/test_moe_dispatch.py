@@ -66,3 +66,22 @@ def test_disk_tier_layers_run_grouped_whatever_the_batch(paths, monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     with pytest.raises(RuntimeError, match="graph capture"):
         run(1, stage=0)
+
+
+def test_padding_rows_reach_no_path_with_a_negative_expert(paths, monkeypatch):
+    """v0.34 routers give padding rows expert id -1 (VLLM_MOE_SKIP_PADDING); every path must see a valid id, and the
+    padding rows must contribute nothing."""
+    ops, _ = paths
+    seen = []
+    monkeypatch.setattr(ops, "_moe_grouped", lambda *a, **k: seen.append((a[1].clone(), a[2].clone())) or a[0])
+    x = torch.zeros(64, 8)
+    ids = torch.randint(0, 4, (64, 2), dtype=torch.int32)
+    ids[40:] = -1
+    w = torch.rand(64, 2)
+    t = torch.zeros(4, dtype=torch.long)
+    route = torch.zeros(64, 2, dtype=torch.int32)
+    ops._exl3_moe_mm(x, ids, w, t, t, t, t, t, t, t, t, t, 2.0, 2.0, 16, 4, False, True, "silu", route)
+    got_ids, got_w = seen[0]
+    assert int(got_ids.min()) >= 0 and int(route.min()) >= 0
+    assert torch.equal(got_w[40:], torch.zeros_like(got_w[40:])), "padding rows contribute exactly nothing"
+    assert torch.equal(got_ids[:40], ids[:40]) and torch.equal(got_w[:40], w[:40]), "real rows are untouched"
