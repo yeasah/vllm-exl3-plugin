@@ -25,12 +25,11 @@ the fork. A stock vLLM serves EXL3 without them, worse.
 | an embedding built without `quant_config` takes the EXL3 config it is built under | a quantized embedding is unreachable on most model files (they never pass it): a load error for blockq, a silently dense embedding beside a quantized head on a tied model | `stock_compat._embedding_quant_config_default` (fork `be1219d32`) |
 | a fused QKV / gate_up tensor reaches an EXL3 parameter whole, with its shard id | the merged and QKV loaders hand a fused tensor whole only to vLLM's own two parameter types; Qwen3.5 EXL3 checkpoints do not load | `stock_compat._fused_shard_loading` (fork `00896553c`) |
 | an EXL3 parameter in a `ReplicatedLinear` loads whole through its own row loader | `ReplicatedLinear` has no v2 loader; quantized models through the Transformers backend do not load | `stock_compat._replicated_linear_loading` (fork `bacb74d98`) |
+| a Transformers-backend model's `output_multiplier` folded into the soft cap (MuseGlimmer) | every logprob, temperature-sampled choice and, through bf16 rounding near the cap's saturation, greedy output wrong: 28 of 106 argmaxes flipped on the bench's Muse backend entry; turboderp's Muse checkpoints quantize the vision adapter, which the native implementation builds as `nn.Linear`, so the backend is their only path | `stock_compat._transformers_logit_multiplier` (fork `40fb01056`) |
+| the profile's dummy sampler pass starts from an emptied torch cache | the profiling forward leaves the card full of cached segments, and the sampler's first kernel launch cannot load its code: native Muse-Glimmer-30B 2.50bpw fails to start on 16 GiB with a raw CUDA out-of-memory (2 MiB free, 15.28 GiB reserved, 8.95 allocated) | `stock_compat._profile_sampler_with_room` |
 | full decode graphs by default for EXL3 models with GDN layers that vLLM captures breakable | breakable capture fails for EXL3 + GDN (docs/upstream.md); v0.34 makes Qwen3.5 and family breakable by default | `plugin._patch_gdn_graph_default` (was Qwen4Exp only) |
 
-Retired at v0.34: the Muse Glimmer vendored vision config (`1f3b03290`; upstream deleted the config, #60823). Pending:
-the Transformers backend's logit multiplier (`40fb01056`), Muse Glimmer's alone -- vital while Muse is served through
-the backend (every logprob and temperature-sampled choice is off by the multiplier), moot if the plugin serves the
-native `muse_glimmer.py` v0.34 added, which applies `output_multiplier` before the soft cap itself.
+Retired at v0.34: the Muse Glimmer vendored vision config (`1f3b03290`; upstream deleted the config, #60823).
 
 ## Optimization, carried on `appliance/v0.34.0`
 

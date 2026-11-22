@@ -170,3 +170,54 @@ def test_importing_exllamav3_under_the_plugin_leaves_the_allocator_alone(monkeyp
     sys.modules.pop("exllamav3", None)
     importlib.import_module("exllamav3")
     assert calls == ["expandable_segments:True"], "the probe must see exllamav3's setter when it is allowed"
+
+
+def test_transformers_backend_takes_an_output_multiplier_before_the_cap(monkeypatch):
+    """MuseGlimmer spells its logit multiplier output_multiplier, which the backend's processor never applies, and
+    applies a scale only after the cap; under an EXL3 config it is folded into the cap instead."""
+    import vllm.config
+    import vllm.model_executor.layers.logits_processor as lp
+
+    class LogitsProcessor:   # vLLM's reads the current config when built; the arithmetic is what is tested
+        def __init__(self, vocab_size, scale=1.0, soft_cap=None):
+            self.scale, self.soft_cap = scale, soft_cap
+
+    monkeypatch.setattr(lp, "LogitsProcessor", LogitsProcessor)
+
+    class Causal:
+        def __init__(self, text_config):
+            self.text_config = text_config
+            self.logits_processor = LogitsProcessor(text_config.vocab_size, scale=1.0,
+                                                    soft_cap=text_config.final_logit_softcapping)
+
+    stock_compat._transformers_logit_multiplier(Causal)
+    muse = types.SimpleNamespace(vocab_size=8, output_multiplier=0.5, final_logit_softcapping=30.0)
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: types.SimpleNamespace(quant_config=_Exl3Config()))
+    c = Causal(muse)
+    z = torch.linspace(-80, 80, 9)
+    want = 30.0 * torch.tanh(z * 0.5 / 30.0)
+    got = torch.tanh(z / c.logits_processor.soft_cap) * c.logits_processor.soft_cap * c.logits_processor.scale
+    assert torch.allclose(got, want)
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: types.SimpleNamespace(quant_config=_OtherConfig()))
+    assert Causal(muse).logits_processor.scale == 1.0, "only under EXL3"
+    plain = types.SimpleNamespace(vocab_size=8, final_logit_softcapping=30.0)
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: types.SimpleNamespace(quant_config=_Exl3Config()))
+    assert Causal(plain).logits_processor.soft_cap == 30.0, "no multiplier, nothing changes"
+
+
+def test_profile_sampler_pass_starts_with_an_empty_cache_for_exl3(monkeypatch):
+    emptied = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(True))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    class Runner:
+        def __init__(self, quantization):
+            self.model_config = types.SimpleNamespace(quantization=quantization)
+
+        def _dummy_sampler_run(self, hidden_states):
+            return "sampled"
+
+    stock_compat._profile_sampler_with_room(Runner)
+    assert Runner("exl3")._dummy_sampler_run(None) == "sampled" and emptied == [True]
+    Runner("fp8")._dummy_sampler_run(None)
+    assert emptied == [True], "other quantizations are left as vLLM has them"

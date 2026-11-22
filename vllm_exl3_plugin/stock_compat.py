@@ -23,6 +23,18 @@ def apply() -> None:
     _embedding_quant_config_default(VocabParallelEmbedding)
     _fused_shard_loading(MergedColumnParallelLinear, QKVParallelLinear)
     _replicated_linear_loading(ReplicatedLinear)
+    try:
+        from vllm.model_executor.models.transformers.causal import CausalMixin
+    except ImportError:   # a vLLM without the Transformers backend's causal mixin
+        CausalMixin = None
+    if CausalMixin is not None:
+        _transformers_logit_multiplier(CausalMixin)
+    try:
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    except ImportError:
+        GPUModelRunner = None
+    if GPUModelRunner is not None and hasattr(GPUModelRunner, "_dummy_sampler_run"):
+        _profile_sampler_with_room(GPUModelRunner)
 
 
 def _is_exl3(quant_config) -> bool:
@@ -134,3 +146,73 @@ def _replicated_linear_loading(ReplicatedLinear) -> None:
 
     weight_loader._exl3_patched = True
     ReplicatedLinear.weight_loader = weight_loader
+
+
+def _transformers_logit_multiplier(CausalMixin) -> None:
+    """A model served through the Transformers backend that spells its logit multiplier `output_multiplier`
+    (MuseGlimmer) gets it, applied before the soft cap.
+
+    The backend reads only `logit_scale`, and its LogitsProcessor applies a scale after the cap, where such a model
+    needs it before. Without this, every logprob and temperature-dependent choice is off, and greedy output changes
+    too: the bench's Muse Transformers-backend entry on v0.34 flipped 28 of 106 argmaxes and its greedy continuation,
+    bit-identical with this. The multiplier folds into the cap by the identity LogitsProcessor already expresses,
+        tanh(z / (T/m)) * (T/m) * m  ==  T * tanh(z * m / T),
+    which reduces to the backend's own behaviour when there is no multiplier. turboderp's Muse checkpoints quantize
+    the vision adapter, which the native implementation builds as a plain nn.Linear, so this backend is the only way
+    to serve them; only models under an EXL3 config are touched.
+    """
+    original = CausalMixin.__init__
+    if getattr(original, "_exl3_patched", False):
+        return
+
+    @functools.wraps(original)
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        text_config = getattr(self, "text_config", None)
+        processor = getattr(self, "logits_processor", None)
+        multiplier = getattr(text_config, "output_multiplier", None)
+        if processor is None or multiplier in (None, 1, 1.0) or getattr(text_config, "logit_scale", None) is not None:
+            return
+        from vllm.config import get_current_vllm_config
+
+        try:
+            ambient = get_current_vllm_config().quant_config
+        except Exception:
+            ambient = None
+        if not _is_exl3(ambient):
+            return
+        from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+        cap = getattr(text_config, "final_logit_softcapping", None)
+        self.logits_processor = LogitsProcessor(
+            text_config.vocab_size,
+            scale=float(multiplier),
+            soft_cap=None if cap is None else float(cap) / float(multiplier),
+        )
+
+    __init__._exl3_patched = True
+    CausalMixin.__init__ = __init__
+
+
+def _profile_sampler_with_room(GPUModelRunner) -> None:
+    """The memory profile's dummy sampler pass runs after torch's cache is emptied, for an EXL3 model.
+
+    The profiling forward leaves torch's caching allocator holding segments it no longer uses -- an EXL3 forward
+    allocates many shapes -- and the sampler pass that follows is the first use of some kernels, whose code CUDA
+    loads lazily into device memory. With the card full of cached segments that load fails, as a raw CUDA
+    out-of-memory error: Muse-Glimmer-30B 2.50bpw native on a 16 GiB card at v0.34 had 2 MiB free before the
+    pass, torch holding 15.28 GiB with 8.95 GiB allocated. Emptying the cache returns only unused segments, and the
+    profile measures the allocated peak, which this does not change.
+    """
+    original = GPUModelRunner._dummy_sampler_run
+    if getattr(original, "_exl3_patched", False):
+        return
+
+    @functools.wraps(original)
+    def _dummy_sampler_run(self, *args, **kwargs):
+        if getattr(getattr(self, "model_config", None), "quantization", None) == "exl3" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return original(self, *args, **kwargs)
+
+    _dummy_sampler_run._exl3_patched = True
+    GPUModelRunner._dummy_sampler_run = _dummy_sampler_run
