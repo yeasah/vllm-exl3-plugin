@@ -361,13 +361,14 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="qwen3.8-27B 3.0bpw blockq MTP fp8",
-        known_broken="OOMs at first inference on the 16 GiB dev card: exl3_mm "
-        "cannot get 272 MiB with 217 MiB free. Not a spec or dtype conflict, and "
-        "not the 0.29 bump -- it passed on the 0.28 build hours earlier. The KV "
-        "cache took 1.05 -> 1.62 GiB against this baseline, i.e. it was handed "
-        "memory that inference-time scratch used to have. Tracked as "
-        "`kv-budget-margin` in TODO.md; the one-run test is whether pinning "
-        "--kv-cache-memory at the blessed figure restores it.",
+        known_broken="v0.34 (2026-11-22): refuses at startup, 0 KV blocks. After "
+        "warmup 2.48 GiB is free, and the extensible KV cache keeps the 1.47 GiB "
+        "transient plus a margin of 0.75 x that (~1.1 GiB) back, so nothing is left "
+        "at gpu_memory_utilization 0.95. Before v0.34 it OOMed at first inference "
+        "instead (exl3_mm could not get 272 MiB with 217 MiB free): the same "
+        "doesn't-fit, now caught at startup. The 0.75 fraction is upstream's GB200 "
+        "figure; whether a smaller one is safe on small cards is the open question "
+        "beside TODO `late-slots`",
         model="turboderp/Qwen3.8-27B-exl3",
         revision="3.00bpw",
         tier="full",
