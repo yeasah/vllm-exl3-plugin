@@ -25,8 +25,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "309288f",
-   "head": "309288fadc",
+   "describe": "c23e3db",
+   "head": "c23e3dbef9",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -50,48 +50,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmp065sir28/caches/exllamav3_autotune",
+   "path": "/tmp/tmp6s2wv7pv/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 9872,
-   "mtime": 1795333213
+   "mtime": 1795333947
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmp065sir28/caches/vllm",
+   "path": "/tmp/tmp6s2wv7pv/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 3806994,
-   "mtime": 1795333233
+   "mtime": 1795333967
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmp065sir28/caches/triton",
+   "path": "/tmp/tmp6s2wv7pv/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 505,
-   "bytes": 12455191,
-   "mtime": 1795333233
+   "files": 497,
+   "bytes": 12293701,
+   "mtime": 1795333967
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmp065sir28/caches/flashinfer",
+   "path": "/tmp/tmp6s2wv7pv/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6368445,
-   "mtime": 1795333269
+   "mtime": 1795334003
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "48",
+    "temperature.gpu": "47",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "25.06 W",
+    "power.draw": "24.94 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -100,10 +100,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "40",
+    "temperature.gpu": "43",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "25.57 W",
+    "power.draw": "25.91 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",

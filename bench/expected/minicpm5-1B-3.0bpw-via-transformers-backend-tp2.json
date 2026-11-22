@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "309288f",
-   "head": "309288fadc",
+   "describe": "c23e3db",
+   "head": "c23e3dbef9",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,48 +46,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmp065sir28/caches/exllamav3_autotune",
+   "path": "/tmp/tmp6s2wv7pv/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 9872,
-   "mtime": 1795333394
+   "mtime": 1795334128
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmp065sir28/caches/vllm",
+   "path": "/tmp/tmp6s2wv7pv/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 10,
    "bytes": 3807995,
-   "mtime": 1795333403
+   "mtime": 1795334137
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmp065sir28/caches/triton",
+   "path": "/tmp/tmp6s2wv7pv/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 561,
-   "bytes": 17220709,
-   "mtime": 1795333307
+   "files": 553,
+   "bytes": 17059219,
+   "mtime": 1795334040
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmp065sir28/caches/flashinfer",
+   "path": "/tmp/tmp6s2wv7pv/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6371061,
-   "mtime": 1795333445
+   "mtime": 1795334179
   }
  },
  "hardware": {
   "gpu": [
    {
     "temperature.gpu": "47",
-    "clocks.sm": "660 MHz",
+    "clocks.sm": "2220 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "19.35 W",
+    "power.draw": "21.67 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -96,10 +96,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "41",
-    "clocks.sm": "480 MHz",
+    "temperature.gpu": "42",
+    "clocks.sm": "495 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "14.55 W",
+    "power.draw": "16.66 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
