@@ -1215,15 +1215,13 @@ _LATE: dict = {}
 
 
 def _late_slots(worker, layers) -> bool:
-    """Whether the slots are placed after the KV cache is sized (TODO `late-slots`): the auto mode at a fixed
-    --max-model-len, where slots take everything the KV reserve leaves, and the exclusive cache, which can grow.
-    Under --max-model-len auto the slots stop at a target share and the KV cache takes the rest, so they are placed
-    up front as before. ``EXL3_LATE_SLOTS=0`` places them up front everywhere."""
+    """Whether the slots are placed after the KV cache is sized (TODO `late-slots`): the auto slot count, with the
+    exclusive cache, which can grow. At a fixed --max-model-len the slots take everything the KV reserve leaves; under
+    --max-model-len auto, the KV cache is planned at what the target share's slots leave and the slots take what is
+    left once it is final. ``EXL3_LATE_SLOTS=0`` places them up front everywhere."""
     from . import cpu_offload
 
     if os.environ.get("EXL3_LATE_SLOTS", "1") == "0" or cpu_offload.cache_mode() == "fixed" or not EXCLUSIVE:
-        return False
-    if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
         return False
     return _uniform_hosting(layers)
 
@@ -1237,9 +1235,24 @@ def _build_late(layers: list, available: int, worker) -> int:
     cache = ExclusiveCache(layers, 0, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
     CACHE = cache
     _patch_runners()
-    _LATE.update(cache=cache, reserve=reserve, slot_bytes=slot_row_bytes(layers), layers=len(layers),
+    slot_bytes = slot_row_bytes(layers)
+    _LATE.update(cache=cache, reserve=reserve, slot_bytes=slot_bytes, layers=len(layers),
                  peak=int(getattr(worker, "peak_activation_memory", 0) or 0))
     kept = max(available - reserve, 0)
+    if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
+        # auto: the KV cache takes what the target share's slots leave, and its length is fitted to that; the slots
+        # then take what is actually free once it is final, so a misjudged warmup lands on them, not on the KV cache
+        E = layers[0].exl3_num_experts
+        streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
+        per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
+        in_vram = target_in_vram(E, streams)
+        cap = max(in_vram - (E - per_layer_max), 0)
+        kept = min(kept, cap * slot_bytes * len(layers))
+        logger.info("expert cache: slots are placed after the KV cache is sized; --max-model-len auto plans KV at "
+                    "%.2f GiB, what %.0f%% of experts in VRAM for %g stream(s) leaves (at least %s), and %.2f GiB stay "
+                    "free for slots", (available - kept) / (1 << 30), 100 * in_vram / E, streams, how,
+                    kept / (1 << 30))
+        return kept
     logger.info("expert cache: slots are placed after the KV cache is sized; KV is planned at its reserve, %.2f GiB "
                 "(%s), and %.2f GiB stay free for slots", reserve / (1 << 30), how, kept / (1 << 30))
     return kept

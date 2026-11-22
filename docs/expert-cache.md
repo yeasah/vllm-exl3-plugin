@@ -1366,7 +1366,16 @@ GiB meant, 2.02 left). Under the extensible cache upstream's margin, 0.75 x the 
 and torch's reservation growth, was 1.58 GiB of the 3.69 kept; it now goes on the allocated peak only, with
 reservation growth kept at 1.1 x its measurement (2.48 kept, 1.51 with expandable segments), measured in
 [memory-accounting.md](memory-accounting.md), "The extensible KV cache's margin". Under `--max-model-len auto` the slots stop at a target share and the KV cache
-takes the rest, so they are still placed up front. `EXL3_LATE_SLOTS=0` places them up front everywhere.
+takes the rest, so they were still placed up front. `EXL3_LATE_SLOTS=0` places them up front everywhere.
+
+**Under `--max-model-len auto` too (2026-11-22).** Up front, the slots took the target share against a predicted
+withholding and the auto-fit gave KV the rest, so any underestimate of warmup came out of KV: QFN 1.66bpw on 16 GiB
+(`max_num_batched_tokens` 1024, 4 sequences) placed 185 slots a layer and was left 5 KV blocks after warmup, refusing
+to start. Now phase A plans KV at what the target share's slots leave (never below its reserve, 1 x 4096 tokens),
+vLLM fits the length to that plan, and phase B grows the slots into what is free once the KV cache is final, so a
+misjudged warmup lands on the slots. The same config serves: 6,272 tokens, 180 slots a layer (35%), 60.9 ms a token
+with 8 GiB of host rows and the rest on disk. The length is short because the one-stream target, 40% of experts in
+VRAM, is most of the card here; that split is the policy question left.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 

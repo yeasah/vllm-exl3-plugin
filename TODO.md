@@ -146,8 +146,9 @@ docs/memory-accounting.md).
 
 **Open:** (1) the host-RAM quota has the same shape: it is
 decided at the first expert, mid-load, when MemAvailable is at its low point (cuda: ~4 GiB of loading's transient
-anon memory), and could grow its rows after load the same way; (2) `--max-model-len auto` still sizes slots up front
-against a predicted withholding (it only trades KV there); (3) the inclusive cache.
+anon memory), and could grow its rows after load the same way; (2) the inclusive cache. `--max-model-len auto` places slots late too (2026-11-22): KV is planned at what the
+target share's slots leave and fitted to that, then the slots take what is free once it is final. Open there: the
+split itself -- on QFN 1.66bpw with 16 GiB the one-stream 40% target leaves KV its floor (6,272 tokens).
 
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 
