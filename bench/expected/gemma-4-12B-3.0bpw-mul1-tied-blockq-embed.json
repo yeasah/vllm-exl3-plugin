@@ -14,33 +14,33 @@
  "k": 20,
  "platform": null,
  "environment": {
-  "torch": "2.13.0+cu130",
+  "torch": "2.14.0+cu130",
   "cuda": "13.0",
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "gpu_count": 2,
   "capability": "12.0",
-  "vllm_reported": "0.32.1.dev16+g1f3b03290",
-  "pkg.digest": "3fa75059b4d8",
-  "pkg.count": 248,
+  "vllm_reported": "0.34.1.dev12+g68c13ab5f",
+  "pkg.digest": "0d5149e17ca7",
+  "pkg.count": 251,
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "8762d12",
-   "head": "8762d12dd0",
+   "describe": "2b40af5",
+   "head": "2b40af5403",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
-   "describe": "v0.32.0-16-g1f3b032909",
-   "head": "1f3b032909",
+   "describe": "v0.34.0-12-g68c13ab5fe",
+   "head": "68c13ab5fe",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-100-g4bff9eb2",
-   "head": "4bff9eb21b",
+   "describe": "v1.6.4-114-g7de59a59",
+   "head": "7de59a590c",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -50,39 +50,39 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmp_0lvzr4e/caches/exllamav3_autotune",
+   "path": "/tmp/tmpvfatdfcb/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
-   "bytes": 8400,
-   "mtime": 1794277224
+   "bytes": 9872,
+   "mtime": 1795334706
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmp_0lvzr4e/caches/vllm",
+   "path": "/tmp/tmpvfatdfcb/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 2,
-   "bytes": 1866,
-   "mtime": 1794277116
+   "bytes": 2055,
+   "mtime": 1795334573
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmp_0lvzr4e/caches/triton",
+   "path": "/tmp/tmpvfatdfcb/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 409,
-   "bytes": 11634092,
-   "mtime": 1794277165
+   "files": 721,
+   "bytes": 25871409,
+   "mtime": 1795334636
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmp_0lvzr4e/caches/flashinfer",
+   "path": "/tmp/tmpvfatdfcb/caches/flashinfer",
    "from_env": true,
    "exists": true,
-   "files": 1,
-   "bytes": 1308,
-   "mtime": 1794277327
+   "files": 9,
+   "bytes": 6367873,
+   "mtime": 1795334820
   }
  },
  "hardware": {
@@ -91,19 +91,19 @@
     "temperature.gpu": "49",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "24.63 W",
+    "power.draw": "25.07 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
     "clocks_throttle_reasons.active": "0x0000000000000000",
     "persistence_mode": "Enabled",
-    "fan.speed": "0 %"
+    "fan.speed": "39 %"
    },
    {
     "temperature.gpu": "31",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.84 W",
+    "power.draw": "9.63 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
@@ -279,7 +279,7 @@
     {
      "5279": -15.222595,
      "100": -0.113221,
-     "45518": -2.300721,
+     "45518": -2.30072,
      "1751": -6.550721,
      "3305": -7.050721,
      "711": -7.738221,
@@ -1171,14 +1171,14 @@
     {
      "236764": -2.832149,
      "568": -0.082149,
-     "532": -5.26965,
-     "1854": -5.39465,
-     "236761": -6.20715,
-     "6131": -6.64465,
-     "236881": -6.95715,
-     "236793": -7.64465,
-     "563": -7.83215,
-     "2721": -7.89465,
+     "532": -5.269649,
+     "1854": -5.394649,
+     "236761": -6.207149,
+     "6131": -6.644649,
+     "236881": -6.957149,
+     "236793": -7.644649,
+     "563": -7.832149,
+     "2721": -7.894649,
      "573": -8.01965,
      "531": -8.08215,
      "100": -8.26965,
@@ -1461,7 +1461,7 @@
     {
      "886": -6.964094,
      "529": -0.214094,
-     "4313": -2.214094,
+     "4313": -2.214093,
      "496": -4.089094,
      "2958": -5.776594,
      "1239": -5.776594,
@@ -2141,7 +2141,7 @@
   }
  ],
  "tune_drift": null,
- "weight_gib": 5.68,
+ "weight_gib": 5.15,
  "attn_backend": "TRITON_ATTN",
- "kv_cache_gib": 6.56
+ "kv_cache_gib": 7.22
 }

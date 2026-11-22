@@ -10,33 +10,33 @@
  "k": 20,
  "platform": null,
  "environment": {
-  "torch": "2.13.0+cu130",
+  "torch": "2.14.0+cu130",
   "cuda": "13.0",
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "gpu_count": 2,
   "capability": "12.0",
-  "vllm_reported": "0.32.1.dev16+g1f3b03290",
-  "pkg.digest": "3fa75059b4d8",
-  "pkg.count": 248,
+  "vllm_reported": "0.34.1.dev12+g68c13ab5f",
+  "pkg.digest": "0d5149e17ca7",
+  "pkg.count": 251,
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "8762d12",
-   "head": "8762d12dd0",
+   "describe": "2b40af5",
+   "head": "2b40af5403",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
-   "describe": "v0.32.0-16-g1f3b032909",
-   "head": "1f3b032909",
+   "describe": "v0.34.0-12-g68c13ab5fe",
+   "head": "68c13ab5fe",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-100-g4bff9eb2",
-   "head": "4bff9eb21b",
+   "describe": "v1.6.4-114-g7de59a59",
+   "head": "7de59a590c",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -46,60 +46,60 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmp_0lvzr4e/caches/exllamav3_autotune",
+   "path": "/tmp/tmpvfatdfcb/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
-   "bytes": 8400,
-   "mtime": 1794277106
+   "bytes": 9872,
+   "mtime": 1795334564
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmp_0lvzr4e/caches/vllm",
+   "path": "/tmp/tmpvfatdfcb/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 2,
-   "bytes": 1866,
-   "mtime": 1794277116
+   "bytes": 2055,
+   "mtime": 1795334573
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmp_0lvzr4e/caches/triton",
+   "path": "/tmp/tmpvfatdfcb/caches/triton",
    "from_env": true,
    "exists": true,
-   "files": 409,
-   "bytes": 11634092,
-   "mtime": 1794277165
+   "files": 721,
+   "bytes": 25871409,
+   "mtime": 1795334636
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmp_0lvzr4e/caches/flashinfer",
+   "path": "/tmp/tmpvfatdfcb/caches/flashinfer",
    "from_env": true,
    "exists": true,
-   "files": 1,
-   "bytes": 872,
-   "mtime": 1794277218
+   "files": 9,
+   "bytes": 6366901,
+   "mtime": 1795334689
   }
  },
  "hardware": {
   "gpu": [
    {
     "temperature.gpu": "48",
-    "clocks.sm": "2197 MHz",
+    "clocks.sm": "2557 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "23.11 W",
+    "power.draw": "25.01 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
     "clocks_throttle_reasons.active": "0x0000000000000000",
     "persistence_mode": "Enabled",
-    "fan.speed": "0 %"
+    "fan.speed": "34 %"
    },
    {
-    "temperature.gpu": "33",
+    "temperature.gpu": "32",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "9.81 W",
+    "power.draw": "9.68 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
@@ -766,21 +766,21 @@
      "611": -2.698484,
      "82153": -3.698484,
      "11629": -3.698484,
-     "24699": -4.198483,
-     "10625": -4.448483,
-     "43108": -4.448483,
-     "37727": -4.823483,
-     "159183": -4.948483,
-     "70088": -4.948483,
-     "8475": -4.948483,
-     "104569": -4.948483,
-     "115842": -5.198483,
-     "114738": -5.198483,
-     "13909": -5.198483,
-     "62682": -5.198483,
-     "31324": -5.198483,
-     "22637": -5.198483,
-     "140": -5.323483
+     "24699": -4.198484,
+     "10625": -4.448484,
+     "43108": -4.448484,
+     "37727": -4.823484,
+     "159183": -4.948484,
+     "70088": -4.948484,
+     "8475": -4.948484,
+     "104569": -4.948484,
+     "115842": -5.198484,
+     "114738": -5.198484,
+     "13909": -5.198484,
+     "62682": -5.198484,
+     "31324": -5.198484,
+     "22637": -5.198484,
+     "140": -5.323484
     },
     {
      "1806": -5.461791,
@@ -1165,8 +1165,8 @@
      "4458": -8.089914
     },
     {
-     "236764": -2.891318,
-     "568": -0.078818,
+     "236764": -2.891317,
+     "568": -0.078817,
      "532": -5.141317,
      "1854": -5.578817,
      "236761": -6.078817,
@@ -1500,7 +1500,7 @@
      "1800": -5.597553
     },
     {
-     "8082": -9.011932,
+     "8082": -9.011933,
      "107": -1.300995,
      "4313": -2.207245,
      "564": -2.613495,
@@ -1571,11 +1571,11 @@
      "4317": -6.165977,
      "3495": -1.165976,
      "10241": -1.415976,
-     "14485": -2.040976,
-     "13179": -2.290976,
-     "24519": -2.665976,
-     "28050": -3.915976,
-     "26423": -3.915976,
+     "14485": -2.040977,
+     "13179": -2.290977,
+     "24519": -2.665977,
+     "28050": -3.915977,
+     "26423": -3.915977,
      "19548": -4.165977,
      "52097": -4.540977,
      "15106": -5.040977,
@@ -2140,5 +2140,5 @@
  "tune_drift": null,
  "weight_gib": 5.15,
  "attn_backend": "TRITON_ATTN",
- "kv_cache_gib": 7.09
+ "kv_cache_gib": 7.22
 }
