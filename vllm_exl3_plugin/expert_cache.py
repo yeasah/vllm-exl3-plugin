@@ -662,6 +662,61 @@ class ExclusiveCache(ExpertCache):
         if self.disk_on:
             self._admit(rows, flat_ids)
 
+    # ------------------------------------------------------------ late slots
+
+    def grow(self, n: int) -> int:
+        """Add up to `n` slots to every layer, filled from host rows; returns the bytes allocated.
+
+        Late slots (TODO `late-slots`): placed once the KV cache has its final size, so they take what is actually
+        left rather than a prediction of it. Graph-safe because decode reaches every expert through `self.table`,
+        whose address graphs captured and whose contents only ever change by scatter: a new slot is a new entry
+        value, as a promotion is. New slots start filled -- the lowest-id experts still in host rows, as `_fill`
+        chooses -- since the promotion search never picks an empty slot. In-flight moves are drained first: warmup
+        steps run the controller too."""
+        if n <= 0:
+            return 0
+        torch.cuda.synchronize(self.device)
+        for _ in range(64):
+            if not (self.pending_d or self.pending_p or self.pending_a):
+                break
+            self.step_begin()
+            torch.cuda.synchronize(self.device)
+        else:
+            raise RuntimeError("expert cache: in-flight moves did not drain before growing the slots")
+        added, moves = 0, []
+        for l, layer in enumerate(self.layers):
+            candidates = [int(e) for e in numpy.flatnonzero((self.row_of[l] >= 0) & (self.slot_of[l] < 0))
+                          if not self.busy[l, e]]
+            take = candidates[:n]
+            if not take:
+                continue
+            chunk = [torch.empty((len(take), *layer.exl3_host_blocks[label].host.shape[1:]),
+                                 dtype=layer.exl3_host_blocks[label].host.dtype, device=self.device)
+                     for label in _LABELS]
+            added += sum(t.numel() * t.element_size() for t in chunk)
+            first = len(self.views[l])
+            self.views[l] += [tuple(chunk[j][k] for j in range(3)) for k in range(len(take))]
+            self.owner[l] = numpy.concatenate([self.owner[l], numpy.full(len(take), -1, dtype=numpy.int64)])
+            self.capacity[l] = len(self.views[l])
+            for k, e in enumerate(take):
+                row = int(self.row_of[l, e])
+                for j, label in enumerate(_LABELS):
+                    self.views[l][first + k][j].copy_(layer.exl3_host_blocks[label].host[row], non_blocking=True)
+                moves.append((l, e, first + k, row))
+        torch.cuda.synchronize(self.device)
+        updates, stage_updates = [], []
+        for l, e, s, row in moves:
+            d, st = self._to_slot(l, e, s)
+            updates += d
+            stage_updates += st
+            self.free_rows[l].append(row)
+        self._write(updates)
+        self._write_stage(stage_updates)
+        torch.cuda.synchronize(self.device)
+        if self.ref is not None:
+            self._verify(range(len(self.layers)), full=True)
+        return added
+
     # ------------------------------------------------------------ the disk tier
 
     def _admit(self, rows, flat_ids) -> None:
@@ -896,6 +951,28 @@ def _patch_worker() -> None:
         return available - build(layers, available, self)
 
     cls.determine_available_memory = determine_available_memory
+
+    # Late slots, phase B: after the estimate-sized KV cache's warmup, or once an extensible one is extended
+    warm = cls.compile_or_warm_up_model
+
+    @wraps(warm)
+    def compile_or_warm_up_model(self, *args, **kwargs):
+        result = warm(self, *args, **kwargs)
+        if _LATE and not getattr(self.cache_config, "enable_extensible_kv_cache", False):
+            grow_late(self, extensible=False)
+        return result
+
+    cls.compile_or_warm_up_model = compile_or_warm_up_model
+    extend = getattr(cls, "extend_kv_cache", None)
+    if extend is not None:
+        @wraps(extend)
+        def extend_kv_cache(self, *args, **kwargs):
+            result = extend(self, *args, **kwargs)
+            if _LATE:
+                grow_late(self, extensible=True)
+            return result
+
+        cls.extend_kv_cache = extend_kv_cache
     cls._exl3_cache_sizing = True
 
 
@@ -998,12 +1075,93 @@ def _uniform_hosting(layers) -> bool:
     return True
 
 
+#: Late slots, waiting for the KV cache's final size: the cache and how its growth is to be budgeted
+_LATE: dict = {}
+
+
+def _late_slots(worker, layers) -> bool:
+    """Whether the slots are placed after the KV cache is sized (TODO `late-slots`): the auto mode at a fixed
+    --max-model-len, where slots take everything the KV reserve leaves, and the exclusive cache, which can grow.
+    Under --max-model-len auto the slots stop at a target share and the KV cache takes the rest, so they are placed
+    up front as before. ``EXL3_LATE_SLOTS=0`` places them up front everywhere."""
+    from . import cpu_offload
+
+    if os.environ.get("EXL3_LATE_SLOTS", "1") == "0" or cpu_offload.cache_mode() == "fixed" or not EXCLUSIVE:
+        return False
+    if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
+        return False
+    return _uniform_hosting(layers)
+
+
+def _build_late(layers: list, available: int, worker) -> int:
+    """Phase A of late slots: an exclusive cache with no slots, and the KV cache planned at exactly its reserve, so
+    what is left stays unallocated through warmup and graph capture; `grow_late` fills it once the KV cache's size
+    is final. Returns the bytes kept from the KV cache's plan."""
+    global CACHE
+    reserve, how = _kv_reserve(worker)
+    cache = ExclusiveCache(layers, 0, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
+    CACHE = cache
+    _patch_runners()
+    _LATE.update(cache=cache, reserve=reserve, slot_bytes=slot_row_bytes(layers), layers=len(layers),
+                 peak=int(getattr(worker, "peak_activation_memory", 0) or 0))
+    kept = max(available - reserve, 0)
+    logger.info("expert cache: slots are placed after the KV cache is sized; KV is planned at its reserve, %.2f GiB "
+                "(%s), and %.2f GiB stay free for slots", reserve / (1 << 30), how, kept / (1 << 30))
+    return kept
+
+
+def grow_late(worker, extensible: bool) -> None:
+    """Phase B of late slots: grow the slots into what the final KV cache leaves.
+
+    With the extensible KV cache, what it keeps free is measured, and kept exactly: the larger of the allocated
+    transient peak and torch's reservation growth, plus its margin (max(floor, fraction x that), the floor scaled to
+    the device where the fork does so). Its torch memory cap was set from free memory before this, so slots
+    allocated through torch come out of that allowance and leave it the reserve and margin it meant to keep.
+    Without it, the slots stay inside gpu_memory_utilization x total less the profiled peak, as the estimate-based
+    sizing reasons."""
+    cache = _LATE.pop("cache", None)
+    if cache is None:
+        return
+    from . import cpu_offload
+
+    torch.cuda.synchronize(cache.device)
+    torch.cuda.empty_cache()
+    free, total = torch.cuda.mem_get_info(cache.device)
+    if extensible:
+        from vllm.v1.worker import extensible_kv_cache as ext
+
+        kv = getattr(worker.model_runner, "extensible_kv_cache", None)
+        transient = max(getattr(kv, "reserved_headroom_bytes", 0), getattr(kv, "torch_reserve_growth_bytes", 0))
+        floor_of = getattr(ext, "kv_cache_margin_floor_bytes", None)
+        floor = floor_of(cache.device) if floor_of is not None else ext.KV_CACHE_MARGIN_FLOOR_BYTES
+        keep = transient + max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
+        how = f"the extensible KV cache keeps {keep / (1 << 30):.2f} GiB (transient and margin)"
+    else:
+        util = cpu_offload.gpu_utilization(worker.cache_config)
+        keep = int(total * (1 - util)) + _LATE["peak"]
+        how = f"{util:g} utilization and the {_LATE['peak'] / (1 << 30):.2f} GiB profiled peak stay free"
+    budget = max(free - keep, 0)
+    n = budget // max(_LATE["slot_bytes"] * _LATE["layers"], 1)
+    added = cache.grow(int(n))
+    E = cache.E
+    in_vram = int(numpy.mean([len(v) for v in cache.views]))
+    streams = 2 ** ((in_vram / E - 0.4) / 0.1) if in_vram / E >= 0.4 else 0
+    logger.info(
+        "expert cache: %d slots per layer over %d layers placed after the KV cache (%.0f MiB), %.0f%% of experts in "
+        "VRAM; %s, %.2f GiB free after. Measured on gemma-4-26B, that holds decode within ~10%% of resident for %s "
+        "concurrent streams.", in_vram - (E - max(len(b.rows) + len(b.disk) for b in cache.layers[0].exl3_host_blocks.values())),
+        _LATE["layers"], added / (1 << 20), 100 * in_vram / E, how, (free - added) / (1 << 30),
+        "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1 else "fewer than 1 (single-stream decode will be slower)")
+
+
 def build(layers: list, available: int, worker) -> int:
     """Size and allocate the slots; returns the bytes taken from what KV would have had."""
     global CACHE
     from . import cpu_offload
 
     E = layers[0].exl3_num_experts
+    if _late_slots(worker, layers):
+        return _build_late(layers, available, worker)
     withheld = _extensible_withholding(worker)
     if withheld:
         available = max(available - withheld, 0)

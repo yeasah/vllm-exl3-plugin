@@ -1255,6 +1255,42 @@ differences. (Against an *eager* all-in-RAM arm decode differs everywhere: graph
 so that comparison is not an identity test.) QFN cannot be measured this way until breakable capture works for EXL3
 with GDN layers (docs/upstream.md), which the vLLM bump has to fix anyway.
 
+## Late slots: placed after the KV cache is sized (2026-11-22)
+
+Slots used to be sized inside vLLM's `determine_available_memory`, from the memory profile, before warmup and graph
+capture. With vLLM 0.34's extensible KV cache -- sized after warmup, from what is actually free -- that broke: the
+slots took memory the KV cache then kept back for warmup's transients (Qwen3.6-35B-A3B at 256K on 16 GiB: 179
+slots, then 0.04 GiB of KV and a refusal), and no prediction of the withholding covered what warmup itself allocates.
+
+So at a fixed `--max-model-len`, with the exclusive cache, the slots are placed late:
+
+- **Phase A** (at `determine_available_memory`): an exclusive cache with no slots, and the KV cache planned at exactly
+  its reserve (1 x --max-model-len x `EXL3_KV_RESERVE`). What is left stays unallocated through warmup and capture,
+  which also gives FlashInfer's autotune room.
+- **Phase B** (after `extend_kv_cache` with the extensible cache, after `compile_or_warm_up_model` without it):
+  grow every layer's slots into what is measured free, filled from host rows (`ExclusiveCache.grow`). Kept free:
+  with the extensible cache, exactly what it measured it needs (the larger of the allocated transient and torch's
+  reservation growth, plus its margin) -- its torch memory cap was set from free memory, so slots allocated through
+  torch come out of that allowance and leave it the rest; without it, utilization slack plus the profiled peak.
+
+Graph-safe because decode reaches every expert through the pointer table's contents, whose address is what graphs
+capture; a grown slot is a new entry value, like a promotion. Identity: gemma-4-26B 2.54bpw, late-grown slots
+against the same count placed up front (`EXL3_EXPERT_SLOTS`), bit-identical eager (118 slots) and in graph mode
+(119, grown after capture), `EXL3_CACHE_VERIFY` on.
+
+| Qwen3.6-35B-A3B 4.00bpw, 256K, nvfp4 KV, 16 GiB offload, 16 GiB card | slots | KV tokens |
+|---|---|---|
+| up front, extensible KV (refused) | 179 | 0.04 GiB committed |
+| late, extensible KV (the default) | 105 | 265,462 |
+| late, estimate-sized at 0.96 | 136 | 265,462 |
+| up front, estimate-sized at 0.96 | 167 | 272,098 |
+
+The up-front estimate path placed 31 more slots by trusting the profile's estimate of graphs and warmup, and
+lived within the utilization slack; the late one keeps that slack and the profiled peak free as measured (1.97
+GiB meant, 2.02 left). Under the extensible cache its margin, 0.75 x the measured transient, is 1.58 GiB of the
+3.69 kept: TODO `late-slots` (1). Under `--max-model-len auto` the slots stop at a target share and the KV cache
+takes the rest, so they are still placed up front. `EXL3_LATE_SLOTS=0` places them up front everywhere.
+
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 
 "Output identical to resident" holds in **eager mode**, at TP=1 and TP=2, for all-hosted and partial hosting:

@@ -123,15 +123,21 @@ the replay's 22.5 -- over longer decode, and filling admitted rows from bytes al
 
 ## `late-slots` — Expert-cache slots added after the KV cache is sized
 
-**Outcome:** the expert cache stops guessing what the KV cache will keep free. Slots are placed before warmup today,
-because graphs capture addresses, while an extensible KV cache is sized after warmup; since v0.34 the cache subtracts
-a predicted withholding (`expert_cache._extensible_withholding`: growth over peak x1.4, plus a 0.75 margin), which on
-gemma-4-26B at 32K gave 86 slots where v0.32 had 104, and left 1.47 GiB free after serving. Slots reach the kernels
-through pointer tables, which are device data rather than captured addresses, so slots placed after sizing should
-survive graphs taken earlier.
+**Done (2026-11-22), for the exclusive cache at a fixed --max-model-len:** the cache is built with no slots and the
+KV cache planned at exactly its reserve; once the KV cache's size is final (after `extend_kv_cache` with the
+extensible cache, after warmup without it), the slots grow into what is measured free, keeping what the extensible
+cache measured it needs, or utilization slack plus the profiled peak. Graph-safe (decode reads experts through the
+pointer table's contents), and bit-identical against the same slot count placed up front, eager and graphs.
+Qwen3.6-35B-A3B at 256K on 16 GiB: 105 slots with the extensible cache, 136 without at 0.96 (`EXL3_LATE_SLOTS=0`
+restores up-front placement).
 
-**Candidate:** keep the guess as the floor, then grow each layer's slots into what remains once the KV cache has its
-final size; needs the cache's fixed-capacity arrays (views, owners, free rows) to grow.
+**Open:** (1) the extensible cache's margin, 0.75 x the measured transient (upstream's GB200 figure), now costs slots
+directly -- 1.58 GiB of Qwen3.6's 3.69 GiB kept, about 26 slots a layer -- and decided three other 16 GiB cases the
+same day; serving grew 10-20% past the sizing step's measurement where measured, so a smaller fraction on small
+cards needs measuring across more workloads before it is argued; (2) the host-RAM quota has the same shape: it is
+decided at the first expert, mid-load, when MemAvailable is at its low point (cuda: ~4 GiB of loading's transient
+anon memory), and could grow its rows after load the same way; (3) `--max-model-len auto` still sizes slots up front
+against a predicted withholding (it only trades KV there); (4) the inclusive cache.
 
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 

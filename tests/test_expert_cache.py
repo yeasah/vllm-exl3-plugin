@@ -230,3 +230,45 @@ def test_detector_fires_on_an_admission_that_reads_the_wrong_expert(monkeypatch,
                         and out["gate"].is_pinned() else real(key, e, out))
     with pytest.raises(RuntimeError, match="wrong bytes"):
         _drive(cache, 200)
+
+
+def test_late_slots_grow_a_zero_slot_cache_and_keep_every_expert_on_its_bytes(monkeypatch):
+    """Late slots: a cache built with no slots (residents only) grows after the KV cache is sized. New slots take the
+    lowest-id experts still in host rows, their rows become free for write-backs, and swaps then run through them."""
+    cache = _cache(monkeypatch, slots=0)
+    assert [len(v) for v in cache.views] == [E - HOSTED] * 3
+    added = cache.grow(3)
+    assert added == 3 * len(cache.layers) * 3 * 8 * 64 * 2   # three slots a layer, three projections each
+    for l in range(len(cache.layers)):
+        assert len(cache.views[l]) == (E - HOSTED) + 3 and cache.capacity[l] == len(cache.views[l])
+        assert sorted(cache.free_rows[l]) == [0, 1, 2]
+        assert all(cache.slot_of[l, e] >= 0 and cache.row_of[l, e] == -1 for e in (0, 1, 2))
+    cache._verify(range(len(cache.layers)), full=True)
+    big = torch.randn(2048, 2048, device="cuda", dtype=torch.half)
+    _drive(cache, 300, busy=lambda: [big @ big for _ in range(3)])
+    assert cache.promoted > 20, "the grown slots should take part in swaps"
+    cache._verify(range(len(cache.layers)), full=True)
+
+
+def test_late_slots_stop_at_the_experts_left_in_rows(monkeypatch):
+    cache = _cache(monkeypatch, slots=0)
+    cache.grow(100)
+    assert all(len(cache.views[l]) == E for l in range(len(cache.layers))), "one slot an expert at most"
+    assert cache.grow(5) == 0
+
+
+def test_detector_fires_on_a_late_slot_filled_from_the_wrong_row(monkeypatch):
+    """The failure put back: a grown slot copied from a neighbour's row."""
+    cache = _cache(monkeypatch, slots=0)
+    real = torch.Tensor.copy_
+    calls = {"n": 0}
+
+    def shifted(self, src, non_blocking=False):
+        calls["n"] += 1
+        if calls["n"] == 2 and src.dim() == 2:          # the second row copy of the growth reads a neighbour
+            src = src.roll(1, dims=0)
+        return real(self, src, non_blocking=non_blocking)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", shifted)
+    with pytest.raises(RuntimeError, match="wrong bytes"):
+        cache.grow(2)
