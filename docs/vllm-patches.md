@@ -41,14 +41,17 @@ native `muse_glimmer.py` v0.34 added, which applies `output_multiplier` before t
   own rework now).
 - Checkpoint download progress in `weight_utils`.
 
-Re-test before carrying (each was a fix for a v0.32 failure; v0.34 rewrote what it patched):
+- TurboQuant with a full-attention skip layer: `unify` scales a padded spec's pad with its block (`4d3b2c78`). What is
+  left of `045b18123`; v0.34 fixed its load-bearing half (the primary page priced through the first layer's backend)
+  itself, and `unify` now pads a non-divisible attention page directly.
+- The extensible KV cache's margin floor scales with the device on CUDA (`78104318`): 2% of its memory between 256 MiB
+  and upstream's 1 GiB, the non-torch share at most half of it; `VLLM_KV_CACHE_MARGIN_FLOOR_MB` overrides. On a 16 GiB
+  card the flat 1 GiB went unused (Qwen3.8-27B 3.00bpw TurboQuant, a 260K-token prompt grew torch 0.16 GiB, inside the
+  measured reserve; nothing outside torch grew).
 
-- TurboQuant with sliding-window layers (`045b18123`): the primary page priced through the first layer's backend.
-  v0.34 still prices it through `backend_cls` but added its own packing logic beside it, and moved `unify` to
-  `kv_cache_planning.py`.
-- Backend workspace declarations (`82853c68e`, `abab1caed`): v0.34 added `reserve_workspace()` and TurboQuant reserves
-  during profiling; and the extensible KV cache, on by default, sizes after warmup, when builders' workspace exists.
-  Likely moot by default, perhaps not with extensible KV off.
+Not carried: backend workspace declarations (`82853c68e`, `abab1caed`). With the extensible KV cache on, the v0.34
+default, the workspace is measured; they would matter only with it off, where the 27B TurboQuant config sizes 0.13 GiB
+past what 0.32 did and runs out mid-prefill. Revisit if extensible-off ever needs to be a supported path.
 
 ## Checking it
 
