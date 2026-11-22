@@ -128,16 +128,15 @@ KV cache planned at exactly its reserve; once the KV cache's size is final (afte
 extensible cache, after warmup without it), the slots grow into what is measured free, keeping what the extensible
 cache measured it needs, or utilization slack plus the profiled peak. Graph-safe (decode reads experts through the
 pointer table's contents), and bit-identical against the same slot count placed up front, eager and graphs.
-Qwen3.6-35B-A3B at 256K on 16 GiB: 105 slots with the extensible cache, 136 without at 0.96 (`EXL3_LATE_SLOTS=0`
-restores up-front placement).
+Qwen3.6-35B-A3B at 256K on 16 GiB: 126 slots with the extensible cache (144 with expandable segments, the fork's
+default where torch has the #196258 fix), 136 without at 0.96 (`EXL3_LATE_SLOTS=0` restores up-front placement).
+The extensible cache's margin now sits on the allocated peak, not on torch's fragmentation (2026-11-22,
+docs/memory-accounting.md).
 
-**Open:** (1) the extensible cache's margin, 0.75 x the measured transient (upstream's GB200 figure), now costs slots
-directly -- 1.58 GiB of Qwen3.6's 3.69 GiB kept, about 26 slots a layer -- and decided three other 16 GiB cases the
-same day; serving grew 10-20% past the sizing step's measurement where measured, so a smaller fraction on small
-cards needs measuring across more workloads before it is argued; (2) the host-RAM quota has the same shape: it is
+**Open:** (1) the host-RAM quota has the same shape: it is
 decided at the first expert, mid-load, when MemAvailable is at its low point (cuda: ~4 GiB of loading's transient
-anon memory), and could grow its rows after load the same way; (3) `--max-model-len auto` still sizes slots up front
-against a predicted withholding (it only trades KV there); (4) the inclusive cache.
+anon memory), and could grow its rows after load the same way; (2) `--max-model-len auto` still sizes slots up front
+against a predicted withholding (it only trades KV there); (3) the inclusive cache.
 
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 
@@ -285,6 +284,10 @@ cannot occur. Today exllamav3's import turns expandable segments on behind vLLM'
 **Unblocks:** TP serving on peer-access boxes (workstation cards, NVLink pairs, most cloud
 multi-GPU) without a crash at CUDA-graph capture; memory numbers that mean the same allocator
 everywhere.
+
+**Since v0.34 (2026-11-22):** the plugin keeps exllamav3's import off the allocator (`EXL3_EXPANDABLE_SEGMENTS=0`
+default), the fork turns expandable segments on only where torch has the #196258 fix and TP=1, and the plugin
+refuses expandable segments on unpatched torch across two devices. What is open is TP > 1.
 
 **Candidate:** the plugin sets the allocator itself before importing exllamav3 and exports it in
 `PYTORCH_CUDA_ALLOC_CONF`, so vLLM's own guards see the truth; when expandable segments are on

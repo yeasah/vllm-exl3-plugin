@@ -1281,14 +1281,18 @@ against the same count placed up front (`EXL3_EXPERT_SLOTS`), bit-identical eage
 | Qwen3.6-35B-A3B 4.00bpw, 256K, nvfp4 KV, 16 GiB offload, 16 GiB card | slots | KV tokens |
 |---|---|---|
 | up front, extensible KV (refused) | 179 | 0.04 GiB committed |
-| late, extensible KV (the default) | 105 | 265,462 |
+| late, extensible KV, upstream's margin | 105 | 265,462 |
+| late, extensible KV, margin on the peak (the default) | 126 | 265,462 |
+| late, extensible KV, margin on the peak, expandable segments (the fork's default with the fix, TP=1) | 144 | 265,462 |
 | late, estimate-sized at 0.96 | 136 | 265,462 |
 | up front, estimate-sized at 0.96 | 167 | 272,098 |
 
 The up-front estimate path placed 31 more slots by trusting the profile's estimate of graphs and warmup, and
 lived within the utilization slack; the late one keeps that slack and the profiled peak free as measured (1.97
-GiB meant, 2.02 left). Under the extensible cache its margin, 0.75 x the measured transient, is 1.58 GiB of the
-3.69 kept: TODO `late-slots` (1). Under `--max-model-len auto` the slots stop at a target share and the KV cache
+GiB meant, 2.02 left). Under the extensible cache upstream's margin, 0.75 x the larger of the allocated transient
+and torch's reservation growth, was 1.58 GiB of the 3.69 kept; it now goes on the allocated peak only, with
+reservation growth kept at 1.1 x its measurement (2.48 kept, 1.51 with expandable segments), measured in
+[memory-accounting.md](memory-accounting.md), "The extensible KV cache's margin". Under `--max-model-len auto` the slots stop at a target share and the KV cache
 takes the rest, so they are still placed up front. `EXL3_LATE_SLOTS=0` places them up front everywhere.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)

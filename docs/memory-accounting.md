@@ -771,6 +771,51 @@ because FlashInfer hard-errors rather than growing when a workspace is too small
 estimate scales with chunk and head geometry (768 MiB at an 8192-token chunk). So this is a
 knob to set per configuration, not a default to change.
 
+## The extensible KV cache's margin (2026-11-22)
+
+vLLM 0.34 sizes the KV cache after warmup, from what is free, and keeps back the sizing step's transient plus a
+margin. As shipped that was `max(T, G) + max(floor, 0.75 x max(T, G))`: T the allocated peak the step measured, G
+torch's reservation growth across it, 0.75 from upstream's GB200 runs ("adversarial workloads reached up to 45%",
+workloads unnamed). On a 16 GiB card with an expert cache every kept byte is a slot, so the margin's job was
+measured rather than taken.
+
+`tools/memory/margin_scan.py` runs the engine in-process with the extensible cache at lowered utilization, so torch's
+cap does not clip demand, and drives hostile phases: a long prefill to `--max-model-len`, concurrent sampling, prompt
+logprobs, n=4, JSON guided decoding, prefix-cache hits, images. It reports per phase the growth of torch's reserved
+and allocated memory and of non-torch memory past the post-startup baseline. 16 GiB RTX 5060 Ti, 64K unless noted,
+GiB; "new keep" is the formula below, at this card's floor of 0.31 and non-torch share of 0.16:
+
+| config | allocator | T | G | serving worst (reserved) | old keep | new keep |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B (8K batches, 32K prompt) | default | 0.20 | 0.32 | 0.42 | 0.63 | 0.51 |
+| Qwen3.6-35B-A3B 4.00bpw | default | 0.30 | 0.83 | 0.67 | 1.45 | 1.07 |
+| | expandable | 0.30 | 0.20 | 0.24 | 0.61 | 0.61 |
+| Laguna-XS-2.1 4.00bpw | default | 0.37 | 0.75 | 0.64 | 1.31 | 0.98 |
+| | expandable | 0.37 | 0.27 | 0.29 | 0.68 | 0.68 |
+| gemma-4-26B 2.54bpw | default | 0.88 | 0.77 | 1.03 | 1.54 | 1.54 |
+| | expandable | 0.86 | 0.92 | 1.14 | 1.61 | 1.50 |
+| Qwen3.8-27B 3.00bpw TurboQuant | default | 1.12 | 0.48 | 0.39 | 1.96 | 1.96 |
+| | expandable | 1.12 | 0.41 | 0.33 | 1.96 | 1.96 |
+| Qwen3.6-35B-A3B serving config, 256K, offloaded experts | default | 0.86 | 2.11 | 1.98 | 3.69 | 2.48 |
+| | expandable | 0.86 | 0.87 | 0.84 | 1.52 | 1.50 |
+
+Two different excesses sit in there. **Allocation** past T is real: long-context prefill builds shapes the sizing
+step never runs (gemma +18-24%, Qwen3-0.6B +30%, upstream's 45%), and it is the same with expandable segments on.
+**Reservation** past allocation is fragmentation, and serving never grew it past what the step measured (G); the
+worst phase was always the long prefill. So the margin belongs on T, and G needs only headroom:
+
+    keep = max(T + max(floor, 0.75 x T), 1.1 x G + non-torch share)
+
+That is the fork's `kv_cache_keep_bytes` (`6b2557b4`). Every row keeps at least 0.33 GiB over its worst serving
+growth. The serving config at 256K went from 3.69 GiB kept to 2.48, and from 105 to 126 expert-cache slots a layer
+(late slots, [expert-cache.md](expert-cache.md)), all phases served, with a 262K-token prefill growing torch 1.98.
+
+**Expandable segments** take G down to about T (the table's expandable rows), which is why the fork now turns them on
+by default where it is safe (`f6f5443b`): torch carries the #196258 fix and there is no tensor parallelism
+([vllm-patches.md](vllm-patches.md)). The serving config then keeps 1.51 GiB and gets 144 slots, all phases served.
+Without the fix the default allocator is the conservative best effort, and the plugin refuses the one unsafe
+combination outright (`allocator_safety.py`).
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

@@ -1131,10 +1131,18 @@ def grow_late(worker, extensible: bool) -> None:
         from vllm.v1.worker import extensible_kv_cache as ext
 
         kv = getattr(worker.model_runner, "extensible_kv_cache", None)
-        transient = max(getattr(kv, "reserved_headroom_bytes", 0), getattr(kv, "torch_reserve_growth_bytes", 0))
+        peak = getattr(kv, "reserved_headroom_bytes", 0)
+        growth = getattr(kv, "torch_reserve_growth_bytes", 0)
         floor_of = getattr(ext, "kv_cache_margin_floor_bytes", None)
         floor = floor_of(cache.device) if floor_of is not None else ext.KV_CACHE_MARGIN_FLOOR_BYTES
-        keep = transient + max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
+        keep_of = getattr(ext, "kv_cache_keep_bytes", None)   # the fork's: margin on the peak, growth with headroom
+        if keep_of is not None:
+            reserve_of = getattr(ext, "kv_cache_non_torch_reserve_bytes", None)
+            nt = reserve_of(cache.device) if reserve_of is not None else ext.KV_CACHE_NON_TORCH_RESERVE_BYTES
+            keep = keep_of(peak, growth, floor, ext.KV_CACHE_MARGIN_FRACTION, nt)
+        else:   # stock vLLM: the margin on the larger of the two
+            transient = max(peak, growth)
+            keep = transient + max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
         how = f"the extensible KV cache keeps {keep / (1 << 30):.2f} GiB (transient and margin)"
     else:
         util = cpu_offload.gpu_utilization(worker.cache_config)
