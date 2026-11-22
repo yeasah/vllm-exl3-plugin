@@ -6,8 +6,9 @@ metadata:
   type: project
 ---
 
-As of 2026-09-04 the plugin's vLLM is the **`deps/vllm` submodule**, pinned to
-`appliance/v0.28.0` in `github.com/yeasah/vllm` (v0.28.0 plus 7 commits). The
+As of 2026-09-04 the plugin's vLLM is the **`deps/vllm` submodule**, pinned to an
+`appliance/v<version>` branch in `github.com/yeasah/vllm` (`appliance/v0.34.0` since 2026-11-22; the
+branch carries optimizations only since then, see [[vllm-patch-policy-vital-vs-optimization]]). The
 `patches/` directory is gone; `patches.md` is the index. `deps/exllamav3` was
 already a submodule, so both dependencies now live inside the project.
 
