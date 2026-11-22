@@ -204,20 +204,3 @@ def test_transformers_backend_takes_an_output_multiplier_before_the_cap(monkeypa
     monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: types.SimpleNamespace(quant_config=_Exl3Config()))
     assert Causal(plain).logits_processor.soft_cap == 30.0, "no multiplier, nothing changes"
 
-
-def test_profile_sampler_pass_starts_with_an_empty_cache_for_exl3(monkeypatch):
-    emptied = []
-    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(True))
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-
-    class Runner:
-        def __init__(self, quantization):
-            self.model_config = types.SimpleNamespace(quantization=quantization)
-
-        def _dummy_sampler_run(self, hidden_states):
-            return "sampled"
-
-    stock_compat._profile_sampler_with_room(Runner)
-    assert Runner("exl3")._dummy_sampler_run(None) == "sampled" and emptied == [True]
-    Runner("fp8")._dummy_sampler_run(None)
-    assert emptied == [True], "other quantizations are left as vLLM has them"

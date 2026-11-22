@@ -29,12 +29,6 @@ def apply() -> None:
         CausalMixin = None
     if CausalMixin is not None:
         _transformers_logit_multiplier(CausalMixin)
-    try:
-        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-    except ImportError:
-        GPUModelRunner = None
-    if GPUModelRunner is not None and hasattr(GPUModelRunner, "_dummy_sampler_run"):
-        _profile_sampler_with_room(GPUModelRunner)
 
 
 def _is_exl3(quant_config) -> bool:
@@ -193,26 +187,3 @@ def _transformers_logit_multiplier(CausalMixin) -> None:
     __init__._exl3_patched = True
     CausalMixin.__init__ = __init__
 
-
-def _profile_sampler_with_room(GPUModelRunner) -> None:
-    """The memory profile's dummy sampler pass runs after torch's cache is emptied, for an EXL3 model.
-
-    The profiling forward leaves torch's caching allocator holding segments it no longer uses -- an EXL3 forward
-    allocates many shapes -- and the sampler pass that follows is the first use of some kernels, whose code CUDA
-    loads lazily into device memory. With the card full of cached segments that load fails, as a raw CUDA
-    out-of-memory error: Muse-Glimmer-30B 2.50bpw native on a 16 GiB card at v0.34 had 2 MiB free before the
-    pass, torch holding 15.28 GiB with 8.95 GiB allocated. Emptying the cache returns only unused segments, and the
-    profile measures the allocated peak, which this does not change.
-    """
-    original = GPUModelRunner._dummy_sampler_run
-    if getattr(original, "_exl3_patched", False):
-        return
-
-    @functools.wraps(original)
-    def _dummy_sampler_run(self, *args, **kwargs):
-        if getattr(getattr(self, "model_config", None), "quantization", None) == "exl3" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return original(self, *args, **kwargs)
-
-    _dummy_sampler_run._exl3_patched = True
-    GPUModelRunner._dummy_sampler_run = _dummy_sampler_run
