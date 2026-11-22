@@ -586,8 +586,27 @@ def _exl3_mm(
         ext().exl3_gemm(a, trellis, y, suh, a_had, svh, -1, mcg, mul1, 0)
 
     if out_dtype != torch.half:
-        y = y.to(out_dtype)
+        y = _cast_output(y, out_dtype)
     return y.view(out_shape)
+
+
+#: Elements converted at a time by `_cast_output`: 4M is 8 MiB of temporary
+_CAST_CHUNK = 1 << 22
+
+
+def _cast_output(y: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """The kernels' fp16 output in the model's dtype. A bf16 model's output is converted in place, a chunk at a time,
+    in the fp16 tensor's own storage: `.to()` holds a second full copy, and on a quantized head at a 512-token step
+    with prompt logprobs that copy was 242 MiB of the extensible KV cache's 0.48 GiB transient reserve (Qwen3.8-27B,
+    2026-11-21). Exactly the values `.to()` gives. `y` is a fresh, contiguous output nobody else holds."""
+    if dtype.itemsize != y.element_size() or not y.is_contiguous() or y.numel() <= _CAST_CHUNK:
+        return y.to(dtype)
+    src = y.view(-1)
+    dst = src.view(dtype)
+    for start in range(0, src.numel(), _CAST_CHUNK):
+        part = src[start:start + _CAST_CHUNK]
+        dst[start:start + _CAST_CHUNK].copy_(part.to(dtype))
+    return dst.view(y.shape)
 
 
 def _reconstruct_mm(
