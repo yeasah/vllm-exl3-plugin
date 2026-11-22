@@ -899,6 +899,33 @@ def _patch_worker() -> None:
     cls._exl3_cache_sizing = True
 
 
+#: Torch's reservation growth over the profiled activation peak, which the extensible KV cache keeps free on top of
+#: the peak: 1.08x on gemma-4-26B, 1.33-1.36x on Qwen3.8-27B and Muse-Glimmer-30B (16 GiB cards, 2026-11-21)
+_EXTENSIBLE_GROWTH = 1.4
+
+
+def _extensible_withholding(worker) -> int:
+    """What an extensible KV cache keeps free beyond the profiled activation peak the estimate is built on.
+
+    The expert cache has to place its slots before warmup, since graphs capture their addresses, while an
+    extensible cache is sized after warmup: from free memory, less the larger of the allocated peak and torch's
+    reservation growth, less a margin of max(floor, 0.75 x that). Without this the slots took memory the cache then
+    kept back: gemma-4-26B at --max-model-len 32768 on 16 GiB placed 127 slots for a 4.12 GiB KV reserve and was left
+    1.77 GiB of KV, refusing to start, where v0.32 served it with 104. 0 when the cache is not extensible."""
+    if not getattr(worker.vllm_config.cache_config, "enable_extensible_kv_cache", False):
+        return 0
+    try:
+        from vllm.v1.worker import extensible_kv_cache as ext
+    except ImportError:
+        return 0
+    peak = int(getattr(worker, "peak_activation_memory", 0) or 0)
+    transient = int(peak * _EXTENSIBLE_GROWTH)
+    floor_of = getattr(ext, "kv_cache_margin_floor_bytes", None)   # the fork scales it to the device
+    floor = floor_of(worker.device) if floor_of is not None else ext.KV_CACHE_MARGIN_FLOOR_BYTES
+    margin = max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
+    return transient - peak + margin
+
+
 def _kv_reserve(worker) -> tuple[int, str]:
     """Bytes of KV to keep, and how they were arrived at, for the log."""
     mult = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
@@ -977,6 +1004,11 @@ def build(layers: list, available: int, worker) -> int:
     from . import cpu_offload
 
     E = layers[0].exl3_num_experts
+    withheld = _extensible_withholding(worker)
+    if withheld:
+        available = max(available - withheld, 0)
+        logger.info("expert cache: the extensible KV cache will keep %.2f GiB more free than the profile shows "
+                    "(reservation growth and its margin); slots size against what is left", withheld / (1 << 30))
     slot_bytes = slot_row_bytes(layers)
     # off the device per layer: host rows, and with the disk tier the experts left in the checkpoint
     per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
