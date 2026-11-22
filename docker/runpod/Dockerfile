@@ -34,8 +34,8 @@ WORKDIR $HOME
 # and a clone layer cached from before the bump would install the old pin's requirements and code
 # under the new binaries. A changed value re-runs the clone and every step after it, which a new
 # vLLM (new torch) needs anyway
-ARG VLLM_WHEEL=https://files.pythonhosted.org/packages/a5/0d/0b15fda9a56ac485ebb607e466f0e3386c8c115bafeced6514298bd325b5/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl
-ARG VLLM_BASE_TAG=v0.32.0
+ARG VLLM_WHEEL=https://files.pythonhosted.org/packages/0b/2c/55f3b76ceadbfc6d515f16b1c17e2e69136c8e54d47be2a94b9f7326f9bb/vllm-0.34.0-cp38-abi3-manylinux_2_28_x86_64.whl
+ARG VLLM_BASE_TAG=v0.34.0
 RUN echo "vllm base $VLLM_BASE_TAG: $VLLM_WHEEL" \
     && git clone https://github.com/yeasah/vllm-exl3-plugin.git -b dev --recurse-submodules
 

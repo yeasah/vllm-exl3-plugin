@@ -4,4 +4,3 @@ max_model_len: auto
 max_num_seqs: 4
 enable_auto_tool_choice: yes
 tool_call_parser: minicpm5
-gpu_memory_utilization: 0.80

@@ -4,8 +4,8 @@ ARG BASEOS=ubuntu24.04
 FROM "nvidia/cuda:${CUDAVERS}-cudnn-devel-${BASEOS}" AS build
 
 ARG BRANCH=dev
-ARG VLLM_WHEEL=https://files.pythonhosted.org/packages/a5/0d/0b15fda9a56ac485ebb607e466f0e3386c8c115bafeced6514298bd325b5/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl
-ARG VLLM_BASE_TAG=v0.32.0
+ARG VLLM_WHEEL=https://files.pythonhosted.org/packages/0b/2c/55f3b76ceadbfc6d515f16b1c17e2e69136c8e54d47be2a94b9f7326f9bb/vllm-0.34.0-cp38-abi3-manylinux_2_28_x86_64.whl
+ARG VLLM_BASE_TAG=v0.34.0
 
 # install needed things
 RUN apt-get update --yes && \
@@ -99,4 +99,4 @@ ENV VLLM_WSL2_ENABLE_PIN_MEMORY=1
 ENTRYPOINT [ "/usr/local/bin/vllm-exl3-entrypoint" ]
 
 # default example that will work on most hardware
-CMD [ "turboderp/Llama-3.2-1B-Instruct-exl3", "--revision", "3.0bpw", "--max-model-len", "auto", "--gpu-memory-utilization", "0.80" ]
+CMD [ "turboderp/Llama-3.2-1B-Instruct-exl3", "--revision", "3.0bpw", "--max-model-len", "auto" ]
