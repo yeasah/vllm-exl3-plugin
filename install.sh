@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Install vllm-exl3-plugin into the active Python environment: exllamav3 (our fork, with its CUDA
-# extension built here), the patched vLLM (our fork, using the released v0.32.0 wheel's binaries),
+# extension built here), the patched vLLM (our fork, using the released v0.34.0 wheel's binaries),
 # and the plugin itself. Run it from the repository root inside a venv.
 #
-#   ./install.sh           everything, starting with vLLM 0.32.0's dependencies if vLLM is absent
+#   ./install.sh           everything, starting with vLLM 0.34.0's dependencies if vLLM is absent
 #   ./install.sh --extras  also flash-linear-attention and causal-conv1d (see below)
 #   ./install.sh --check   report what is installed and whether it is the expected build
 #
@@ -16,8 +16,8 @@
 # Each step is what README.md "Install" lists by hand; patches.md explains the vLLM part.
 set -euo pipefail
 
-VLLM_TAG=v0.32.0
-VLLM_WHEEL=https://files.pythonhosted.org/packages/a5/0d/0b15fda9a56ac485ebb607e466f0e3386c8c115bafeced6514298bd325b5/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl
+VLLM_TAG=v0.34.0
+VLLM_WHEEL=https://files.pythonhosted.org/packages/0b/2c/55f3b76ceadbfc6d515f16b1c17e2e69136c8e54d47be2a94b9f7326f9bb/vllm-0.34.0-cp38-abi3-manylinux_2_28_x86_64.whl
 BUILD_REQS=('cmake>=3.26.1' ninja 'packaging>=24.2' 'setuptools>=77.0.3,<81.0.0' 'setuptools-scm>=8.0'
             'setuptools-rust>=1.9.0' wheel jinja2)
 
@@ -39,7 +39,7 @@ if any(not __import__("importlib.util").util.find_spec(m) for m in ("fla", "caus
     print("  extras without a reinstall: pip install flash-linear-attention && pip install --no-build-isolation causal-conv1d")
 try:
     v = metadata.version("vllm")
-    print(f"{'vllm build':24}", "ok: the patched fork" if "+g" in v and v.startswith("0.32") else f"NOT the fork ({v})")
+    print(f"{'vllm build':24}", "ok: the patched fork" if "+g" in v and v.startswith("0.34") else f"NOT the fork ({v})")
 except metadata.PackageNotFoundError:
     pass
 try:
@@ -66,7 +66,7 @@ say "submodules"
 git submodule update --init deps/exllamav3 deps/vllm
 
 if ! python -c 'import vllm' 2> /dev/null; then
-    say "vLLM 0.32.0 and its dependencies (replaced by the fork below)"
+    say "vLLM 0.34.0 and its dependencies (replaced by the fork below)"
     pip install "vllm==${VLLM_TAG#v}"
 fi
 

@@ -67,10 +67,13 @@ Optional:
   the startup warning about them; without them, the few FlashInfer ops used compile on first use.
 - More than one GPU: see the PyTorch fix under [Requirements](#requirements).
 
-The plugin needs a patched vLLM, vendored as the `deps/vllm` submodule (our fork's
-`appliance/v0.32.0` branch: the v0.32.0 release plus pure-Python commits). `install.sh` does
-the following, which can also be run by hand, starting from an environment with vLLM 0.32.0's
-dependencies (`pip install vllm==0.32.0`, which the fork then replaces):
+The plugin is tested against a patched vLLM, vendored as the `deps/vllm` submodule (our fork's
+`appliance/v0.34.0` branch: the v0.34.0 release plus pure-Python commits). It also runs on a stock
+vLLM 0.34.0: the fixes it cannot work without are applied by the plugin itself, and the fork adds
+optimizations, mostly VRAM ([docs/vllm-patches.md](docs/vllm-patches.md)). The fork is the
+recommended install, being the version the plugin's tests and baselines come from. `install.sh` does
+the following, which can also be run by hand, starting from an environment with vLLM 0.34.0's
+dependencies (`pip install vllm==0.34.0`, which the fork then replaces):
 
     # 1. exllamav3: builds the CUDA extension. If CUDA_HOME's toolkit does not
     #    match torch's, see docs/tensor-parallel.md "Finishing this"
@@ -80,16 +83,16 @@ dependencies (`pip install vllm==0.32.0`, which the fork then replaces):
     #    Python, so building from source is half an hour for nothing)
     pip install 'cmake>=3.26.1' ninja 'packaging>=24.2' 'setuptools>=77.0.3,<81.0.0' \
         'setuptools-scm>=8.0' 'setuptools-rust>=1.9.0' wheel jinja2
-    git -C deps/vllm fetch --no-tags https://github.com/vllm-project/vllm.git tag v0.32.0
+    git -C deps/vllm fetch --no-tags https://github.com/vllm-project/vllm.git tag v0.34.0
     VLLM_USE_PRECOMPILED=1 \
-    VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/a5/0d/0b15fda9a56ac485ebb607e466f0e3386c8c115bafeced6514298bd325b5/vllm-0.32.0-cp38-abi3-manylinux_2_28_x86_64.whl \
+    VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/0b/2c/55f3b76ceadbfc6d515f16b1c17e2e69136c8e54d47be2a94b9f7326f9bb/vllm-0.34.0-cp38-abi3-manylinux_2_28_x86_64.whl \
     pip install --no-deps --no-build-isolation -e deps/vllm
 
     # 3. the plugin
     pip install --no-deps -e .
 
 `python -c "import vllm; print(vllm.__version__)"` should then name the base tag, the patch
-count, our commit and `.precompiled` (for example `0.32.1.dev16+g1f3b03290`). The tag fetch has
+count, our commit and `.precompiled` (for example `0.34.1.dev12+g68c13ab5f`). The tag fetch has
 to come before the vLLM install, and [patches.md](patches.md) explains why, along with what
 each commit does.
 
@@ -148,7 +151,8 @@ The fork also changes vLLM behaviour that is not specific to EXL3. Most are auto
 Each commit is described in [patches.md](patches.md).
 
 - **TurboQuant KV with sliding-window models.** A quantized KV cache can coexist with
-  sliding-window layers (gemma-4, Laguna, Muse-Glimmer), which stock v0.32.0 rejects.
+  sliding-window layers (gemma-4, Laguna, Muse-Glimmer) when a full-attention layer is also held
+  native, which stock v0.34.0 rejects (it handles the sliding layers alone itself now).
   Automatic with `--kv-cache-dtype turboquant_4bit_nc` (or another TurboQuant type).
 - **`boundary:N` in `--kv-cache-dtype-skip-layers`.** TurboQuant keeps a boundary of native
   layers at each end of the stack; `boundary:N` sets how many, which the stock flag cannot, and
@@ -343,8 +347,8 @@ than raw completion prompts.
 
 ## The vLLM fork
 
-The patched vLLM is the `deps/vllm` submodule: our fork's `appliance/v0.32.0` branch, the
-v0.32.0 pin plus the commits listed in [patches.md](patches.md), which reproduces the tree the
+The patched vLLM is the `deps/vllm` submodule: our fork's `appliance/v0.34.0` branch, the
+v0.34.0 pin plus the commits listed in [patches.md](patches.md), which reproduces the tree the
 baselines in `bench/expected/` were captured from. [patches.md](patches.md) is the index: what
 each commit does, how to install it (Part 1 has the short form), how to offer one upstream,
 and which earlier patches retired at which bump and why. These changes used to live as

@@ -510,6 +510,45 @@ reinstalls it: run `tools/torch-c10cuda-fix.sh --check`). transformers 5.15 -> `
 
 ---
 
+### What the 0.34 bump actually cost (2026-11-22)
+
+`appliance/v0.34.0`: 13 commits on `v0.34.0` (2,002 upstream commits past `v0.32.0`), under the new patch policy
+([vllm-patches.md](vllm-patches.md)): the vital fixes moved into the plugin as EXL3-scoped monkeypatches
+(`stock_compat.py`), so a stock v0.34.0 serves EXL3 too (the fast tier matched the fork entry for entry); the fork
+carries optimizations only. Retired: the Muse Glimmer vendored config (upstream deleted it). Reduced: TurboQuant
+with sliding-window layers (upstream fixed the mispriced page; the stale-pad hunk is left). Not carried: the backend
+workspace declarations (the extensible KV cache measures what they declared). New: the extensible KV cache's margin
+floor scales with the device, and prompt logits chunk to a byte budget.
+
+**What broke, and none of it was in the release notes:**
+
+- The extensible KV cache, on by default, kept a flat 1 GiB margin plus a transient reserve the serving path never
+  reached; with EXL3's double fp16->bf16 output copy and v0.34's prompt-logprob sizing step, a 16 GiB card lost a
+  quarter of its KV (Qwen3.8-27B TurboQuant, 512-token chunks: 5.14 GiB on v0.32 -> 3.65; 4.56 after the fixes).
+- MoE routers now give padding rows expert id -1 (`VLLM_MOE_SKIP_PADDING`): the grouped path's bincount raised,
+  and padded decode rows read the expert tables out of bounds. The op maps them to expert 0 at weight 0.
+- The expert cache's slots, placed before warmup, took memory the extensible KV cache then kept back (gemma-4-26B
+  at 32K refused to start); slots now size against a predicted withholding until `late-slots`.
+- Breakable CUDA graphs became Qwen3.5's default (#51012), which still fails for EXL3 with GDN layers; the
+  FULL_DECODE_ONLY default now covers every EXL3 model with GDN layers that vLLM would capture breakable.
+- Muse Glimmer through the Transformers backend lost its logit multiplier with the fork patch: 28 of 106 argmaxes
+  flipped, greedy changed (bf16 rounding near the cap's saturation). Now a plugin monkeypatch.
+- An in-place cast in chunks through a temporary churned the allocator on a full card into a startup OOM
+  (native Muse); one fully overlapping copy_ replaced it.
+
+**What the gate showed:** eager entries bit-identical; CUDA-graph entries moved at the drift floor (torch 2.14's
+Inductor and v0.34's fusion passes); every Qwen3.5-family entry drifted (0.32 vs 0.34, mean KL 2-4e-3 on the 27B,
+~8e-4 on bf16 Qwen3.5-4B), amplified past the KL threshold at one low-confidence position on the 27B and on
+Qwen3.5-35B-A3B at TP=2, where discrete routing turns small differences into expert flips (layer 0 bit-identical
+between versions, first divergence in layer 1's GDN mixer). Weight bytes fell on five entries from plugin changes
+since their baselines (the embedding table in host memory, 11-16; the vision tower replicated per TP rank, 11-17),
+the same on v0.32. Perf at parity; the MoE perf baseline predated the grouped MoE path (+920% prefill either way).
+
+**Environment:** torch 2.13 -> 2.14 (the c10 fix still needed; exllamav3's extension rebuilt), transformers 5.19 ->
+5.22, huggingface_hub 1.31 -> 2.4, FlashInfer 0.7.3, NCCL 2.29.7 -> 2.30.7. vLLM ships its kernels as
+`_C_stable_libtorch` now, so the ROCm probe's "No module named 'vllm._C'" warning is noise. Bench fixtures moved
+by `BENCH_FIXTURES` when /home filled; a build now prunes older generations.
+
 ### The 0.34 bump: what running on `main` already showed (2026-11-10)
 
 Not a survey: a throwaway venv at upstream `main` `960f5c1bb1` (torch 2.14.0, precompiled kernels, our

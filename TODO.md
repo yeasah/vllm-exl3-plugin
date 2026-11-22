@@ -75,7 +75,10 @@ allocations, which are admission control. Evidence: [docs/memory-accounting.md](
 **Unblocks:** dependency bumps decided on the gate alone.
 
 **Candidate, cheapest first:** (1) an entry that chunks its prefill (an `Entry` field for
-`max_num_batched_tokens` and a long prompt), since `_continuation_prefill` is unreachable from the gate;
+`max_num_batched_tokens` and a long prompt), since `_continuation_prefill` is unreachable from the gate -- and
+with it any quantized KV: a teacher-forced prompt in one prefill attends over fresh K/V, so the `tq4` entries'
+logprobs never read the TurboQuant cache (at the 0.34 bump `qwen3.8-27B-3.0bpw-blockq-tq4` matched a bf16-KV
+run to every digit), only their 24-token greedy continuation does;
 (2) a VRAM profile per entry (peak and per-prefill growth beside `weight_gib`), the axis the gate is blind to;
 (3) `bless` by entry name, so adding one entry does not re-bless a green tier, paired with an additive
 `freeze-tune` seeded from the committed fixture so only missing shapes are timed: adding the native Muse
