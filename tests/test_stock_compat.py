@@ -204,3 +204,18 @@ def test_transformers_backend_takes_an_output_multiplier_before_the_cap(monkeypa
     monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: types.SimpleNamespace(quant_config=_Exl3Config()))
     assert Causal(plain).logits_processor.soft_cap == 30.0, "no multiplier, nothing changes"
 
+
+
+def test_moe_offload_defaults_to_estimate_sized_kv(monkeypatch):
+    """Until late slots, an EXL3 MoE served with offloaded experts sizes its KV cache from the profile: the expert
+    cache's slots are placed before an extensible cache measures what warmup leaves."""
+    from vllm_exl3_plugin import cpu_offload
+
+    monkeypatch.setattr(cpu_offload, "cache_mode", lambda: "auto")
+    moe = types.SimpleNamespace(text_config=types.SimpleNamespace(num_experts=256))
+    dense = types.SimpleNamespace(text_config=types.SimpleNamespace(num_experts=None))
+    assert plugin._num_experts(moe) == 256 and plugin._num_experts(dense) == 0
+    cfg = types.SimpleNamespace(offload_config=types.SimpleNamespace(uva=types.SimpleNamespace(cpu_offload_gb=16)))
+    assert plugin._uva_offload_gb(cfg) == 16.0
+    old = types.SimpleNamespace(cache_config=types.SimpleNamespace(cpu_offload_gb=4))   # v0.32 spelling
+    assert plugin._uva_offload_gb(old) == 4.0

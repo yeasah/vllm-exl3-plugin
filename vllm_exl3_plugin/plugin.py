@@ -35,6 +35,7 @@ def register() -> None:
     _patch_offload_defaults()
     _patch_kernel_overlap()
     _patch_gdn_graph_default()
+    _patch_extensible_kv_default()
     _patch_mm_encoder_dp_default()
     _REGISTERED = True
 
@@ -286,6 +287,63 @@ def _leave_allocator_alone() -> None:
     import os
 
     os.environ.setdefault("EXL3_EXPANDABLE_SEGMENTS", "0")
+
+
+def _num_experts(hf_config) -> int:
+    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
+        for key in ("num_experts", "num_local_experts", "n_routed_experts"):
+            n = getattr(cfg, key, None) if cfg is not None else None
+            if isinstance(n, int) and n > 0:
+                return n
+    return 0
+
+
+def _uva_offload_gb(config) -> float:
+    offload = getattr(config, "offload_config", None)
+    uva = getattr(offload, "uva", None)
+    gb = getattr(uva, "cpu_offload_gb", None)
+    if gb is None:
+        gb = getattr(getattr(config, "cache_config", None), "cpu_offload_gb", 0)
+    return float(gb or 0)
+
+
+def _patch_extensible_kv_default() -> None:
+    """The estimate-based KV cache, by default, for an EXL3 MoE whose experts the expert cache serves from host memory.
+
+    The cache places its slots before warmup, and an extensible KV cache (vLLM 0.34's default) is sized after it,
+    from what warmup leaves free; the slots are sized against a prediction of that (`expert_cache._extensible_withholding`)
+    which cannot see what warmup itself allocates. On Qwen3.6-35B-A3B 4.00bpw, 16 GiB, 256K context, nvfp4 KV, 16 GiB
+    offload: 179 slots for a 1.66 GiB KV reserve, then 1.21 GiB free after warmup and 0.04 GiB committed, refused;
+    the estimate-based cache serves 272K tokens. Until the slots are placed after sizing (TODO `late-slots`), and only
+    when the user did not choose: an explicit --[no-]enable-extensible-kv-cache stands.
+    """
+    from vllm.config import VllmConfig
+
+    if getattr(VllmConfig, "_exl3_extensible_default_patched", False):
+        return
+    original = VllmConfig.__post_init__
+
+    @wraps(original)
+    def __post_init__(self, *args, **kwargs):
+        mc, cc = getattr(self, "model_config", None), getattr(self, "cache_config", None)
+        if mc is not None and cc is not None and getattr(cc, "enable_extensible_kv_cache", False) is None \
+                and getattr(mc, "quantization", None) == "exl3" and _num_experts(mc.hf_config) \
+                and _uva_offload_gb(self) > 0:
+            from .cpu_offload import cache_mode
+
+            if cache_mode() != "off":
+                from .log import init_logger
+
+                cc.enable_extensible_kv_cache = False
+                init_logger(__name__).info(
+                    "EXL3 MoE with offloaded experts: the KV cache is sized from the memory profile, not the extensible "
+                    "cache (the expert cache places its slots before the extensible cache measures what warmup "
+                    "leaves; pass --enable-extensible-kv-cache to override). gpu_memory_utilization defaults to %.2f "
+                    "then; the extensible cache's default of 1.0 does not apply.", cc.DEFAULT_GPU_MEMORY_UTILIZATION)
+        return original(self, *args, **kwargs)
+
+    VllmConfig.__post_init__ = __post_init__
+    VllmConfig._exl3_extensible_default_patched = True
 
 
 def _has_gdn_layers(hf_config) -> bool:
