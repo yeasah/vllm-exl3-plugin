@@ -164,4 +164,26 @@ def ensure(kind: str, model: str, revision: str, quiet: bool = False) -> str:
             f"exit {proc.returncode}:\n{proc.stdout}"
         )
     os.replace(staging, dest)
+    _prune(dest)
     return dest
+
+
+def _prune(dest: str) -> None:
+    """Remove the other generations of this fixture: the same base checkpoint and recipe under an older key.
+
+    A key changes with the encoder's source, and nothing read the old generations again: they grew to 52 GiB of
+    /home before this (three 11 GiB Qwen3.8-27B fixtures among them, 2026-11-22). Fixtures are byte-reproducible
+    and cheap to rebuild, so keeping one per entry costs nothing a rebuild does not repay. Also removes build
+    directories left by a process that is gone. Two checkouts with different encoder sources sharing this cache
+    prune each other's and rebuild in turn, which is the cheap side of that trade."""
+    root, name = os.path.split(dest)
+    stem = name.rsplit("-v", 1)[0] + "-v"          # {slug}-{kind}-v, before the recipe version and digest
+    for other in os.listdir(root):
+        p = os.path.join(root, other)
+        if other == name or not other.startswith(stem) or not os.path.isdir(p):
+            continue
+        if ".building-" in other:
+            pid = other.rsplit("-", 1)[-1]
+            if pid.isdigit() and os.path.exists(f"/proc/{pid}"):
+                continue                            # another process is building it now
+        shutil.rmtree(p, ignore_errors=True)
