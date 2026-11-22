@@ -53,7 +53,7 @@ def run_arm(arm):
 
     from vllm_exl3_plugin import cpu_offload
 
-    graphs = os.environ.get("EXL3_MOE_EAGER_BREAK") == "1"
+    graphs = os.environ.get("EXL3_MOE_EAGER_BREAK") == "1" or os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH") == "1"
     llm = LLM(a.model, enforce_eager=not graphs,
               **({"compilation_config": {"cudagraph_mode": "PIECEWISE"}} if graphs else {}), max_num_batched_tokens=a.chunk, max_model_len=8192,
               cpu_offload_gb=a.offload_gb, gpu_memory_utilization=0.85, seed=0, max_num_seqs=8,

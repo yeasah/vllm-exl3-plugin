@@ -1169,9 +1169,22 @@ def _exl3_moe_mm_out(
     route: Optional[torch.Tensor] = None,
     stage: int = -1,
 ) -> None:
+    # Breakable capture calls an eager break once at capture time, after the segments before it were captured but not
+    # run: the router's topk_ids are whatever the buffer held (QFN: an id past every expert, a 16 GiB bincount). That
+    # call's output is never read -- replay runs the op again on real routing -- so it does nothing.
+    if _breakable_capture_active():
+        return
     out.copy_(_exl3_moe_mm(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh,
                            down_trellis, down_suh, down_svh, gate_bits, down_bits, intermediate, num_experts, mcg,
                            mul1, activation, route, stage))
+
+
+def _breakable_capture_active() -> bool:
+    try:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    except ImportError:
+        return False
+    return BreakableCUDAGraphCapture.is_active()
 
 
 def _exl3_moe_mm_out_fake(out: torch.Tensor, *args, **kwargs) -> None:

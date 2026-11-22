@@ -115,9 +115,13 @@ token from disk against the replay's 22.5, because nothing caches or promotes a 
 measurement chose A: on gemma 30 MoE eager breaks cost ~0.3 ms a token, and the disk tier runs bit-identically under
 breakable capture (`EXL3_MOE_EAGER_BREAK=1`). B is not needed.
 
-**Next:** (1) QFN under breakable capture, once EXL3+GDN capture works (the vLLM bump); (2) the read gap -- 76.8 against
-the replay's 22.5 -- over longer decode, and filling admitted rows from bytes already staged instead of a second read;
-(3) make the eager break the default whenever the disk tier is on; (4) TP>1 reads a rank's slice.
+**Since (2026-11-22):** QFN runs the disk tier under breakable capture with the MoE op as an eager break: 67.5-77.5
+ms a token at 50% on disk against 110-128 eager, prefill unchanged; bit-identical against all in RAM on gemma under
+v0.34 (QFN is not deterministic run to run, so it cannot be identity-tested; TODO `engram-ple`).
+
+**Next:** (1) the read gap -- QFN warm decode reads 45.7 experts a token against the replay's 22.5 -- over longer
+decode, and filling admitted rows from bytes already staged instead of a second read; (2) make the eager break the
+default whenever the disk tier is on; (3) TP>1 reads a rank's slice.
 
 → [docs/expert-cache.md](docs/expert-cache.md), "A disk tier below host RAM"
 
@@ -370,22 +374,24 @@ experts in VRAM, 28 GiB hosted, VRAM hit climbing past 69%. Scripts and the venv
 `b44a48c`:** the table stays on disk, rows staged per step through exllamav3's `RowTable` into fixed device buffers,
 decoded by `ngram_dequant` in the forward (`vllm_exl3_plugin/engram.py`). Milestone 1 done: the EXL3 body loads and
 runs on the fork with a stub table (73 s load, coherent output), and decodes under full CUDA graphs at 22 t/s; vLLM's
-default breakable capture fails for EXL3 with GDN layers, so the plugin defaults this model to `FULL_DECODE_ONLY`
-(docs/upstream.md, "CUDA graphs under breakable capture"; parked, but it must be fixed before the bump, which makes
-every Qwen3.5/3.6 EXL3 model breakable). Milestone 2 done: the
+default breakable capture failed for EXL3 with GDN layers (fixed 2026-11-22: the plugin's stream guard held the last
+forward alive; docs/upstream.md, "CUDA graphs under breakable capture"), and breakable is the default again; QFN 2.05bpw
+decodes at 29.7-33.3 ms a token under it, all experts in RAM. Milestone 2 done: the
 table streams from disk; staged rows equal exllamav3's reference decode bit for bit and vLLM's hash equals exllamav3's
 on a 4096-token step. On a 5060 Ti (2.05bpw_h4_ng4, 28 GiB of experts hosted, 120 slots, batch 1): prefill 1,510 t/s on
 rows read fresh from disk, 1,708 with them in page cache (the reads are ~12% of a 3,500-token prefill); decode 21-32 t/s
 under full decode graphs (upstream's FP8 hybrid: 13.6-18.1 eager). Next: overlap prefill reads with compute
-(RowTable's prefetch worker, unused so far), the breakable-capture failure, TP, a test that does not need the 24 GiB table, and
+(RowTable's prefetch worker, unused so far), TP, a test that does not need the 24 GiB table, and
 the same path for DeepSeek-V4.1-Flash's engram.
 
 **TP=2 (2026-11-17):** runs by uneven blocks (`tp-uneven-blocks`), exact against TP=1, 36 t/s decode on the 2.05bpw
 body. The 3.05bpw body serves at TP=2 here too (2x16 GiB, 40 GiB RAM: 28.1 GiB of experts hosted, 7.0 GiB each in
 VRAM, cache coverage 32%/54%): 10.8 t/s, link-bound -- once the host-RAM margin was taken once rather than per rank.
-**Open:** breakable CUDA graphs fail for EXL3 GDN models (ours and
-`main`'s, "CUDA graphs under breakable capture"), and `main`'s KV sizing disagrees with the expert cache (docs/upstream.md,
-"The 0.34 bump"). The native trellis PLE method is done (the plugin-owned table above); its bit depth per user
+**Open:** QFN is not deterministic run to run (2026-11-22), in eager mode too, once prefill shares a step with
+decodes: decode drifts 1e-3 to 3e-2 and flips a token within 4-50 steps, while prefill-only steps and a 7-token prompt
+repeat exactly. Some path depends on batch composition -- the sparse attention's indexer, the PLE table, the
+hyper-connections are the candidates; unexamined. docs/expert-cache.md, "QFN under breakable capture".
+The native trellis PLE method is done (the plugin-owned table above); its bit depth per user
 (`EXL3_NGRAM_REVISION`/`_FILE`) answers most of the `-ngb` question left from the retired `category-bits`.
 
 ## `tied-embeddings` — An embedding policy for tied models

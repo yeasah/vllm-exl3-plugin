@@ -85,3 +85,24 @@ def test_padding_rows_reach_no_path_with_a_negative_expert(paths, monkeypatch):
     assert int(got_ids.min()) >= 0 and int(route.min()) >= 0
     assert torch.equal(got_w[40:], torch.zeros_like(got_w[40:])), "padding rows contribute exactly nothing"
     assert torch.equal(got_ids[:40], ids[:40]) and torch.equal(got_w[:40], w[:40]), "real rows are untouched"
+
+
+def test_eager_break_does_nothing_at_capture_time(monkeypatch):
+    """Breakable capture runs an eager break once while capturing, after the segments before it were captured but not
+    run, so the router's ids are garbage (QFN: an id past every expert, a 16 GiB bincount). The MoE op must not read
+    them then; replay calls it again on real routing."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    from vllm_exl3_plugin import ops
+
+    calls = []
+    monkeypatch.setattr(ops, "_exl3_moe_mm", lambda *a, **k: calls.append(a) or torch.ones(2, 4))
+    out = torch.zeros(2, 4)
+    args = [torch.zeros(2, 4), torch.full((2, 2), 1 << 40), torch.ones(2, 2)] + [None] * 9 + [2.0, 2.0, 8, 4, True,
+                                                                                            False, "silu"]
+    monkeypatch.setattr(BreakableCUDAGraphCapture, "is_active", classmethod(lambda cls: True))
+    ops._exl3_moe_mm_out(out, *args)
+    assert not calls and not out.any(), "the capture-time call read garbage routing"
+    monkeypatch.setattr(BreakableCUDAGraphCapture, "is_active", classmethod(lambda cls: False))
+    ops._exl3_moe_mm_out(out, *args)
+    assert len(calls) == 1 and out.eq(1).all(), "replay computes"

@@ -1252,8 +1252,28 @@ this evidence. With the disk tier on, it saves ~14 ms a token over eager; what i
 Identity: both arms under breakable PIECEWISE graphs, disk tier against all in RAM, bit-identical over 64 decode
 tokens on each of five prompts (6978 admissions, `EXL3_CACHE_VERIFY` on); with a neighbour's bytes read, 6909
 differences. (Against an *eager* all-in-RAM arm decode differs everywhere: graph replay pads batches to capture sizes,
-so that comparison is not an identity test.) QFN cannot be measured this way until breakable capture works for EXL3
-with GDN layers (docs/upstream.md), which the vLLM bump has to fix anyway.
+so that comparison is not an identity test.)
+
+**QFN under breakable capture (2026-11-22).** Breakable capture works for EXL3 with GDN layers since the stream guard
+stopped holding a finished forward alive (docs/upstream.md). It turned up one more thing: breakable capture runs each
+eager break once *at capture time*, after the segments before it were captured but not run, so the MoE op read the
+router's buffer uninitialised -- on QFN an id past every expert, a 16 GiB `bincount`; on gemma the garbage happened to
+stay in range. The op now does nothing in that call (replay runs it on real routing). QFN 2.05bpw, 20% slots, decode
+ms a token (cold / warm), `tools/offload/disk_tier_prefill.py --graphs --cudagraph-mode PIECEWISE`:
+
+| | ms a token | prefill |
+|---|---|---|
+| breakable, all in RAM | 33.3 / 29.7 | |
+| breakable + MoE eager break, 50% on disk | 77.5 / 67.5 (76.4 / 45.7 disk reads a token) | 544 tok/s, 10.65 GiB a 2K chunk from disk |
+| eager, 50% on disk (above) | 110-128 | 537 tok/s |
+
+Identity on v0.34: gemma-4-26B-A4B 2.54bpw, both arms breakable with the eager break, 60% on disk against all in RAM,
+bit-identical (prompt logprobs, greedy tokens and decode logprobs over five prompts of 7-4429 tokens, 64 decode
+tokens each; 11,603 disk reads, 2,883 admissions, `EXL3_CACHE_VERIFY` on). QFN cannot be tested this way: it is not
+deterministic run to run in any mode -- eager, breakable, breakable with the eager break -- once prefill shares a step
+with decodes. Prefill-only steps repeat bit for bit; decode drifts by 1e-3 to 3e-2 and flips a token within 4-50
+steps; a 7-token prompt decoding in the same batches repeats exactly. Not the disk tier (the all-in-RAM arm against
+itself differs as much); a QFN path that depends on batch composition (TODO `engram-ple`).
 
 ## Late slots: placed after the KV cache is sized (2026-11-22)
 
