@@ -1275,6 +1275,11 @@ with decodes. Prefill-only steps repeat bit for bit; decode drifts by 1e-3 to 3e
 steps; a 7-token prompt decoding in the same batches repeats exactly. Not the disk tier (the all-in-RAM arm against
 itself differs as much); a QFN path that depends on batch composition (TODO `engram-ple`).
 
+The breaks themselves cost ~0.4 ms a token on QFN (all in RAM: 33.8 / 30.1 with them, 33.3 / 29.7 without), so the
+disk tier defaults its graph path: with `EXL3_DISK_TIER` set, `EXL3_MOE_EAGER_BREAK`, `VLLM_USE_BREAKABLE_CUDAGRAPH`
+and a PIECEWISE `cudagraph_mode` (a FULL decode graph captures across the breaks) default on, each overridable; QFN
+and gemma serve graphs from the one switch (`plugin._disk_tier_graph_defaults`).
+
 ## Late slots: placed after the KV cache is sized (2026-11-22)
 
 Slots used to be sized inside vLLM's `determine_available_memory`, from the memory profile, before warmup and graph

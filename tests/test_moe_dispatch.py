@@ -106,3 +106,34 @@ def test_eager_break_does_nothing_at_capture_time(monkeypatch):
     monkeypatch.setattr(BreakableCUDAGraphCapture, "is_active", classmethod(lambda cls: False))
     ops._exl3_moe_mm_out(out, *args)
     assert len(calls) == 1 and out.eq(1).all(), "replay computes"
+
+
+def test_disk_tier_defaults_its_graph_path(monkeypatch):
+    """With EXL3_DISK_TIER set, graphs mean breakable capture with the MoE op as an eager break; without these the disk
+    tier refuses capture. Explicit settings stand."""
+    import os
+    import subprocess
+    import sys
+
+    from vllm_exl3_plugin import plugin
+
+    def eager_break(env):
+        code = "from vllm_exl3_plugin import ops; print(ops.MOE_EAGER_BREAK)"
+        e = {k: v for k, v in os.environ.items() if k not in ("EXL3_DISK_TIER", "EXL3_MOE_EAGER_BREAK")}
+        return subprocess.run([sys.executable, "-c", code], env={**e, **env}, capture_output=True, text=True,
+                              check=True).stdout.split()[-1]
+
+    assert eager_break({}) == "False"
+    assert eager_break({"EXL3_DISK_TIER": "0.5"}) == "True"
+    assert eager_break({"EXL3_DISK_TIER": "0.5", "EXL3_MOE_EAGER_BREAK": "0"}) == "False"
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.delenv("EXL3_DISK_TIER", raising=False)
+    plugin._disk_tier_graph_defaults()
+    assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ, "no disk tier, no default"
+    monkeypatch.setenv("EXL3_DISK_TIER", "0.5")
+    plugin._disk_tier_graph_defaults()
+    assert os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "1"
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    plugin._disk_tier_graph_defaults()
+    assert os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0", "an explicit opt-out stands"

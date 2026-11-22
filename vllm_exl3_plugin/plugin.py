@@ -21,6 +21,7 @@ def register() -> None:
         return
 
     _leave_allocator_alone()
+    _disk_tier_graph_defaults()
     from vllm.model_executor.layers.quantization import register_quantization_config
 
     from .quantization.config import EXL3Config
@@ -275,6 +276,37 @@ def _patch_mm_encoder_dp_default() -> None:
 
     VllmConfig.__post_init__ = __post_init__
     VllmConfig._exl3_encoder_dp_patched = True
+
+
+def _disk_tier_graph_defaults() -> None:
+    """With the disk tier on, CUDA graphs that leave the routed-expert op eager: breakable capture with the op as an
+    eager break (`ops.MOE_EAGER_BREAK`, which defaults on with the disk tier) and PIECEWISE decode graphs, since a FULL
+    decode graph captures across the breaks. The disk tier reads routing back on the host and refuses capture, so
+    without these every graph mode but `enforce_eager` fails at capture. Each is a default: an explicit
+    VLLM_USE_BREAKABLE_CUDAGRAPH or cudagraph_mode stands. QFN 2.05bpw, 50% on disk: 67.5-77.5 ms a token, against
+    110-128 eager (docs/expert-cache.md, "QFN under breakable capture")."""
+    import os
+
+    if not os.environ.get("EXL3_DISK_TIER", "").strip():
+        return
+    os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    from vllm.config import VllmConfig
+    from vllm.config.compilation import CUDAGraphMode
+
+    if getattr(VllmConfig, "_exl3_disk_tier_graphs_patched", False):
+        return
+    original = VllmConfig.__post_init__
+
+    @wraps(original)
+    def __post_init__(self, *args, **kwargs):
+        mc, cc = getattr(self, "model_config", None), getattr(self, "compilation_config", None)
+        if mc is not None and cc is not None and cc.cudagraph_mode is None and os.environ.get("EXL3_DISK_TIER", "").strip() \
+                and getattr(mc, "quantization", None) == "exl3" and not mc.enforce_eager:
+            cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        return original(self, *args, **kwargs)
+
+    VllmConfig.__post_init__ = __post_init__
+    VllmConfig._exl3_disk_tier_graphs_patched = True
 
 
 def _leave_allocator_alone() -> None:

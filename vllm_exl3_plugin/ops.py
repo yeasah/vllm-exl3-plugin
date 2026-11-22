@@ -1141,8 +1141,9 @@ def exl3_moe_mm(*args) -> torch.Tensor:
 
 #: ``EXL3_MOE_EAGER_BREAK=1``: the routed-expert op writes into a caller's buffer and, under breakable capture, is an
 #: eager break -- the disk tier's decode path A inside otherwise captured graphs (docs/expert-cache.md, the disk tier's
-#: design note). Off by default; set before the plugin loads.
-MOE_EAGER_BREAK = os.environ.get("EXL3_MOE_EAGER_BREAK", "0") == "1"
+#: design note). On by default with the disk tier (``EXL3_DISK_TIER``), which reads routing back and so cannot be
+#: captured; 48 breaks cost ~0.4 ms a token on Qwen3.8-Flash-Next. Set before the plugin loads.
+MOE_EAGER_BREAK = os.environ.get("EXL3_MOE_EAGER_BREAK", "1" if os.environ.get("EXL3_DISK_TIER", "").strip() else "0") == "1"
 
 
 def _exl3_moe_mm_out(

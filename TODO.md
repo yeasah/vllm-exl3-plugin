@@ -120,8 +120,9 @@ ms a token at 50% on disk against 110-128 eager, prefill unchanged; bit-identica
 v0.34 (QFN is not deterministic run to run, so it cannot be identity-tested; TODO `engram-ple`).
 
 **Next:** (1) the read gap -- QFN warm decode reads 45.7 experts a token against the replay's 22.5 -- over longer
-decode, and filling admitted rows from bytes already staged instead of a second read; (2) make the eager break the
-default whenever the disk tier is on; (3) TP>1 reads a rank's slice.
+decode, and filling admitted rows from bytes already staged instead of a second read; (2) TP>1 reads a rank's slice.
+`EXL3_DISK_TIER` alone now gives the graph path: the eager break, breakable capture and PIECEWISE decode graphs are its
+defaults (48 breaks cost ~0.4 ms a token on QFN), each overridable.
 
 → [docs/expert-cache.md](docs/expert-cache.md), "A disk tier below host RAM"
 
