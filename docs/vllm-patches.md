@@ -28,6 +28,7 @@ the fork. A stock vLLM serves EXL3 without them, worse.
 | a Transformers-backend model's `output_multiplier` folded into the soft cap (MuseGlimmer) | every logprob, temperature-sampled choice and, through bf16 rounding near the cap's saturation, greedy output wrong: 28 of 106 argmaxes flipped on the bench's Muse backend entry; turboderp's Muse checkpoints quantize the vision adapter, which the native implementation builds as `nn.Linear`, so the backend is their only path | `stock_compat._transformers_logit_multiplier` (fork `40fb01056`) |
 | padding rows' expert id -1 becomes expert 0 at weight 0 at the MoE op's entry (`ops._skip_padding_rows`) | v0.34 routers mark CUDA-graph, DP and dummy padding rows with expert id -1 (`VLLM_MOE_SKIP_PADDING`, on by default): the grouped path's bincount raised (Qwen3.5-35B-A3B at TP=2 could not start), the per-row kernels read the pointer tables out of bounds, and the expert cache counted them as the last expert | `vllm_exl3_plugin/ops.py`, not a patch to vLLM: the op adapts to the new contract |
 | full decode graphs by default for EXL3 models with GDN layers that vLLM captures breakable | breakable capture fails for EXL3 + GDN (docs/upstream.md); v0.34 makes Qwen3.5 and family breakable by default | `plugin._patch_gdn_graph_default` (was Qwen4Exp only) |
+| refuse to serve when expandable segments are on, torch lacks the #196258 fix and the process holds torch memory on two or more devices; checked after load and after warmup | PyTorch #196258: under expandable segments a freed page is unmapped on every device but only the current one is synchronized, so a kernel queued on another GPU writes into memory that is gone or remapped -- Xid 31, or silent corruption. vLLM's workers are one device each (measured at TP=2), so this checks an invariant; it is vital because nothing else stands between a broken one and corrupt output | `vllm_exl3_plugin/allocator_safety.py`, not a patch: a check in the plugin's load and warmup hooks |
 
 Retired at v0.34: the Muse Glimmer vendored vision config (`1f3b03290`; upstream deleted the config, #60823).
 
@@ -47,6 +48,12 @@ Retired at v0.34: the Muse Glimmer vendored vision config (`1f3b03290`; upstream
   and upstream's 1 GiB, the non-torch share at most half of it; `VLLM_KV_CACHE_MARGIN_FLOOR_MB` overrides. On a 16 GiB
   card the flat 1 GiB went unused (Qwen3.8-27B 3.00bpw TurboQuant, a 260K-token prompt grew torch 0.16 GiB, inside the
   measured reserve; nothing outside torch grew).
+- The extensible KV cache's margin goes on the allocated peak only; torch's reservation growth is kept at 1.1 x its
+  measurement plus the non-torch share (`6b2557b4`). Qwen3.6-35B-A3B at 256K on 16 GiB: 3.69 GiB kept became 2.48.
+  The measurements are in [memory-accounting.md](memory-accounting.md), "The extensible KV cache's margin".
+- Expandable segments on by default where torch carries the PyTorch #196258 fix (the stamp `tools/torch-c10cuda-fix.sh`
+  leaves) and there is no tensor parallelism (`f6f5443b`); an explicit setting stands. TP stays off because custom
+  all-reduce cannot IPC-export expandable segments ([tensor-parallel.md](tensor-parallel.md)). Qwen3.6 at 256K then keeps 1.51 GiB.
 
 Not carried: backend workspace declarations (`82853c68e`, `abab1caed`). With the extensible KV cache on, the v0.34
 default, the workspace is measured; they would matter only with it off, where the 27B TurboQuant config sizes 0.13 GiB

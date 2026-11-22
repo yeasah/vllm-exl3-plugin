@@ -35,6 +35,7 @@ def register() -> None:
     _patch_offload_defaults()
     _patch_kernel_overlap()
     _patch_gdn_graph_default()
+    _patch_allocator_check()
     _patch_mm_encoder_dp_default()
     _REGISTERED = True
 
@@ -123,6 +124,10 @@ def _patch_offload_summary() -> None:
         if hasattr(model, "named_modules"):
             check_uneven_mlps(model)
         build_staging()
+        if _serving_exl3():
+            from .allocator_safety import check
+
+            check("after loading the model")
         report_once()
         return result
 
@@ -286,6 +291,32 @@ def _leave_allocator_alone() -> None:
     import os
 
     os.environ.setdefault("EXL3_EXPANDABLE_SEGMENTS", "0")
+
+
+def _patch_allocator_check() -> None:
+    """Re-check expandable-segment safety once warmup and graph capture have allocated (`allocator_safety`), for an
+    EXL3 model; anything else gets stock vLLM's behaviour, as every plugin patch leaves it."""
+    try:
+        from vllm.v1.worker import gpu_worker
+    except ImportError:
+        return
+    cls = gpu_worker.Worker
+    if getattr(cls, "_exl3_allocator_check", False):
+        return
+    original = cls.compile_or_warm_up_model
+
+    @wraps(original)
+    def compile_or_warm_up_model(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        quant = getattr(getattr(self, "vllm_config", None), "quant_config", None)
+        if quant is not None and quant.get_name() == "exl3":
+            from .allocator_safety import check
+
+            check("after warmup")
+        return result
+
+    cls.compile_or_warm_up_model = compile_or_warm_up_model
+    cls._exl3_allocator_check = True
 
 
 def _has_gdn_layers(hf_config) -> bool:
