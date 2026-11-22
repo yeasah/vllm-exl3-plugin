@@ -118,6 +118,18 @@ the replay's 22.5 -- over longer decode, and filling admitted rows from bytes al
 
 → [docs/expert-cache.md](docs/expert-cache.md), "A disk tier below host RAM"
 
+## `late-slots` — Expert-cache slots added after the KV cache is sized
+
+**Outcome:** the expert cache stops guessing what the KV cache will keep free. Slots are placed before warmup today,
+because graphs capture addresses, while an extensible KV cache is sized after warmup; since v0.34 the cache subtracts
+a predicted withholding (`expert_cache._extensible_withholding`: growth over peak x1.4, plus a 0.75 margin), which on
+gemma-4-26B at 32K gave 86 slots where v0.32 had 104, and left 1.47 GiB free after serving. Slots reach the kernels
+through pointer tables, which are device data rather than captured addresses, so slots placed after sizing should
+survive graphs taken earlier.
+
+**Candidate:** keep the guess as the floor, then grow each layer's slots into what remains once the KV cache has its
+final size; needs the cache's fixed-capacity arrays (views, owners, free rows) to grow.
+
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 
 **Outcome:** checkpoints whose model ties `lm_head` to the embedding load. LFM2.5-8B-A1B (our pipeline's 4.00 probe
