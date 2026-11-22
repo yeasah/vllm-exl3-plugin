@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 
 import numpy
 import torch
@@ -445,6 +446,8 @@ class ExclusiveCache(ExpertCache):
         self.pending_p: list = []
         self.pending_a: list = []                     # admissions from disk: (event, [(l, x, z, r)])
         self.admitting: list[set] = [set() for _ in self.layers]
+        self.evicting: list[set] = [set() for _ in self.layers]   # pending admissions' Z, at a row's window position
+        self.read_admitted: list = []                 # (l, e) moved by admit_at_read, verified at the next step
         self.admitted = 0
         self.disk_on = any(getattr(layer, "exl3_disk_pos", None) for layer in self.layers)
         self.stage = None
@@ -597,6 +600,9 @@ class ExclusiveCache(ExpertCache):
         self._write_stage(stage_updates)
         if follow:
             self._copy_in(follow)
+        if self.read_admitted:
+            moved.update(self.read_admitted)
+            self.read_admitted = []
         if self.ref is not None:
             self._verify_tick = getattr(self, "_verify_tick", 0) + 1
             if self._verify_tick % 512 == 0:
@@ -742,6 +748,7 @@ class ExclusiveCache(ExpertCache):
             self.row_of[l, z] = DISK
             self.offloaded[l, z] = False
             self.layers[l].exl3_disk_pos[z] = r     # the row's window position, unused until X lands there
+            self.evicting[l].add(z)
             updates += [(self._entry(l, j, z), 0) for j in range(3)]
             stage_updates += [(self._entry(l, j, z), self._window_addr(l, j, r)) for j in range(3)]
             self.admitting[l].add(x)
@@ -754,13 +761,93 @@ class ExclusiveCache(ExpertCache):
         ready.record(torch.cuda.current_stream(self.device))
         self.pending_a.append((ready, issued))
 
-    def _row_victim(self, l: int) -> int | None:
-        """The least recently used expert in a host row that no promotion has reserved, and not used this step."""
+    def _row_victim(self, l: int, routed=None) -> int | None:
+        """The least recently used expert in a host row that no promotion has reserved, and not used this step; nor,
+        given `routed` (a mask over experts), routed by the batch being staged, whose row copies may still be queued:
+        `last_use` lags routing by a step or more."""
         row_of, slot_of, use = self.row_of[l], self.slot_of[l], self.last_use[l]
-        cand = numpy.flatnonzero((row_of >= 0) & (slot_of < 0) & (use < self.clock))
+        ok = (row_of >= 0) & (slot_of < 0) & (use < self.clock)
+        if routed is not None:
+            ok &= ~routed
+        cand = numpy.flatnonzero(ok)
         if not len(cand):
             return None
         return int(cand[numpy.argmin(use[cand])])
+
+    def layer_index(self, layer) -> int | None:
+        index = getattr(self, "_layer_index", None)
+        if index is None:
+            index = self._layer_index = {id(m): i for i, m in enumerate(self.layers)}
+        return index.get(id(layer))
+
+    def verify_staged_bytes(self, layer, experts, tables) -> None:
+        """EXL3_CACHE_VERIFY: the bytes at each routed expert's staged address are that expert's, by checksum --
+        after synchronizing, so every queued copy has landed. Entries can be right while the bytes behind them are
+        not: a host row overwritten before its window copy ran left a live entry pointing at another expert."""
+        l = self.layer_index(layer)
+        if l is None or self.ref is None:
+            return
+        torch.cuda.synchronize(self.device)
+        for j, label in enumerate(_LABELS):
+            entries = tables[j].cpu()
+            dst, row_bytes = layer.exl3_stage_plan[label]
+            base, end = dst.data_ptr(), dst.data_ptr() + dst.numel()
+            for e in experts:
+                a = int(entries[e])
+                if base <= a < end:
+                    got = dst[a - base:a - base + row_bytes]
+                elif self.slot_of[l, e] >= 0 and a == self._view_addr(l, int(self.slot_of[l, e]), j):
+                    got = self.views[l][int(self.slot_of[l, e])][j]
+                elif self.row_of[l, e] >= 0 and a == self._host_addr(l, j, int(self.row_of[l, e])):
+                    got = layer.exl3_host_blocks[label].host[int(self.row_of[l, e])]
+                else:
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} {label} is staged at {a:#x}, none of its "
+                                       f"homes")
+                if _checksum(got) != self.ref[l, j, e]:
+                    raise RuntimeError(f"expert cache: layer {l} expert {e} {label}: the staged bytes are not its own")
+
+    def admit_at_read(self, layer, xs, routed) -> dict:
+        """Decode's routed disk experts `xs` take host rows now, read straight into them (TODO `disk-tier`): one read
+        an admission, where `_admit` reads each again a step later. Called inside the layer's MoE op once routing has
+        been read back -- which synchronized the forward stream -- and before its staging, so the only readers of host
+        rows still in flight are promotions (row -> slot, whose experts hold a reserved slot and are never victims) and
+        write-backs (slot -> free row, never an owned row). The victim Z, unrouted by this batch, goes to disk and takes
+        X's window position; X's entries point at the row (decode) and the row's window position (staged). Returns
+        {X: row}; the caller reads each X into its row and copies it to the window from there."""
+        l = self.layer_index(layer)
+        if l is None:
+            return {}
+        pos = layer.exl3_disk_pos
+        mask = numpy.zeros(self.E, dtype=bool)
+        mask[[e for e in range(self.E) if routed(e)]] = True
+        got, updates, stage_updates = {}, [], []
+        for x in xs:
+            if _ADMIT_BUDGET and len(got) >= _ADMIT_BUDGET:
+                break
+            # a pending admission's X, or its Z -- whose window position is the row X is about to fill -- waits for it
+            if x in self.admitting[l] or x in self.evicting[l] or self.row_of[l, x] != DISK:
+                continue
+            z = self._row_victim(l, mask)
+            if z is None:
+                break
+            r = int(self.row_of[l, z])
+            self.row_of[l, z] = DISK
+            self.offloaded[l, z] = False
+            pos[z] = pos.pop(x)
+            updates += [(self._entry(l, j, z), 0) for j in range(3)]
+            stage_updates += [(self._entry(l, j, z), self._window_addr(l, j, pos[z])) for j in range(3)]
+            d, st = self._to_host(l, x, r)
+            updates += d
+            stage_updates += st
+            self.last_use[l, x] = self.clock      # not a victim again before its routing is planned
+            got[x] = r
+            self.read_admitted.append((l, x))
+            self.read_admitted.append((l, z))
+        if got:
+            self._write(updates)
+            self._write_stage(stage_updates)
+            self.admitted += len(got)
+        return got
 
     def _fill_rows(self, done):
         """Read each admitted X into its row, then flip it there; Z takes X's window position on disk."""
@@ -776,7 +863,9 @@ class ExclusiveCache(ExpertCache):
                    for label, (_, _, dt, shape) in parts.items()}
             store.read(layer.exl3_store_key, x, out)
 
+        t = time.perf_counter()
         list(cpu_offload._DISK["pool"].map(one, done))
+        cpu_offload._STATS["disk_fill_s"] = cpu_offload._STATS.get("disk_fill_s", 0.0) + time.perf_counter() - t
         updates, stage_updates = [], []
         for l, x, z, r in done:
             pos = self.layers[l].exl3_disk_pos
@@ -786,6 +875,7 @@ class ExclusiveCache(ExpertCache):
             updates += d
             stage_updates += st
             self.admitting[l].discard(x)
+            self.evicting[l].discard(z)
         self.admitted += len(done)
         cpu_offload._STATS["disk_admitted"] = cpu_offload._STATS.get("disk_admitted", 0) + len(done)
         return updates, stage_updates

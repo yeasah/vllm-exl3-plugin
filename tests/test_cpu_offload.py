@@ -1107,7 +1107,7 @@ def test_verify_catches_a_routed_disk_expert_left_unread(offload, monkeypatch, t
 
     monkeypatch.setattr(expert_cache, "VERIFY", True)
     layer, _ = _disk_layer(offload, monkeypatch, tmp_path)
-    monkeypatch.setattr(cpu_offload, "_read_disk", lambda layer, want: [])
+    monkeypatch.setattr(cpu_offload, "_read_disk", lambda layer, want, admit=None: [])
     with pytest.raises(RuntimeError, match=r"experts \[4\] through null entries"):
         cpu_offload.stage_routed(layer.exl3_stage_idx, [0, 2, 0, 0, 1, 0, 0, 0, 0], _decode(layer))
 

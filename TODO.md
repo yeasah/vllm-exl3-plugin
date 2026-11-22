@@ -119,8 +119,12 @@ breakable capture (`EXL3_MOE_EAGER_BREAK=1`). B is not needed.
 ms a token at 50% on disk against 110-128 eager, prefill unchanged; bit-identical against all in RAM on gemma under
 v0.34 (QFN is not deterministic run to run, so it cannot be identity-tested; TODO `engram-ple`).
 
-**Next:** (1) the read gap -- QFN warm decode reads 45.7 experts a token against the replay's 22.5 -- over longer
-decode, and filling admitted rows from bytes already staged instead of a second read; (2) TP>1 reads a rank's slice.
+The read gap is closed: decode admits disk experts at read time, straight into their rows, so each is read once --
+QFN warm decode 18.2 reads a token (replay 22.5), 61.7 ms against 65.7 (2026-11-22).
+
+**Next:** (1) the staging reads, 14.3 ms of the ~32 the disk tier adds to QFN's decode: ~0.4 experts a layer, read
+synchronously at queue depth 1, ~0.8 ms each -- reads that cannot start before their layer's routing is known; (2) the
+disk dispatch's own cost (routing readback and routed staging at every layer); (3) TP>1 reads a rank's slice.
 `EXL3_DISK_TIER` alone now gives the graph path: the eager break, breakable capture and PIECEWISE decode graphs are its
 defaults (48 breaks cost ~0.4 ms a token on QFN), each overridable.
 

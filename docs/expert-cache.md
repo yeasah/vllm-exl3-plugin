@@ -1280,6 +1280,32 @@ disk tier defaults its graph path: with `EXL3_DISK_TIER` set, `EXL3_MOE_EAGER_BR
 and a PIECEWISE `cudagraph_mode` (a FULL decode graph captures across the breaks) default on, each overridable; QFN
 and gemma serve graphs from the one switch (`plugin._disk_tier_graph_defaults`).
 
+**The read gap, closed (2026-11-22).** Over 1,024 decode tokens the reads staged for use settle at 20.5 a token,
+already under `tier_replay.py`'s 22.5; the rest of the gap was admissions. Every routed disk expert was admitted
+(`_admit`) a step or two after its read -- routing reaches the controller through the ring -- and read from the
+checkpoint *again* into its row, synchronously at the next step's start: 15.6 reads and 4.5 ms a token. Decode now
+admits at read time (`ExclusiveCache.admit_at_read`, `EXL3_DISK_READ_ADMIT`): inside the layer's MoE op, after the
+routing readback has synchronized the forward stream, the victim goes to disk and the expert is read straight into its
+row, then copied to the window from there. The readers still in flight then are promotions (their experts hold a
+reserved slot, never a victim) and write-backs (into free rows, never an owned one); the victim also excludes
+everything the batch routes, since `last_use` lags routing. QFN 2.05bpw, 50% on disk, 20% slots, 1,024 tokens:
+
+| decode, warm | reads a token | row fills | ms a token |
+|---|---|---|---|
+| admitted a step later, read twice | 36.1 | 4.5 ms | 65.7 |
+| admitted at read time | 18.2 | 0 | 61.7 |
+
+`EXL3_CACHE_VERIFY` found one interaction on the first run: a pending step-boundary admission's victim sits at the
+window position of the row its expert is about to fill, and read-time admission took it back from disk, so two
+experts shared a position. Pending victims now wait. The verifier also checks bytes now, not only entries
+(`verify_staged_bytes`: after staging, each routed expert's bytes at its staged address, by checksum): with the routed
+exclusion dropped, the identity test showed 303 differences while the entry checks passed; the byte check raises.
+gemma-4-26B-A4B, 60% on disk, against all in RAM under breakable graphs: bit-identical, checkpoint reads 16,016 ->
+12,172. QFN under the verifier: clean over 85,959 reads and 14,450 admissions.
+
+What is left of the disk tier's ~32 ms a token over all-in-RAM is the staging reads (14.3 ms: 0.4 experts a layer, read
+synchronously one layer at a time, ~0.8 ms each at 1.6 GB/s) and the disk dispatch itself.
+
 ## Late slots: placed after the KV cache is sized (2026-11-22)
 
 Slots used to be sized inside vLLM's `determine_available_memory`, from the memory profile, before warmup and graph

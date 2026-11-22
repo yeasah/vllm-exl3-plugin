@@ -56,8 +56,9 @@ ids = (ids * (need // len(ids) + 1))[:need]
 def snap():
     store = cpu_offload._DISK.get("store")
     return dict(reads=store.reads if store else 0, bytes=store.bytes if store else 0, read_s=cpu_offload._STATS.get("disk_read_s", 0.0),
-                wait_s=cpu_offload._STATS.get("disk_wait_s", 0.0), staged=cpu_offload._STATS.get("disk_reads", 0),
-                admitted=cpu_offload._STATS.get("disk_admitted", 0))
+                wait_s=cpu_offload._STATS.get("disk_wait_s", 0.0), fill_s=cpu_offload._STATS.get("disk_fill_s", 0.0), staged=cpu_offload._STATS.get("disk_reads", 0),
+                admitted=cpu_offload._STATS.get("disk_admitted", 0),
+                read_admitted=cpu_offload._STATS.get("disk_read_admitted", 0))
 
 
 def run(name, prompt, sp):
@@ -86,6 +87,7 @@ for name, start in (("cold", 0), ("warm", 300)):
                        SamplingParams(temperature=0, max_tokens=a.decode, ignore_eos=True))
     toks = len(out.outputs[0].token_ids)
     print(f"  per token: {1e3 * (took - pre) / (toks - 1):.1f} ms wall (prefill subtracted); "
-          f"disk reads {d['reads'] / toks:.1f} "
-          f"({d['staged'] / toks:.1f} staged for use, {d['admitted'] / toks:.1f} filling admitted rows), "
-          f"{1e3 * d['read_s'] / toks:.1f} ms staging reads", flush=True)
+          f"disk reads {d['reads'] / toks:.1f} ({d['staged'] / toks:.1f} staged for use, of which "
+          f"{d['read_admitted'] / toks:.1f} admitted to host rows as read; "
+          f"{(d['admitted'] - d['read_admitted']) / toks:.1f} read again to fill rows), "
+          f"{1e3 * d['read_s'] / toks:.1f} ms staging reads, {1e3 * d['fill_s'] / toks:.1f} ms row fills", flush=True)
