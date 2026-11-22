@@ -316,6 +316,12 @@ def _patch_extensible_kv_default() -> None:
     offload: 179 slots for a 1.66 GiB KV reserve, then 1.21 GiB free after warmup and 0.04 GiB committed, refused;
     the estimate-based cache serves 272K tokens. Until the slots are placed after sizing (TODO `late-slots`), and only
     when the user did not choose: an explicit --[no-]enable-extensible-kv-cache stands.
+
+    Only for a fixed --max-model-len, where the slots grow into everything the KV reserve leaves. Under
+    --max-model-len auto they stop at their target share and leave the rest to the KV cache, and there the
+    extensible cache is the one that works: the estimate-based cache hands auto-fit all of it, and FlashInfer's
+    autotune warmup, which runs after it, then OOMs (Laguna-XS-2.1 4.00bpw, 16 GiB: 546 MiB short; extensible serves
+    183,922 tokens).
     """
     from vllm.config import VllmConfig
 
@@ -328,7 +334,7 @@ def _patch_extensible_kv_default() -> None:
         mc, cc = getattr(self, "model_config", None), getattr(self, "cache_config", None)
         if mc is not None and cc is not None and getattr(cc, "enable_extensible_kv_cache", False) is None \
                 and getattr(mc, "quantization", None) == "exl3" and _num_experts(mc.hf_config) \
-                and _uva_offload_gb(self) > 0:
+                and _uva_offload_gb(self) > 0 and getattr(mc, "original_max_model_len", None) != -1:
             from .cpu_offload import cache_mode
 
             if cache_mode() != "off":

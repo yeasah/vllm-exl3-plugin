@@ -554,7 +554,18 @@ def _usable_vram() -> int:
     """This device's memory times --gpu-memory-utilization."""
     from vllm.config import get_current_vllm_config
 
-    return int(torch.cuda.mem_get_info()[1] * get_current_vllm_config().cache_config.gpu_memory_utilization)
+    return int(torch.cuda.mem_get_info()[1] * gpu_utilization(get_current_vllm_config().cache_config))
+
+
+def gpu_utilization(cache_config) -> float:
+    """The effective `gpu_memory_utilization`. Since v0.34 the field stays None when unset and the default depends on
+    the sizing mode (1.0 with the extensible KV cache, 0.9 without), which `resolved_gpu_memory_utilization` applies;
+    reading the field crashed offload planning on any config that left it unset (Laguna-XS-2.1, 2026-11-22)."""
+    resolved = getattr(cache_config, "resolved_gpu_memory_utilization", None)
+    if resolved is not None:
+        return float(resolved)
+    value = getattr(cache_config, "gpu_memory_utilization", None)
+    return float(value) if value is not None else 0.9
 
 
 def _exclusive_need(experts: int, loader) -> int | None:

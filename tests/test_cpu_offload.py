@@ -1137,3 +1137,13 @@ def test_disk_reads_batch_past_what_the_pinned_sources_hold(offload, monkeypatch
         for e in (2, 4, 5, 7):
             _check_staged(staged[j], None, {}, window, label, e)
     assert cpu_offload._DISK["store"].reads == 4
+
+
+def test_utilization_left_unset_resolves_by_sizing_mode():
+    """v0.34 keeps gpu_memory_utilization None when unset; offload planning multiplied by it and crashed."""
+    import types
+
+    resolved = types.SimpleNamespace(gpu_memory_utilization=None, resolved_gpu_memory_utilization=1.0)
+    assert cpu_offload.gpu_utilization(resolved) == 1.0
+    assert cpu_offload.gpu_utilization(types.SimpleNamespace(gpu_memory_utilization=0.96)) == 0.96   # v0.32 shape
+    assert cpu_offload.gpu_utilization(types.SimpleNamespace(gpu_memory_utilization=None)) == 0.9
