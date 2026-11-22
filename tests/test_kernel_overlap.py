@@ -62,7 +62,10 @@ def test_second_stream_in_one_forward_is_refused(monkeypatch):
 
     from vllm_exl3_plugin import ops
 
-    ctx = [object()]
+    class Ctx:
+        pass
+
+    ctx = [Ctx()]
     monkeypatch.setattr(fc, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(fc, "get_forward_context", lambda: ctx[0])
     monkeypatch.setattr(ops, "_FORWARD_STREAM", [None, None])
@@ -74,5 +77,33 @@ def test_second_stream_in_one_forward_is_refused(monkeypatch):
     with torch.cuda.stream(side):
         with pytest.raises(RuntimeError, match="two CUDA streams"):
             ops._one_stream(x)
-        ctx[0] = object()                   # a new forward on another stream (graph capture): fine
+        ctx[0] = Ctx()                      # a new forward on another stream (graph capture): fine
         ops._one_stream(x)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device for real streams")
+def test_stream_guard_does_not_keep_the_forward_alive(monkeypatch):
+    """The guard holds the forward context weakly. Held strongly, a forward's attention metadata outlived it into the
+    next forward, and GDN's pinned host tensors, freed there under CUDA-graph capture, had torch record their release
+    event on the capturing stream: the next capture failed with cudaErrorInvalidValue (breakable capture, EXL3 + GDN)."""
+    import gc
+    import weakref
+
+    import vllm.forward_context as fc
+
+    from vllm_exl3_plugin import ops
+
+    class Ctx:
+        pass
+
+    ctx = [Ctx()]
+    monkeypatch.setattr(fc, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(fc, "get_forward_context", lambda: ctx[0])
+    monkeypatch.setattr(ops, "_FORWARD_STREAM", [None, None])
+    x = torch.empty(1, device="cuda")
+
+    ops._one_stream(x)
+    finished = weakref.ref(ctx[0])
+    ctx[0] = None
+    gc.collect()
+    assert finished() is None, "the stream guard kept a finished forward's context alive"

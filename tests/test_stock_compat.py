@@ -112,21 +112,6 @@ def test_patches_wrap_once():
     assert Replicated.weight_loader is first
 
 
-def test_gdn_models_are_recognised_from_layer_types():
-    gdn = types.SimpleNamespace(text_config=types.SimpleNamespace(layer_types=["linear_attention", "full_attention"]))
-    dense = types.SimpleNamespace(layer_types=["full_attention"], text_config=None)
-    assert plugin._has_gdn_layers(gdn) and not plugin._has_gdn_layers(dense)
-
-
-def test_graph_default_follows_vllm_choice_of_breakable(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-    assert not plugin._breakable_by_default(["Qwen4ExpForConditionalGeneration"]), "an explicit opt-out stands"
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-    assert plugin._breakable_by_default(["LlamaForCausalLM"])
-    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
-    assert plugin._breakable_by_default(["Qwen4ExpForConditionalGeneration"])
-
-
 def test_fused_shards_check_the_shard_id_as_the_running_vllm_spells_it(monkeypatch):
     """v0.32's validate_shard_id takes the shard id alone, v0.34's the parameter too; calling the new form on the
     old one broke every fused EXL3 load on the 0.32 fork."""

@@ -34,7 +34,6 @@ def register() -> None:
     _patch_offload_summary()
     _patch_offload_defaults()
     _patch_kernel_overlap()
-    _patch_gdn_graph_default()
     _patch_allocator_check()
     _patch_mm_encoder_dp_default()
     _REGISTERED = True
@@ -319,60 +318,3 @@ def _patch_allocator_check() -> None:
     cls._exl3_allocator_check = True
 
 
-def _has_gdn_layers(hf_config) -> bool:
-    """Whether a model interleaves GDN (linear-attention) layers: Qwen3.5, 3.6, 3.8 and Qwen4Exp declare them in
-    `layer_types`, on the text config of a multimodal one."""
-    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
-        if cfg is not None and "linear_attention" in (getattr(cfg, "layer_types", None) or []):
-            return True
-    return False
-
-
-def _breakable_by_default(architectures) -> bool:
-    """Whether vLLM will capture this model with breakable CUDA graphs: by architecture, or the env var."""
-    import os
-
-    flag = os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH")
-    if flag is not None:
-        return flag == "1"
-    try:
-        from vllm.config.vllm import default_breakable_cudagraph_architectures
-    except ImportError:
-        return False
-    return any(a in default_breakable_cudagraph_architectures() for a in architectures)
-
-
-def _patch_gdn_graph_default() -> None:
-    """Full CUDA graphs for decode only, by default, on an EXL3 model with GDN layers that vLLM would capture breakable.
-
-    Breakable CUDA graphs (no torch.compile; capture broken at attention, GDN and kin) leave torch's pinned-host
-    allocator an event it cannot query for EXL3 models with GDN layers: the next full capture's
-    `torch.cuda.graph.__enter__` raises `cudaErrorInvalidValue` from `_host_emptyCache()`. Full decode graphs capture
-    and replay correctly (Qwen4Exp: 22 t/s against 8 eager, 2026-11-17); docs/upstream.md, "CUDA graphs under
-    breakable capture". vLLM 0.32 made only Qwen4Exp breakable; 0.34 adds Qwen3.5 and its family (#51012), so the
-    default follows vLLM's own choice rather than a model list. Only when the user chose no graph mode: an explicit
-    `cudagraph_mode` stands. Until the capture bug is fixed.
-    """
-    from vllm.config import VllmConfig
-    from vllm.config.compilation import CUDAGraphMode
-
-    if getattr(VllmConfig, "_exl3_gdn_graphs_patched", False):
-        return
-    original = VllmConfig.__post_init__
-
-    @wraps(original)
-    def __post_init__(self, *args, **kwargs):
-        mc, cc = getattr(self, "model_config", None), getattr(self, "compilation_config", None)
-        if mc is not None and cc is not None and cc.cudagraph_mode is None \
-                and getattr(mc, "quantization", None) == "exl3" and _has_gdn_layers(mc.hf_config) \
-                and _breakable_by_default(getattr(mc.hf_config, "architectures", None) or []):
-            from .log import init_logger
-
-            cc.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-            init_logger(__name__).info(
-                "EXL3 with GDN layers: CUDA graphs for decode only (breakable capture fails for EXL3 with GDN layers; "
-                "pass a cudagraph_mode to override)")
-        return original(self, *args, **kwargs)
-
-    VllmConfig.__post_init__ = __post_init__
-    VllmConfig._exl3_gdn_graphs_patched = True

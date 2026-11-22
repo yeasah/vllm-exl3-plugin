@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import os
+import weakref
 from functools import lru_cache
 
 from typing import Optional
@@ -510,7 +511,12 @@ def _out_features(trellis: torch.Tensor) -> int:
 _ROUTED_ALWAYS = os.environ.get("EXL3_STAGE_ROUTED_ALWAYS", "0") == "1"
 _GROUPED_MIN_TOKENS = int(os.environ.get("EXL3_MOE_GROUPED_MIN", "48"))  # crossover on Qwen3.6-35B-A3B (256 x top-8)
 
-_FORWARD_STREAM: list = [None, None]   # (forward context, raw stream) of the last launch
+#: (weak reference to the forward context, raw stream) of the last launch. Weak: holding the context past its forward
+#: kept that forward's attention metadata alive into the next one, and GDN's metadata holds pinned host tensors last
+#: used on the main stream; freed inside the next forward's CUDA-graph capture, torch's host allocator records their
+#: release event on the capturing stream, and the next capture's `_host_emptyCache()` fails on it
+#: (`cudaErrorInvalidValue`). That was "breakable capture fails for EXL3 with GDN layers" (docs/upstream.md).
+_FORWARD_STREAM: list = [None, None]
 
 
 def _one_stream(x: torch.Tensor) -> None:
@@ -531,15 +537,17 @@ def _one_stream(x: torch.Tensor) -> None:
         return
     ctx = get_forward_context()
     stream = torch._C._cuda_getCurrentRawStream(x.device.index)
-    last_ctx, last_stream = _FORWARD_STREAM
-    if last_ctx is ctx and last_stream != stream:
+    last_ref, last_stream = _FORWARD_STREAM
+    if last_ref is not None and last_ref() is ctx and last_stream != stream:
         raise RuntimeError(
             "exllamav3 kernels were launched on two CUDA streams within one forward pass. They "
             "spin-wait across blocks and deadlock when they overlap (GPU at 100%, no progress), so "
             "vLLM features that run model compute on a side stream cannot be used with EXL3. The "
             "plugin disables the ones it knows (shared-expert overlap, microbatching); this one is "
             "new. See docs/moe.md, \"Overlapped kernels deadlock\".")
-    _FORWARD_STREAM[0], _FORWARD_STREAM[1] = ctx, stream
+    if last_ref is None or last_ref() is not ctx:
+        _FORWARD_STREAM[0] = weakref.ref(ctx)
+    _FORWARD_STREAM[1] = stream
 
 
 def _exl3_mm(

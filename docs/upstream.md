@@ -1039,6 +1039,29 @@ the checkpoint, and it would make a good `full`-tier entry regardless.
 
 ### CUDA graphs under breakable capture: EXL3 with GDN layers (2026-11-17)
 
+**Resolved 2026-11-22: it was ours.** The plugin's stream guard (`ops._one_stream`, which refuses exllamav3 kernels on
+two streams in one forward) kept the last forward's `ForwardContext` in a module global. The next forward's first EXL3
+GEMM replaced it, and the old context's last reference dropped as the guard returned -- freeing that forward's
+attention metadata, GDN's pinned H2D temporaries with it. Those blocks were last used on the main stream before the
+capture began, and torch's host allocator, on free, records an event on every stream a block was used on, skipping
+that only for blocks allocated *during* capture (`CachingHostAllocator.h`, `free`). So the event was recorded into the
+graph on the capturing stream, and the next capture's `_host_emptyCache()` failed querying it. EXL3 because only EXL3
+reaches the guard; GDN because only its metadata holds pinned temporaries; and nothing was allocated or copied during
+capture, which is why every probe below came back empty. The guard holds the context by weak reference now.
+
+Found with an `LD_PRELOAD` shim on `cudaEventRecord`/`cudaMemcpyAsync`/`cudaHostAlloc` that prints native and Python
+stacks for calls on a capturing stream: a tensor destructor recorded an event under capture; addr2line (the wheel
+keeps `.symtab`) put it in `CachingHostAllocatorImpl::free` via `raw_local_deleter`; a scan one pointer deep from the
+freeing frame named the block, which no live Python tensor held before capture.
+
+Since: Qwen3.8-27B 2.50bpw, Qwen3.5-35B-A3B 2.00bpw, Qwen3.6-35B-A3B 4.00bpw with experts offloaded and Qwen3.8-Flash-Next
+2.05bpw all capture breakable. Breakable is bit-identical to eager on Qwen3.5-35B-A3B (greedy tokens and logprobs, four
+prompts x 64 tokens; it switches torch.compile off, so `FULL_DECODE_ONLY` -- compiled -- differs from both at the
+drift floor) and decodes at parity (86.7 against 86.3 t/s at batch 1, 223 at 4). The plugin's `FULL_DECODE_ONLY`
+default is gone.
+
+The record below is how it looked before.
+
 *First filed as "CUDA graphs and expert offload"; it is neither offload nor compile.* The failure recorded for `main`
 above happens on our fork too, and its trigger is **breakable CUDA graphs** (`vllm/compilation/breakable_cudagraph.py`):
 one capture of the whole forward that ends the capture at each attention, GDN, Mamba or sparse-indexer op, runs that op
