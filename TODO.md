@@ -154,8 +154,8 @@ docs/memory-accounting.md).
 **Open:** (1) the host-RAM quota has the same shape: it is
 decided at the first expert, mid-load, when MemAvailable is at its low point (cuda: ~4 GiB of loading's transient
 anon memory), and could grow its rows after load the same way; (2) the inclusive cache. `--max-model-len auto` places slots late too (2026-11-22): KV is planned at what the
-target share's slots leave and fitted to that, then the slots take what is free once it is final. Open there: the
-split itself -- on QFN 1.66bpw with 16 GiB the one-stream 40% target leaves KV its floor (6,272 tokens). (3) the extensible cache's margin scales with the
+target share's slots leave and fitted to that, then the slots take what is free once it is final. KV keeps at least 32K
+tokens before slots take VRAM (`EXL3_AUTO_LEN_TOKENS`); the 40% target was re-measured and stands. (3) the extensible cache's margin scales with the
 measured peak (0.75 x), and a large token budget makes that peak large: QFN under `--performance-mode throughput`
 (16K tokens) measured a 3.05 GiB peak and kept 5.35 GiB, leaving slots 5% of experts. The 0.75 was argued from
 serving exceeding the peak by 18-30% (upstream 45%) on long-context prefill shapes, ~1 GiB at most; whether the excess
