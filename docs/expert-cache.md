@@ -1346,6 +1346,27 @@ decode kernel on the decode tables -- the all-in-RAM path (`cpu_offload.stage_di
 with read-time admission off, so every disk read takes the copied-table branch, identical too; with that branch's
 repointing removed the verifier raises (null entries). QFN under the verifier: clean over 59,499 reads.
 
+**...but only up to 4 tokens: the per-row kernel's UVA cliff (2026-11-23).** User e2e on a 5060 Ti after the lean
+path: single-stream decode +32-36%, four concurrent requests -4 to -6%. Decode ms a step on QFN 2.05bpw (20% slots,
+prefix caching off, distinct real prompts):
+
+| arm | bs1 | bs2 | bs4 | bs5 | bs8 |
+|---|---|---|---|---|---|
+| a third on disk, lean | 48.3 | 57.4 | 87.8 | | 438.6 |
+| a third on disk, grouped | 60.2 | 63.4 | 96.3 | | 193.5 |
+| a third on disk, lean to 4, then grouped | 48.8 | | 89.6 | 116.0 | 188.1 |
+| all in RAM, dispatch forced, lean | 34.5 | 48.5 | 66.7 | 457.3 | 589.9 |
+| all in RAM, dispatch forced, grouped | 47.6 | 56.4 | 81.8 | 98.5 | 171.7 |
+| all in RAM, as served (per-row under graphs) | 30.0 | 43.9 | 62.9 | | 386.5 |
+| Qwen3.5-35B-A3B 2.00, resident | | | 17.8 | 26.0 | 26.9 |
+
+The per-row kernel reading host rows over UVA steps from 66.7 to 457 ms between 4 and 5 tokens; resident, the same
+step only follows batch 5's padding to the 8-token graph. So it is the kernel's access pattern over host memory past
+~40 assignments, not the kernel. exllamav3's own runtime leaves the per-row kernel at 4 tokens too
+(`f_threshold = min(E / top_k, 4)`). The disk tier's lean path now stops at 4 tokens (`EXL3_DISK_LEAN_MAX`); past it the
+grouped path's routed staging copies each routed expert into VRAM once. The all-in-RAM path has the same cliff under
+graphs at 5-16 tokens, open.
+
 What is left of the disk tier's ~32 ms a token over all-in-RAM is the staging reads (14.3 ms: 0.4 experts a layer, read
 synchronously one layer at a time, ~0.8 ms each at 1.6 GB/s) and the disk dispatch itself.
 

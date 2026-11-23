@@ -514,7 +514,13 @@ _GROUPED_MIN_TOKENS = int(os.environ.get("EXL3_MOE_GROUPED_MIN", "48"))
 #: ``EXL3_DISK_LEAN_DECODE`` (default 1): decode-sized batches on a disk-tier layer read back only the routed ids and
 #: run the per-row decode kernel on the decode tables, reading the routed disk experts first; 0 sends them through
 #: routed staging and the grouped path as prefill goes.
-_LEAN_DECODE = os.environ.get("EXL3_DISK_LEAN_DECODE", "1") == "1"  # crossover on Qwen3.6-35B-A3B (256 x top-8)
+_LEAN_DECODE = os.environ.get("EXL3_DISK_LEAN_DECODE", "1") == "1"
+
+#: Batches up to this many tokens take the lean decode path on a disk-tier layer; larger ones go grouped. The per-row
+#: kernel reading host rows over UVA falls off a cliff past ~40 assignments: QFN 2.05bpw, all in RAM, 66.7 ms a step
+#: at 4 tokens and 457 at 5, where the grouped path's routed staging runs 81.8 and 98.5 (exllamav3's own runtime
+#: leaves the per-row kernel at 4 tokens too). ``EXL3_DISK_LEAN_MAX``.
+_LEAN_MAX_TOKENS = int(os.environ.get("EXL3_DISK_LEAN_MAX", "4"))  # crossover on Qwen3.6-35B-A3B (256 x top-8)
 
 #: (weak reference to the forward context, raw stream) of the last launch. Weak: holding the context past its forward
 #: kept that forward's attention metadata alive into the next one, and GDN's metadata holds pinned host tensors last
@@ -1058,7 +1064,7 @@ def _exl3_moe_mm(
         # tier's design note)
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("EXL3_DISK_TIER: experts on disk are read only outside graph capture (enforce_eager)")
-        if _LEAN_DECODE and num_tokens <= cpu_offload.STAGE_MIN_TOKENS:
+        if _LEAN_DECODE and num_tokens <= _LEAN_MAX_TOKENS:
             # decode: the routed ids back (a few, not a count per expert), the routed disk experts read -- admitted
             # straight into host rows, which the kernel reads over UVA like any row expert -- and then the decode
             # path all-in-RAM runs. Through the grouped path every layer cost QFN 0.37 ms a token with nothing on disk

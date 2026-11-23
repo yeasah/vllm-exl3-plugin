@@ -62,7 +62,8 @@ def test_disk_tier_layers_stage_by_routing_whatever_the_batch(paths, monkeypatch
     monkeypatch.setattr(cpu_offload, "stage_disk_decode",
                         lambda idx, ids, experts, tables: decoded.append(ids) or tables)
     assert run(1, stage=0) == "per_row" and decoded, "decode reads its disk experts before the per-row kernel"
-    assert run(cpu_offload.STAGE_MIN_TOKENS + 1, stage=0) == "grouped"
+    assert run(ops._LEAN_MAX_TOKENS, stage=0) == "per_row"
+    assert run(ops._LEAN_MAX_TOKENS + 1, stage=0) == "grouped", "past the per-row kernel's UVA cliff"
     monkeypatch.setattr(ops, "_LEAN_DECODE", False)
     assert run(1, stage=0) == "grouped"
     staged = []
