@@ -1375,7 +1375,33 @@ to start. Now phase A plans KV at what the target share's slots leave (never bel
 vLLM fits the length to that plan, and phase B grows the slots into what is free once the KV cache is final, so a
 misjudged warmup lands on the slots. The same config serves: 6,272 tokens, 180 slots a layer (35%), 60.9 ms a token
 with 8 GiB of host rows and the rest on disk. The length is short because the one-stream target, 40% of experts in
-VRAM, is most of the card here; that split is the policy question left.
+VRAM, is most of the card here; that split is the policy question left. *(Since: the floor is 32K tokens,
+`EXL3_AUTO_LEN_TOKENS`.)*
+
+**The residency target, re-measured (2026-11-22).** The 40% one-stream target was measured on the inclusive cache;
+re-swept on the exclusive cache of today, decode ms a token with everything offloaded but the slot share (8K length,
+default graphs, prefix caching off, 256 tokens after a warm-up generation per batch size, distinct real prompts):
+
+| share in VRAM | gemma-4-26B 2.54 bs1 | bs4 | Qwen3.5-35B-A3B 2.00 bs1 | bs4 |
+|---|---|---|---|---|
+| resident | 12.3 | 21.8 | 11.5 | 17.9 |
+| 0.5 | 13.6 (+11%) | 25.6 (+17%) | 12.5 (+9%) | 20.9 (+17%) |
+| 0.4 | 14.9 (+21%) | 28.4 (+30%) | 13.0 (+13%) | 22.4 (+25%) |
+| 0.3 | 16.6 (+35%) | 33.0 (+51%) | 13.7 (+19%) | 25.1 (+40%) |
+| 0.2 | 19.0 (+54%) | 40.9 (+88%) | 14.7 (+28%) | 29.6 (+65%) |
+| 0.1 | 23.9 (+94%) | 58.9 (+170%) | 16.6 (+44%) | 37.4 (+109%) |
+| 0.05 | 26.3 | 69.3 | 18.1 | 43.8 |
+
+The 10% point is at about half the experts in VRAM for one stream, higher at four: the target is not too
+conservative, so it stays. The work since went into what a miss costs (staging, the disk tier), not into how many
+experts decode touches. Short runs; a server's promotions over a long session may do better.
+
+**The KV reserve, as v0.34 checks it (2026-11-22).** The late reserve used the per-layer sum, the admission check of
+an earlier upstream main; v0.34 checks per KV cache group through its config builder, counting the padding hybrid
+models' groups get, plus the null block. QFN 1.66bpw with fp8 KV and an fp8 indexer at 262,144 tokens planned 3.48 GiB
+against 3.59 needed and refused at every host budget; the builder's arithmetic plans 3.63 and serves. And slots fill
+from host rows, so a small host tier capped them at its row count (90 a layer with 4 GiB of rows, 1.2 GiB of VRAM left
+unused): late growth now runs in rounds, rows refilling from disk between them -- 117 slots a layer, as with 8 GiB.
 
 ## Verifying the cache: eager identity, not graph identity (2026-11-09)
 

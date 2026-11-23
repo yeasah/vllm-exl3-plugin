@@ -127,8 +127,10 @@ def size_slots(available: int, reserve: int, hosted: int, slot_bytes: int,
     return min(per_layer_max, target // max(slot_bytes * layers, 1))
 
 
-#: Tokens the reserve covers when --max-model-len is auto, before the multiplier.
-_AUTO_LEN_TOKENS = 4096
+#: Tokens the reserve covers when --max-model-len is auto, before the multiplier: the context guaranteed before slots
+#: take VRAM (``EXL3_AUTO_LEN_TOKENS``). 4096 let the residency target take a 16 GiB card and leave QFN 1.66bpw 6,272
+#: tokens; a floor this side of 16-32K is not a useful default.
+_AUTO_LEN_TOKENS = int(os.environ.get("EXL3_AUTO_LEN_TOKENS", "32768"))
 
 
 class ExpertCache:
@@ -1180,8 +1182,20 @@ def _kv_needed(config, specs: dict, mult: float) -> int:
         groups = [g for g in groups if not g.host_resident]
         if not groups:
             return 0
+        if hasattr(kv, "get_global_kv_cache_groups") and hasattr(kv, "_pool_bytes_per_block_from_builder"):
+            # v0.34's admission check, exactly: the builder's groups, their per-group block counts (hybrid models pad
+            # their layers to uniform groups), and the null block BlockPool holds back, at the builder's pool bytes per
+            # block. The per-layer sum below left QFN with fp8 KV and an fp8 indexer 0.11 GiB short at 262144 tokens
+            builder = kv.get_kv_cache_config_builder(config)
+            groups = kv._project_kv_cache_groups_to_worker(kv.get_global_kv_cache_groups(config, [dict(specs)]),
+                                                           dict(specs))
+            groups = [g for g in groups if not g.host_resident]
+            if not groups:
+                return 0
+            block = kv._pool_bytes_per_block_from_builder(builder, config, groups)
+            return int(mult * kv._max_memory_usage_bytes_from_groups(builder, config, groups)) + block
         if kv.__name__.endswith("kv_cache_planning"):
-            # upstream main's `check_enough_kv_cache_memory`: the per-layer sum, against what is
+            # upstream main's `check_enough_kv_cache_memory` before v0.34: the per-layer sum, against what is
             # left after the null block
             # specs as vLLM has them: they carry their own retention there, which the fork's
             # extra_retained_tokens adjustment above would understate
@@ -1297,8 +1311,18 @@ def grow_late(worker, extensible: bool) -> None:
         keep = int(total * (1 - util)) + _LATE["peak"]
         how = f"{util:g} utilization and the {_LATE['peak'] / (1 << 30):.2f} GiB profiled peak stay free"
     budget = max(free - keep, 0)
-    n = budget // max(_LATE["slot_bytes"] * _LATE["layers"], 1)
-    added = cache.grow(int(n))
+    n = int(budget // max(_LATE["slot_bytes"] * _LATE["layers"], 1))
+    # slots fill from host rows, and the rows refill from disk (`_backfill`), so a small host tier takes several
+    # rounds: QFN 1.66bpw with 4 GiB of rows stopped at their 90 experts a layer with 1.2 GiB of VRAM unused
+    added = 0
+    while n > 0:
+        before = min(len(v) for v in cache.views)
+        got = cache.grow(n)
+        grown = min(len(v) for v in cache.views) - before
+        added += got
+        if not got or grown <= 0:
+            break
+        n -= grown
     E = cache.E
     in_vram = int(numpy.mean([len(v) for v in cache.views]))
     streams = 2 ** ((in_vram / E - 0.4) / 0.1) if in_vram / E >= 0.4 else 0
