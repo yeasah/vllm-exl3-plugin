@@ -150,6 +150,16 @@ anon memory), and could grow its rows after load the same way; (2) the inclusive
 target share's slots leave and fitted to that, then the slots take what is free once it is final. Open there: the
 split itself -- on QFN 1.66bpw with 16 GiB the one-stream 40% target leaves KV its floor (6,272 tokens).
 
+## `pinned-rows-return` — Give back host rows the expert cache empties
+
+**Outcome:** pinned host memory tracks what the host tier holds. Each projection's rows are one driver allocation
+(`cpu_offload._pinned`), sized at load and never freed; late slots then move experts out of them. With the disk tier
+spilling, backfill refills the freed rows; without it they stay pinned and idle: gemma-4-26B with every expert grown
+into VRAM keeps all 7.15 GiB pinned for nothing, and QFN 1.66bpw hosted in RAM keeps ~5 GiB idle behind 114 slots.
+**Candidate:** allocate rows in chunks, compact after late growth (a host-to-host copy and an entry flip, while
+nothing runs), free emptied chunks; or free the whole host tier when the slots hold every expert. The final
+`expert placement` log line reports the idle bytes (2026-11-22).
+
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 
 **Outcome:** checkpoints whose model ties `lm_head` to the embedding load. LFM2.5-8B-A1B (our pipeline's 4.00 probe

@@ -727,6 +727,29 @@ class ExclusiveCache(ExpertCache):
             self._verify(range(len(self.layers)), full=True)
         return added
 
+    def report_tiers(self) -> None:
+        """One line on where the experts ended up, once placement is final: VRAM (resident and slots), host rows, disk,
+        each as bytes and share of all routed experts, and the pinned host memory behind the rows -- allocated once at
+        load and never returned, so rows the slots emptied stay pinned (idle) unless the disk tier refills them."""
+        from . import cpu_offload
+
+        gib = 1 << 30
+        vram = held = disk = pinned = spare = 0.0
+        n_vram = n_held = n_disk = 0
+        for l, layer in enumerate(self.layers):
+            blocks = layer.exl3_host_blocks
+            rb = sum(cpu_offload._row_bytes(b) for b in blocks.values())
+            spare += min(len(self.free_rows[l]), cpu_offload._SPARE_ROWS) * rb
+            v, h, d = int((self.slot_of[l] >= 0).sum()), int((self.row_of[l] >= 0).sum()), int((self.row_of[l] == DISK).sum())
+            n_vram, n_held, n_disk = n_vram + v, n_held + h, n_disk + d
+            vram, held, disk = vram + v * rb, held + h * rb, disk + d * rb
+            pinned += sum(cpu_offload._row_bytes(b) * b.host.shape[0] for b in blocks.values())
+        total = max(n_vram + n_held + n_disk, 1)
+        logger.info("expert placement: VRAM %.2f GiB (%.0f%%), host RAM %.2f GiB (%.0f%%) in %.2f GiB pinned "
+                    "(%.2f GiB of spare rows to swap through, %.2f GiB idle), disk %.2f GiB (%.0f%%)", vram / gib,
+                    100 * n_vram / total, held / gib, 100 * n_held / total, pinned / gib, spare / gib,
+                    max(pinned - held - spare, 0) / gib, disk / gib, 100 * n_disk / total)
+
     # ------------------------------------------------------------ the disk tier
 
     def _backfill(self) -> None:
@@ -1332,6 +1355,7 @@ def grow_late(worker, extensible: bool) -> None:
         "concurrent streams.", in_vram - (E - max(len(b.rows) + len(b.disk) for b in cache.layers[0].exl3_host_blocks.values())),
         _LATE["layers"], added / (1 << 20), 100 * in_vram / E, how, (free - added) / (1 << 30),
         "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1 else "fewer than 1 (single-stream decode will be slower)")
+    cache.report_tiers()
 
 
 def build(layers: list, available: int, worker) -> int:
@@ -1428,4 +1452,6 @@ def build(layers: list, available: int, worker) -> int:
         "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1
         else "fewer than 1 (single-stream decode will be slower)",
     )
+    if hasattr(cache, "report_tiers"):
+        cache.report_tiers()
     return used - given_back
