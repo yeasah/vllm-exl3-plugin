@@ -1365,7 +1365,24 @@ step only follows batch 5's padding to the 8-token graph. So it is the kernel's 
 ~40 assignments, not the kernel. exllamav3's own runtime leaves the per-row kernel at 4 tokens too
 (`f_threshold = min(E / top_k, 4)`). The disk tier's lean path now stops at 4 tokens (`EXL3_DISK_LEAN_MAX`); past it the
 grouped path's routed staging copies each routed expert into VRAM once. The all-in-RAM path has the same cliff under
-graphs at 5-16 tokens, open.
+graphs at 5-16 tokens: under `--performance-mode throughput` it now takes the same way out.
+
+**`--performance-mode throughput` for offloaded experts (2026-11-23).** User e2e with the 4-token cap: within noise of
+the lean path at 1 and 4 requests, and 8 requests serving at 46.8 t/s. For the all-in-RAM path the user's call: not
+unconditionally (more than 4 concurrent decodes is the less common workload), but vLLM's throughput mode -- "aggregate
+tokens/sec at high concurrency" -- is the right hook. With it and experts offloaded, the config takes the disk tier's
+graph path (breakable capture, PIECEWISE decode graphs), load records the decision (`decide_throughput_offload`), the
+MoE op becomes an eager break, and decode batches over 4 tokens on offloaded layers run grouped; under any capture
+they stay per-row, so an explicit FULL mode is safe. `balanced` and `interactivity` are unchanged. QFN 2.05bpw all in
+RAM, 20% slots, the token budget pinned at 8192 in both modes, ms a step:
+
+| mode | bs1 | bs4 | bs5 | bs8 |
+|---|---|---|---|---|
+| balanced | 29.95 | 62.73 | 444.5 | 387.9 |
+| throughput | 29.94 | 62.85 | 98.7 | 224.6 |
+
+Throughput mode also doubles vLLM's token budget (16384): with default (late) slots QFN serves at 32K with 5% of
+experts in VRAM, the activations taking the rest; with a fixed 20% it does not fit.
 
 What is left of the disk tier's ~32 ms a token over all-in-RAM is the staging reads (14.3 ms: 0.4 experts a layer, read
 synchronously one layer at a time, ~0.8 ms each at 1.6 GB/s) and the disk dispatch itself.

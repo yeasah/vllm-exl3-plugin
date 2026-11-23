@@ -128,6 +128,9 @@ The dispatch's fixed cost is mostly gone: decode-sized batches skip the grouped 
 kernel after reading their routed disk experts -- 3.6-5 ms a token left of 17.8 on QFN with nothing on disk, and
 52.3 -> 38.9 ms at a third on disk (2026-11-22).
 
+Decode past 4 tokens runs grouped on disk-tier layers, and on any offloaded layer under `--performance-mode
+throughput`: the per-row kernel over host rows falls off a cliff at 5 (QFN 444 ms a step against 99, 2026-11-23).
+
 **Next:** (1) the staging reads: ~0.4 experts a layer, read synchronously at queue depth 1, ~0.8 ms each -- reads
 that cannot start before their layer's routing is known; (2) what is left of the fixed cost, a routing readback a
 layer; (3) TP>1 reads a rank's slice.

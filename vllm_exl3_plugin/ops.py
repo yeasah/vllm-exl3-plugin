@@ -1078,8 +1078,10 @@ def _exl3_moe_mm(
         staged = cpu_offload.stage_routed(stage, counts, (gate_trellis, up_trellis, down_trellis))
         args = (*args[:3], staged[0], *args[4:6], staged[1], *args[7:9], staged[2], *args[10:])
         return _moe_per_row(*args)
-    if (num_tokens >= _GROUPED_MIN_TOKENS and activation in _MOE_ACT
-            and not torch.cuda.is_current_stream_capturing()):
+    if (activation in _MOE_ACT and not torch.cuda.is_current_stream_capturing()
+            and (num_tokens >= _GROUPED_MIN_TOKENS
+                 or (stage >= 0 and num_tokens > _LEAN_MAX_TOKENS and cpu_offload.throughput_offload()))):
+        # --performance-mode throughput: offloaded experts past the per-row kernel's UVA cliff are staged by routing
         return _moe_grouped(*args, stage=stage)
     if stage >= 0 and num_tokens > cpu_offload.STAGE_MIN_TOKENS:
         staged = cpu_offload.stage_all(stage)
@@ -1168,7 +1170,7 @@ _EAGER_BREAK_ENV = os.environ.get("EXL3_MOE_EAGER_BREAK")
 def moe_eager_break() -> bool:
     if _EAGER_BREAK_ENV is not None:
         return _EAGER_BREAK_ENV == "1"
-    return cpu_offload._STATS.get("disk_experts", 0) > 0
+    return cpu_offload._STATS.get("disk_experts", 0) > 0 or cpu_offload.throughput_offload()
 
 
 def _exl3_moe_mm_out(

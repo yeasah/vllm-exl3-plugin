@@ -125,6 +125,9 @@ def _patch_offload_summary() -> None:
             check_uneven_mlps(model)
         build_staging()
         if _serving_exl3():
+            from .cpu_offload import decide_throughput_offload
+
+            decide_throughput_offload()
             from .allocator_safety import check
 
             check("after loading the model")
@@ -279,7 +282,9 @@ def _patch_mm_encoder_dp_default() -> None:
 
 
 def _disk_tier_graph_defaults() -> None:
-    """When experts will spill to disk, CUDA graphs that leave the routed-expert op eager: breakable capture with the
+    """When experts will spill to disk -- or are offloaded under ``--performance-mode throughput``, where decode batches
+    over 4 tokens run grouped (`cpu_offload.decide_throughput_offload`) -- CUDA graphs that leave the routed-expert op
+    eager: breakable capture with the
     op as an eager break (`ops.moe_eager_break`, on once anything spilled) and PIECEWISE decode graphs, since a FULL
     decode graph captures across the breaks. The disk tier reads routing back on the host and refuses capture. Whether
     anything spills is decided at load, so this predicts it from the config (`cpu_offload.spill_expected`); load
@@ -298,9 +303,9 @@ def _disk_tier_graph_defaults() -> None:
         mc, cc = getattr(self, "model_config", None), getattr(self, "compilation_config", None)
         if mc is not None and cc is not None and getattr(mc, "quantization", None) == "exl3" \
                 and not mc.enforce_eager:
-            from .cpu_offload import spill_expected
+            from .cpu_offload import spill_expected, throughput_offload_expected
 
-            if spill_expected(self):
+            if spill_expected(self) or throughput_offload_expected(self):
                 import os
 
                 os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")

@@ -421,6 +421,42 @@ def _spill_ready() -> str | None:
     return _STATS["spill_blocker"]
 
 
+def _offloads_experts(config) -> bool:
+    uva = config.offload_config.uva
+    params = uva.cpu_offload_params or set()
+    return uva.cpu_offload_gb > 0 and (not params or any("expert" in p for p in params))
+
+
+def throughput_offload_expected(config) -> bool:
+    """At config time: ``--performance-mode throughput`` with experts offloaded, which takes the graph path that lets
+    decode batches over 4 tokens run grouped (`throughput_offload`)."""
+    try:
+        return config.performance_mode == "throughput" and _offloads_experts(config)
+    except Exception:
+        return False
+
+
+def decide_throughput_offload() -> None:
+    """At the end of load, while the config is current: whether decode batches over 4 tokens on offloaded layers take
+    the grouped path's routed staging (one copy of each routed expert into VRAM) rather than the per-row kernel, which
+    reads host rows over UVA and falls off a cliff past ~40 assignments: QFN 2.05bpw all in RAM, 386 ms a step at 8
+    tokens against 172 grouped. Only under ``--performance-mode throughput``, with experts offloaded, and in a graph
+    path where the MoE op is an eager break: the eager break costs ~0.4 ms a token at batch 1, worth it only where
+    concurrency is the point."""
+    try:
+        from vllm.config import get_current_vllm_config
+
+        config = get_current_vllm_config()
+        _STATS["throughput_offload"] = (config.performance_mode == "throughput" and _STATS.get("expert_bytes", 0) > 0
+                                        and _graph_path_ready())
+    except Exception:
+        _STATS["throughput_offload"] = False
+
+
+def throughput_offload() -> bool:
+    return bool(_STATS.get("throughput_offload"))
+
+
 def spill_expected(config) -> bool:
     """At config time, whether the automatic disk tier will spill: the routed experts' bytes exceed what
     --cpu-offload-gb and host RAM (less the margin) can hold, with a fifth to spare, since load decides at the first
@@ -434,8 +470,7 @@ def spill_expected(config) -> bool:
         if isinstance(mode, float):
             return True
         uva = config.offload_config.uva
-        params = uva.cpu_offload_params or set()
-        if uva.cpu_offload_gb <= 0 or (params and not any("expert" in p for p in params)):
+        if not _offloads_experts(config):
             return False
         mc = config.model_config
         census = _checkpoint_census(mc.model, mc.revision, getattr(config.load_config, "download_dir", None))

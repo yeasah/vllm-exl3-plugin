@@ -167,3 +167,19 @@ def test_spill_is_predicted_from_expert_bytes_against_host_room(monkeypatch):
     assert cpu_offload.spill_expected(config(64)), "more experts than host RAM less the margin"
     monkeypatch.setenv("EXL3_DISK_TIER", "off")
     assert not cpu_offload.spill_expected(config(8))
+
+
+def test_throughput_mode_stages_offloaded_decode_past_the_uva_cliff(paths, monkeypatch):
+    """Under --performance-mode throughput (decided at load), offloaded layers run decode batches over 4 tokens grouped
+    -- routed staging, one copy of each routed expert into VRAM -- instead of the per-row kernel over host rows; never
+    while capturing, and never otherwise."""
+    from vllm_exl3_plugin import cpu_offload
+
+    ops, run = paths
+    monkeypatch.setattr(cpu_offload, "has_disk", lambda idx: False)
+    monkeypatch.setitem(cpu_offload._STATS, "throughput_offload", True)
+    assert run(ops._LEAN_MAX_TOKENS, stage=0) == "per_row"
+    assert run(ops._LEAN_MAX_TOKENS + 1, stage=0) == "grouped"
+    assert run(ops._LEAN_MAX_TOKENS + 1, stage=-1) == "per_row", "resident layers have no cliff"
+    monkeypatch.setitem(cpu_offload._STATS, "throughput_offload", False)
+    assert run(ops._LEAN_MAX_TOKENS + 1, stage=0) == "per_row"
