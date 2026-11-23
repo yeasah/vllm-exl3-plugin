@@ -1384,6 +1384,17 @@ RAM, 20% slots, the token budget pinned at 8192 in both modes, ms a step:
 Throughput mode also doubles vLLM's token budget (16384): with default (late) slots QFN serves at 32K with 5% of
 experts in VRAM, the activations taking the rest; with a fixed 20% it does not fit.
 
+**Speculative next-layer reads: measured, parked (2026-11-23).** What the disk tier still adds on QFN 2.05bpw at a third
+on disk is ~3.7 ms of routing readback (48 syncs; inherent while the host must learn the routing before it reads) and
+~5 ms of reads, ~0.4 experts a layer, synchronous at queue depth 1 because a layer's reads cannot start before its
+routing is known. Prefetching layer l+1's experts from a predicted routing (Pre-gated MoE, ProMoE: layer l+1's gate on
+layer l's input, read back with layer l's routing) hinges on the prediction. On QFN, eager, 8 prompts x 200 sampled
+decode tokens, 533,450 expert picks (the gate's top-k matched the MoE op's routing on all 19,104 calls): recall of the
+actual top-10 is 65% predicting 10 and 82.5% predicting 20; by layer 29% (layer 1) to 82%, mostly 55-75%. At best that
+hides ~4 of the 5 ms (~10% of decode) at twice the disk reads, with a fifth of the needed reads still synchronous, on
+a number that depends on the model and likely the workload; speculative reads would also have to stay out of host
+rows, or a bad prediction evicts useful experts. Not taken; revisit for a model whose recall is well above 90%.
+
 What is left of the disk tier's ~32 ms a token over all-in-RAM is the staging reads (14.3 ms: 0.4 experts a layer, read
 synchronously one layer at a time, ~0.8 ms each at 1.6 GB/s) and the disk dispatch itself.
 

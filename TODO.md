@@ -132,7 +132,8 @@ Decode past 4 tokens runs grouped on disk-tier layers, and on any offloaded laye
 throughput`: the per-row kernel over host rows falls off a cliff at 5 (QFN 444 ms a step against 99, 2026-11-23).
 
 **Next:** (1) the staging reads: ~0.4 experts a layer, read synchronously at queue depth 1, ~0.8 ms each -- reads
-that cannot start before their layer's routing is known; (2) what is left of the fixed cost, a routing readback a
+that cannot start before their layer's routing is known (next-layer prediction measured and parked: 65% recall at
+top-10, 82.5% at 20 on QFN; docs/expert-cache.md); (2) what is left of the fixed cost, a routing readback a
 layer; (3) TP>1 reads a rank's slice.
 `EXL3_DISK_TIER` alone now gives the graph path: the eager break, breakable capture and PIECEWISE decode graphs are its
 defaults (48 breaks cost ~0.4 ms a token on QFN), each overridable.
