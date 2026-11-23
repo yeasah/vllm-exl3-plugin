@@ -509,7 +509,12 @@ def _out_features(trellis: torch.Tensor) -> int:
 #: ``EXL3_STAGE_ROUTED_ALWAYS=1``, a measurement switch: every staged layer takes the disk tier's dispatch (routing read
 #: back each layer, routed staging, every batch) with nothing on disk, so that path's own cost can be timed. Eager only.
 _ROUTED_ALWAYS = os.environ.get("EXL3_STAGE_ROUTED_ALWAYS", "0") == "1"
-_GROUPED_MIN_TOKENS = int(os.environ.get("EXL3_MOE_GROUPED_MIN", "48"))  # crossover on Qwen3.6-35B-A3B (256 x top-8)
+_GROUPED_MIN_TOKENS = int(os.environ.get("EXL3_MOE_GROUPED_MIN", "48"))
+
+#: ``EXL3_DISK_LEAN_DECODE`` (default 1): decode-sized batches on a disk-tier layer read back only the routed ids and
+#: run the per-row decode kernel on the decode tables, reading the routed disk experts first; 0 sends them through
+#: routed staging and the grouped path as prefill goes.
+_LEAN_DECODE = os.environ.get("EXL3_DISK_LEAN_DECODE", "1") == "1"  # crossover on Qwen3.6-35B-A3B (256 x top-8)
 
 #: (weak reference to the forward context, raw stream) of the last launch. Weak: holding the context past its forward
 #: kept that forward's attention metadata alive into the next one, and GDN's metadata holds pinned host tensors last
@@ -1053,6 +1058,14 @@ def _exl3_moe_mm(
         # tier's design note)
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("EXL3_DISK_TIER: experts on disk are read only outside graph capture (enforce_eager)")
+        if _LEAN_DECODE and num_tokens <= cpu_offload.STAGE_MIN_TOKENS:
+            # decode: the routed ids back (a few, not a count per expert), the routed disk experts read -- admitted
+            # straight into host rows, which the kernel reads over UVA like any row expert -- and then the decode
+            # path all-in-RAM runs. Through the grouped path every layer cost QFN 0.37 ms a token with nothing on disk
+            staged = cpu_offload.stage_disk_decode(stage, topk_ids.reshape(-1).tolist(), num_experts,
+                                                   (gate_trellis, up_trellis, down_trellis))
+            args = (*args[:3], staged[0], *args[4:6], staged[1], *args[7:9], staged[2], *args[10:])
+            return _moe_per_row(*args)
         if activation in _MOE_ACT:
             return _moe_grouped(*args, stage=stage)
         counts = torch.bincount(topk_ids.reshape(-1).to(torch.long), minlength=num_experts + 1).tolist()

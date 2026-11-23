@@ -1124,6 +1124,42 @@ def stage_routed(idx: int, counts: list[int], tables: tuple) -> tuple:
     return out
 
 
+def stage_disk_decode(idx: int, ids: list[int], experts: int, tables: tuple) -> tuple:
+    """A decode batch's tables on a disk-tier layer: the decode tables themselves, which point row experts at their host
+    rows (read over UVA) and slotted ones at VRAM, once the routed disk experts are read. Under the exclusive cache
+    those are admitted as read, straight into host rows, so their decode entries point there too; only one that could
+    not be admitted is read through the pinned sources into its window position, and the returned tables -- a copy
+    -- point it there. No copies of row experts into the window, no masks over every expert."""
+    layer = STAGED[idx]
+    routed = {e for e in ids if 0 <= e < experts}
+    pos = getattr(layer, "exl3_disk_pos", None)
+    out = tables
+    from . import expert_cache
+
+    cache = expert_cache.CACHE
+    if pos and any(e in pos for e in routed):
+        admit = cache if cache is not None and hasattr(cache, "admit_at_read") and _READ_ADMIT else None
+        bounced = _read_disk(layer, routed.__contains__, admit, window_rows=False)
+        if bounced and layer.exl3_stage is not None:
+            index = torch.tensor([e for _, e in bounced], dtype=torch.long).pin_memory().to(tables[0].device,
+                                                                                            non_blocking=True)
+            out = []
+            for j, t in enumerate(tables):
+                t = t.clone()
+                t.index_copy_(0, index, layer.exl3_stage[1][j].index_select(0, index))
+                out.append(t)
+            out = tuple(out)
+    if expert_cache.VERIFY:
+        counts = [0] * (experts + 1)
+        for e in ids:
+            if 0 <= e < experts:
+                counts[e] += 1
+        _verify_routed(idx, counts, out)
+        if cache is not None and hasattr(cache, "verify_staged_bytes"):
+            cache.verify_staged_bytes(layer, sorted(routed), out)
+    return out
+
+
 def has_disk(idx: int) -> bool:
     """Whether a staged layer has experts on the disk tier, which only `stage_routed` can read."""
     return bool(getattr(STAGED[idx], "exl3_disk_pos", None))
@@ -1210,7 +1246,7 @@ def _open_disk_tier(layers) -> None:
 _READ_ADMIT = os.environ.get("EXL3_DISK_READ_ADMIT", "1") == "1"
 
 
-def _read_disk(layer, want, admit=None) -> list:
+def _read_disk(layer, want, admit=None, window_rows=True) -> list:
     """Read the layer's disk experts `want` accepts into their window positions; returns (position, expert)
     pairs. Synchronous: the reads run on a thread pool, a deep queue being what an SSD needs, then one copy a
     run of positions on the current stream. The pinned sources are reused by the next batch's reads, so
@@ -1219,7 +1255,8 @@ def _read_disk(layer, want, admit=None) -> list:
     go in batches of what the sources hold.
 
     With `admit` (the exclusive cache, a decode batch), experts it admits (`admit_at_read`) are read straight into
-    their new host rows and copied to the window from there, at the row's window position; the rest as above."""
+    their new host rows and copied to the window from there, at the row's window position; the rest as above. With
+    `window_rows` false the admitted ones are not copied and not returned: a decode kernel reads them from their rows."""
     pos = getattr(layer, "exl3_disk_pos", None)
     if not pos:
         return []
@@ -1245,10 +1282,13 @@ def _read_disk(layer, want, admit=None) -> list:
             t = time.perf_counter()
             list(_DISK["pool"].map(into_row, into_rows))
             _STATS["disk_read_s"] = _STATS.get("disk_read_s", 0.0) + time.perf_counter() - t
-            _copy_rows(layer, {label: into_rows for label in layer.exl3_host_blocks})
-            _STATS["disk_reads"] = _STATS.get("disk_reads", 0) + len(into_rows)
-            _STATS["disk_admitted"] = _STATS.get("disk_admitted", 0) + len(into_rows)
-            _STATS["disk_read_admitted"] = _STATS.get("disk_read_admitted", 0) + len(into_rows)
+            if window_rows:
+                _copy_rows(layer, {label: into_rows for label in layer.exl3_host_blocks})
+            else:
+                into_rows = []
+            _STATS["disk_reads"] = _STATS.get("disk_reads", 0) + len(rows)
+            _STATS["disk_admitted"] = _STATS.get("disk_admitted", 0) + len(rows)
+            _STATS["disk_read_admitted"] = _STATS.get("disk_read_admitted", 0) + len(rows)
     if not es:
         return into_rows
     cap = min(pinned[label].numel() // nbytes for label, (_, nbytes, _, _) in parts.items())

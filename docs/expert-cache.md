@@ -1325,6 +1325,27 @@ by itself, 4,128 experts refilled into rows the slots freed; decode 67.6 ms a to
 with a 64 GiB budget spills nothing and keeps vLLM's FULL_AND_PIECEWISE graphs. Backfill under the verifier (gemma, a
 60% share, both arms breakable): bit-identical, 1,530 -> 1,260 experts on disk, checkpoint reads 12,172 -> 9,877.
 
+**The fixed cost: decode through the prefill path (2026-11-22).** User e2e on a 5060 Ti (QFN 1.66bpw, 265K KV):
+12% of experts on disk cost 41% of single-stream decode against host-only, 34% only 47% -- the cost was mostly fixed.
+QFN 2.05bpw all in RAM under breakable graphs, the disk dispatch forced on with nothing on disk
+(`EXL3_STAGE_ROUTED_ALWAYS`): 47.9 ms a token against 30.1, 0.37 ms a MoE layer with no reads at all. Every batch on
+a disk-tier layer, one decode token included, took the grouped path: argsort, a bincount over every expert read back,
+three Python passes over 513 entries for the tile tables and an upload, `stage_routed` copying every routed RAM-row
+expert into the window (decode otherwise reads rows over UVA) and masking all experts three times, tiled kernels, a
+scatter and a gather. Decode-sized batches now read back only the routed ids, read the routed disk experts (admitted
+straight into rows, whose decode entries the kernel follows over UVA like any row expert; one that could not be
+admitted goes through the pinned sources into its window position, in a copy of the tables), and run the per-row
+decode kernel on the decode tables -- the all-in-RAM path (`cpu_offload.stage_disk_decode`, `EXL3_DISK_LEAN_DECODE`).
+
+| QFN 2.05bpw, decode ms a token (cold / warm) | grouped | lean |
+|---|---|---|
+| all in RAM, disk dispatch forced | 47.9 | 35.4 / 33.7 |
+| 20% VRAM, 47% RAM, 33% disk, 1,024 tokens | 54.7 / 52.3 | 42.7 / 38.9 |
+
+(all in RAM, no dispatch: 30.1). gemma-4-26B, 60% on disk, against all in RAM under breakable graphs: bit-identical, and
+with read-time admission off, so every disk read takes the copied-table branch, identical too; with that branch's
+repointing removed the verifier raises (null entries). QFN under the verifier: clean over 59,499 reads.
+
 What is left of the disk tier's ~32 ms a token over all-in-RAM is the staging reads (14.3 ms: 0.4 experts a layer, read
 synchronously one layer at a time, ~0.8 ms each at 1.6 GB/s) and the disk dispatch itself.
 

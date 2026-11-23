@@ -124,9 +124,13 @@ QFN warm decode 18.2 reads a token (replay 22.5), 61.7 ms against 65.7 (2026-11-
 The disk tier is the default and `--cpu-offload-gb` sizes the host tier within the host margin; only what VRAM and
 host RAM leave spills (2026-11-22). Not yet seen on a host-RAM-limited box with an over-large explicit share.
 
-**Next:** (1) the staging reads, 14.3 ms of the ~32 the disk tier adds to QFN's decode: ~0.4 experts a layer, read
-synchronously at queue depth 1, ~0.8 ms each -- reads that cannot start before their layer's routing is known; (2) the
-disk dispatch's own cost (routing readback and routed staging at every layer); (3) TP>1 reads a rank's slice.
+The dispatch's fixed cost is mostly gone: decode-sized batches skip the grouped path and run the all-in-RAM decode
+kernel after reading their routed disk experts -- 3.6-5 ms a token left of 17.8 on QFN with nothing on disk, and
+52.3 -> 38.9 ms at a third on disk (2026-11-22).
+
+**Next:** (1) the staging reads: ~0.4 experts a layer, read synchronously at queue depth 1, ~0.8 ms each -- reads
+that cannot start before their layer's routing is known; (2) what is left of the fixed cost, a routing readback a
+layer; (3) TP>1 reads a rank's slice.
 `EXL3_DISK_TIER` alone now gives the graph path: the eager break, breakable capture and PIECEWISE decode graphs are its
 defaults (48 breaks cost ~0.4 ms a token on QFN), each overridable.
 

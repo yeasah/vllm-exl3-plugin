@@ -50,15 +50,21 @@ def test_graph_capture_runs_per_row(paths, monkeypatch):
     assert run(4096) == "per_row"
 
 
-def test_disk_tier_layers_run_grouped_whatever_the_batch(paths, monkeypatch):
-    """Experts on the disk tier are read only by the grouped path's routed staging; a decode-sized batch taking
-    the per-row path would follow their null entries, and a mid-sized one stage_all's unwritten window."""
+def test_disk_tier_layers_stage_by_routing_whatever_the_batch(paths, monkeypatch):
+    """Experts on the disk tier are read only by routed staging: a decode-sized batch reads its routed disk experts
+    first (`stage_disk_decode`) and runs per-row on the tables that returns, never on the raw decode tables, whose
+    disk entries are null; a larger one takes the grouped path's routed staging, never stage_all's unwritten window."""
     from vllm_exl3_plugin import cpu_offload
 
     ops, run = paths
     monkeypatch.setattr(cpu_offload, "has_disk", lambda idx: True)
+    decoded = []
+    monkeypatch.setattr(cpu_offload, "stage_disk_decode",
+                        lambda idx, ids, experts, tables: decoded.append(ids) or tables)
+    assert run(1, stage=0) == "per_row" and decoded, "decode reads its disk experts before the per-row kernel"
+    assert run(cpu_offload.STAGE_MIN_TOKENS + 1, stage=0) == "grouped"
+    monkeypatch.setattr(ops, "_LEAN_DECODE", False)
     assert run(1, stage=0) == "grouped"
-    assert run(ops._GROUPED_MIN_TOKENS - 1, stage=0) == "grouped"
     staged = []
     monkeypatch.setattr(cpu_offload, "stage_routed", lambda idx, counts, tables: staged.append(counts) or tables)
     assert run(4096, activation="relu2", stage=0) == "per_row"   # no fused kernel: staged by routing all the same
