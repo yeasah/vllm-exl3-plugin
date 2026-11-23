@@ -1384,6 +1384,21 @@ RAM, 20% slots, the token budget pinned at 8192 in both modes, ms a step:
 Throughput mode also doubles vLLM's token budget (16384): with default (late) slots QFN serves at 32K with 5% of
 experts in VRAM, the activations taking the rest; with a fixed 20% it does not fit.
 
+**QFN's nondeterminism is vLLM's QSA (2026-11-23).** Localized by tracing a checksum of every decoder layer's
+sublayer outputs at every step over two runs: the first difference is layer 3 -- QFN's first QSA (sparse) attention
+layer -- at a mixed step, with identical inputs, an identical fused QKV projection (EXL3) and identical indexer
+output, and a different attention-core output (`o_proj`'s input). Ruled out on the way: the disk tier (all in RAM
+differs from itself), async scheduling (synchronous differs too), the engram staging (same stream, behind a sync),
+the MoE path and our linears (identical up to the attention core). Upstream: issue #54521 (open, the FP8 checkpoint,
+eager) -- QSA greedy decoding is nondeterministic; the sparse indexer's top-k kernels hand out slots with `atomicAdd`,
+so the selected indices' order (and with exact ties the set) varies, and QSA sums in that order. PR #67044 (open)
+canonicalizes it behind `VLLM_DETERMINISTIC_SPARSE_TOPK=1`. Applied to a stock vLLM main with the plugin in
+vital-patch mode, it makes prompts under the indexer budget (2048 tokens) repeat bit for bit, even sharing steps with
+longer ones; past the budget a second source remains inside QSA, and `VLLM_BATCH_INVARIANT` refuses GDN layers. On
+that setup, prompts under the budget: QFN 2.05bpw, 50% on disk against all in RAM, both breakable, the verifier on --
+bit-identical (21,958 disk reads, 5,996 admissions). Not something to fix here: a user-visible defect of the model's
+upstream kernels, waiting on upstream like any other user (`tools/offload/disk_tier_identity.py --prompts`).
+
 **Tensor parallelism (2026-11-23).** Routed experts shard on the intermediate dimension: tile columns of gate and up,
 tile rows of down. Down's slice is contiguous in the file; gate's and up's are one short run per tile row (128 runs of
 ~1.3 KB per projection for QFN at TP=2), too small and misaligned for O_DIRECT. So each rank reads the whole expert,

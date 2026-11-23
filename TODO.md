@@ -418,10 +418,10 @@ the same path for DeepSeek-V4.1-Flash's engram.
 **TP=2 (2026-11-17):** runs by uneven blocks (`tp-uneven-blocks`), exact against TP=1, 36 t/s decode on the 2.05bpw
 body. The 3.05bpw body serves at TP=2 here too (2x16 GiB, 40 GiB RAM: 28.1 GiB of experts hosted, 7.0 GiB each in
 VRAM, cache coverage 32%/54%): 10.8 t/s, link-bound -- once the host-RAM margin was taken once rather than per rank.
-**Open:** QFN is not deterministic run to run (2026-11-22), in eager mode too, once prefill shares a step with
-decodes: decode drifts 1e-3 to 3e-2 and flips a token within 4-50 steps, while prefill-only steps and a 7-token prompt
-repeat exactly. Some path depends on batch composition -- the sparse attention's indexer, the PLE table, the
-hyper-connections are the candidates; unexamined. docs/expert-cache.md, "QFN under breakable capture".
+QFN's run-to-run nondeterminism is upstream's: QSA's sparse-indexer top-k (vLLM #54521; PR #67044 canonicalizes it
+behind `VLLM_DETERMINISTIC_SPARSE_TOPK`, a second source remains past the indexer budget). With the PR on stock main,
+QFN's disk tier is bit-identical to all in RAM on prompts under the budget (2026-11-23). Waiting on upstream; the
+bench's QFN entries need it before they can gate on QFN.
 The native trellis PLE method is done (the plugin-owned table above); its bit depth per user
 (`EXL3_NGRAM_REVISION`/`_FILE`) answers most of the `-ngb` question left from the retired `category-bits`.
 

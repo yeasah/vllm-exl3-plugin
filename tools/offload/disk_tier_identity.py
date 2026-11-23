@@ -25,6 +25,8 @@ ap.add_argument("--chunk", type=int, default=2048, help="max_num_batched_tokens"
 ap.add_argument("--offload-gb", type=float, default=64)
 ap.add_argument("--decode", type=int, default=16, help="greedy tokens per prompt")
 ap.add_argument("--tp", type=int, default=1, help="tensor_parallel_size (the arms' stats then live in the workers)")
+ap.add_argument("--sync-scheduling", action="store_true", help="async_scheduling off")
+ap.add_argument("--prompts", type=int, default=5, help="use the first N prompts (7, 45, 300, 2049, 2 chunks + 333 tokens)")
 ap.add_argument("--out", default=None)
 ap.add_argument("--disk-graphs", action="store_true",
                 help="the disk arm under breakable piecewise graphs, the MoE op an eager break (decode path A)")
@@ -61,9 +63,9 @@ def run_arm(arm):
     llm = LLM(a.model, enforce_eager=not graphs,
               **({"compilation_config": {"cudagraph_mode": "PIECEWISE"}} if graphs else {}), max_num_batched_tokens=a.chunk, max_model_len=8192,
               cpu_offload_gb=a.offload_gb, gpu_memory_utilization=0.85, seed=0, max_num_seqs=8,
-              tensor_parallel_size=a.tp,
+              tensor_parallel_size=a.tp, **({"async_scheduling": False} if a.sync_scheduling else {}),
               limit_mm_per_prompt={"image": 0, "video": 0, "audio": 0})   # text only: no encoder budget per chunk
-    ps = prompts(llm.get_tokenizer())
+    ps = prompts(llm.get_tokenizer())[:a.prompts]
     sp = SamplingParams(temperature=0, max_tokens=a.decode, prompt_logprobs=1, logprobs=1)
     t = time.time()
     outs = llm.generate([TokensPrompt(prompt_token_ids=p) for p in ps], sp, use_tqdm=False)
@@ -102,6 +104,8 @@ def main():
     for arm, env in arms.items():
         cmd = [sys.executable, os.path.abspath(__file__), a.model, "--arm", arm, "--out", a.out, "--chunk", str(a.chunk),
                "--offload-gb", str(a.offload_gb), "--decode", str(a.decode), "--tp", str(a.tp)]
+        cmd += ["--sync-scheduling"] if a.sync_scheduling else []
+        cmd += ["--prompts", str(a.prompts)]
         with open(os.path.join(a.out, f"{arm}.log"), "w") as log:
             rc = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
         if rc:
