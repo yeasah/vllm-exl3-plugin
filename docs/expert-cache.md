@@ -1384,6 +1384,18 @@ RAM, 20% slots, the token budget pinned at 8192 in both modes, ms a step:
 Throughput mode also doubles vLLM's token budget (16384): with default (late) slots QFN serves at 32K with 5% of
 experts in VRAM, the activations taking the rest; with a fixed 20% it does not fit.
 
+**Tensor parallelism (2026-11-23).** Routed experts shard on the intermediate dimension: tile columns of gate and up,
+tile rows of down. Down's slice is contiguous in the file; gate's and up's are one short run per tile row (128 runs of
+~1.3 KB per projection for QFN at TP=2), too small and misaligned for O_DIRECT. So each rank reads the whole expert,
+as TP=1 does, and keeps its slice: the store already reads into its own aligned buffer and copies each part out, so
+the slice is the view it copies (`ExpertStore.read(slices=...)`, `cpu_offload.read_expert`), at loading's bounds,
+uneven where the width demands. A rank's read costs what TP=1's does; the drive sees each expert once per rank.
+Qwen3.5-35B-A3B 2.00bpw at TP=2, 60% on disk (20% VRAM, 54% host, 26% disk a rank), both arms breakable: bit-identical
+to all in RAM. The first run differed in a few decode logprobs because the identity tool's RAM arm forced the grouped
+kernel while the disk arm decodes per-row up to 4 tokens; it now takes the disk tier's dispatch too, and a second RAM
+run against the first was bit-identical, so TP=2 here is deterministic. With each rank given the other's slice, the
+verifier raises (rows placed at load were sliced by the loader, so disk reads must match them).
+
 **WSL2: where the checkpoint lives (2026-11-23).** User measurements, Qwen3.6-35B-A3B on a WSL2 host (PCIe 4.0 x16, a
 slower CPU), 38% of experts in VRAM, decode t/s over three prompts:
 

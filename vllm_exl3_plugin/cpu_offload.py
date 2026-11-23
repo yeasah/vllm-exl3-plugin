@@ -1244,8 +1244,9 @@ def _model_root() -> str:
 
 def _open_disk_tier(layers) -> None:
     """The reader for experts left on disk, each layer's window positions for them, and one pinned source per
-    projection sized for the layer with the most. A read is one span per expert (expert_store), so each
-    must hold the expert whole: under TP the experts are sliced, which the size check refuses."""
+    projection sized for the layer with the most. A read is one span per expert (expert_store); under TP each rank
+    reads the whole expert and keeps its slice of the intermediate dimension, as loading does (gate and up by tile
+    columns, which is strided in the file, down by tile rows), so every rank's read costs what TP=1's does."""
     from concurrent.futures import ThreadPoolExecutor
 
     from .expert_store import ExpertStore
@@ -1264,11 +1265,15 @@ def _open_disk_tier(layers) -> None:
         rows = next(iter(blocks.values())).host.shape[0]
         layer.exl3_disk_pos = {e: rows + k for k, e in enumerate(sorted(disk))}
         layer.exl3_store_key = key
+        parts = store.index[(key, min(disk))][3]
+        layer.exl3_disk_slices = _rank_slices(parts)
         for label, block in blocks.items():
-            stored = store.index[(key, min(disk))][3][label][1]
-            if stored != _row_bytes(block):
+            _, _, dt, shape = parts[label]
+            rshape = layer.exl3_disk_slices[label][1] if layer.exl3_disk_slices else shape
+            got = math.prod(rshape) * torch.empty(0, dtype=_STORE_DTYPES[dt]).element_size()
+            if got != _row_bytes(block):
                 raise RuntimeError(f"disk tier: {layer_prefix(layer)} {label} holds {_row_bytes(block)} bytes an "
-                                   f"expert, the checkpoint {stored}: a sliced expert (TP > 1) is not read whole")
+                                   f"expert, its slice of the checkpoint's {got}")
             most[label] = max(most.get(label, 0), len(disk) * _row_bytes(block))
     _DISK.update(store=store, pinned={label: _pinned((n,), torch.uint8) for label, n in most.items()},
                  pool=ThreadPoolExecutor(int(os.environ.get("EXL3_DISK_QUEUE", "8")), "exl3-disk"), done=None)
@@ -1282,6 +1287,46 @@ def _open_disk_tier(layers) -> None:
             "of experts on disk went 16 t/s from such a mount against 21-24 from the WSL filesystem. Put the "
             "Hugging Face cache on a native filesystem (the WSL distro's disk, or a Docker named volume), or give "
             "--cpu-offload-gb enough host RAM that nothing spills.", fs, root)
+
+
+def _rank_slices(parts) -> dict | None:
+    """Under tensor parallelism, per projection: (this rank's view of a stored trellis, the view's shape). Routed
+    experts shard on the intermediate dimension -- tile columns of gate and up, tile rows of down -- at the bounds
+    loading uses (`quantization.fused_moe._tp_shard`, uneven where the width demands). None at TP=1."""
+    try:
+        from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+
+        size, rank = get_tensor_model_parallel_world_size(), get_tensor_model_parallel_rank()
+    except Exception:
+        return None
+    if size <= 1:
+        return None
+    from .format import TILE, shard_bounds
+
+    out = {}
+    for label, (_, _, _, shape) in parts.items():
+        column = label in ("gate", "up")
+        dim = shape[1 if column else 0] * TILE
+        first, last = shard_bounds(dim, rank, size, f"MoE intermediate ({label})", uneven=True)
+        a, b = first // TILE, last // TILE
+        fn = (lambda t, a=a, b=b: t[:, a:b]) if column else (lambda t, a=a, b=b: t[a:b])
+        out[label] = (fn, tuple(fn(torch.empty(shape, device="meta")).shape))
+    return out
+
+
+def read_expert(layer, expert: int, dests: dict | None = None) -> dict:
+    """One disk expert's trellises from the checkpoint: into `dests` (label -> any contiguous tensor holding exactly
+    this rank's bytes, such as a host row or a pinned source slot), or into new tensors. A rank's slice under TP."""
+    store = _DISK["store"]
+    key = layer.exl3_store_key
+    slices = getattr(layer, "exl3_disk_slices", None)
+    out = None
+    if dests is not None:
+        out = {}
+        for label, (_, _, dt, shape) in store.index[(key, expert)][3].items():
+            rshape = slices[label][1] if slices else shape
+            out[label] = dests[label].reshape(-1).view(torch.uint8).view(_STORE_DTYPES[dt]).view(rshape)
+    return store.read(key, expert, out, {label: fn for label, (fn, _) in slices.items()} if slices else None)
 
 
 #: Filesystems that bridge files in from outside the VM: 9P (WSL2's DrvFs under /mnt/c, Docker Desktop's bind mounts
@@ -1343,9 +1388,7 @@ def _read_disk(layer, want, admit=None, window_rows=True) -> list:
 
             def into_row(item):
                 r, x = item
-                out = {label: layer.exl3_host_blocks[label].host[r].view(-1).view(_STORE_DTYPES[dt]).view(shape)
-                       for label, (_, _, dt, shape) in parts.items()}
-                store.read(key, x, out)
+                read_expert(layer, x, {label: block.host[r] for label, block in layer.exl3_host_blocks.items()})
 
             t = time.perf_counter()
             list(_DISK["pool"].map(into_row, into_rows))
@@ -1359,13 +1402,11 @@ def _read_disk(layer, want, admit=None, window_rows=True) -> list:
             _STATS["disk_read_admitted"] = _STATS.get("disk_read_admitted", 0) + len(rows)
     if not es:
         return into_rows
-    cap = min(pinned[label].numel() // nbytes for label, (_, nbytes, _, _) in parts.items())
+    rank_bytes = {label: _row_bytes(block) for label, block in layer.exl3_host_blocks.items()}
+    cap = min(pinned[label].numel() // nb for label, nb in rank_bytes.items())
 
     def one(k, e):
-        out = {}
-        for label, (_, nbytes, dt, shape) in parts.items():
-            out[label] = pinned[label][k * nbytes:(k + 1) * nbytes].view(_STORE_DTYPES[dt]).view(shape)
-        store.read(key, e, out)
+        read_expert(layer, e, {label: pinned[label][k * nb:(k + 1) * nb] for label, nb in rank_bytes.items()})
 
     for b in range(0, len(es), cap):
         batch = es[b:b + cap]

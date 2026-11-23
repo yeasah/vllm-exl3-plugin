@@ -511,7 +511,7 @@ class ExclusiveCache(ExpertCache):
                     if self.row_of[l, e] == DISK:
                         # from the checkpoint, so an admission's fill is checked against bytes it did not read itself
                         from . import cpu_offload
-                        got = cpu_offload._DISK["store"].read(self.layers[l].exl3_store_key, e)
+                        got = cpu_offload.read_expert(self.layers[l], e)
                         for j in range(3):
                             self.ref[l, j, e] = _checksum(got[_LABELS[j]])
                         continue
@@ -775,10 +775,7 @@ class ExclusiveCache(ExpertCache):
         def one(item):
             l, x, r = item
             layer = self.layers[l]
-            parts = store.index[(layer.exl3_store_key, x)][3]
-            out = {label: layer.exl3_host_blocks[label].host[r].view(-1).view(cpu_offload._STORE_DTYPES[dt]).view(shape)
-                   for label, (_, _, dt, shape) in parts.items()}
-            store.read(layer.exl3_store_key, x, out)
+            cpu_offload.read_expert(layer, x, {label: b.host[r] for label, b in layer.exl3_host_blocks.items()})
 
         list(cpu_offload._DISK["pool"].map(one, todo))
         updates, stage_updates = [], []
@@ -928,10 +925,7 @@ class ExclusiveCache(ExpertCache):
         def one(item):
             l, x, _, r = item
             layer = self.layers[l]
-            parts = store.index[(layer.exl3_store_key, x)][3]
-            out = {label: layer.exl3_host_blocks[label].host[r].view(-1).view(cpu_offload._STORE_DTYPES[dt]).view(shape)
-                   for label, (_, _, dt, shape) in parts.items()}
-            store.read(layer.exl3_store_key, x, out)
+            cpu_offload.read_expert(layer, x, {label: b.host[r] for label, b in layer.exl3_host_blocks.items()})
 
         t = time.perf_counter()
         list(cpu_offload._DISK["pool"].map(one, done))

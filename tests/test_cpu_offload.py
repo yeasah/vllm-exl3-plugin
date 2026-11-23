@@ -1161,15 +1161,48 @@ def test_verify_catches_a_routed_disk_expert_left_unread(offload, monkeypatch, t
         cpu_offload.stage_routed(layer.exl3_stage_idx, [0, 2, 0, 0, 1, 0, 0, 0, 0], _decode(layer))
 
 
-def test_disk_tier_refuses_sliced_experts(offload, monkeypatch, tmp_path):
-    """Under TP an expert's trellis is a slice of the stored one, and a disk read is the whole span: refused."""
+def test_disk_tier_refuses_rows_that_do_not_match_the_checkpoint(offload, monkeypatch, tmp_path):
+    """A host row must hold exactly what a read of this rank's slice of the checkpoint gives; at TP=1 the whole
+    expert, so a row sized for anything else is refused rather than read into."""
     import torch
 
     real = cpu_offload.place_expert
     monkeypatch.setattr(cpu_offload, "place_expert",
                         lambda param, t, label, e: real(param, t[:, :, :16].contiguous(), label, e))
-    with pytest.raises(RuntimeError, match="sliced"):
+    with pytest.raises(RuntimeError, match="slice of the checkpoint"):
         _disk_layer(offload, monkeypatch, tmp_path)
+
+
+def test_disk_reads_keep_this_ranks_slice(monkeypatch, tmp_path):
+    """Under TP a rank reads the whole expert and keeps its slice of the intermediate dimension, at loading's bounds:
+    tile columns of gate and up, tile rows of down -- into new tensors or into a row's bytes."""
+    import types
+
+    import torch
+    import vllm.distributed as dist
+    from safetensors.torch import save_file
+
+    from vllm_exl3_plugin import format as fmt
+    from vllm_exl3_plugin.expert_store import ExpertStore
+
+    full = {label: (torch.arange(4 * 2 * 32, dtype=torch.int16) + 1000 * k).view(4, 2, 32)
+            for k, label in enumerate(("gate", "up", "down"))}
+    save_file({f"model.layers.3.mlp.experts.0.{label}_proj.trellis": t for label, t in full.items()},
+              str(tmp_path / "model.safetensors"))
+    store = ExpertStore(str(tmp_path))
+    key = next(k for k, e in store.index if e == 0)
+    monkeypatch.setattr(dist, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(fmt, "shard_bounds", lambda dim, rank, size, what, uneven=False:
+                        (dim * rank // size, dim * (rank + 1) // size))
+    layer = types.SimpleNamespace(exl3_store_key=key, exl3_disk_slices=cpu_offload._rank_slices(store.index[(key, 0)][3]))
+    monkeypatch.setattr(cpu_offload, "_DISK", {"store": store})
+    want = {"gate": full["gate"][:, 1:2], "up": full["up"][:, 1:2], "down": full["down"][2:4]}
+    got = cpu_offload.read_expert(layer, 0)
+    assert all(torch.equal(got[label], want[label]) for label in want)
+    rows = {label: torch.zeros(want[label].numel(), dtype=torch.int16) for label in want}
+    cpu_offload.read_expert(layer, 0, rows)
+    assert all(torch.equal(rows[label].view(want[label].shape), want[label]) for label in want)
 
 
 @pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="events need CUDA")

@@ -226,7 +226,7 @@ def test_detector_fires_on_an_admission_that_reads_the_wrong_expert(monkeypatch,
     cache = _disk_cache(monkeypatch, tmp_path)
     store = cpu_offload._DISK["store"]
     real = store.read
-    monkeypatch.setattr(store, "read", lambda key, e, out=None: real(key, e ^ 1, out) if out is not None
+    monkeypatch.setattr(store, "read", lambda key, e, out=None, slices=None: real(key, e ^ 1, out, slices) if out is not None
                         and out["gate"].is_pinned() else real(key, e, out))
     with pytest.raises(RuntimeError, match="wrong bytes"):
         _drive(cache, 200)

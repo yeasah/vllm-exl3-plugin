@@ -102,9 +102,12 @@ class ExpertStore:
             buf = self._local.buf = mmap.mmap(-1, self._bounce_bytes)   # anonymous: page-aligned, as O_DIRECT needs
         return buf
 
-    def read(self, prefix: str, expert: int, out: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
+    def read(self, prefix: str, expert: int, out: dict[str, torch.Tensor] | None = None,
+             slices: dict | None = None) -> dict[str, torch.Tensor]:
         """The expert's trellises: copied into `out`'s tensors (label -> a CPU tensor of the stored shape and dtype,
-        typically a pinned host row or staging source), or into new CPU tensors."""
+        typically a pinned host row or staging source), or into new CPU tensors. With `slices` (label -> a function of
+        the stored tensor), each is that function's view of it -- a tensor-parallel rank's slice -- and `out` holds
+        the slice's shape. The read is the whole expert either way: a rank's slice of gate and up is strided."""
         name, start, end, parts = self.index[(prefix, expert)]
         fd, direct = self._fd(name)
         lo = start // _ALIGN * _ALIGN
@@ -121,9 +124,11 @@ class ExpertStore:
             src = torch.from_numpy(raw[start - lo + off : start - lo + off + nb].view(_DTYPES[dt]).reshape(shape))
             if dt == "BF16":
                 src = src.view(torch.bfloat16)
+            if slices and label in slices:
+                src = slices[label](src)
             dst = out.get(label) if out else None
             if dst is None:
-                dst = torch.empty(shape, dtype=src.dtype)
+                dst = torch.empty(src.shape, dtype=src.dtype)
             dst.copy_(src)
             result[label] = dst
         with self._lock:
