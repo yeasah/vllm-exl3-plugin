@@ -1384,6 +1384,21 @@ RAM, 20% slots, the token budget pinned at 8192 in both modes, ms a step:
 Throughput mode also doubles vLLM's token budget (16384): with default (late) slots QFN serves at 32K with 5% of
 experts in VRAM, the activations taking the rest; with a fixed 20% it does not fit.
 
+**WSL2: where the checkpoint lives (2026-11-23).** User measurements, Qwen3.6-35B-A3B on a WSL2 host (PCIe 4.0 x16, a
+slower CPU), 38% of experts in VRAM, decode t/s over three prompts:
+
+| on disk | HF cache on a 9P mount (external drive) | HF cache in the WSL disk image |
+|---|---|---|
+| 0% | 28 | 29-31 |
+| 8% | 16 | 21-24 |
+| 21% | 12 | 18-21 |
+
+A 9P mount -- WSL2's DrvFs under /mnt, and every bind mount on Docker Desktop's WSL2 engine, the serve image's default
+-- bridges files in from outside the VM, and every disk-tier read crosses it. O_DIRECT holds there (checked with dd),
+so the cost is the bridge. The plugin warns at startup when experts spill from such a mount
+(`cpu_offload._filesystem_type`). The first prompt is the slowest in each row: decode admits disk experts into host
+rows as it reads them, so the RAM tier learns the working set (QFN here: 21.7 disk reads a token cold, 18.2 warm).
+
 **Speculative next-layer reads: measured, parked (2026-11-23).** What the disk tier still adds on QFN 2.05bpw at a third
 on disk is ~3.7 ms of routing readback (48 syncs; inherent while the host must learn the routing before it reads) and
 ~5 ms of reads, ~0.4 experts a layer, synchronous at queue depth 1 because a layer's reads cannot start before its

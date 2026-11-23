@@ -1274,6 +1274,39 @@ def _open_disk_tier(layers) -> None:
                  pool=ThreadPoolExecutor(int(os.environ.get("EXL3_DISK_QUEUE", "8")), "exl3-disk"), done=None)
     logger.info("expert cache disk tier: %d experts read from %s on use, through %.0f MiB of pinned sources",
                 _STATS["disk_experts"], root, sum(most.values()) / (1 << 20))
+    fs = _filesystem_type(root)
+    if fs in _SLOW_FILESYSTEMS:
+        logger.warning(
+            "expert cache disk tier: the checkpoint is on a %s mount (%s), a file bridge out of the VM (WSL2's DrvFs, "
+            "and Docker Desktop's bind mounts on WSL2): every disk-tier read crosses it. On a WSL2 host decode with 8%% "
+            "of experts on disk went 16 t/s from such a mount against 21-24 from the WSL filesystem. Put the "
+            "Hugging Face cache on a native filesystem (the WSL distro's disk, or a Docker named volume), or give "
+            "--cpu-offload-gb enough host RAM that nothing spills.", fs, root)
+
+
+#: Filesystems that bridge files in from outside the VM: 9P (WSL2's DrvFs under /mnt/c, Docker Desktop's bind mounts
+#: on its WSL2 engine) and FUSE. Disk-tier reads through them cost several times a native read.
+_SLOW_FILESYSTEMS = {"9p", "v9fs", "drvfs", "fuse"}
+
+
+def _filesystem_type(path: str) -> str | None:
+    """The filesystem type of the mount holding `path`, from /proc/mounts (the longest mount point that prefixes it)."""
+    try:
+        real = os.path.realpath(path)
+        best, fs = "", None
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                point = parts[1].replace("\\040", " ")
+                if (real == point or real.startswith(point.rstrip("/") + "/")) and len(point) > len(best):
+                    best, fs = point, parts[2]
+        if fs is not None and fs.startswith("fuse"):
+            return "fuse"
+        return fs
+    except OSError:
+        return None
 
 
 #: ``EXL3_DISK_READ_ADMIT`` (default 1): decode reads a disk expert straight into the host row it is admitted to,

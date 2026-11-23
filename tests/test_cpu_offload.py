@@ -1196,3 +1196,25 @@ def test_utilization_left_unset_resolves_by_sizing_mode():
     assert cpu_offload.gpu_utilization(resolved) == 1.0
     assert cpu_offload.gpu_utilization(types.SimpleNamespace(gpu_memory_utilization=0.96)) == 0.96   # v0.32 shape
     assert cpu_offload.gpu_utilization(types.SimpleNamespace(gpu_memory_utilization=None)) == 0.9
+
+
+def test_filesystem_type_finds_the_longest_mount(monkeypatch, tmp_path):
+    """The disk tier warns when the checkpoint is on a file bridge (9P under WSL2 and Docker Desktop's bind mounts):
+    the mount holding a path is the longest mount point prefixing it, spaces escaped as in /proc/mounts."""
+    import builtins
+    import io
+
+    mounts = ("/dev/sda1 / ext4 rw 0 0\n"
+              "C:\\134 /mnt/c 9p rw 0 0\n"
+              "drvfs /mnt/c/My\\040Data drvfs rw 0 0\n"
+              "hf /root/.cache/huggingface fuse.sshfs rw 0 0\n")
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda p, *a, **k: io.StringIO(mounts) if p == "/proc/mounts"
+                        else real_open(p, *a, **k))
+    monkeypatch.setattr(cpu_offload.os.path, "realpath", lambda p: p)
+    assert cpu_offload._filesystem_type("/home/u/model") == "ext4"
+    assert cpu_offload._filesystem_type("/mnt/c/Users/hf") == "9p"
+    assert cpu_offload._filesystem_type("/mnt/c/My Data/hf") == "drvfs"
+    assert cpu_offload._filesystem_type("/mnt/cache") == "ext4", "a prefix of the name is not a parent directory"
+    assert cpu_offload._filesystem_type("/root/.cache/huggingface/hub") == "fuse"
+    assert {"9p", "drvfs", "fuse"} <= cpu_offload._SLOW_FILESYSTEMS
