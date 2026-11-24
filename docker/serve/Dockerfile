@@ -65,6 +65,9 @@ RUN TORCH_FIX_WORK=/tmp/pytorch-c10fix bash vllm-exl3-plugin/tools/torch-c10cuda
     && bash vllm-exl3-plugin/tools/torch-c10cuda-fix.sh --check \
     && rm -rf /tmp/pytorch-c10fix
 
+# external vLLM plugin for Spark2_5 (needed for XHToken/Spark-X2.6-4B)
+RUN git clone https://github.com/XHToken/Spark-plugin.git
+RUN pip install --no-deps --no-cache-dir ./Spark-plugin
 
 # base omits the toolkit, 421MiB vs 7.88GiB.
 # including nvcc -- needed for flashinfer jit, etc, and flashinfer's cubins alone are more than that

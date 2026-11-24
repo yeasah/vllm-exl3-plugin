@@ -1,0 +1,30 @@
+# [XHToken/Spark-X2.6-4B](https://huggingface.co/XHToken/Spark-X2.6-4B)
+
+Small but mighty? A truly ridiculous maximum context for a 4B model.
+
+This model requires an external vLLM plugin to add support: [Spark-plugin](https://github.com/XHToken/Spark-plugin.git). It pins vLLM v0.32, so it is important to not install with dependencies or it will downgrade vLLM. It runs well on the current fork or stock vLLM v0.34.
+
+```
+git clone https://github.com/XHToken/Spark-plugin.git
+pip install --no-deps Spark-plugin
+```
+
+The `vllm-exl3-serve` docker image has this plugin pre-installed as of version 0.12.
+
+The KV cache requires 40KiB/token unquantized, and at the maximum model length (1M) this will require 36.4GiB unquantized, 18.2GiB for a `kv_cache_dtype` of `fp8`, or 10.7GiB for `turboquant_4bit_nc` or `nvfp4`
+
+Available EXL3 quants include [UnstableLlama/Spark-X2.6-4B-exl3](https://hf.co/UnstableLlama/Spark-X2.6-4B-exl3)
+
+## 4GiB+
+
+Example yaml config (this can be supplied to vLLM via the `--config` argument):
+
+```yaml
+model: 'UnstableLlama/Spark-X2.6-4B-exl3'
+revision: '4.00bpw'
+max_model_len: auto
+max_num_seqs: 4
+enable_auto_tool_choice: yes
+tool_call_parser: spark25
+reasoning_parser: qwen3
+```

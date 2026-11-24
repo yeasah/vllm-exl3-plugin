@@ -1,6 +1,6 @@
 # [openbmb/MiniCPM5-2B](https://hf.co/openbmb/MiniCPM5-2B)
 
-A small, but still usefully sized entry in the Qwen lineup. 2B parameters, with vision. Systems that can run this might be better off considering the considerably more capable but still compact [Qwen3.5-4B](Qwen3.5-4B.md). Reasoning is supported via the `qwen3` reasoning parser, and tool calling via the `qwen3_coder` parser. There are no default sampling parameters defined in the base model, but the EXL3 quant linked below has this corrected so it will include the recommended sampling parameters by default.
+A small, but reasonably capable model. No vision.
 
 The KV cache requires 42KiB/token unquantized, and at the maximum model length (256K) this will require 5.25GiB unquantized, 2.63GiB for a `kv_cache_dtype` of `fp8`, or 1.54GiB for `turboquant_4bit_nc` or `nvfp4`
 
@@ -16,8 +16,7 @@ revision: '4.00bpw'
 max_model_len: auto
 max_num_seqs: 4
 enable_auto_tool_choice: yes
-tool_call_parser: qwen3_coder
-reasoning_parser: qwen3
+tool_call_parser: minicpm5
 ```
 
 ## Benchmarks
