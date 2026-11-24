@@ -422,6 +422,7 @@ def main():
     parser.add_argument('--host', default='vast', help='hostname or ssh alias to connect to')
     parser.add_argument('--plugin-dir', default="~/vllm-exl3-plugin")
     parser.add_argument('--num-devices', default=1, type=int, help='number of CUDA devices present')
+    parser.add_argument('-d', '--devices', default=None, help='restrict to this list of CUDA devices.')
     parser.add_argument('--quant-parallel', default=2, type=int, help='number of concurrent quantizations to run')
     parser.add_argument('--qbench-parallel', default=2, type=int, help='number of concurrent qbenches to run')
 
@@ -492,7 +493,7 @@ def main():
     recordpath=args.record_dir
     modelpath=f"{args.model.split('/')[1]}-exl3"
     remotepath=os.path.join(args.plugin_dir, "quantization")
-    devlist=",".join(map(str, range(0, args.num_devices)))
+    devlist=args.devices if args.devices else ",".join(map(str, range(0, args.num_devices)))
     quant_devlist=",".join([devlist] * args.quant_parallel)
     qbench_devlist=",".join([devlist] * args.qbench_parallel)
     job = { "args": args,
