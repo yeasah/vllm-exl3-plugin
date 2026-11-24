@@ -180,11 +180,16 @@ _EMBED_BLOCK_CHUNK = int(env.get("EMBED_BLOCK_CHUNK", "256"))
 #: The chunk's fp32 intermediate, at most: `had_left`/`had_right` materialize (in_features, 128 x blocks) in fp32, and a
 #: wide embedding at 256 blocks made that 352 MiB (gemma-4-26B, 2816 wide), ~0.9 GiB at peak across the transforms --
 #: past what the extensible KV cache kept, out of memory mid-serve. ``EXL3_EMBED_CHUNK_MIB``.
-_EMBED_CHUNK_BYTES = int(env.get("EMBED_CHUNK_MIB", "128")) << 20
+#: 64 MiB keeps the whole decode (fp16 reconstruct plus two fp32 transforms) near 0.2 GiB, inside the extensible KV
+#: cache's margin even where no profiled batch exercised it: the static path's 257-512-token batches never are.
+_EMBED_CHUNK_BYTES = int(env.get("EMBED_CHUNK_MIB", "64")) << 20
 
 
-def _embed_chunk_blocks(in_features: int) -> int:
-    return max(1, min(_EMBED_BLOCK_CHUNK, _EMBED_CHUNK_BYTES // (in_features * HAD_BLOCK * 4)))
+def _embed_step(trellis: torch.Tensor) -> int:
+    """Blocks a chunk decodes, on both paths: the byte budget's worth at this width, at most the vocabulary's."""
+    in_features = trellis.shape[0] * TILE
+    vocab_blocks = trellis.shape[1] // (HAD_BLOCK // TILE)
+    return max(1, min(_EMBED_BLOCK_CHUNK, vocab_blocks, _EMBED_CHUNK_BYTES // (in_features * HAD_BLOCK * 4)))
 
 
 def _embed_rows(
@@ -261,7 +266,7 @@ def _embed_rows(
     arange_tiles = torch.arange(tiles_per_block, device=trellis.device)
     arange_cols = torch.arange(HAD_BLOCK, device=trellis.device)
 
-    step = min(_embed_chunk_blocks(trellis.shape[0] * TILE), trellis.shape[1] // tiles_per_block)
+    step = _embed_step(trellis)
     for start in range(0, blocks.numel(), step):
         chunk = blocks[start : start + step]
         # Every chunk decodes `step` blocks, the last padded with repeats: its peak is then fixed, not set by how many
@@ -327,7 +332,7 @@ def _embed_rows_static(
     output size, and asking for it is a synchronization.
 
     A full chunk hands `reconstruct`/`had_left` exactly the same shape the
-    deduplicating path does (`_EMBED_BLOCK_CHUNK * HAD_BLOCK` columns), so the
+    deduplicating path does (`_embed_step` blocks of `HAD_BLOCK` columns), so the
     intermediate is bounded identically and the fp32 rounding matches.
     """
     tiles_per_block = HAD_BLOCK // TILE
@@ -338,8 +343,12 @@ def _embed_rows_static(
     arange_tiles = torch.arange(tiles_per_block, device=trellis.device)
     arange_cols = torch.arange(HAD_BLOCK, device=trellis.device)
 
-    for start in range(0, n, _EMBED_BLOCK_CHUNK):
-        stop = min(start + _EMBED_BLOCK_CHUNK, n)
+    # The deduplicating path's step: the same shape, so the same bound and the same fp32 rounding, and batches of
+    # 257-512 tokens -- prefill tails and short requests, which no profiled batch exercises -- cannot reach past it
+    # (256 here made 352 MiB of fp32 on gemma-4-26B's 2816-wide table, and ran it out of memory mid-serve)
+    step = _embed_step(trellis)
+    for start in range(0, n, step):
+        stop = min(start + step, n)
         ids = token_ids[start:stop]
         block = ids // HAD_BLOCK
         local = ids % HAD_BLOCK

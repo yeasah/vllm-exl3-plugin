@@ -359,10 +359,13 @@ Hadamard intermediates are `(in_features, 128 x blocks)`: for gemma-4-26B's 2816
 GiB at peak across the transforms. vLLM's profile and warmup use one repeated dummy token -- one block -- so the
 extensible KV cache's keep never saw it, and a real 2048-token prefill chunk with a spread of ids ran out of memory
 mid-serve (4.10bpw, auto length, utilization 1.0; reproduced at the API server's 2048-token budget, where the measured
-peak is 0.42 GiB). The chunk is now sized by bytes (`EXL3_EMBED_CHUNK_MIB`, 128 MiB of fp32 intermediate: 93 blocks
+peak is 0.42 GiB). The chunk is now sized by bytes (`EXL3_EMBED_CHUNK_MIB`, now 64 MiB of fp32 intermediate: 46 blocks
 at 2816 wide, fewer for wider tables, capped at the vocabulary), and every chunk decodes the full count, the last
 padded with repeats, so the peak no longer depends on how many distinct blocks a batch touches. The same config now
-serves four long distinct prompts at once.
+serves four long distinct prompts at once. The static path (batches up to `EXL3_EMBED_STATIC_MAX`, one block per token)
+still chunked at 256 and failed the same way on the bench's random-token prompts, a 257-512-token prefill tail being
+a batch no profile runs; it now takes the same step. The budget is 64 MiB, so the whole decode (fp16 reconstruct and
+two fp32 transforms) stays near 0.2 GiB, inside the keep's margin whether or not a profiled batch saw it.
 
 **That trade is nearly free where it applies, and avoided where it is not.** Deduplication
 only pays when tokens share a 128-block, which scattered decode-batch ids rarely do; it
