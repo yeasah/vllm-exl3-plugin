@@ -36,7 +36,7 @@ Alongside, the file `vllm_config.yml` should contain the vLLM configuration to b
 
 Be patient the first time running a new model: vLLM does a considerable amount of compilation and tuning, and it may take a surprising amount of time. Subsequent runs after this is all done will be much faster.
 
-For additional example configurations including models large and small, see the [recipe index](https://github.com/yeasah/vllm-exl3-plugin/docs/recipes/index.md).
+For additional example configurations including models large and small, see the [recipe index](https://github.com/yeasah/vllm-exl3-plugin/blob/dev/docs/recipes/index.md).
 
 # [Qwen3.6-35B-A3B](http://hf.co/yeasah/Qwen3.6-35B-A3B-exl3)
 
