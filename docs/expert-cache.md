@@ -1490,6 +1490,23 @@ with 8 GiB of host rows and the rest on disk. The length is short because the on
 VRAM, is most of the card here; that split is the policy question left. *(Since: the floor is 32K tokens,
 `EXL3_AUTO_LEN_TOKENS`.)*
 
+**Auto length when experts spill (2026-11-24).** User bench, Qwen3.6-35B-A3B 2.00bpw-H5, 16 GiB, `--max-model-len auto`,
+utilization 1.0: with 2 and 4 GiB of host rows the slots stopped at 21% of experts in VRAM against the 40% target,
+and KV took 1.67M tokens. Two causes. The plan reserved the target's bytes (3.02 GiB) but not what the extensible
+cache keeps after warmup, which came out of them (0.9 GiB), so the target was unreachable; the plan now reserves that
+withholding too. And with experts on disk the target was the wrong one: every slot past it takes an expert off disk
+(the rows it empties refill from disk), and KV past the 32K floor buys little at auto length, so while anything
+spills the slots aim to empty the disk tier (its experts a layer plus the spare rows), as far as the floor allows.
+Same config, decode t/s at 1 / 4 streams:
+
+| host rows | before | now | VRAM / host / disk |
+|---|---|---|---|
+| 2 GiB | 28 / 42 | 59 / 110 | 71% / 20% / 10% |
+| 4 GiB | 44 / 77 | 56 / 106 | 45% / 46% / 10% |
+
+(fully resident: 98 / 143). The disk does not quite empty: the keep is predicted at 1.29 GiB and measured 1.61 --
+warmup with more VRAM free grows torch's reservation into it -- which leaves ~24 experts a layer on disk.
+
 **The residency target, re-measured (2026-11-22).** The 40% one-stream target was measured on the inclusive cache;
 re-swept on the exclusive cache of today, decode ms a token with everything offloaded but the slot share (8K length,
 default graphs, prefix caching off, 256 tokens after a warm-up generation per batch size, distinct real prompts):

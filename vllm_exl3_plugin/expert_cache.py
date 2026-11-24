@@ -1273,16 +1273,31 @@ def _build_late(layers: list, available: int, worker) -> int:
     if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
         # auto: the KV cache takes what the target share's slots leave, and its length is fitted to that; the slots
         # then take what is actually free once it is final, so a misjudged warmup lands on them, not on the KV cache
+        from . import cpu_offload
+
         E = layers[0].exl3_num_experts
         streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
         per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
         in_vram = target_in_vram(E, streams)
         cap = max(in_vram - (E - per_layer_max), 0)
-        kept = min(kept, cap * slot_bytes * len(layers))
+        why = f"{100 * in_vram / E:.0f}% of experts in VRAM for {streams:g} stream(s)"
+        # With experts on disk every slot past the target takes one off it (the rows it empties refill from disk), so
+        # the slots aim to empty the disk, as far as the KV floor allows: a disk read costs far more than KV past
+        # the floor buys at --max-model-len auto
+        on_disk = max(max(len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
+        if on_disk:
+            empty = on_disk + cpu_offload._SPARE_ROWS
+            if empty > cap:
+                cap = min(empty, per_layer_max)
+                why = f"enough to empty the disk tier ({on_disk} experts a layer on disk)"
+        # What the extensible KV cache keeps free past the profile comes out of these bytes once warmup has run, so it
+        # is reserved too: without it the slots reached 21% against the 40% target (Qwen3.6-35B-A3B 2.00bpw, 16 GiB)
+        withheld = _extensible_withholding(worker)
+        kept = min(kept, cap * slot_bytes * len(layers) + withheld)
         logger.info("expert cache: slots are placed after the KV cache is sized; --max-model-len auto plans KV at "
-                    "%.2f GiB, what %.0f%% of experts in VRAM for %g stream(s) leaves (at least %s), and %.2f GiB stay "
-                    "free for slots", (available - kept) / (1 << 30), 100 * in_vram / E, streams, how,
-                    kept / (1 << 30))
+                    "%.2f GiB, what %s leaves (at least %s), and %.2f GiB stay free for slots (%.2f GiB of them for "
+                    "what the extensible KV cache keeps after warmup)", (available - kept) / (1 << 30), why, how,
+                    kept / (1 << 30), withheld / (1 << 30))
         return kept
     logger.info("expert cache: slots are placed after the KV cache is sized; KV is planned at its reserve, %.2f GiB "
                 "(%s), and %.2f GiB stay free for slots", reserve / (1 << 30), how, kept / (1 << 30))
