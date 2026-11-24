@@ -396,8 +396,11 @@ class TestEmbedRows(unittest.TestCase):
 
     def test_decodes_only_the_needed_blocks(self):
         """Above `_EMBED_STATIC_MAX`, cost tracks distinct 128-blocks rather than
-        batch size. Asserted through `reconstruct`, since a version that decoded
-        the whole tensor would still return the right rows.
+        batch size, in whole chunks: every chunk decodes the same number of blocks
+        (the last padded), so the peak is fixed whatever a batch touches -- vLLM
+        profiles with one repeated dummy token, and must still see it. Asserted
+        through `reconstruct`, since a version that decoded the whole tensor would
+        still return the right rows.
 
         The batch has to clear the threshold deliberately. Below it the
         capture-safe path runs instead and does *not* deduplicate -- that is the
@@ -425,16 +428,17 @@ class TestEmbedRows(unittest.TestCase):
             seen.append(trellis.shape)
             return real(trellis, *a, **kw)
 
-        with mock.patch.object(ops, "reconstruct", spy):
+        tiles_per_block = format.HAD_BLOCK // format.TILE
+        k = t["trellis"].shape[0] * format.TILE
+        step = 4   # a byte budget that fits four blocks
+        with mock.patch.object(ops, "reconstruct", spy), \
+                mock.patch.object(ops, "_EMBED_CHUNK_BYTES", step * k * format.HAD_BLOCK * 4):
             ops.embed_rows(t["trellis"], t["suh"], t["svh"], bits, mcg, mul1, ids)
 
         self.assertEqual(len(seen), 1, "2 blocks fits one chunk, so one decode")
         tiles = seen[0][1]
-        self.assertEqual(
-            tiles,
-            2 * (format.HAD_BLOCK // format.TILE),
-            f"decoded {tiles} tiles for 2 distinct blocks",
-        )
+        self.assertEqual(tiles, step * tiles_per_block,
+                         f"decoded {tiles} tiles for 2 distinct blocks: a whole chunk of {step}")
         self.assertLess(tiles, t["trellis"].shape[1] / 10)
 
     def test_static_path_trades_dedup_for_a_fixed_kernel_sequence(self):

@@ -177,6 +177,15 @@ def dense_weight(
 #: is bit-exact against `dense_weight`, which is what the tests pin.
 _EMBED_BLOCK_CHUNK = int(env.get("EMBED_BLOCK_CHUNK", "256"))
 
+#: The chunk's fp32 intermediate, at most: `had_left`/`had_right` materialize (in_features, 128 x blocks) in fp32, and a
+#: wide embedding at 256 blocks made that 352 MiB (gemma-4-26B, 2816 wide), ~0.9 GiB at peak across the transforms --
+#: past what the extensible KV cache kept, out of memory mid-serve. ``EXL3_EMBED_CHUNK_MIB``.
+_EMBED_CHUNK_BYTES = int(env.get("EMBED_CHUNK_MIB", "128")) << 20
+
+
+def _embed_chunk_blocks(in_features: int) -> int:
+    return max(1, min(_EMBED_BLOCK_CHUNK, _EMBED_CHUNK_BYTES // (in_features * HAD_BLOCK * 4)))
+
 
 def _embed_rows(
     trellis: torch.Tensor,
@@ -252,8 +261,14 @@ def _embed_rows(
     arange_tiles = torch.arange(tiles_per_block, device=trellis.device)
     arange_cols = torch.arange(HAD_BLOCK, device=trellis.device)
 
-    for start in range(0, blocks.numel(), _EMBED_BLOCK_CHUNK):
-        chunk = blocks[start : start + _EMBED_BLOCK_CHUNK]
+    step = min(_embed_chunk_blocks(trellis.shape[0] * TILE), trellis.shape[1] // tiles_per_block)
+    for start in range(0, blocks.numel(), step):
+        chunk = blocks[start : start + step]
+        # Every chunk decodes `step` blocks, the last padded with repeats: its peak is then fixed, not set by how many
+        # distinct blocks a batch touches -- vLLM profiles with one repeated dummy token, one block, and sized the
+        # extensible KV cache's keep without the real peak. The repeats are decoded and never read.
+        if chunk.numel() < step:
+            chunk = torch.cat([chunk, chunk[-1:].expand(step - chunk.numel())])
         tile_index = (chunk.unsqueeze(1) * tiles_per_block + arange_tiles).flatten()
         w = reconstruct(trellis[:, tile_index, :].contiguous(), bits, mcg, mul1)
 
@@ -267,7 +282,7 @@ def _embed_rows(
         w = w * svh[columns].unsqueeze(0)
 
         # Rows whose block landed in this chunk, and where inside it.
-        wanted = (inverse >= start) & (inverse < start + chunk.numel())
+        wanted = (inverse >= start) & (inverse < start + step)
         rows = wanted.nonzero(as_tuple=True)[0]
         if rows.numel():
             out[rows] = w[

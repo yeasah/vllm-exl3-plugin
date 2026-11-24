@@ -354,6 +354,16 @@ blocks. Its loop bound comes from `token_ids.shape`, which is metadata, so the k
 sequence depends on batch size alone. It decodes one block per token, giving up
 deduplication.
 
+**The deduplicating path's peak, and the profiler (2026-11-24).** It decoded up to 256 blocks a chunk, and its fp32
+Hadamard intermediates are `(in_features, 128 x blocks)`: for gemma-4-26B's 2816-wide embedding that is 352 MiB, ~0.9
+GiB at peak across the transforms. vLLM's profile and warmup use one repeated dummy token -- one block -- so the
+extensible KV cache's keep never saw it, and a real 2048-token prefill chunk with a spread of ids ran out of memory
+mid-serve (4.10bpw, auto length, utilization 1.0; reproduced at the API server's 2048-token budget, where the measured
+peak is 0.42 GiB). The chunk is now sized by bytes (`EXL3_EMBED_CHUNK_MIB`, 128 MiB of fp32 intermediate: 93 blocks
+at 2816 wide, fewer for wider tables, capped at the vocabulary), and every chunk decodes the full count, the last
+padded with repeats, so the peak no longer depends on how many distinct blocks a batch touches. The same config now
+serves four long distinct prompts at once.
+
 **That trade is nearly free where it applies, and avoided where it is not.** Deduplication
 only pays when tokens share a 128-block, which scattered decode-batch ids rarely do; it
 pays enormously on a large prefill, where it saturates at the vocabulary's block count
