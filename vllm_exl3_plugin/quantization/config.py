@@ -728,7 +728,26 @@ class EXL3Config(QuantizationConfig):
             # The converter also leaves the dense fused tensors behind; exllamav3 reads them only when no split is
             # stored, so they go unread here too
             rules[re.compile(r"\bvisual\.blocks\.\d+\.attn\.qkv\.(weight|bias)$")] = None
-        return self._embedding_mapper() | WeightsMapper(orig_to_new_regex=rules)
+        return self._embedding_leaf_rename(self._embedding_mapper() | WeightsMapper(orig_to_new_regex=rules))
+
+    #: What an EXL3 checkpoint stores under the embedding, routed by the rules above
+    _EMBED_LEAVES = ("weight", "bq_src", "bq_q", "bq_s", "bq_r", "et_table", "et_signs")
+
+    def _embedding_leaf_rename(self, mapper):
+        """exllamav3 names the embedding `embed_tokens` whatever the model calls it (Spark-X2.6's `model.embedding`,
+        `exllamav3/architecture/spark2_5.py`), and the rules above route it by that name. When the model built its
+        embedding under another name (`embed_prefix`), the routed tensors are renamed onto it last: suffix rules run
+        in order, so these see what the routing produced. A suffix rule the routing already holds for a name is left
+        alone, so the dense tensor still reaches `bq_src` and is renamed from there."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        leaf = self.embed_prefix.rsplit(".", 1)[-1]
+        if leaf == "embed_tokens":
+            return mapper
+        held = mapper.orig_to_new_suffix
+        renames = {f".embed_tokens.{name}": f".{leaf}.{name}" for name in self._EMBED_LEAVES
+                   if f".embed_tokens.{name}" not in held}
+        return mapper | WeightsMapper(orig_to_new_suffix=renames)
 
     def _embedding_mapper(self):
         """Route a tied model's `lm_head.*` onto the embedding module.

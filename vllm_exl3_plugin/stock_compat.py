@@ -29,6 +29,12 @@ def apply() -> None:
         CausalMixin = None
     if CausalMixin is not None:
         _transformers_logit_multiplier(CausalMixin)
+    try:   # the model maker's out-of-tree plugin (vllm-spark2-5-plugin), when installed
+        from vllm_spark2_5_plugin.spark2_5 import Spark2_5ForCausalLM
+    except Exception:
+        Spark2_5ForCausalLM = None
+    if Spark2_5ForCausalLM is not None:
+        _spark_exl3_names(Spark2_5ForCausalLM)
 
 
 def _is_exl3(quant_config) -> bool:
@@ -186,4 +192,35 @@ def _transformers_logit_multiplier(CausalMixin) -> None:
 
     __init__._exl3_patched = True
     CausalMixin.__init__ = __init__
+
+
+def _spark_exl3_names(Spark2_5ForCausalLM) -> None:
+    """Spark-X2.6 (`Spark2_5ForCausalLM`, served by its maker's plugin) loads an EXL3 checkpoint under its names.
+
+    exllamav3 stores the fused `q_k_v_proj` as the split `q_proj`, `k_proj`, `v_proj` it quantized
+    (`exllamav3/architecture/spark2_5.py`); the plugin's loader maps only `gate_proj`/`up_proj` into `gate_up_proj`, so
+    q/k/v found no parameter. Under an EXL3 config the instance's mapper also maps them, by shard id, into the plugin's
+    own `QKVParallelLinear`; the class mapper, and so the reference checkpoint, is untouched. exllamav3's other rename,
+    `model.embedding` -> `model.embed_tokens`, the EXL3 config undoes for any model (`_embedding_leaf_rename`). The head needs nothing: exllamav3 emits it untied
+    (`tie_word_embeddings: false`), so the plugin builds a `ParallelLMHead` under the EXL3 config.
+    """
+    original = Spark2_5ForCausalLM.__init__
+    if getattr(original, "_exl3_patched", False):
+        return
+
+    @functools.wraps(original)
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        vllm_config = kwargs.get("vllm_config")
+        if vllm_config is None or not _is_exl3(getattr(vllm_config, "quant_config", None)):
+            return
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        self.hf_to_vllm_mapper = type(self).hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_stacked={".q_proj.": (".q_k_v_proj.", "q"), ".k_proj.": (".q_k_v_proj.", "k"),
+                                 ".v_proj.": (".q_k_v_proj.", "v")},
+        )
+
+    __init__._exl3_patched = True
+    Spark2_5ForCausalLM.__init__ = __init__
 

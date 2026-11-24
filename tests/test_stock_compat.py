@@ -190,3 +190,55 @@ def test_transformers_backend_takes_an_output_multiplier_before_the_cap(monkeypa
     assert Causal(plain).logits_processor.soft_cap == 30.0, "no multiplier, nothing changes"
 
 
+
+
+def _map(mapper, name):
+    """(name, shard id), from whichever of WeightsMapper's two spellings the running vLLM has."""
+    with_shard = getattr(mapper, "_map_name_with_shard", None)
+    return with_shard(name) if with_shard is not None else mapper._map_name(name)
+
+
+def test_embedding_routes_follow_the_models_module_name():
+    """exllamav3 names the embedding `embed_tokens` whatever the model calls it; the config's routes (dense, the
+    on-load blockq source, a stored blockq or trellis table) end on the module the model built -- Spark-X2.6's
+    `model.embedding` -- and are left alone where the names agree."""
+    import types
+
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    from vllm_exl3_plugin.quantization.config import EXL3Config
+
+    def mapped(embed_prefix, routes, name):
+        cfg = types.SimpleNamespace(embed_prefix=embed_prefix, _EMBED_LEAVES=EXL3Config._EMBED_LEAVES)
+        m = EXL3Config._embedding_leaf_rename(cfg, WeightsMapper(orig_to_new_suffix=routes))
+        return _map(m, name)[0]
+
+    onload = {".embed_tokens.weight": ".embed_tokens.bq_src"}
+    assert mapped("model.embedding", onload, "model.embed_tokens.weight") == "model.embedding.bq_src"
+    assert mapped("model.embedding", {}, "model.embed_tokens.weight") == "model.embedding.weight"
+    assert mapped("model.embedding", {}, "model.embed_tokens.bq_q") == "model.embedding.bq_q"
+    assert mapped("model.embedding", {}, "model.layers.0.mlp.up_proj.trellis") == "model.layers.0.mlp.up_proj.trellis"
+    assert mapped("model.embed_tokens", onload, "model.embed_tokens.weight") == "model.embed_tokens.bq_src"
+
+
+def test_spark_exl3_names_map_split_qkv_onto_the_fused_projection():
+    """Spark-X2.6 under its maker's plugin: an EXL3 checkpoint's split q/k/v land on the fused `q_k_v_proj` by shard
+    id; the reference checkpoint's names, and any model not under an EXL3 config, are left as the plugin maps them."""
+    import types
+
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    class Spark:
+        hf_to_vllm_mapper = WeightsMapper(orig_to_new_stacked={".gate_proj": (".gate_up_proj", 0)})
+
+        def __init__(self, *, vllm_config, prefix=""):
+            pass
+
+    stock_compat._spark_exl3_names(Spark)
+    exl3 = types.SimpleNamespace(get_name=lambda: "exl3")
+    m = Spark(vllm_config=types.SimpleNamespace(quant_config=exl3)).hf_to_vllm_mapper
+    assert _map(m, "model.layers.3.self_attn.k_proj.trellis") == ("model.layers.3.self_attn.q_k_v_proj.trellis", "k")
+    assert _map(m, "model.layers.3.self_attn.q_k_v_proj.weight") == ("model.layers.3.self_attn.q_k_v_proj.weight", None)
+    assert _map(m, "model.layers.3.mlp.gate_proj.trellis")[1] == 0
+    plain = Spark(vllm_config=types.SimpleNamespace(quant_config=None))
+    assert plain.hf_to_vllm_mapper is Spark.hf_to_vllm_mapper
