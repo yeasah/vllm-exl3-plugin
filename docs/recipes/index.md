@@ -18,3 +18,4 @@ This is not an inclusive list of supported models; rather these are example conf
 |[Qwen3.5-4B](Qwen3.5-4B.md)|Dense|4|4|✅|32|4 GiB+|
 |[Qwen3.5-2B](Qwen3.5-2B.md)|Dense|2|2|✅|12|4 GiB+|
 |[MiniCPM5-2B](MiniCPM5-2B.md)|Dense|2|2|❌|42|4 GiB+|
+|[LFM3-1.7B](LFM3-1.7B.md)|Dense|1.7|1.7|❌|12|any|
