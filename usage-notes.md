@@ -28,25 +28,14 @@ vLLM has several interacting knobs for setting the size of different aspects of 
 - `--max-num-seqs`: The expected level of concurrency that will happen during serving. If up to 8 requests are expected to be running at once, set it to 8.
 - `--max-num-batched-tokens`: This controls the batch size used during prefill, and directly affects prefill performance, at a VRAM cost. Larger values do tend to have diminishing returns, but it is very system dependent.
 
-The value for `gpu-memory-utilization` should be as high as possible to maximize utilization of VRAM, but there is a limit. The primary limit is that vLLM doesn't have access to the entire VRAM of the card(s) at startup. It logs exactly what it was, for example:
+In vLLM v0.34, the meaning of `gpu-memory-utilization` has changed, with the introduction of the extensible KV cache. Previously it was necessary to adjust this to carefully fit a system to available VRAM; now it is recommended to leave this at the default (which is now 1.0), and the system will autofit itself to available space. It is only when the system should not use all of the available VRAM that this setting is now required: to leave half of the card unutilized for example, set it to 0.5.
 
-`Free memory on device (10.98/12.0 GiB) on startup`
+The defaults for `max-num-seqs` is quite large by the standard of a small VRAM system and should be reduced in such situations. `--max-num-seqs 4` may be a reasonable place to start with a small system that expects limited concurrency.
 
-In this case, `gpu-memory-utilization` cannot be greater than that literal fraction: `10.98 / 12.0` = `0.915` is the absolute upper limit. Normally one would leave some significant headroom here for safety from transient allocations and fragmentation, but this vLLM fork has many kinds of transients reduced or better profiled so it is generally possible to run very close to the limit here (see [patches.md](patches.md), "The commits" for details). When running at very high utilization it may also be important to enable expandable segments to avoid later failures due to memory fragmentation (see "Memory Fragmentation, below)
-
-The defaults for `max-num-seqs` and `max-num-batched-tokens` are quite large by the standard of a small VRAM system and should be reduced in such situations. `--max-num-seqs 4` and `--max-num-batched-tokens 512` may be a reasonable place to start with a small system that expects limited concurrency.
+The default for `max-num-batched-tokens` here is 2048, and this is a good starting place in terms of VRAM vs. prefill performance. It is possible to save a fair bit of VRAM by reducing this further, though past 512 the amount of VRAM saved versus the degree of prefill slowdown becomes less favorable.
 
 The default for `max-model-len` is the maximum the model allows, and the system will OOM at startup if there is not sufficient VRAM for this, which will often be the case with smaller VRAM systems. A safer (but less consistent) option is `--max-model-len auto`, which will size the max context to be equal to available VRAM. It is an especially good idea to use this when first trying a new model, before you have an idea how big things can really be.
 
-Regardless of the setting of `max-model-len`, vLLM will allocate as much VRAM as is possible within its `gpu-memory-utilization` budget, and any leftover VRAM is allocated to the KV cache -- and any excess beyond the model context limit is simply used for the processing of concurrent requests.
-
-This all means there are a number of different ways to experience an out-of-memory condition with vLLM, each with a different solution:
-
-- gpu-memory-utilization exceeds the actual available VRAM: an OOM crash very early, and reducing this parameter is the solution.
-- gpu-memory-utilization is achievable, but doesn't leave enough room for allocations that happen outside of vLLM/pytorch's accounting. Again an OOM crash, but potentially later in startup. Reducing this parameter is the solution. The vLLM fork used by this project is less prone to this, but it is still possible.
-- Model weights (minus any configured CPU offload) are too large to fit in VRAM. This will be reported directly by vLLM. Either more offload, choosing a smaller quant, or raising gpu-memory-utilization is the solution.
-- Insufficient space for the configured max-model-len KV cache. This will be reported directly by vLLM. Reducing max-model-len (or setting to auto), enabling kv cache quantization, or reducing the size of model weights (as above) is the solution
-- vLLM starts up, serves for a while, then OOMs later on a request. Fragmentation or allocation transients are the likely cause: the former may be helped by enabling expandable segments.
 
 ## Model Evaluation
 
@@ -90,9 +79,9 @@ This size category is extra-tricky: not just because it's very small, but becaus
 
 This means the name of the game becomes KV management more than size of the model weights. As always, different model architectures have different levels of efficiency in KV memory requirements, and in this class, the Qwen3.5 family models are the king. Not only do they have the highest maximum context in the class (256K), they also have the lowest KiB/token requirement (12KiB/t and 32KiB/t respectively). Additionally, Qwen3.5 in this range generally have among the highest capability benchmark scores. Finally, the models are both vision and MTP enabled, so both of those features are available if desired and space allows.
 
-So it ends up a race between `Qwen3.5-2B` and `Qwen3.5-4B`: the former is obviously a less capable model, but with a more efficient KV, so if long context is an absolute requirement this may still be the better pick. My advice would be that a 2B model (or really even the 4B model) is unlikely to be able to really take advantage of a much longer context, and the VRAM would very likely be better spent on the 4B model with a correspondingly reduced context size.
+So it ends up a race between [Qwen3.5-2B](docs/recipes/Qwen3.5-2B.md) and [Qwen3.5-4B](docs/recipes/Qwen3.5-4B.md): the former is obviously a less capable model, but with a more efficient KV, so if long context is an absolute requirement this may still be the better pick. My advice would be that a 2B model (or really even the 4B model) is unlikely to be able to really take advantage of a much longer context, and the VRAM would very likely be better spent on the 4B model with a correspondingly reduced context size.
 
-The main other contender in this space is `MiniCPM5-2B`, which by model size is competitive with Qwen3.5 on benchmarks, but lacks in the other ways Qwen is strong: a maximum 128K context, no vision, no MTP, and most importantly a considerably less efficient KV (at 42KiB/t). For use cases where longer context or vision is not a requirement, it could be worth considering.
+The main other contender in this space is [MiniCPM5-2B](docs/recipes/MiniCPM5-2B.md), which by model size is competitive with Qwen3.5 on benchmarks, but lacks in the other ways Qwen is strong: a maximum 128K context, no vision, no MTP, and most importantly a considerably less efficient KV. For use cases where longer context or vision is not a requirement, it could be worth considering.
 
 LiquidAI's `LFM3-1.7B` (or its vision-enabled variant `LFM3-VL-2B`) is competitive as well: good KV efficiency (22KiB/t) and impressive looking (though thin) published benchmarks. There are currently no EXL3 quants available, however. Their prior LFM2.5 series are generally not as competitive, although the tiny MoE `LFM2.5-8B-A1B` deserves mention for being a much smaller MoE than any other model listed, with a KV efficiency that ties the best alternative (`Qwen3.5-2B`). With 1B active parameters, there are real questions about capability, but some benchmark scores look acceptable.
 
@@ -101,178 +90,34 @@ XHToken's `Spark-X2.6-4B` is another recent impressive looking model. At 38KiB/t
 
 ### 8GiB
 
-There's really currently only two reasonable contenders in this space: Gemma 4's MoE `gemma-4-26B-A4B`, and `Qwen3.5-9B` (or finetunes such as `Ornith-1.5-9B`). Gemma generally has different strengths than Qwen, so the recommendation is more about use case than anything. For conversational tasks, many people find gemma a more pleasant model to work with. For agentic work, Qwen does score much better on benchmarks; it is worth nothing however, that agentic work at the 9B model class may be fairly disappointing by modern standards.
+There's really currently only two reasonable contenders in this space: Gemma 4's MoE [gemma-4-26B-A4B](docs/recipes/gemma-4-26B-A4B.md), and [Qwen3.5-9B](docs/recipes/Qwen3.5-9B.md) (or finetunes such as [Ornith-1.5-9B](docs/recipes/Ornith-1.5-9B)). Gemma generally has different strengths than Qwen, so the recommendation is more about use case than anything. For conversational tasks, many people find gemma a more pleasant model to work with. For agentic work, Qwen does score much better on benchmarks; it is worth nothing however, that agentic work at the 9B model class may be fairly disappointing by modern standards.
 
 
 ### 12GiB
 
-The 12GiB cards open up considerably in terms of options. `Qwen3.6-35B-A3B` is probably the best choice for agentic work: a very efficient KV, vision and MTP support, the extra speed that MoEs can bring, and solid scores on benchmarks. Finetunes of 35B Qwen MoEs are available as well (i.e. `Ornith-1.5-35B-A3B`).
+The 12GiB cards open up considerably in terms of options. [Qwen3.6-35B-A3B](docs/recipes/Qwen3.6-35B-A3B.md) is probably the best choice for agentic work: a very efficient KV, vision and MTP support, the extra speed that MoEs can bring, and solid scores on benchmarks. Finetunes of 35B Qwen MoEs are available as well (i.e. [Ornith-1.5-35B-A3B](docs/recipes/Ornith-1.5-35B-A3B.md)).
 
-As at the 8GiB tier, for conversational work Gemma 4's 12B dense model `gemma-4-12B-it` is worth consideration. It has no vision, but otherwise offers similar capabilities as Qwen. As a dense model, it will likely run more slowly.
+As at the 8GiB tier, for conversational work Gemma 4's 12B dense model [gemma-4-12B-it](docs/recipes/gemma-4-12B-it.md) is worth consideration. It has no vision, but otherwise offers similar capabilities as Qwen. As a dense model, it will likely run more slowly.
 
-Two other MoEs deserve mention: poolside's `Laguna-XS-2.1` and zai-org's `GLM-4.7-Flash`. Neither model support vision, and both have a less efficient KV than Qwen or Gemma, but they have different strengths and could better fit certain use cases.
+Two other MoEs deserve mention: poolside's [Laguna-XS-2.1](docs/recipes/Laguna-XS-2.1.md) and zai-org's `GLM-4.7-Flash`. Neither model support vision, and both have a less efficient KV than Qwen or Gemma, but they have different strengths and could better fit certain use cases.
 
 
 ### 16GiB
 
-The main model that opens up here is `Qwen3.8-27B`, although it is tight: KV costs more, and the model itself is much bigger in resident VRAM. However, the capability scores are potentially very worth it: it is a very strong model, especially for coding tasks. Likely it will be necessary to bump the body bitrate below 4bpw, which will affect quality; the main question is whether this degradation of a stronger model will be a fair trade as compared to a higher bitrate `Qwen3.6-35B-A3B`.
+The main model that opens up here is [Qwen3.8-27B](docs/recipes/Qwen3.8-27B.md), although it is tight: KV costs more, and the model itself is much bigger in resident VRAM. However, the capability scores are potentially very worth it: it is a very strong model, especially for coding tasks. Likely it will be necessary to bump the body bitrate below 4bpw, which will affect quality; the main question is whether this degradation of a stronger model will be a fair trade as compared to a higher bitrate [Qwen3.6-35B-A3B](docs/recipes/Qwen3.6-35B-A3B.md).
 
-The wildcard option is `Qwen3.8-Flash-Next`: a much larger model that doesn't seem like it would plausibly fit, but the architecture means it can, barely -- with a combination of disk offload and host cpu offload. It does require a large amount of host RAM available. But the KV efficiency is shockingly good, and its capability scores are in a different class entirely from anything else that can be run. In order to fit on a 16GiB card, it is necessary to use a 2bpw or lower quant, and there is the very real question of how much damage that represents to the model, and whether it is better to use a less damaged smaller model on the balance. There isn't solid data on that, but there is reason to think that larger models can be considerably more resilient to aggressive quantization than smaller ones, so it's a plausibly good trade.
+The wildcard option is [Qwen3.8-Flash-Next](docs/recipes/Qwen3.8-Flash-Next.md): a much larger model that doesn't seem like it would plausibly fit, but the architecture means it can, with a combination of disk offload and host cpu offload. It does require a large amount of host RAM available. But the KV efficiency is shockingly good, and its capability scores are in a different class entirely from anything else that can be run. In order to fit on a 16GiB card, it is necessary to use a 2bpw or lower quant, and there is the very real question of how much damage that represents to the model, and whether it is better to use a less damaged smaller model on the balance. There isn't solid data on that, but there is reason to think that larger models can be considerably more resilient to aggressive quantization than smaller ones, so it's a plausibly good trade.
 
 
 ### 24GiB+
 
-`Qwen3.8-Flash-Next` becomes progressively more of a no-brainer at higher VRAM systems, as it becomes possible to run at bitrates that are more classically acceptable. At 32GiB, 4bpw is possible, and there this model becomes the obvious choice.
+[Qwen3.8-Flash-Next](docs/recipes/Qwen3.8-Flash-Next.md) becomes progressively more of a no-brainer at higher VRAM systems, as it becomes possible to run at bitrates that are more classically acceptable. At 32GiB, 4bpw is possible, and there this model becomes the obvious choice.
 
 `Nanbeige4.3-33B` looks at first blush like an interesting model: benchmark scores are very high (almost too high to believe), but the benchmark validity question becomes irrelevant once you look at the KV efficiency: this model is essentially impossible to run at long context on cards of this VRAM class.
 
-`gemma-4-31B-it` is possible, and would be a decent pick in all the same situations that Gemma 4 at other VRAM classes would be. It's got a more expensive KV, but not to a disqualifying degree like Nanbeige, particularly given Gemma's strength lies in directions that do not demand the longest contexts.
+[gemma-4-31B-it](docs/recipes/gemma-4-31B-it.md) is possible, and would be a decent pick in all the same situations that Gemma 4 at other VRAM classes would be. It's got a more expensive KV, but not to a disqualifying degree like Nanbeige, particularly given Gemma's strength lies in directions that do not demand the longest contexts.
 
-Meta's `Muse-Glimmer-30B` is another prominent option here, and its main claim to fame is an incredibly efficient KV architecture: at 15KiB/token, it is possible to run a quantized KV cache on this model at the maximum context in 0.5GiB of VRAM. The caveat is that the maximum context is lower than any nearby competitor, at 128K. But this is plenty of context for many kinds of work, and a larger KV than maximum context supports greater concurrent use, so this is still a potentially significant strength for certain kinds of use.
-
-
-## Recommended Dense Models
-
-A variety of recent dense models in the 9-30B range are available in EXL3 format:
-
-### [Qwen/Qwen3.5-9B](https://hf.co/Qwen/Qwen3.5-9B)
-
-A small, but still usefully sized entry in the Qwen lineup. 9B parameters, with vision.
-Reasoning is supported via the `qwen3` reasoning parser, and tool calling via the `qwen3_coder` parser. There are no default sampling parameters defined in the model, so it is either necessary to set these at every client, or override these to the correct defaults via (for example) `--override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'` -- note that there are *four* different sampling parameter configurations recommended on the model card for different scenarios, so make sure you are using the right set.
-
-Available EXL3 quants include [turboderp/Qwen3.5-9B-exl3](https://hf.co/turboderp/Qwen3.5-9B-exl3)
-
-Example:
-
-```
-vllm serve turboderp/Qwen3.5-9B-exl3 --revision 4.00bpw \
-    --max-model-len auto --max-num-seqs 4 --max-num-batched-tokens 512 \
-    --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
-    --kv-cache-dtype nvfp4 --gpu-memory-utilization 0.95 \
-    --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }' \
-    --cpu-offload-gb 1 --cpu-offload-params visual --mm-processor-kwargs '{"max_pixels": 1048576}' 
-```
-
-### [ornith-ai/Ornith-1.5-9B](https://hf.co/ornith-ai/Ornith-1.5-9B)
-
-A Qwen finetune oriented toward agentic work. Shares the reasoning and tool calling parameters with Qwen, as well as the requirement for setting sampling parameters.
-
-Available EXL3 quants include [yeasah/Ornith-1.5-9B-exl3](https://hf.co/yeasah/Ornith-1.5-9B-exl3)
-
-Example:
-
-```
-vllm serve yeasah/Ornith-1.5-9B-exl3 --revision 4.00bpw \
-    --max-model-len auto --max-num-seqs 4 --max-num-batched-tokens 512 \
-    --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
-    --kv-cache-dtype nvfp4 --gpu-memory-utilization 0.95 \
-    --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }' \
-    --cpu-offload-gb 1 --cpu-offload-params visual --mm-processor-kwargs '{"max_pixels": 1048576}' 
-```
-
-### [google/gemma-4-12B-it](https://hf.co/google/gemma-4-12B-it)
-
-Gemma 4 may not be the strongest at coding, but it is quite strong as a conversational model. Reasoning and tool calling are supported via `gemma4` parsers. 
-
-Gemma 4 12B is particularly unusual in that it has a "unified" multimodal architecture, meaning it does not have a separate vision or audio encoder, and so it is not possible to offload vision in any meaningful sense. `--language-model-only` is still useful if no vision is required, but it does not save a substantial amount of VRAM. It is also the only model on this list that can accept audio.
-
-Gemma 4 has some unusual characteristics that make serving a little trickier:
-
- - Gemma 4 has varying head dimensions across its layers. Except on recent datacenter-class cards, this will result in the following message at startup `Gemma4 model has heterogeneous head dimensions {'sliding_attention': 256, 'full_attention': 512}. FA4 not available, forcing TRITON_ATTN backend.`, and the forced use of triton attention will preclude or complicate the use of KV cache quantization other than `fp8`. TurboQuant is possible in some configurations, with considerable setup.
- - When vision is enabled, `max-num-batched-tokens` must be at least 2496, and if you try to run it with a lower value, the following error will be raised at startup: `Chunked MM input disabled but max_tokens_per_mm_item (2496) is larger than max_num_batched_tokens (512). Please increase max_num_batched_tokens.`
- - When vision is enabled, a load-time OOM may happen if expandable segments are not enabled (which can be done by setting the `PYTORCH_CUDA_ALLOC_CONF` environment variable to the value `expandable_segments:True`)
-
-Available EXL3 quants include [turboderp/gemma-4-12B-it-exl3](https://hf.co/turboderp/gemma-4-12B-it-exl3)
-
-Example:
-
-```
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    vllm serve turboderp/gemma-4-12B-it-exl3 --revision 4.00bpw_mul1 \
-    --max-model-len auto --max-num-seqs 4 --max-num-batched-tokens 2496 \
-    --enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4 \
-    --kv-cache-dtype fp8 --gpu-memory-utilization 0.90
-```
-
-
-### [Qwen/Qwen3.8-27B](https://hf.co/Qwen/Qwen3.8-27B)
-
-One of the current darlings of the community, a strong coder. Reasoning is supported via the `qwen3` parser, and tool calling is supported by the `qwen3_coder` parser. The sampling parameter situation is simpler than prior entries in the Qwen lineup, with only two configs recommended, one for thinking and one for non-thinking. Normally one would want to use this model in thinking mode, which is the default. However, note that this model supports different thinking effort levels, and the chat template's default is `xhigh`, which many find excessive (I certainly do, and I would recommend `medium` instead)
-
-Available EXL3 quants include [yeasah/Qwen3.8-27B-exl3](https://hf.co/yeasah/Qwen3.8-27B-exl3) and [turboderp/Qwen3.8-27B-exl3](https://hf.co/turboderp/Qwen3.8-27B-exl3)
-
-Example:
-
-```
-vllm serve yeasah/Qwen3.8-27B-exl3 --revision 3.50bpw-H5 \
-    --max-model-len auto --max-num-seqs 4 --max-num-batched-tokens 512 \
-    --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
-    --kv-cache-dtype nvfp4 --gpu-memory-utilization 0.95 \
-    --cpu-offload-gb 2 --cpu-offload-params visual --mm-processor-kwargs '{"max_pixels": 1048576}
-```
-
-
-### [meta-models/Muse-Glimmer-30B](https://hf.co/meta-models/Muse-Glimmer-30B)
-
-meta's 30B dense model. Extremely efficient KV, but ironically only trained for 128K of it. It does, however, allow for much greater KV concurrency in vLLM. Reasoning and tool calling are supported by the `muse_glimmer` parsers.
-
-Available EXL3 quants include [yeasah/Muse-Glimmer-30B-exl3](https://hf.co/yeasah/Muse-Glimmer-30B-exl3) and [turboderp/Muse-Glimmer-30B-exl3](https://hf.co/turboderp/Muse-Glimmer-30B-exl3)
-
-Note that turboderp uses a quantized vision tower, which makes offload more difficult.
-
-Example:
-
-```
-vllm serve yeasah/Muse-Glimmer-30B-exl3 --revision 3.00bpw-H5 \
-    --max-model-len auto --max-num-seqs 4 --max-num-batched-tokens 512 \
-    --enable-auto-tool-choice --tool-call-parser muse_glimmer --reasoning-parser muse_glimmer \
-    --kv-cache-dtype nvfp4 --gpu-memory-utilization 0.95 \
-    --cpu-offload-gb 12 --cpu-offload-params visual
-```
-
-### [google/gemma-4-31B-it](https://hf.co/google/gemma-4-31B-it)
-
-Gemma 4 12B, but more of it, and with a more traditional multimodal setup (with a separate vision encoder, and no audio)
-
-Available EXL3 quants include [turboderp/gemma-4-31B-it-exl3](https://hf.co/turboderp/gemma-4-31B-it-exl3)
-
-
-## Recommended MoE Models
-
-Mixture-of-experts models in this range tend to be a little larger than the dense lineup in terms of total parameters (26B-35B), but they have two powerful advantages. First, only a small number of parameters are used at any given time, so generation tends to be faster than a corresponding dense model. And second, the same property means that a significant amount of the model can be offloaded to host RAM and paged in on demand without seriously impacting performance, so often they have a smaller effective VRAM footprint as well.
-
-The MoE expert cache that allows this high-performance offload is simple to enable: configure a certain amount of memory for offload in the normal vLLM way (`--cpu-offload-gb N`, where N is the number of GiB you wish to allocate for this), and optionally explicitly specifying that the experts are the target via `--cpu-offload-params experts`. (If vision is being used, it should be included in the cpu offload list as well: vision offload is nearly free from a performance perspective and should be prioritized over experts if offload is to be used)
-
-### [google/gemma-4-26B-A4B-it](https://hf.co/google/gemma-4-26B-A4B-it)
-
-Gemma, MoE style, with a more traditional multimodal setup (with a separate vision encoder, and no audio). One of the smallest MoEs available at only 26B parameters. 
-
-Available EXL3 quants include [turboderp/gemma-4-26B-A4B-it-exl3](https://hf.co/turboderp/gemma-4-26B-A4B-it-exl3)
-
-
-### [Qwen/Qwen3.6-35B-A3B](https://hf.co/Qwen/Qwen3.6-35B-A3B)
-
-The most recent Qwen MoE available. Reasoning is supported via the `qwen3` reasoning parser, and tool calling via the `qwen3_coder` parser. The model card calls out different sampling parameters for different use cases, so make sure you are using the right settings.
-
-Available EXL3 quants include [yeasah/Qwen3.6-35B-A3B-exl3](https://hf.co/yeasah/Qwen3.6-35B-A3B-exl3)
-
-
-### [ornith-ai/Ornith-1.5-35B-A3B](https://hf.co/ornith-ai/Ornith-1.5-35B-A3B)
-
-The ornith counterpart to the Qwen MoE. Same settings and caveats as the Qwen MoE on which it is based.
-
-Available EXL3 quants include [yeasah/Ornith-1.5-35B-A3B-exl3](https://hf.co/yeasah/Ornith-1.5-35B-A3B-exl3)
-
-
-### [poolside/Laguna-XS-2.1](https://hf.co/poolside/Laguna-XS-2.1)
-
-poolside's agentic-focused MoE. This is a 33B parameter model. Reasoning and tool calling are supported via the `poolside_v1` parsers.
-
-Available EXL3 quants include [turboderp/Laguna-XS-2.1-exl3](https://hf.co/turboderp/Laguna-XS-2.1-exl3)
-
-## Other models
-
-Many other models are available, but in general a model must be supported both by exllamav3 (so that an EXL3 quantization may be produced in the first place), and vLLM (so that it may be served)
+Meta's [Muse-Glimmer-30B](docs/recipes/Muse-Glimmer-30B.md) is another prominent option here, and its main claim to fame is an incredibly efficient KV architecture: at 15KiB/token, it is possible to run a quantized KV cache on this model at the maximum context in 0.5GiB of VRAM. The caveat is that the maximum context is lower than any nearby competitor, at 128K. But this is plenty of context for many kinds of work, and a larger KV than maximum context supports greater concurrent use, so this is still a potentially significant strength for certain kinds of use.
 
 
 ## KV cache quantization
@@ -333,6 +178,27 @@ Certain draft model configurations do not work at all, sometimes spectacularly: 
 ## Multi-GPU operation
 
 This plugin does support tensor parallelism across multiple GPUs, and generally speaking this is as simple as including the `--tensor-parallel-size N` option, where N is the desired number of GPUs to use. There are currently some model-specific limits as to which configurations can work, and the script `tools/tp_preflight.py` will check a model for support of TP configurations without having to first download the model itself, so planning can happen efficiently.
+
+
+## Host RAM and disk offload
+
+vLLM supports CPU offload of weights, and this plugin extends this mechanism to cover EXL3 quantized tensors as well. The vLLM mechanism to control this is the `cpu-offload-gb` parameter, which instructs vLLM to use up to that number of GiB of host RAM *per rank* (so on a 2 card system with `tensor-parallel 2`, the total RAM pinned and allocated will be double that number).
+
+Normally, if vision is configured on a model and offload is desired at all, the vision encoder should be the first thing to go: performance loss is almost zero there. Telling vLLM which parts to offload is configured with the `cpu-offload-params` option, which can be a list of names. For vision, include `visual` in the list.
+
+The following additions have been made to offload in this plugin:
+ - Embeddings are automatically offloaded to host RAM by default
+ - Engram tables are automatically streamed from disk via exllamav3's streaming mechanism.
+ - MoE expert offload is handled very differently from vLLM's normal behavior. This is enabled by including `experts` in the `cpu-offload-params` list. See the next section for more details on how this works.
+
+
+## MoE expert cache
+
+Simply including experts in the list of offloaded targets will automatically enable the MoE expert cache, which divides expert residency into three layers: available VRAM space on the GPUs, available host RAM, and finally (if required) the disk where the tensors were loaded from. 
+
+When `max-model-len` is `auto`, the cache will attempt to allocate enough VRAM to hit a 40% residency rate, which in benchmarks has held the performance loss at a relatively low level. KV space will be given at least a usable amount (currently 32K tokens). 
+
+When operating, the system will actively promote and demote experts through all three tiers based on their use. The impact on performance at different residency rates at each of the three tiers will be system dependent, but expect significant slowdown with high levels of disk offload.
 
 
 ## A note on quant selection
