@@ -1,0 +1,56 @@
+<svg width="400" height="300" viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="400" height="300" fill="#f8f5f7" />
+
+  <!-- Shadow -->
+  <ellipse cx="200" cy="280" rx="90" ry="30" fill="#d6cccd" opacity="0.6" />
+
+  <!-- Neck -->
+  <path d="M170 220 Q200 180 230 220 L230 215" stroke="#b5aeb5" stroke-width="12" stroke-linecap="round" />
+
+  <!-- Head -->
+  <circle cx="200" cy="170" r="75" fill="#fff" />
+
+  <!-- Ears -->
+  <g transform="translate(160, 10)">
+    <path d="M30 40 Q-20 35 -10 55 T10 30 L20 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
+    <path d="M170 40 Q250 35 260 55 T230 30 L230 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
+    <circle cx="40" cy="35" r="3" fill="#ff0000" />
+    <circle cx="-15" cy="55" r="3" fill="#ff0000" />
+    <circle cx="130" cy="30" r="3" fill="#ff0000" />
+  </g>
+  
+  <g transform="translate(270, 10)">
+    <path d="M30 40 Q250 35 260 55 T230 30 L230 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
+    <path d="M170 40 Q200 35 230 55 T190 30 L190 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
+    <circle cx="40" cy="35" r="3" fill="#ff0000" />
+    <circle cx="15" cy="55" r="3" fill="#ff0000" />
+    <circle cx="100" cy="30" r="3" fill="#ff0000" />
+  </g>
+
+  <!-- Body -->
+  <ellipse cx="200" cy="190" rx="55" ry="35" fill="#fff" />
+  <path d="M160 180 Q200 140 240 180" stroke="#b5aeb5" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Tail -->
+  <ellipse cx="120" cy="180" rx="12" ry="10" fill="transparent" />
+  <path d="M120 180 Q90 210 90 200 Q80 190 120 180" fill="#ffbaba" stroke="#ffc6c6" stroke-width="8" />
+  <path d="M120 180 Q180 150 180 200 Q170 230 120 180" fill="#fff" />
+
+  <!-- Legs -->
+  <g stroke="#b5aeb5" stroke-width="14" stroke-linecap="round">
+    <line x1="140" y1="240" x2="140" y2="280" /> <!-- Left Front -->
+    <line x1="200" y1="240" x2="200" y2="280" /> <!-- Right Front -->
+    <line x1="140" y1="280" x2="170" y2="290" /> <!-- Left Back -->
+    <line x1="200" y1="280" x2="230" y2="290" /> <!-- Right Back -->
+  </g>
+
+  <!-- Whiskers -->
+  <line x1="175" y1="150" x2="175" y2="100" stroke="#aaaaaa" stroke-width="1"/>
+  <line x1="175" y1="180" x2="175" y2="100" stroke="#aaaaaa" stroke-width="1"/>
+  <line x1="200" y1="150" x2="220" y2="180" stroke="#aaaaaa" stroke-width="1"/>
+  <line x1="200" y1="180" x2="220" y2="150" stroke="#aaaaaa" stroke-width="1"/>
+  <line x1="175" y1="200" x2="175" y2="230" stroke="#aaaaaa" stroke-width="1"/>
+  <line x1="200" y1="200" x2="200" y2="230" stroke="#aaaaaa" stroke-width="1"/>
+
+</svg>

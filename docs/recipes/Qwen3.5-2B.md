@@ -26,3 +26,7 @@ cpu_offload_params: visual
 mm_processor_kwargs: '{"max_pixels": 1048576}' 
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
+
+## Cat!
+
+<img src="cats/Qwen3.5-2B.svg" alt="meow">

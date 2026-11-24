@@ -28,3 +28,7 @@ enable_auto_tool_choice: yes
 tool_call_parser: spark25
 reasoning_parser: qwen3
 ```
+
+## Cat!
+
+<img src="cats/Spark-X2.6-4B.svg" alt="meow">

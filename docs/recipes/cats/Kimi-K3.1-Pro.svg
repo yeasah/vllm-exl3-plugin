@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"
+     viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Cute orange cat</title>
+  <desc id="desc">A smiling orange tabby cat with rosy cheeks and a curled tail.</desc>
+
+  <defs>
+    <linearGradient id="fur" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFC88F"/>
+      <stop offset="100%" stop-color="#F2A465"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="48" fill="#FFF9F2"/>
+  <circle cx="256" cy="254" r="204" fill="#FFF0DC"/>
+
+  <!-- Sparkles -->
+  <g fill="none" stroke="#E9B66F" stroke-width="5"
+     stroke-linecap="round">
+    <path d="M103 156v22M92 167h22"/>
+    <path d="M400 178v18M391 187h18"/>
+    <path d="M387 107v12M381 113h12"/>
+  </g>
+
+  <!-- Ground shadow -->
+  <ellipse cx="256" cy="439" rx="137" ry="19"
+           fill="#DDBFA8" opacity=".4"/>
+
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <!-- Curled tail -->
+    <path d="M329 374C405 421 448 370 426 326
+             C412 297 374 299 370 323
+             C367 342 390 350 400 335"
+          fill="none" stroke="#D88B54" stroke-width="34"/>
+    <path d="M329 374C405 421 448 370 426 326
+             C412 297 374 299 370 323
+             C367 342 390 350 400 335"
+          fill="none" stroke="#F2AC6D" stroke-width="25"/>
+
+    <!-- Body -->
+    <path d="M164 371C164 306 201 273 256 273
+             C311 273 348 306 348 371V399
+             C348 433 312 448 256 448
+             C200 448 164 433 164 399Z"
+          fill="url(#fur)" stroke="#D88B54" stroke-width="4"/>
+
+    <ellipse cx="256" cy="367" rx="58" ry="66"
+             fill="#FFD9AC" opacity=".85"/>
+
+    <!-- Paws -->
+    <ellipse cx="207" cy="418" rx="39" ry="26"
+             fill="#FFC488" stroke="#D88B54" stroke-width="4"/>
+    <ellipse cx="305" cy="418" rx="39" ry="26"
+             fill="#FFC488" stroke="#D88B54" stroke-width="4"/>
+    <g fill="none" stroke="#D88B54" stroke-width="3">
+      <path d="M196 412v13M208 410v14"/>
+      <path d="M294 410v14M306 412v13"/>
+    </g>
+
+    <!-- Ears -->
+    <path d="M146 174L151 91Q153 71 170 84L224 129Z"
+          fill="#F2A465" stroke="#D88B54" stroke-width="4"/>
+    <path d="M366 174L361 91Q359 71 342 84L288 129Z"
+          fill="#F2A465" stroke="#D88B54" stroke-width="4"/>
+    <path d="M160 145L162 105Q163 98 170 104L202 131Z"
+          fill="#F7BDB3"/>
+    <path d="M352 145L350 105Q349 98 342 104L310 131Z"
+          fill="#F7BDB3"/>
+
+    <!-- Head -->
+    <ellipse cx="256" cy="205" rx="124" ry="105"
+             fill="url(#fur)" stroke="#D88B54" stroke-width="4"/>
+
+    <!-- Forehead stripes -->
+    <g fill="none" stroke="#D88B54" stroke-width="9">
+      <path d="M221 121l8 30"/>
+      <path d="M256 114v34"/>
+      <path d="M291 121l-8 30"/>
+    </g>
+
+    <!-- Eyes -->
+    <g fill="#493833">
+      <circle cx="210" cy="202" r="18"/>
+      <circle cx="302" cy="202" r="18"/>
+    </g>
+    <g fill="#FFFFFF">
+      <circle cx="216" cy="196" r="6"/>
+      <circle cx="308" cy="196" r="6"/>
+      <circle cx="204" cy="209" r="3"/>
+      <circle cx="296" cy="209" r="3"/>
+    </g>
+
+    <!-- Rosy cheeks -->
+    <ellipse cx="177" cy="244" rx="20" ry="11"
+             fill="#F58E8E" opacity=".5"/>
+    <ellipse cx="335" cy="244" rx="20" ry="11"
+             fill="#F58E8E" opacity=".5"/>
+
+    <!-- Muzzle, nose, and smile -->
+    <ellipse cx="256" cy="246" rx="47" ry="34"
+             fill="#FFDCB3" opacity=".8"/>
+    <path d="M246 234Q256 228 266 234
+             Q264 244 256 247Q248 244 246 234Z"
+          fill="#D9787D"/>
+    <path d="M256 247C256 259 245 263 238 255
+             M256 247C256 259 267 263 274 255"
+          fill="none" stroke="#705047" stroke-width="4"/>
+
+    <!-- Whiskers -->
+    <g fill="none" stroke="#98705B" stroke-width="4">
+      <path d="M183 244l-64-11M181 256h-68M185 267l-60 15"/>
+      <path d="M329 244l64-11M331 256h68M327 267l60 15"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 300 300" role="img">
+  <title>Cute Cat</title>
+  <!-- Background -->
+  <rect width="300" height="300" rx="30" fill="#FFF4E6"/>
+  
+  <!-- Body -->
+  <ellipse cx="150" cy="240" rx="55" ry="38" fill="#FFEED5" stroke="#FFB6A0" stroke-width="4"/>
+  <!-- Paws -->
+  <ellipse cx="130" cy="258" rx="14" ry="10" fill="#FFF8DC" stroke="#FFB6A0" stroke-width="3"/>
+  <ellipse cx="170" cy="258" rx="14" ry="10" fill="#FFF8DC" stroke="#FFB6A0" stroke-width="3"/>
+  <!-- Tail -->
+  <path d="M 195 235 C 230 220 240 180 215 165" fill="none" stroke="#FFEED5" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 195 235 C 230 220 240 180 215 165" fill="none" stroke="#FFB6A0" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Head -->
+  <circle cx="150" cy="145" r="80" fill="#FFF8DC" stroke="#FFB6A0" stroke-width="4"/>
+  
+  <!-- Ears -->
+  <path d="M 85 85 L 60 25 L 120 48 Z" fill="#FFF8DC" stroke="#FFB6A0" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M 215 85 L 240 25 L 180 48 Z" fill="#FFF8DC" stroke="#FFB6A0" stroke-width="4" stroke-linejoin="round"/>
+  <!-- Inner ears -->
+  <path d="M 87 70 L 75 35 L 112 55 Z" fill="#FFC2D1" stroke="#FF8FA3" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M 213 70 L 225 35 L 188 55 Z" fill="#FFC2D1" stroke="#FF8FA3" stroke-width="2" stroke-linejoin="round"/>
+
+  <!-- Bow on ear -->
+  <g transform="translate(200, 38) rotate(15)">
+    <path d="M -14 -8 L -20 -14 L -8 -14 L -2 -8 L -8 -2 L -20 -2 Z" fill="#FF6B8A" stroke="#E44D6B" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M 2 -8 L 8 -14 L 20 -14 L 14 -8 L 20 -2 L 8 -2 Z" fill="#FF6B8A" stroke="#E44D6B" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="0" cy="-8" r="5" fill="#E44D6B"/>
+  </g>
+
+  <!-- Eyes -->
+  <ellipse cx="120" cy="140" rx="18" ry="22" fill="#3D2B1F"/>
+  <ellipse cx="180" cy="140" rx="18" ry="22" fill="#3D2B1F"/>
+  <!-- Eye highlights -->
+  <circle cx="115" cy="132" r="7" fill="white"/>
+  <circle cx="125" cy="148" r="3" fill="white" opacity="0.8"/>
+  <circle cx="175" cy="132" r="7" fill="white"/>
+  <circle cx="185" cy="148" r="3" fill="white" opacity="0.8"/>
+  <!-- Tiny sparkle -->
+  <path d="M 108 125 l 2 3 l 3 2 l -3 2 l -2 3 l -2 -3 l -3 -2 l 3 -2 Z" fill="white" opacity="0.9"/>
+  <path d="M 168 125 l 2 3 l 3 2 l -3 2 l -2 3 l -2 -3 l -3 -2 l 3 -2 Z" fill="white" opacity="0.9"/>
+
+  <!-- Blush -->
+  <ellipse cx="102" cy="162" rx="14" ry="8" fill="#FF8FA3" opacity="0.5"/>
+  <ellipse cx="198" cy="162" rx="14" ry="8" fill="#FF8FA3" opacity="0.5"/>
+
+  <!-- Nose -->
+  <path d="M 144 158 L 156 158 L 150 164 Z" fill="#FF6B8A" stroke="#E44D6B" stroke-width="1.5" stroke-linejoin="round"/>
+  
+  <!-- Mouth -->
+  <path d="M 150 164 C 144 172 136 172 133 165" fill="none" stroke="#3D2B1F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 150 164 C 156 172 164 172 167 165" fill="none" stroke="#3D2B1F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Whiskers -->
+  <g stroke="#3D2B1F" stroke-width="2" stroke-linecap="round" opacity="0.7">
+    <line x1="85" y1="150" x2="65" y2="145"/>
+    <line x1="85" y1="160" x2="65" y2="160"/>
+    <line x1="85" y1="170" x2="65" y2="175"/>
+    <line x1="215" y1="150" x2="235" y2="145"/>
+    <line x1="215" y1="160" x2="235" y2="160"/>
+    <line x1="215" y1="170" x2="235" y2="175"/>
+  </g>
+</svg>

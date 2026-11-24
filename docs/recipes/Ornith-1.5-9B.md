@@ -37,3 +37,7 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 |RTX 5060 ti|15.2 GiB|975K|4|6131.44 t/s|140.10 t/s|
 |RTX 5070 ti|15.2 GiB|986K|1|4385.20 t/s|101.39 t/s|
 |RTX 5070 ti|15.2 GiB|986K|4|11953.88 t/s|228.85 t/s|
+
+## Cat!
+
+<img src="cats/Ornith-1.5-9B.svg" alt="meow">

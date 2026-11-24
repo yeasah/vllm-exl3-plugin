@@ -1,0 +1,41 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background Circle -->
+  <circle cx="100" cy="100" r="90" fill="#f0f0f0" />
+
+  <!-- Ears -->
+  <polygon points="60,70 80,30 100,60" fill="#FFB6C1" /> <!-- Left Ear -->
+  <polygon points="140,70 120,30 100,60" fill="#FFB6C1" /> <!-- Right Ear -->
+  
+  <!-- Ear Inner Part -->
+  <polygon points="65,65 80,40 95,60" fill="#FFC0CB" />
+  <polygon points="135,65 120,40 105,60" fill="#FFC0CB" />
+
+  <!-- Face/Head -->
+  <ellipse cx="100" cy="100" rx="50" ry="45" fill="#FFB6C1" />
+
+  <!-- Eyes -->
+  <circle cx="80" cy="95" r="6" fill="#333" /> <!-- Left Eye -->
+  <circle cx="120" cy="95" r="6" fill="#333" /> <!-- Right Eye -->
+  
+  <!-- Eye Highlights -->
+  <circle cx="78" cy="93" r="2" fill="white" />
+  <circle cx="118" cy="93" r="2" fill="white" />
+
+  <!-- Nose -->
+  <polygon points="95,105 105,105 100,112" fill="#FF69B4" />
+
+  <!-- Mouth -->
+  <path d="M 90 115 Q 100 125 110 115" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round" />
+  <path d="M 100 112 L 100 118" stroke="#333" stroke-width="2" fill="none" />
+
+  <!-- Whiskers -->
+  <line x1="65" y1="105" x2="45" y2="100" stroke="#333" stroke-width="1.5" />
+  <line x1="65" y1="110" x2="45" y2="115" stroke="#333" stroke-width="1.5" />
+  
+  <line x1="135" y1="105" x2="155" y2="100" stroke="#333" stroke-width="1.5" />
+  <line x1="135" y1="110" x2="155" y2="115" stroke="#333" stroke-width="1.5" />
+
+  <!-- Blush -->
+  <circle cx="70" cy="110" r="8" fill="#FFD1DC" opacity="0.6" />
+  <circle cx="130" cy="110" r="8" fill="#FFD1DC" opacity="0.6" />
+</svg>

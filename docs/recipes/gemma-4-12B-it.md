@@ -30,3 +30,7 @@ reasoning_parser: gemma4
 kv_cache_dtype: fp8
 #speculative_config: '{"model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":4}'
 ```
+
+## Cat!
+
+<img src="cats/gemma-4-12B-it.svg" alt="meow">

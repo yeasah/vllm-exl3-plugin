@@ -18,3 +18,7 @@ tool_call_parser: qwen3_coder
 reasoning_parser: qwen3
 kv_cache_dtype: fp8
 ```
+
+## Cat!
+
+<img src="cats/LFM3-1.7B.svg" alt="meow">

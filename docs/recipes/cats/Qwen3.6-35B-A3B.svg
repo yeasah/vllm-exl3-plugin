@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="100%" height="100%">
+  <style>
+    .body { fill: #FFB347; }
+    .face { fill: #FFE6D0; }
+    .ear-inner { fill: #FF9966; }
+    .eye { fill: #333333; }
+    .eye-highlight { fill: #FFFFFF; }
+    .nose { fill: #FF69B4; }
+    .mouth { fill: none; stroke: #333333; stroke-width: 3; stroke-linecap: round; }
+    .whisker { fill: none; stroke: #333333; stroke-width: 2; stroke-linecap: round; }
+    .blush { fill: #FFB6C1; opacity: 0.6; }
+  </style>
+
+  <!-- Body -->
+  <ellipse cx="200" cy="340" rx="110" ry="70" class="body" />
+  
+  <!-- Left Ear -->
+  <path d="M 130 160 L 100 70 L 180 130 Z" class="body" />
+  <path d="M 135 150 L 115 90 L 170 130 Z" class="ear-inner" />
+
+  <!-- Right Ear -->
+  <path d="M 270 160 L 300 70 L 220 130 Z" class="body" />
+  <path d="M 265 150 L 285 90 L 230 130 Z" class="ear-inner" />
+
+  <!-- Head Base -->
+  <circle cx="200" cy="210" r="95" class="body" />
+  
+  <!-- Face Highlight Area -->
+  <ellipse cx="200" cy="240" rx="60" ry="50" class="face" />
+
+  <!-- Left Eye -->
+  <g transform="translate(160, 190)">
+    <circle cx="0" cy="0" r="14" class="eye" />
+    <circle cx="4" cy="-4" r="4" class="eye-highlight" />
+    <circle cx="-4" cy="4" r="1.5" class="eye-highlight" />
+  </g>
+
+  <!-- Right Eye -->
+  <g transform="translate(240, 190)">
+    <circle cx="0" cy="0" r="14" class="eye" />
+    <circle cx="4" cy="-4" r="4" class="eye-highlight" />
+    <circle cx="-4" cy="4" r="1.5" class="eye-highlight" />
+  </g>
+
+  <!-- Blushes -->
+  <ellipse cx="140" cy="230" rx="12" ry="8" class="blush" />
+  <ellipse cx="260" cy="230" rx="12" ry="8" class="blush" />
+
+  <!-- Nose -->
+  <path d="M 190 235 L 210 235 L 200 250 Z" class="nose" />
+
+  <!-- Mouth -->
+  <path d="M 200 250 L 200 260" class="mouth" />
+  <path d="M 200 260 C 180 280 170 260 160 260" class="mouth" />
+  <path d="M 200 260 C 220 280 230 260 240 260" class="mouth" />
+
+  <!-- Whiskers Left -->
+  <line x1="130" y1="230" x2="90" y2="220" class="whisker" />
+  <line x1="130" y1="250" x2="80" y2="250" class="whisker" />
+  <line x1="130" y1="270" x2="90" y2="280" class="whisker" />
+
+  <!-- Whiskers Right -->
+  <line x1="270" y1="230" x2="310" y2="220" class="whisker" />
+  <line x1="270" y1="250" x2="320" y2="250" class="whisker" />
+  <line x1="270" y1="270" x2="310" y2="280" class="whisker" />
+</svg>

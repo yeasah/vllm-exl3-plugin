@@ -1,0 +1,25 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="200" height="200" fill="#f7f9fb"/>
+  
+  <!-- Cat body (circle) -->
+  <circle cx="100" cy="100" r="60" fill="#ffe0b0"/>
+  
+  <!-- Cat ears (two triangles) -->
+  <polygon points="70,95 90,95 100,110" fill="#ffe0b0"/>
+  <polygon points="130,95 150,95 100,110" fill="#ffe0b0"/>
+  
+  <!-- Cat eyes -->
+  <circle cx="80" cy="95" r="10" fill="#ffd93d"/>
+  <circle cx="120" cy="95" r="10" fill="#ffd93d"/>
+  
+  <!-- Cat nose -->
+  <path d="M90,108 L100,116 L110,108" fill="#ffcc33" stroke="#d4af37" stroke-width="2"/>
+  
+  <!-- Cat paws (small circles) -->
+  <circle cx="75" cy="165" r="8" fill="#ffe0b0"/>
+  <circle cx="125" cy="165" r="8" fill="#ffe0b0"/>
+  
+  <!-- Cat tail (rounded shape) -->
+  <path d="M100,135 Q100,120 90,110" fill="#ffe0b0"/>
+</svg>

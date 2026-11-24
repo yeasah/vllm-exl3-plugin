@@ -21,3 +21,7 @@ cpu_offload_gb: 16
 cpu_offload_params: experts
 #speculative_config: '{"model":"poolside/Laguna-XS-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}'
 ```
+
+## Cat!
+
+<img src="cats/Laguna-XS-2.1.svg" alt="meow">

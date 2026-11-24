@@ -48,3 +48,7 @@ MTP enabled:
 |RTX 5060 ti|15 GiB|132K|4|8737.31 t/s|121.22 t/s|75.64%|
 |RTX 5070 ti|15.2 GiB|132K|1|4757.50 t/s|98.98 t/s|66.58%|
 |RTX 5070 ti|15.2 GiB|132K|4|12503.21 t/s|204.33 t/s|71.36%|
+
+## Cat!
+
+<img src="cats/Qwen3.6-35B-A3B.svg" alt="meow">

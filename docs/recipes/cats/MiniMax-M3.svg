@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <!-- Background circle -->
+  <circle cx="200" cy="200" r="180" fill="#FFE5E5"/>
+  
+  <!-- Ears (outer) -->
+  <polygon points="100,140 130,70 165,135" fill="#F4A261"/>
+  <polygon points="300,140 270,70 235,135" fill="#F4A261"/>
+  
+  <!-- Ears (inner pink) -->
+  <polygon points="115,135 130,90 150,130" fill="#FFB3BA"/>
+  <polygon points="285,135 270,90 250,130" fill="#FFB3BA"/>
+  
+  <!-- Head -->
+  <ellipse cx="200" cy="220" rx="120" ry="110" fill="#F4A261"/>
+  
+  <!-- Face markings (lighter area) -->
+  <ellipse cx="200" cy="245" rx="80" ry="65" fill="#FFD4A3"/>
+  
+  <!-- Stripes on forehead -->
+  <path d="M 170 140 Q 175 155 170 170" stroke="#D88B4F" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M 200 135 Q 205 152 200 170" stroke="#D88B4F" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M 230 140 Q 225 155 230 170" stroke="#D88B4F" stroke-width="3" fill="none" stroke-linecap="round"/>
+  
+  <!-- Eyes (white) -->
+  <ellipse cx="160" cy="220" rx="22" ry="28" fill="white"/>
+  <ellipse cx="240" cy="220" rx="22" ry="28" fill="white"/>
+  
+  <!-- Eyes (iris - green) -->
+  <ellipse cx="160" cy="222" rx="16" ry="22" fill="#4A7C59"/>
+  <ellipse cx="240" cy="222" rx="16" ry="22" fill="#4A7C59"/>
+  
+  <!-- Eyes (pupils) -->
+  <ellipse cx="160" cy="225" rx="6" ry="14" fill="#1a1a1a"/>
+  <ellipse cx="240" cy="225" rx="6" ry="14" fill="#1a1a1a"/>
+  
+  <!-- Eye highlights (big shine) -->
+  <circle cx="155" cy="215" r="5" fill="white"/>
+  <circle cx="235" cy="215" r="5" fill="white"/>
+  
+  <!-- Eye highlights (small shine) -->
+  <circle cx="165" cy="230" r="2" fill="white"/>
+  <circle cx="245" cy="230" r="2" fill="white"/>
+  
+  <!-- Cheek blush -->
+  <ellipse cx="130" cy="265" rx="18" ry="12" fill="#FFB3BA" opacity="0.7"/>
+  <ellipse cx="270" cy="265" rx="18" ry="12" fill="#FFB3BA" opacity="0.7"/>
+  
+  <!-- Nose -->
+  <polygon points="200,260 188,272 212,272" fill="#FF8FA3"/>
+  
+  <!-- Mouth -->
+  <path d="M 200 272 Q 200 285 188 285" stroke="#5C3A21" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M 200 272 Q 200 285 212 285" stroke="#5C3A21" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  
+  <!-- Whiskers (left) -->
+  <line x1="140" y1="265" x2="80" y2="255" stroke="#5C3A21" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="140" y1="275" x2="80" y2="280" stroke="#5C3A21" stroke-width="1.5" stroke-linecap="round"/>
+  
+  <!-- Whiskers (right) -->
+  <line x1="260" y1="265" x2="320" y2="255" stroke="#5C3A21" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="260" y1="275" x2="320" y2="280" stroke="#5C3A21" stroke-width="1.5" stroke-linecap="round"/>
+  
+  <!-- Tiny heart on cheek -->
+  <path d="M 110 230 Q 105 225 110 222 Q 115 225 110 230 Z" fill="#FF6B9D" opacity="0.6"/>
+</svg>

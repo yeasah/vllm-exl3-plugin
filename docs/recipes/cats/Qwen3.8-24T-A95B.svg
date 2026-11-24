@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <!-- Background -->
+  <rect width="400" height="400" rx="24" fill="#FDF6EC"/>
+  <circle cx="200" cy="210" r="150" fill="#FFEEDD"/>
+
+  <!-- Little hearts -->
+  <path d="M 62 96 C 57 88 46 90 46 98 C 46 105 54 110 62 116 C 70 110 78 105 78 98 C 78 90 67 88 62 96 Z" fill="#FFB5B5"/>
+  <path d="M 338 84 C 334 77 325 79 325 86 C 325 92 332 96 338 101 C 344 96 351 92 351 86 C 351 79 342 77 338 84 Z" fill="#FFC9A0"/>
+
+  <!-- Ground shadow -->
+  <ellipse cx="200" cy="380" rx="122" ry="13" fill="#F0E1CE"/>
+
+  <!-- Tail -->
+  <path d="M 268 330 Q 332 318 322 256 Q 317 230 296 238" fill="none" stroke="#F5A25D" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="296" cy="238" r="11" fill="#DD8134"/>
+
+  <!-- Body -->
+  <path d="M 130 372 Q 118 275 200 265 Q 282 275 270 372 Z" fill="#F5A25D"/>
+  <ellipse cx="200" cy="340" rx="42" ry="38" fill="#FFF3E0"/>
+
+  <!-- Front paws -->
+  <ellipse cx="172" cy="371" rx="21" ry="13" fill="#F5A25D"/>
+  <ellipse cx="228" cy="371" rx="21" ry="13" fill="#F5A25D"/>
+  <path d="M 166 366 L 166 377 M 178 366 L 178 378" stroke="#DD8134" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 222 366 L 222 378 M 234 366 L 234 377" stroke="#DD8134" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Head -->
+  <circle cx="200" cy="180" r="90" fill="#F5A25D"/>
+
+  <!-- Ears -->
+  <path d="M 122 148 L 104 58 L 182 102 Z" fill="#F5A25D"/>
+  <path d="M 278 148 L 296 58 L 218 102 Z" fill="#F5A25D"/>
+  <path d="M 130 130 L 119 78 L 164 103 Z" fill="#FF9E9E"/>
+  <path d="M 270 130 L 281 78 L 236 103 Z" fill="#FF9E9E"/>
+
+  <!-- Head stripes -->
+  <path d="M 200 96 L 200 118" stroke="#DD8134" stroke-width="8" stroke-linecap="round"/>
+  <path d="M 177 100 L 172 120" stroke="#DD8134" stroke-width="8" stroke-linecap="round"/>
+  <path d="M 223 100 L 228 120" stroke="#DD8134" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Collar + bell -->
+  <path d="M 162 252 Q 200 288 238 252" fill="none" stroke="#E8616E" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="200" cy="283" r="8.5" fill="#FFC94D"/>
+  <path d="M 192.5 282.5 L 207.5 282.5" stroke="#D99B2B" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="200" cy="286.5" r="1.8" fill="#7A5220"/>
+  <path d="M 200 288.5 L 200 291" stroke="#7A5220" stroke-width="1.8" stroke-linecap="round"/>
+
+  <!-- Eyes -->
+  <ellipse cx="166" cy="182" rx="13" ry="17" fill="#4A3728"/>
+  <ellipse cx="234" cy="182" rx="13" ry="17" fill="#4A3728"/>
+  <circle cx="170" cy="175" r="4.5" fill="#FFFFFF"/>
+  <circle cx="238" cy="175" r="4.5" fill="#FFFFFF"/>
+  <circle cx="163" cy="189" r="2" fill="#FFFFFF" opacity="0.85"/>
+  <circle cx="231" cy="189" r="2" fill="#FFFFFF" opacity="0.85"/>
+
+  <!-- Blush -->
+  <ellipse cx="136" cy="219" rx="13" ry="8" fill="#FFAFAF" opacity="0.7"/>
+  <ellipse cx="264" cy="219" rx="13" ry="8" fill="#FFAFAF" opacity="0.7"/>
+
+  <!-- Nose -->
+  <path d="M 192 203 Q 200 199 208 203 Q 210 207 201 214 Q 200 215 199 214 Q 190 207 192 203 Z" fill="#E8737F"/>
+
+  <!-- Mouth -->
+  <path d="M 200 215 Q 192 226 183 219" fill="none" stroke="#4A3728" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 200 215 Q 208 226 217 219" fill="none" stroke="#4A3728" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Whiskers -->
+  <path d="M 115 190 Q 92 183 70 176" fill="none" stroke="#C98850" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 115 202 Q 90 202 66 203" fill="none" stroke="#C98850" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 118 212 Q 96 220 74 229" fill="none" stroke="#C98850" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 285 190 Q 308 183 330 176" fill="none" stroke="#C98850" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 285 202 Q 310 202 334 203" fill="none" stroke="#C98850" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 282 212 Q 304 220 326 229" fill="none" stroke="#C98850" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

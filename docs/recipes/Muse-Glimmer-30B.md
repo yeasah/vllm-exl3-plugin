@@ -43,3 +43,7 @@ cpu_offload_gb: 4
 cpu_offload_params: visual
 #speculative-config '{"method": "dflash", "model": "turboderp/Muse-Glimmer-30B-assistant-exl3", "revision": "4.00bpw", "num_speculative_tokens": 15}'
 ```
+
+## Cat!
+
+<img src="cats/Muse-Glimmer-30B.svg" alt="meow">

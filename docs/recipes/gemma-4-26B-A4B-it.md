@@ -23,3 +23,7 @@ cpu_offload_params: visual
 mm_processor_kwargs: '{"max_pixels": 1048576}' 
 #speculative_config: '{"model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":4}'
 ```
+
+## Cat!
+
+<img src="cats/gemma-4-26B-A4B-it.svg" alt="meow">

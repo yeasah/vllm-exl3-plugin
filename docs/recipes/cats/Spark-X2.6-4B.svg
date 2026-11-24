@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="100%" height="100%">
+  <!-- background -->
+  <rect width="400" height="400" rx="20" fill="#f7f2e9"/>
+  <!-- soft ground shadow -->
+  <ellipse cx="200" cy="352" rx="105" ry="13" fill="#e4d9c6" opacity="0.35"/>
+
+  <!-- tail -->
+  <path d="M 292 235 C 345 225, 358 160, 335 115 C 332 138, 338 168, 345 200 C 352 220, 342 242, 298 236 Z" fill="#f7e2c9"/>
+
+  <!-- body -->
+  <ellipse cx="200" cy="272" rx="88" ry="62" fill="#f4e7d0"/>
+  <!-- belly -->
+  <ellipse cx="200" cy="288" rx="58" ry="42" fill="#fbf2e4"/>
+  <!-- legs -->
+  <ellipse cx="148" cy="312" rx="20" ry="26" fill="#f4e7d0"/>
+  <ellipse cx="252" cy="312" rx="20" ry="26" fill="#f4e7d0"/>
+  <!-- paws -->
+  <ellipse cx="148" cy="338" rx="15" ry="11" fill="#f9ebd8"/>
+  <ellipse cx="252" cy="338" rx="15" ry="11" fill="#f9ebd8"/>
+
+  <!-- pink collar with bow tie -->
+  <path d="M 152 178 Q 200 150 248 178 L 248 200 Q 200 166 152 200 Z" fill="#f08a5e"/>
+  <path d="M 192 152 L 176 120 L 212 120 Z" fill="#d9573f"/>
+  <path d="M 208 152 L 224 120 L 188 120 Z" fill="#d9573f"/>
+
+  <!-- head -->
+  <circle cx="200" cy="140" r="78" fill="#f6e9d8"/>
+
+  <!-- ears -->
+  <path d="M 132 92 L 118 38 L 172 68 Z" fill="#f1ddc6"/>
+  <path d="M 268 92 L 282 38 L 228 68 Z" fill="#f1ddc6"/>
+  <path d="M 146 80 L 142 54 L 168 74 Z" fill="#e7a37c"/>
+  <path d="M 254 80 L 256 54 L 234 74 Z" fill="#e7a37c"/>
+
+  <!-- eyes -->
+  <circle cx="165" cy="142" r="25" fill="#21635c"/>
+  <circle cx="235" cy="142" r="25" fill="#21635c"/>
+  <circle cx="157" cy="134" r="9" fill="#ffffff"/>
+  <circle cx="243" cy="134" r="9" fill="#ffffff"/>
+  <circle cx="169" cy="150" r="3.5" fill="#ffffff"/>
+  <circle cx="237" cy="150" r="3.5" fill="#ffffff"/>
+
+  <!-- nose & mouth -->
+  <path d="M 193 164 L 207 164 L 200 178 L 196 178 Z" fill="#f28573"/>
+  <path d="M 200 178 Q 206 190 214 180 M 200 178 Q 194 190 186 180"
+        fill="none" stroke="#c95a45" stroke-width="2.2" stroke-linecap="round"/>
+
+  <!-- cheek blush -->
+  <circle cx="138" cy="165" r="13" fill="#f6b5a4" opacity="0.55"/>
+  <circle cx="262" cy="165" r="13" fill="#f6b5a4" opacity="0.55"/>
+
+  <!-- whiskers -->
+  <g stroke="#c89a76" stroke-width="2.4" stroke-linecap="round" fill="none" opacity="0.85">
+    <path d="M 192 164 Q 100 154 70 158"/>
+    <path d="M 192 180 Q 102 186 72 194"/>
+    <path d="M 192 158 Q 98 148 76 150"/>
+    <path d="M 208 164 Q 300 154 330 158"/>
+    <path d="M 208 180 Q 302 186 328 194"/>
+    <path d="M 208 158 Q 304 148 324 150"/>
+  </g>
+</svg>

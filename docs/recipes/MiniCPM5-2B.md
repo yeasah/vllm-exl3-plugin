@@ -29,3 +29,7 @@ tool_call_parser: minicpm5
 |RTX 3060|10.32 GiB|202K|4|5903.67 t/s|273.05 t/s|
 |RTX 5070 ti|15.2 GiB|340K|1|12354.34 t/s|179.95 t/s|
 |RTX 5070 ti|15.2 GiB|340K|4|17819.09 t/s|512.40 t/s|
+
+## Cat!
+
+<img src="cats/MiniCPM5-2B.svg" alt="meow">

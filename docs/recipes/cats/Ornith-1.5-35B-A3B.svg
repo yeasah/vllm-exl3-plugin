@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!-- Background -->
+  <rect width="200" height="200" rx="20" fill="#fdeff0"/>
+
+  <!-- Tail -->
+  <path d="M150 160 Q185 150 175 120 Q170 105 158 112" 
+        fill="none" stroke="#ffb3ba" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- Body -->
+  <ellipse cx="100" cy="155" rx="48" ry="38" fill="#ffb3ba"/>
+
+  <!-- Feet -->
+  <ellipse cx="78" cy="182" rx="14" ry="9" fill="#ff8fa3"/>
+  <ellipse cx="122" cy="182" rx="14" ry="9" fill="#ff8fa3"/>
+
+  <!-- Ears -->
+  <path d="M62 62 L52 28 L88 52 Z" fill="#ffb3ba"/>
+  <path d="M138 62 L148 28 L112 52 Z" fill="#ffb3ba"/>
+  <path d="M64 58 L58 38 L76 50 Z" fill="#ff8fa3"/>
+  <path d="M136 58 L142 38 L124 50 Z" fill="#ff8fa3"/>
+
+  <!-- Head -->
+  <ellipse cx="100" cy="78" rx="50" ry="45" fill="#ffb3ba"/>
+
+  <!-- Cheek blush -->
+  <circle cx="66" cy="92" r="8" fill="#ff6b8a" opacity="0.4"/>
+  <circle cx="134" cy="92" r="8" fill="#ff6b8a" opacity="0.4"/>
+
+  <!-- Eyes -->
+  <circle cx="82" cy="78" r="8" fill="#3a3a3a"/>
+  <circle cx="118" cy="78" r="8" fill="#3a3a3a"/>
+  <circle cx="79" cy="75" r="2.5" fill="#ffffff"/>
+  <circle cx="115" cy="75" r="2.5" fill="#ffffff"/>
+
+  <!-- Nose -->
+  <path d="M100 88 L94 94 L106 94 Z" fill="#ff6b8a"/>
+
+  <!-- Mouth -->
+  <path d="M100 94 Q100 100 94 102" fill="none" stroke="#3a3a3a" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M100 94 Q100 100 106 102" fill="none" stroke="#3a3a3a" stroke-width="1.5" stroke-linecap="round"/>
+
+  <!-- Whiskers -->
+  <path d="M70 92 L44 88 M70 98 L44 100 M130 92 L156 88 M130 98 L156 100" 
+        stroke="#3a3a3a" stroke-width="1.2" stroke-linecap="round"/>
+</svg>

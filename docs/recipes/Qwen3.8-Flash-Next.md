@@ -62,3 +62,7 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 |RTX 5060 ti|15.3 GiB (22%)|14.7 GiB (63%)|3.3 GiB (15%)|265K|1|1199.52 t/s|29.72 t/s|
 |RTX 5060 ti|15.3 GiB (22%)|14.7 GiB (63%)|3.3 GiB (15%)|265K|4|3125.65 t/s|38.82 t/s|
 |RTX 5060 ti|15.3 GiB (22%)|14.7 GiB (63%)|3.3 GiB (15%)|265K|8|4763.50 t/s|46.82 t/s|
+
+## Cat!
+
+<img src="cats/Qwen3.8-Flash-Next.svg" alt="meow">
