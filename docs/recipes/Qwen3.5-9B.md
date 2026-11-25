@@ -29,17 +29,17 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
 
-## Benchmarks
-
-|Platform|VRAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
-|---|---|---|---|---|---|
-|RTX 3060|10.32 GiB|504K|1|1288.08 t/s|45.76 t/s|
-|RTX 3060|10.32 GiB|504K|4|3257.29 t/s|92.27 t/s|
-|RTX 5060 ti|15.2 GiB|975K|1|2379.11 t/s|64.08 t/s|
-|RTX 5060 ti|15.2 GiB|975K|4|6131.44 t/s|140.10 t/s|
-|RTX 5070 ti|15.2 GiB|986K|1|4385.20 t/s|101.39 t/s|
-|RTX 5070 ti|15.2 GiB|986K|4|11953.88 t/s|228.85 t/s|
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB|0.5 GiB|548K|1|1722 t/s|49 t/s|
+|RTX 3060|10.1 GiB|0.5 GiB|548K|4|4607 t/s|140 t/s|
+|RTX 5060 Ti|15.1 GiB|0.5 GiB|1017K|1|3181 t/s|68 t/s|
+|RTX 5060 Ti|15.1 GiB|0.5 GiB|1017K|4|9013 t/s|201 t/s|
+|RTX 5070 Ti|15.1 GiB|0.5 GiB|1010K|1|6154 t/s|102 t/s|
+|RTX 5070 Ti|15.1 GiB|0.5 GiB|1010K|4|17223 t/s|315 t/s|
 
 ## Cat!
+
+The following cat was produced by `turboderp/Qwen3.5-9B-exl3` at `4.00bpw` on a RTX 5060 Ti in 23.29 seconds, using 1575 tokens (including thoughts, if any)
 
 <img src="cats/Qwen3.5-9B.svg" alt="meow">

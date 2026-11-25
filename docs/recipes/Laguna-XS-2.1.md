@@ -22,6 +22,17 @@ cpu_offload_params: experts
 #speculative_config: '{"model":"poolside/Laguna-XS-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}'
 ```
 
+|Platform|VRAM|Host RAM|Host Disk|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB (32.0%)|11.0 GiB (68.0%)|0.0 GiB (0.0%)|256K|1|1981 t/s|31 t/s|
+|RTX 3060|10.1 GiB (32.0%)|11.0 GiB (68.0%)|0.0 GiB (0.0%)|256K|4|5848 t/s|56 t/s|
+|RTX 5060 Ti|15.1 GiB (61.0%)|6.8 GiB (39.0%)|0.0 GiB (0.0%)|256K|1|4075 t/s|69 t/s|
+|RTX 5060 Ti|15.1 GiB (61.0%)|6.8 GiB (39.0%)|0.0 GiB (0.0%)|256K|4|11868 t/s|133 t/s|
+|RTX 5070 Ti|15.1 GiB (56.0%)|7.4 GiB (44.0%)|0.0 GiB (0.0%)|256K|1|7098 t/s|102 t/s|
+|RTX 5070 Ti|15.1 GiB (56.0%)|7.4 GiB (44.0%)|0.0 GiB (0.0%)|256K|4|20888 t/s|177 t/s|
+
 ## Cat!
+
+The following cat was produced by `turboderp/Laguna-XS-2.1-exl3` at `4.00bpw` on a RTX 5060 Ti in 14.88 seconds, using 1050 tokens (including thoughts, if any)
 
 <img src="cats/Laguna-XS-2.1.svg" alt="meow">

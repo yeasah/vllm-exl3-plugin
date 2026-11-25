@@ -27,28 +27,29 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
 
-## Benchmarks
+|Platform|VRAM|Host RAM|Host Disk|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|Platform|VRAM|Host RAM|Host Disk|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB (39.0%)|10.3 GiB (61.0%)|0.0 GiB (0.0%)|259K|1|2066 t/s|29 t/s|
+|RTX 3060|10.1 GiB (39.0%)|10.3 GiB (61.0%)|0.0 GiB (0.0%)|259K|4|5796 t/s|62 t/s|
+|RTX 5060 Ti|15.1 GiB (66.0%)|6.3 GiB (34.0%)|0.0 GiB (0.0%)|259K|1|4574 t/s|64 t/s|
+|RTX 5060 Ti|15.1 GiB (66.0%)|6.3 GiB (34.0%)|0.0 GiB (0.0%)|259K|4|12877 t/s|138 t/s|
+|RTX 5070 Ti|15.1 GiB (62.0%)|6.9 GiB (38.0%)|0.0 GiB (0.0%)|259K|1|6488 t/s|99 t/s|
+|RTX 5070 Ti|15.1 GiB (62.0%)|6.9 GiB (38.0%)|0.0 GiB (0.0%)|259K|4|21192 t/s|188 t/s|
 
-|Platform|VRAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
-|---|---|---|---|---|---|
-|RTX 3060|10.32 GiB|265K|1|1600.44 t/s|44.60 t/s|
-|RTX 3060|10.32 GiB|265K|4|4461.73 t/s|66.46 t/s|
-|RTX 5060 ti|15 GiB|265K|1|3678.27 t/s|63.45 t/s|
-|RTX 5060 ti|15 GiB|256K|4|9327.13 t/s|132.70 t/s|
-|RTX 5070 ti|14.2 GiB|272K|1|5098.35 t/s|101.63 t/s|
-|RTX 5070 ti|14.2 GiB|272K|4|15521.81 t/s|173.26 t/s|
+MTP Enabled:
 
-MTP enabled:
-
-|Platform|VRAM|KV|Concurrent Req.|Mean Prefill|Mean Output|Draft Acceptance Rate|
-|---|---|---|---|---|---|---|
-|RTX 3060|10.32 GiB|133K|1|1632.31 t/s|41.86 t/s|62.33%|
-|RTX 3060|10.32 GiB|133K|4|4375.89 t/s|47.53 t/s|62.01%|
-|RTX 5060 ti|15 GiB|132K|1|3646.68 t/s|81.14 t/s|77.38%|
-|RTX 5060 ti|15 GiB|132K|4|8737.31 t/s|121.22 t/s|75.64%|
-|RTX 5070 ti|15.2 GiB|132K|1|4757.50 t/s|98.98 t/s|66.58%|
-|RTX 5070 ti|15.2 GiB|132K|4|12503.21 t/s|204.33 t/s|71.36%|
+|Platform|VRAM|Host RAM|Host Disk|KV|Concurrent Req.|Mean Prefill|Mean Output|Draft|
+|---|---|---|---|---|---|---|---|---|
+|RTX 3060|10.3 GiB (30.0%)|12.0 GiB (70.0%)|0.0 GiB (0.0%)|259K|1|1894 t/s|45 t/s|2 tok (72.7%)|
+|RTX 3060|10.3 GiB (30.0%)|12.0 GiB (70.0%)|0.0 GiB (0.0%)|259K|4|5449 t/s|67 t/s|2 tok (72.5%)|
+|RTX 5060 Ti|15.2 GiB (57.0%)|7.9 GiB (43.0%)|0.0 GiB (0.0%)|259K|1|4290 t/s|93 t/s|2 tok (76.1%)|
+|RTX 5060 Ti|15.2 GiB (57.0%)|7.9 GiB (43.0%)|0.0 GiB (0.0%)|259K|4|11290 t/s|130 t/s|2 tok (71.1%)|
+|RTX 5070 Ti|15.2 GiB (53.0%)|8.5 GiB (47.0%)|0.0 GiB (0.0%)|259K|1|6321 t/s|137 t/s|2 tok (75.2%)|
+|RTX 5070 Ti|15.2 GiB (53.0%)|8.5 GiB (47.0%)|0.0 GiB (0.0%)|259K|4|18971 t/s|185 t/s|2 tok (70.5%)|
 
 ## Cat!
+
+The following cat was produced by `yeasah/Qwen3.6-35B-A3B-exl3` at `4.00bpw` on a RTX 5060 Ti in 28.89 seconds, using 3025 tokens (including thoughts, if any)
 
 <img src="cats/Qwen3.6-35B-A3B.svg" alt="meow">

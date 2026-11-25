@@ -31,6 +31,13 @@ cpu_offload_params: experts
 language_model_only: yes
 ```
 
+|Platform|VRAM|Host RAM|Host Disk|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|---|
+|RTX 5060 Ti|15.1 GiB (21.0%)|18.5 GiB (79.0%)|0.0 GiB (0.0%)|259K|1|1690 t/s|35 t/s|
+|RTX 5060 Ti|15.1 GiB (21.0%)|18.5 GiB (79.0%)|0.0 GiB (0.0%)|259K|4|4766 t/s|51 t/s|
+|RTX 5070 Ti|15.1 GiB (32.0%)|12.5 GiB (52.0%)|3.6 GiB (16.0%)|35K|1|1437 t/s|31 t/s|
+|RTX 5070 Ti|15.1 GiB (32.0%)|12.5 GiB (52.0%)|3.6 GiB (16.0%)|35K|4|605 t/s|54 t/s|
+
 ## 24GiB+
 
 Vision-enabled. MTP optional, uncomment `speculative_config` to enable. For more context length, set `max_model_len` to a specific value, at the cost of VRAM expert residency (and thus performance)
@@ -53,16 +60,13 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"2.68bpw_h6_ng8"}'
 ```
 
-## Benchmarks
-
 |Platform|VRAM|Host RAM|Host Disk|KV|Concurrent Req.|Mean Prefill|Mean Output|
 |---|---|---|---|---|---|---|---|
-|RTX 5060 ti|15.3 GiB (22%)|17.3 GiB (78%)|0 GiB|265K|1|1583.37 t/s|37.46 t/s|
-|RTX 5060 ti|15.3 GiB (22%)|17.3 GiB (78%)|0 GiB|265K|4|3858.52 t/s|45.74 t/s|
-|RTX 5060 ti|15.3 GiB (22%)|14.7 GiB (63%)|3.3 GiB (15%)|265K|1|1199.52 t/s|29.72 t/s|
-|RTX 5060 ti|15.3 GiB (22%)|14.7 GiB (63%)|3.3 GiB (15%)|265K|4|3125.65 t/s|38.82 t/s|
-|RTX 5060 ti|15.3 GiB (22%)|14.7 GiB (63%)|3.3 GiB (15%)|265K|8|4763.50 t/s|46.82 t/s|
+|RTX 5060 Ti x2|29.8 GiB (56.5%)|14.8 GiB (43.5%)|0.0 GiB (0.0%)|259K|1|2064 t/s|44 t/s|
+|RTX 5060 Ti x2|29.8 GiB (56.5%)|14.8 GiB (43.5%)|0.0 GiB (0.0%)|259K|4|6165 t/s|81 t/s|
 
 ## Cat!
+
+The following cat was produced by `turboderp/Qwen3.8-Flash-Next-exl3` at `2.18bpw_h6_ng8` on a RTX 5060 Ti x2 in 85.71 seconds, using 3724 tokens (including thoughts, if any)
 
 <img src="cats/Qwen3.8-Flash-Next.svg" alt="meow">

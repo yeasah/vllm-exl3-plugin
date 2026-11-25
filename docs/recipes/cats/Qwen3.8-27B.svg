@@ -1,73 +1,232 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
-  <!-- background -->
-  <rect width="400" height="400" rx="24" fill="#FDF6EC"/>
-  <circle cx="200" cy="210" r="172" fill="#FBE8CF"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="680" role="img" aria-labelledby="t d">
+  <title id="t">Mochi the cat</title>
+  <desc id="d">A cute ginger tabby cat blinking and swishing its tail on a cushion under a smiling moon, with a yarn ball, hearts and stars.</desc>
 
-  <!-- floor shadow -->
-  <ellipse cx="200" cy="384" rx="120" ry="12" fill="#EAD6BB"/>
+  <style>
+    .eye     { transform-box: fill-box; transform-origin: 50% 50%; animation: blink 4.6s infinite; }
+    @keyframes blink { 0%,91%,97%,100% { transform: scaleY(1);} 94% { transform: scaleY(.05);} }
 
-  <!-- tail (with cream tip) -->
-  <path d="M 280 352 Q 372 348 360 252" fill="none" stroke="#F2A65E" stroke-width="36" stroke-linecap="round"/>
-  <circle cx="360" cy="252" r="18" fill="#FCEBD5"/>
+    .head    { transform-box: fill-box; transform-origin: 50% 92%; animation: sway 9s ease-in-out infinite; }
+    @keyframes sway { 0%,100% { transform: rotate(-1.6deg);} 50% { transform: rotate(1.6deg);} }
+
+    .earR    { transform-box: fill-box; transform-origin: 40% 95%; animation: twitch 7s infinite; }
+    @keyframes twitch { 0%,88%,95%,100% { transform: rotate(0);} 90% { transform: rotate(-9deg);} 92.5% { transform: rotate(6deg);} }
+
+    .body    { transform-box: fill-box; transform-origin: 50% 100%; animation: breathe 4.2s ease-in-out infinite; }
+    @keyframes breathe { 0%,100% { transform: scale(1,1);} 50% { transform: scale(1.008,1.02);} }
+
+    .tail    { transform-box: fill-box; transform-origin: 8% 88%; animation: swish 3.4s ease-in-out infinite; }
+    @keyframes swish { 0%,100% { transform: rotate(4deg);} 50% { transform: rotate(-10deg);} }
+
+    .whiskL  { transform-box: fill-box; transform-origin: 100% 50%; animation: wl 3.9s ease-in-out infinite; }
+    .whiskR  { transform-box: fill-box; transform-origin: 0% 50%;  animation: wr 3.9s ease-in-out infinite; }
+    @keyframes wl { 0%,100% { transform: rotate(0);} 50% { transform: rotate(2.2deg);} }
+    @keyframes wr { 0%,100% { transform: rotate(0);} 50% { transform: rotate(-2.2deg);} }
+
+    .yarn    { transform-box: fill-box; transform-origin: 50% 60%; animation: wiggle 5.5s ease-in-out infinite; }
+    @keyframes wiggle { 0%,100% { transform: rotate(0);} 30% { transform: rotate(3.5deg);} 60% { transform: rotate(-3deg);} }
+
+    .heart   { transform-box: fill-box; transform-origin: center; opacity: 0; animation: floatUp 4.4s ease-out infinite; }
+    @keyframes floatUp { 0% { opacity: 0; transform: translateY(8px) scale(.7);} 20% { opacity: 1;} 70% { opacity: .95;} 100% { opacity: 0; transform: translateY(-46px) scale(1.15);} }
+    .h2 { animation-delay: 1.5s; } .h3 { animation-delay: 2.9s; }
+
+    .star    { transform-box: fill-box; transform-origin: center; animation: twinkle 3s ease-in-out infinite; }
+    @keyframes twinkle { 0%,100% { opacity: .25; transform: scale(.75);} 50% { opacity: 1; transform: scale(1);} }
+
+    .glow    { transform-box: fill-box; transform-origin: center; animation: glow 6s ease-in-out infinite; }
+    @keyframes glow { 0%,100% { opacity: .55; transform: scale(1);} 50% { opacity: .8; transform: scale(1.05);} }
+
+    .cloud   { animation: drift 12s ease-in-out infinite; }
+    .c2      { animation-duration: 15s; animation-delay: -6s; }
+    @keyframes drift { 0%,100% { transform: translateX(0);} 50% { transform: translateX(26px);} }
+
+    .mew     { transform-box: fill-box; transform-origin: 10% 100%; animation: mew 7s infinite; }
+    @keyframes mew { 0%,55% { opacity: 0; transform: scale(.4);} 62% { opacity: 1; transform: scale(1.08);}
+                     66% { transform: scale(.96);} 70%,88% { opacity: 1; transform: scale(1);} 94%,100% { opacity: 0; transform: scale(.9);} }
+
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#bfe7d6"/><stop offset="55%" stop-color="#ffe2bd"/><stop offset="100%" stop-color="#ffcf9f"/>
+    </linearGradient>
+    <radialGradient id="moonG" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#fff8e2"/><stop offset="60%" stop-color="#ffefc4"/><stop offset="100%" stop-color="#ffe8ac"/>
+    </radialGradient>
+    <radialGradient id="glowG" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fff0be" stop-opacity=".8"/><stop offset="100%" stop-color="#fff0be" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="floorG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f6ad7e"/><stop offset="100%" stop-color="#df8a58"/>
+    </linearGradient>
+    <linearGradient id="cushionG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff8f68"/><stop offset="100%" stop-color="#f4714a"/>
+    </linearGradient>
+    <radialGradient id="furHead" cx="45%" cy="32%" r="80%">
+      <stop offset="0%" stop-color="#ffbd7c"/><stop offset="70%" stop-color="#f8a257"/><stop offset="100%" stop-color="#ef8f47"/>
+    </radialGradient>
+    <radialGradient id="furBody" cx="50%" cy="28%" r="85%">
+      <stop offset="0%" stop-color="#f9ab63"/><stop offset="85%" stop-color="#f0924a"/>
+    </radialGradient>
+    <radialGradient id="iris" cx="50%" cy="38%" r="70%">
+      <stop offset="0%" stop-color="#dff3b0"/><stop offset="55%" stop-color="#9ed45c"/><stop offset="100%" stop-color="#4f9e46"/>
+    </radialGradient>
+    <radialGradient id="vign" cx="50%" cy="45%" r="72%">
+      <stop offset="70%" stop-color="#5a2d14" stop-opacity="0"/><stop offset="100%" stop-color="#5a2d14" stop-opacity=".16"/>
+    </radialGradient>
+    <path id="spark" d="M0 -14 C 2.5 -4.5 4.5 -2.5 14 0 C 4.5 2.5 2.5 4.5 0 14 C -2.5 4.5 -4.5 2.5 -14 0 C -4.5 -2.5 -2.5 -4.5 0 -14 Z"/>
+    <path id="heart" d="M10 17.5 C 5 13 0 9.5 0 5.5 C 0 2.4 2.3 0 5 0 C 7.2 0 9 1.3 10 3.3 C 11 1.3 12.8 0 15 0 C 17.7 0 20 2.4 20 5.5 C 20 9.5 15 13 10 17.5 Z"/>
+  </defs>
+
+  <!-- sky, moon, clouds -->
+  <rect width="800" height="800" fill="url(#sky)"/>
+  <circle class="glow" cx="400" cy="300" r="252" fill="url(#glowG)"/>
+  <circle cx="400" cy="300" r="210" fill="url(#moonG)"/>
+  <!-- sleepy moon face peeking between the ears -->
+  <g stroke="#d9b56f" stroke-width="5" stroke-linecap="round" fill="none" opacity=".85">
+    <path d="M 330 158 q 12 9 24 0"/><path d="M 446 158 q 12 9 24 0"/><path d="M 383 176 q 17 11 34 0"/>
+  </g>
+  <g class="cloud" opacity=".5" fill="#ffffff">
+    <ellipse cx="140" cy="120" rx="34" ry="17"/><ellipse cx="168" cy="110" rx="25" ry="15"/><ellipse cx="188" cy="121" rx="22" ry="13"/>
+  </g>
+  <g class="cloud c2" opacity=".5" fill="#ffffff">
+    <ellipse cx="648" cy="96" rx="30" ry="15"/><ellipse cx="674" cy="88" rx="22" ry="13"/><ellipse cx="692" cy="98" rx="19" ry="11"/>
+  </g>
+
+  <!-- stars & sparkles -->
+  <g fill="#fff6d8">
+    <g transform="translate(120 118) scale(.9)"><use href="#spark" class="star"/></g>
+    <g transform="translate(215 70)  scale(.5)"><use href="#spark" class="star" style="animation-delay:.7s"/></g>
+    <g transform="translate(688 130) scale(.8)"><use href="#spark" class="star" style="animation-delay:1.4s"/></g>
+    <g transform="translate(745 300) scale(.6)"><use href="#spark" class="star" style="animation-delay:2.1s"/></g>
+    <g transform="translate(85 330)  scale(.55)"><use href="#spark" class="star" style="animation-delay:2.8s"/></g>
+    <g transform="translate(585 60)  scale(.55)"><use href="#spark" class="star" style="animation-delay:.5s"/></g>
+    <circle class="star" cx="160" cy="240" r="3" style="animation-delay:1s"/>
+    <circle class="star" cx="700" cy="215" r="3" style="animation-delay:2s"/>
+    <circle class="star" cx="95"  cy="480" r="2.5" style="animation-delay:1.6s"/>
+    <circle class="star" cx="722" cy="470" r="3" style="animation-delay:.3s"/>
+  </g>
+
+  <!-- floor & cushion -->
+  <path d="M 0 640 Q 200 615 430 625 Q 650 634 800 618 L 800 800 L 0 800 Z" fill="url(#floorG)"/>
+  <ellipse cx="400" cy="737" rx="252" ry="34" fill="#c96b43" opacity=".35"/>
+  <ellipse cx="400" cy="697" rx="218" ry="54" fill="#e5643f"/>
+  <ellipse cx="400" cy="686" rx="218" ry="54" fill="url(#cushionG)"/>
+  <ellipse cx="400" cy="684" rx="190" ry="40" fill="none" stroke="#ffe4d6" stroke-width="3" stroke-dasharray="12 9" opacity=".75"/>
+  <ellipse cx="400" cy="700" rx="170" ry="26" fill="#d95f39" opacity=".3"/>
+
+  <!-- tail (behind body) -->
+  <g class="tail">
+    <path d="M 508 614 C 640 600 662 470 588 436" fill="none" stroke="#f2964f" stroke-width="34" stroke-linecap="round"/>
+    <circle cx="588" cy="436" r="15" fill="#fff3e0"/>
+  </g>
 
   <!-- body -->
-  <path d="M 200 250 C 130 255 110 320 112 365 C 113 383 140 388 200 388 C 260 388 287 383 288 365 C 290 320 270 255 200 250 Z" fill="#F2A65E"/>
-  <ellipse cx="200" cy="340" rx="50" ry="46" fill="#FCEBD5"/>
-
-  <!-- front paws -->
-  <ellipse cx="160" cy="376" rx="26" ry="16" fill="#F2A65E"/>
-  <ellipse cx="240" cy="376" rx="26" ry="16" fill="#F2A65E"/>
-  <g stroke="#D98E45" stroke-width="3" stroke-linecap="round">
-    <path d="M 152 368 L 152 382"/><path d="M 168 368 L 168 382"/>
-    <path d="M 232 368 L 232 382"/><path d="M 248 368 L 248 382"/>
+  <g class="body">
+    <path d="M 268 668 C 252 560 300 470 400 462 C 500 470 548 560 532 668 C 536 690 500 700 400 700 C 300 700 264 690 268 668 Z" fill="url(#furBody)"/>
+    <ellipse cx="400" cy="592" rx="86" ry="82" fill="#fff3e0"/>
+    <ellipse cx="400" cy="512" rx="100" ry="15" fill="#cf6f38" opacity=".32"/>
+    <!-- side stripes -->
+    <g stroke="#e07a3f" stroke-width="12" stroke-linecap="round" fill="none" opacity=".7">
+      <path d="M 276 505 C 292 515 298 536 292 558"/><path d="M 268 562 C 284 572 290 592 284 612"/>
+      <path d="M 524 505 C 508 515 502 536 508 558"/><path d="M 532 562 C 516 572 510 592 516 612"/>
+    </g>
+    <!-- front legs & paws -->
+    <rect x="344" y="560" width="40" height="104" rx="20" fill="#f69c50"/>
+    <rect x="416" y="560" width="40" height="104" rx="20" fill="#f69c50"/>
+    <ellipse cx="364" cy="660" rx="22" ry="13" fill="#f69c50"/>
+    <ellipse cx="436" cy="660" rx="22" ry="13" fill="#f69c50"/>
+    <g stroke="#d9793f" stroke-width="3" stroke-linecap="round">
+      <path d="M 357 651 L 357 665"/><path d="M 371 651 L 371 665"/>
+      <path d="M 429 651 L 429 665"/><path d="M 443 651 L 443 665"/>
+    </g>
   </g>
-
-  <!-- ears -->
-  <path d="M 100 122 L 128 28 L 192 78 Z" fill="#F2A65E" stroke="#F2A65E" stroke-width="14" stroke-linejoin="round"/>
-  <path d="M 300 122 L 272 28 L 208 78 Z" fill="#F2A65E" stroke="#F2A65E" stroke-width="14" stroke-linejoin="round"/>
-  <path d="M 118 104 L 131 52 L 170 80 Z" fill="#F7A8B8" stroke="#F7A8B8" stroke-width="8" stroke-linejoin="round"/>
-  <path d="M 282 104 L 269 52 L 230 80 Z" fill="#F7A8B8" stroke="#F7A8B8" stroke-width="8" stroke-linejoin="round"/>
 
   <!-- head -->
-  <circle cx="200" cy="180" r="100" fill="#F2A65E"/>
+  <g class="head">
+    <path d="M 271 271 C 258 220 250 160 256 118 Q 258 106 270 112 C 300 138 322 172 332 220 C 312 245 292 260 271 271 Z" fill="#f2964f"/>
+    <path d="M 280 250 C 272 210 268 165 272 130 Q 274 122 281 126 C 300 146 315 172 322 208 C 308 228 295 240 280 250 Z" fill="#ffa396"/>
+    <g class="earR">
+      <path d="M 529 271 C 542 220 550 160 544 118 Q 542 106 530 112 C 500 138 478 172 468 220 C 488 245 508 260 529 271 Z" fill="#f2964f"/>
+      <path d="M 520 250 C 528 210 532 165 528 130 Q 526 122 519 126 C 500 146 485 172 478 208 C 492 228 505 240 520 250 Z" fill="#ffa396"/>
+    </g>
 
-  <!-- head stripes -->
-  <g stroke="#E28B45" stroke-width="9" stroke-linecap="round" fill="none">
-    <path d="M 178 104 Q 174 92 178 84"/>
-    <path d="M 200 106 L 200 82"/>
-    <path d="M 222 104 Q 226 92 222 84"/>
+    <circle cx="400" cy="352" r="152" fill="url(#furHead)"/>
+    <!-- forehead stripes -->
+    <g stroke="#e07a3f" stroke-linecap="round" fill="none" opacity=".8">
+      <path d="M 400 252 L 400 214" stroke-width="15"/>
+      <path d="M 364 248 L 352 212" stroke-width="13"/>
+      <path d="M 436 248 L 448 212" stroke-width="13"/>
+    </g>
+
+    <ellipse cx="400" cy="430" rx="84" ry="55" fill="#fff3e2"/>
+    <ellipse cx="293" cy="412" rx="25" ry="13" fill="#ff9078" opacity=".55"/>
+    <ellipse cx="507" cy="412" rx="25" ry="13" fill="#ff9078" opacity=".55"/>
+
+    <!-- eyes -->
+    <g class="eye">
+      <circle cx="340" cy="364" r="33" fill="url(#iris)"/>
+      <ellipse cx="340" cy="364" rx="12" ry="21" fill="#2a211c"/>
+      <circle cx="328" cy="352" r="11" fill="#ffffff"/>
+      <circle cx="350" cy="380" r="5" fill="#ffffff" opacity=".9"/>
+      <path d="M 309 354 Q 340 330 371 354" fill="none" stroke="#2c5c33" stroke-width="4" stroke-linecap="round" opacity=".9"/>
+    </g>
+    <g class="eye">
+      <circle cx="460" cy="364" r="33" fill="url(#iris)"/>
+      <ellipse cx="460" cy="364" rx="12" ry="21" fill="#2a211c"/>
+      <circle cx="448" cy="352" r="11" fill="#ffffff"/>
+      <circle cx="470" cy="380" r="5" fill="#ffffff" opacity=".9"/>
+      <path d="M 429 354 Q 460 330 491 354" fill="none" stroke="#2c5c33" stroke-width="4" stroke-linecap="round" opacity=".9"/>
+    </g>
+
+    <!-- nose & mouth -->
+    <path d="M 385 408 Q 400 400 415 408 Q 417 420 400 428 Q 383 420 385 408 Z" fill="#f06a5b"/>
+    <ellipse cx="394" cy="410" rx="4" ry="2.5" fill="#ffd0c4" opacity=".9"/>
+    <path d="M 376 441 C 386 448 400 442 400 428 C 400 442 414 448 424 441" fill="none" stroke="#7a4632" stroke-width="5" stroke-linecap="round"/>
+
+    <!-- whiskers -->
+    <g class="whiskL" stroke="#ffffff" stroke-width="4" stroke-linecap="round" fill="none" opacity=".85">
+      <path d="M 312 408 C 258 400 214 398 168 404"/>
+      <path d="M 310 424 C 254 424 208 428 162 438"/>
+      <path d="M 312 440 C 262 448 224 460 178 474"/>
+    </g>
+    <g class="whiskR" stroke="#ffffff" stroke-width="4" stroke-linecap="round" fill="none" opacity=".85">
+      <path d="M 488 408 C 542 400 586 398 632 404"/>
+      <path d="M 490 424 C 546 424 592 428 638 438"/>
+      <path d="M 488 440 C 538 448 576 460 622 474"/>
+    </g>
+
+    <!-- collar & bell -->
+    <path d="M 312 472 Q 400 514 488 472" fill="none" stroke="#ff5d6c" stroke-width="15" stroke-linecap="round"/>
+    <circle cx="400" cy="495" r="11" fill="#ffd166" stroke="#d99e17" stroke-width="2"/>
+    <path d="M 392.5 495 L 407.5 495" stroke="#d99e17" stroke-width="2"/>
+    <circle cx="400" cy="500.5" r="1.8" fill="#d99e17"/>
   </g>
 
-  <!-- muzzle -->
-  <ellipse cx="200" cy="225" rx="45" ry="32" fill="#FCEBD5"/>
-
-  <!-- big cute eyes -->
-  <circle cx="160" cy="172" r="18" fill="#45332B"/>
-  <circle cx="240" cy="172" r="18" fill="#45332B"/>
-  <circle cx="166" cy="165" r="6" fill="#FFFFFF"/>
-  <circle cx="155" cy="179" r="3" fill="#FFFFFF" opacity="0.8"/>
-  <circle cx="246" cy="165" r="6" fill="#FFFFFF"/>
-  <circle cx="235" cy="179" r="3" fill="#FFFFFF" opacity="0.8"/>
-
-  <!-- nose & mouth -->
-  <path d="M 190 208 L 210 208 L 200 221 Z" fill="#F28CA8" stroke="#F28CA8" stroke-width="6" stroke-linejoin="round"/>
-  <g stroke="#45332B" stroke-width="4" stroke-linecap="round" fill="none">
-    <path d="M 200 221 L 200 230"/>
-    <path d="M 200 230 Q 192 239 184 231"/>
-    <path d="M 200 230 Q 208 239 216 231"/>
+  <!-- yarn ball (in front) -->
+  <ellipse cx="655" cy="737" rx="52" ry="12" fill="#c96b43" opacity=".4"/>
+  <g class="yarn">
+    <path d="M 620 722 C 578 744 522 740 498 712 C 484 696 494 682 507 690 C 516 696 512 706 501 704" fill="none" stroke="#ff5d73" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="655" cy="693" r="44" fill="#ff5d73"/>
+    <g fill="none" stroke="#d84462" stroke-width="4" stroke-linecap="round" opacity=".9">
+      <path d="M 618 669 Q 656 685 694 667"/><path d="M 614 683 Q 655 703 697 681"/>
+      <path d="M 613 699 Q 655 719 698 697"/><path d="M 622 712 Q 655 726 690 710"/>
+    </g>
+    <ellipse cx="641" cy="678" rx="12" ry="8" fill="#ff8a9c" opacity=".8"/>
   </g>
 
-  <!-- blush -->
-  <ellipse cx="142" cy="212" rx="15" ry="9" fill="#F9A8B8" opacity="0.6"/>
-  <ellipse cx="258" cy="212" rx="15" ry="9" fill="#F9A8B8" opacity="0.6"/>
+  <!-- floating hearts -->
+  <g transform="translate(232 240) scale(1.1)"><use href="#heart" class="heart" fill="#ff8fa3"/></g>
+  <g transform="translate(196 302) scale(.8)"><use href="#heart" class="heart h2" fill="#ff9fb0"/></g>
+  <g transform="translate(266 172) scale(.95)"><use href="#heart" class="heart h3" fill="#ffb3c0"/></g>
 
-  <!-- whiskers -->
-  <g stroke="#C08552" stroke-width="3.5" stroke-linecap="round">
-    <path d="M 138 200 L 64 190"/><path d="M 136 214 L 58 214"/><path d="M 138 228 L 66 238"/>
-    <path d="M 262 200 L 336 190"/><path d="M 264 214 L 342 214"/><path d="M 262 228 L 334 238"/>
+  <!-- "mew~" bubble -->
+  <g class="mew">
+    <path d="M 566 226 L 524 258 L 596 232 Z" fill="#ffffff"/>
+    <rect x="552" y="168" width="138" height="62" rx="31" fill="#ffffff" stroke="#f2d5ae" stroke-width="2"/>
+    <text x="621" y="212" text-anchor="middle" font-family="'Segoe Script','Comic Sans MS',cursive" font-size="34" fill="#e2554d">mew~</text>
   </g>
 
-  <!-- little floating hearts -->
-  <path d="M 330 118 c -6 -8 -18 -4 -18 6 c 0 8 10 14 18 22 c 8 -8 18 -14 18 -22 c 0 -10 -12 -14 -18 -6 Z" fill="#F78FB3"/>
-  <path d="M 75 105 c -4 -6 -13 -3 -13 4 c 0 6 7 10 13 16 c 6 -6 13 -10 13 -16 c 0 -7 -9 -10 -13 -4 Z" fill="#F7A8B8" opacity="0.8"/>
+  <rect width="800" height="800" fill="url(#vign)" pointer-events="none"/>
 </svg>

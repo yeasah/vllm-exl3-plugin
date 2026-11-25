@@ -24,6 +24,15 @@ kv_cache_dtype: nvfp4
 language_model_only: yes
 ```
 
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 3060|10.2 GiB|0.6 GiB|15K|1|371 t/s|23 t/s|
+|RTX 3060|10.2 GiB|0.6 GiB|15K|4|142 t/s|55 t/s|
+|RTX 5060 Ti|15.2 GiB|0.6 GiB|121K|1|851 t/s|28 t/s|
+|RTX 5060 Ti|15.2 GiB|0.6 GiB|121K|4|2241 t/s|70 t/s|
+|RTX 5070 Ti|15.2 GiB|0.6 GiB|96K|1|1652 t/s|47 t/s|
+|RTX 5070 Ti|15.2 GiB|0.6 GiB|96K|4|4352 t/s|120 t/s|
+
 ## 24GiB+
 
 Offloaded vision, 4.0bpw, NFVP4 KV cache. To enable MTP, uncomment the `speculative_config` line.
@@ -43,17 +52,8 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
 
-## Benchmarks
-
-|Platform|VRAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
-|---|---|---|---|---|---|
-|RTX 3060|10.8 GiB|38K|1|386.75 t/s|21.99 t/s|
-|RTX 3060|10.8 GiB|38K|2|643.38 t/s|22.93 t/s|
-|RTX 5060 ti|15.2 GiB|108K|1|714.69 t/s|27.45 t/s|
-|RTX 5060 ti|15.2 GiB|108K|4|1880.57 t/s|51.09 t/s|
-|RTX 5070 ti|14.9 GiB|105K|1|1293.09 t/s|46.38 t/s|
-|RTX 5070 ti|14.9 GiB|105K|4|3468.45 t/s|89.47 t/s|
-
 ## Cat!
+
+The following cat was produced by `yeasah/Qwen3.8-27B-exl3` at `3.50bpw-H5` on a RTX 5060 Ti in 1066.93 seconds, using 28849 tokens (including thoughts, if any)
 
 <img src="cats/Qwen3.8-27B.svg" alt="meow">

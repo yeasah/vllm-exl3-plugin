@@ -1,31 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
-  <!-- Background Circle -->
-  <circle cx="100" cy="100" r="90" fill="#f0f0f0" />
-  
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background (Optional) -->
+  <rect width="200" height="200" fill="#fdfcf0" rx="20" />
+
   <!-- Ears -->
-  <path d="M60 80 L40 30 L90 70 Z" fill="#555" />
-  <path d="M140 80 L160 30 L110 70 Z" fill="#555" />
+  <path d="M60 80 L40 30 L90 60 Z" fill="#7a7a7a" /> <!-- Left Ear -->
+  <path d="M140 80 L160 30 L110 60 Z" fill="#7a7a7a" /> <!-- Right Ear -->
   
-  <!-- Face/Head -->
-  <circle cx="100" cy="100" r="60" fill="#888" />
+  <!-- Head -->
+  <circle cx="100" cy="100" r="60" fill="#a0a0a0" />
   
   <!-- Eyes -->
-  <circle cx="80" cy="90" r="8" fill="white" />
-  <circle cx="80" cy="90" r="4" fill="black" />
-  
-  <circle cx="120" cy="90" r="8" fill="white" />
-  <circle cx="120" cy="90" r="4" fill="black" />
+  <circle cx="80" cy="90" r="6" fill="#333" />  <!-- Left Eye -->
+  <circle cx="120" cy="90" r="6" fill="#333" /> <!-- Right Eye -->
   
   <!-- Nose -->
-  <path d="M95 110 L105 110 L100 115 Z" fill="#ffb6c1" />
+  <path d="M95 105 Q100 110 105 105" stroke="#ff9999" stroke-width="3" fill="none" stroke-linecap="round" />
+  
+  <!-- Mouth (W shape) -->
+  <path d="M90 115 Q100 125 110 115" stroke="#333" stroke-width="2" fill="none" />
   
   <!-- Whiskers -->
-  <line x1="70" y1="110" x2="30" y2="100" stroke="black" stroke-width="2" />
-  <line x1="70" y1="120" x2="30" y2="130" stroke="black" stroke-width="2" />
-  
-  <line x1="130" y1="110" x2="170" y2="100" stroke="black" stroke-width="2" />
-  <line x1="130" y1="120" x2="170" y2="130" stroke="black" stroke-width="2" />
-  
-  <!-- Mouth -->
-  <path d="M90 120 Q100 130 110 120" fill="none" stroke="black" stroke-width="2" />
+  <!-- Left side -->
+  <line x1="70" y1="110" x2="30" y2="100" stroke="#333" stroke-width="1" />
+  <line x1="70" y1="120" x2="30" y2="130" stroke="#333" stroke-width="1" />
+  <!-- Right side -->
+  <line x1="130" y1="110" x2="170" y2="100" stroke="#333" stroke-width="1" />
+  <line x1="130" y1="120" x2="170" y2="130" stroke="#333" stroke-width="1" />
 </svg>

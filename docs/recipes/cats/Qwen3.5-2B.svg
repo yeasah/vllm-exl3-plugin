@@ -1,56 +1,63 @@
-<svg width="400" height="300" viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
+<svg width="400" height="350" viewBox="0 0 400 350" xmlns="http://www.w3.org/2000/svg">
   <!-- Background -->
-  <rect width="400" height="300" fill="#f8f5f7" />
-
-  <!-- Shadow -->
-  <ellipse cx="200" cy="280" rx="90" ry="30" fill="#d6cccd" opacity="0.6" />
-
-  <!-- Neck -->
-  <path d="M170 220 Q200 180 230 220 L230 215" stroke="#b5aeb5" stroke-width="12" stroke-linecap="round" />
-
-  <!-- Head -->
-  <circle cx="200" cy="170" r="75" fill="#fff" />
-
-  <!-- Ears -->
-  <g transform="translate(160, 10)">
-    <path d="M30 40 Q-20 35 -10 55 T10 30 L20 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
-    <path d="M170 40 Q250 35 260 55 T230 30 L230 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
-    <circle cx="40" cy="35" r="3" fill="#ff0000" />
-    <circle cx="-15" cy="55" r="3" fill="#ff0000" />
-    <circle cx="130" cy="30" r="3" fill="#ff0000" />
-  </g>
+  <rect width="400" height="350" fill="#f7eeb9"/>
   
-  <g transform="translate(270, 10)">
-    <path d="M30 40 Q250 35 260 55 T230 30 L230 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
-    <path d="M170 40 Q200 35 230 55 T190 30 L190 50 Z" fill="#ffcccc" stroke="#ffc6c6" stroke-width="2" />
-    <circle cx="40" cy="35" r="3" fill="#ff0000" />
-    <circle cx="15" cy="55" r="3" fill="#ff0000" />
-    <circle cx="100" cy="30" r="3" fill="#ff0000" />
-  </g>
+  <!-- Ground/Snow pattern -->
+  <path d="M100,320 L140,330 L160,310 L180,335 L200,315 L220,340 L240,310 L260,335 L280,315 L300,340 L320,310 L340,335 L360,315 L380,340 Z" fill="#dcdde0"/>
+  <path d="M250,300 L300,295 L310,310 L320,290 L330,305 L340,285 L350,300 L360,280 L370,305 L380,280 Z" fill="#dddfe8"/>
 
   <!-- Body -->
-  <ellipse cx="200" cy="190" rx="55" ry="35" fill="#fff" />
-  <path d="M160 180 Q200 140 240 180" stroke="#b5aeb5" stroke-width="8" stroke-linecap="round" />
+  <ellipse cx="200" cy="200" rx="60" ry="65" fill="#ffa7cc" transform="rotate(-5 200 200)"/>
+  <circle cx="200" cy="200" r="20" fill="#fff"/>
+  
+  <!-- Front Paws -->
+  <circle cx="145" cy="235" r="10" fill="#fff" stroke="#aaa" stroke-width="2"/>
+  <circle cx="155" cy="240" r="12" fill="#fff" stroke="#aaa" stroke-width="2"/>
+  
+  <circle cx="255" cy="235" r="10" fill="#fff" stroke="#aaa" stroke-width="2"/>
+  <circle cx="245" cy="240" r="12" fill="#fff" stroke="#aaa" stroke-width="2"/>
 
-  <!-- Tail -->
-  <ellipse cx="120" cy="180" rx="12" ry="10" fill="transparent" />
-  <path d="M120 180 Q90 210 90 200 Q80 190 120 180" fill="#ffbaba" stroke="#ffc6c6" stroke-width="8" />
-  <path d="M120 180 Q180 150 180 200 Q170 230 120 180" fill="#fff" />
+  <!-- Head -->
+  <circle cx="200" cy="130" r="55" fill="#ffadc4"/>
+  <circle cx="200" cy="130" r="25" fill="white" opacity="0.9"/>
 
-  <!-- Legs -->
-  <g stroke="#b5aeb5" stroke-width="14" stroke-linecap="round">
-    <line x1="140" y1="240" x2="140" y2="280" /> <!-- Left Front -->
-    <line x1="200" y1="240" x2="200" y2="280" /> <!-- Right Front -->
-    <line x1="140" y1="280" x2="170" y2="290" /> <!-- Left Back -->
-    <line x1="200" y1="280" x2="230" y2="290" /> <!-- Right Back -->
-  </g>
+  <!-- Eyes -->
+  <ellipse cx="160" cy="145" rx="9" ry="10" fill="none" stroke="#333" stroke-width="2.5" transform="rotate(40 160 145)"/>
+  <ellipse cx="160" cy="145" rx="9" ry="10" fill="none" stroke="#333" stroke-width="2.5" transform="rotate(-40 160 145)"/>
+  
+  <ellipse cx="175" cy="135" rx="6" ry="6" fill="black"/>
+  <ellipse cx="185" cy="135" rx="6" ry="6" fill="black"/>
+  
+  <ellipse cx="135" cy="155" rx="6" ry="6" fill="black"/>
+  <ellipse cx="125" cy="155" rx="6" ry="6" fill="black"/>
+
+  <!-- Nose and Mouth -->
+  <ellipse cx="200" cy="165" rx="4" ry="5" fill="#ff6ec3"/>
+  <path d="M208 165 Q200 170 192 165" fill="#ff6ec3" stroke="#ff6ec3" stroke-width="1"/>
+  
+  <!-- Ears -->
+  <ellipse cx="125" cy="90" rx="8" ry="20" fill="#ffadac" stroke="#ff6ec3" stroke-width="2"/>
+  <ellipse cx="255" cy="90" rx="8" ry="20" fill="#ffadac" stroke="#ff6ec3" stroke-width="2"/>
+  <path d="M100 90 C80 60 120 60 140 90 Z" fill="#ffadac"/>
+  <path d="M300 90 C320 60 280 60 260 90 Z" fill="#ffadac"/>
+
+  <!-- White Face Markings (Mustache/Face) -->
+  <ellipse cx="200" cy="160" rx="15" ry="5" fill="rgba(255,255,255,0.4)"/>
+  <circle cx="200" cy="155" r="5" fill="white"/>
 
   <!-- Whiskers -->
-  <line x1="175" y1="150" x2="175" y2="100" stroke="#aaaaaa" stroke-width="1"/>
-  <line x1="175" y1="180" x2="175" y2="100" stroke="#aaaaaa" stroke-width="1"/>
-  <line x1="200" y1="150" x2="220" y2="180" stroke="#aaaaaa" stroke-width="1"/>
-  <line x1="200" y1="180" x2="220" y2="150" stroke="#aaaaaa" stroke-width="1"/>
-  <line x1="175" y1="200" x2="175" y2="230" stroke="#aaaaaa" stroke-width="1"/>
-  <line x1="200" y1="200" x2="200" y2="230" stroke="#aaaaaa" stroke-width="1"/>
+  <line x1="200" y1="130" x2="200" y2="110" stroke="#ffb6bf" stroke-width="1"/>
+  <line x1="200" y1="130" x2="190" y2="110" stroke="#ffb6bf" stroke-width="1"/>
+  <line x1="200" y1="130" x2="210" y2="110" stroke="#ffb6bf" stroke-width="1"/>
+  
+  <line x1="200" y1="130" x2="210" y2="150" stroke="#ffb6bf" stroke-width="1"/>
+  <line x1="200" y1="130" x2="190" y2="150" stroke="#ffb6bf" stroke-width="1"/>
+
+  <!-- Tail -->
+  <path d="M230 140 Q240 110 250 100 T280 110 T230 140" fill="none" stroke="#ff6ec3" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="250" cy="100" r="3" fill="#fff" stroke="#ff6ec3" stroke-width="2"/>
+
+  <!-- Fluffy Back/Pelage -->
+  <ellipse cx="200" cy="210" rx="35" ry="20" fill="none" stroke="#ffadac" stroke-width="1"/>
 
 </svg>

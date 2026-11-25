@@ -1,66 +1,121 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="100%" height="100%">
-  <style>
-    .body { fill: #FFB347; }
-    .face { fill: #FFE6D0; }
-    .ear-inner { fill: #FF9966; }
-    .eye { fill: #333333; }
-    .eye-highlight { fill: #FFFFFF; }
-    .nose { fill: #FF69B4; }
-    .mouth { fill: none; stroke: #333333; stroke-width: 3; stroke-linecap: round; }
-    .whisker { fill: none; stroke: #333333; stroke-width: 2; stroke-linecap: round; }
-    .blush { fill: #FFB6C1; opacity: 0.6; }
-  </style>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 500" width="400" height="500">
+  <defs>
+    <!-- Soft gradient for cat's body -->
+    <radialGradient id="bodyGrad" cx="50%" cy="45%" r="50%">
+      <stop offset="0%" stop-color="#FDD835"/>
+      <stop offset="100%" stop-color="#F9A825"/>
+    </radialGradient>
+    <radialGradient id="headGrad" cx="50%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#FFF176"/>
+      <stop offset="100%" stop-color="#FFCA28"/>
+    </radialGradient>
+    <!-- Cheek blush -->
+    <radialGradient id="blush" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FF8A80" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#FF8A80" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="400" height="500" fill="#E8F5E9" rx="20"/>
+
+  <!-- Shadow under cat -->
+  <ellipse cx="200" cy="470" rx="120" ry="15" fill="#A5D6A7" opacity="0.5"/>
+
+  <!-- Tail -->
+  <path d="M 280 380 Q 340 350 350 280 Q 355 250 340 240" 
+        fill="none" stroke="url(#bodyGrad)" stroke-width="22" stroke-linecap="round"/>
+  <!-- Tail stripes -->
+  <path d="M 340 270 Q 345 275 340 280" 
+        fill="none" stroke="#F57F17" stroke-width="22" stroke-linecap="round"/>
+  <path d="M 332 255 Q 337 260 332 265" 
+        fill="none" stroke="#F57F17" stroke-width="22" stroke-linecap="round"/>
 
   <!-- Body -->
-  <ellipse cx="200" cy="340" rx="110" ry="70" class="body" />
-  
-  <!-- Left Ear -->
-  <path d="M 130 160 L 100 70 L 180 130 Z" class="body" />
-  <path d="M 135 150 L 115 90 L 170 130 Z" class="ear-inner" />
+  <ellipse cx="200" cy="370" rx="90" ry="85" fill="url(#bodyGrad)"/>
 
-  <!-- Right Ear -->
-  <path d="M 270 160 L 300 70 L 220 130 Z" class="body" />
-  <path d="M 265 150 L 285 90 L 230 130 Z" class="ear-inner" />
+  <!-- Belly -->
+  <ellipse cx="200" cy="390" rx="55" ry="50" fill="#FFF9C4"/>
 
-  <!-- Head Base -->
-  <circle cx="200" cy="210" r="95" class="body" />
-  
-  <!-- Face Highlight Area -->
-  <ellipse cx="200" cy="240" rx="60" ry="50" class="face" />
+  <!-- Body stripes -->
+  <path d="M 140 340 Q 160 350 155 370" fill="none" stroke="#F57F17" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 145 355 Q 165 365 160 385" fill="none" stroke="#F57F17" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 260 340 Q 240 350 245 370" fill="none" stroke="#F57F17" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 255 355 Q 235 365 240 385" fill="none" stroke="#F57F17" stroke-width="4" stroke-linecap="round"/>
 
-  <!-- Left Eye -->
-  <g transform="translate(160, 190)">
-    <circle cx="0" cy="0" r="14" class="eye" />
-    <circle cx="4" cy="-4" r="4" class="eye-highlight" />
-    <circle cx="-4" cy="4" r="1.5" class="eye-highlight" />
-  </g>
+  <!-- Left ear -->
+  <polygon points="130,200 110,110 180,175" fill="url(#bodyGrad)" stroke="#F57F17" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="135,195 120,130 175,175" fill="#FF8A80"/>
 
-  <!-- Right Eye -->
-  <g transform="translate(240, 190)">
-    <circle cx="0" cy="0" r="14" class="eye" />
-    <circle cx="4" cy="-4" r="4" class="eye-highlight" />
-    <circle cx="-4" cy="4" r="1.5" class="eye-highlight" />
-  </g>
+  <!-- Right ear -->
+  <polygon points="270,200 290,110 220,175" fill="url(#bodyGrad)" stroke="#F57F17" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="265,195 280,130 225,175" fill="#FF8A80"/>
 
-  <!-- Blushes -->
-  <ellipse cx="140" cy="230" rx="12" ry="8" class="blush" />
-  <ellipse cx="260" cy="230" rx="12" ry="8" class="blush" />
+  <!-- Head -->
+  <ellipse cx="200" cy="220" rx="85" ry="75" fill="url(#headGrad)"/>
+
+  <!-- Head stripes -->
+  <path d="M 190 155 L 195 175" fill="none" stroke="#F57F17" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 210 155 L 205 175" fill="none" stroke="#F57F17" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 200 150 L 200 172" fill="none" stroke="#F57F17" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Left eye -->
+  <ellipse cx="170" cy="215" rx="22" ry="24" fill="white"/>
+  <ellipse cx="172" cy="218" rx="14" ry="16" fill="#5D4037"/>
+  <ellipse cx="173" cy="215" rx="8" ry="9" fill="#1A1A1A"/>
+  <!-- Eye shine -->
+  <ellipse cx="167" cy="210" rx="5" ry="5" fill="white"/>
+  <ellipse cx="176" cy="222" rx="3" ry="3" fill="white"/>
+
+  <!-- Right eye -->
+  <ellipse cx="230" cy="215" rx="22" ry="24" fill="white"/>
+  <ellipse cx="228" cy="218" rx="14" ry="16" fill="#5D4037"/>
+  <ellipse cx="227" cy="215" rx="8" ry="9" fill="#1A1A1A"/>
+  <!-- Eye shine -->
+  <ellipse cx="223" cy="210" rx="5" ry="5" fill="white"/>
+  <ellipse cx="232" cy="222" rx="3" ry="3" fill="white"/>
 
   <!-- Nose -->
-  <path d="M 190 235 L 210 235 L 200 250 Z" class="nose" />
+  <polygon points="200,245 193,238 207,238" fill="#FF8A80" stroke="#E57373" stroke-width="1" stroke-linejoin="round"/>
 
   <!-- Mouth -->
-  <path d="M 200 250 L 200 260" class="mouth" />
-  <path d="M 200 260 C 180 280 170 260 160 260" class="mouth" />
-  <path d="M 200 260 C 220 280 230 260 240 260" class="mouth" />
+  <path d="M 193 245 Q 197 252 200 248 Q 203 252 207 245" 
+        fill="none" stroke="#5D4037" stroke-width="2" stroke-linecap="round"/>
 
-  <!-- Whiskers Left -->
-  <line x1="130" y1="230" x2="90" y2="220" class="whisker" />
-  <line x1="130" y1="250" x2="80" y2="250" class="whisker" />
-  <line x1="130" y1="270" x2="90" y2="280" class="whisker" />
+  <!-- Left whiskers -->
+  <line x1="120" y1="230" x2="160" y2="240" stroke="#795548" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="115" y1="245" x2="158" y2="245" stroke="#795548" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="120" y1="260" x2="160" y2="250" stroke="#795548" stroke-width="1.5" stroke-linecap="round"/>
 
-  <!-- Whiskers Right -->
-  <line x1="270" y1="230" x2="310" y2="220" class="whisker" />
-  <line x1="270" y1="250" x2="320" y2="250" class="whisker" />
-  <line x1="270" y1="270" x2="310" y2="280" class="whisker" />
+  <!-- Right whiskers -->
+  <line x1="280" y1="230" x2="240" y2="240" stroke="#795548" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="285" y1="245" x2="242" y2="245" stroke="#795548" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="280" y1="260" x2="240" y2="250" stroke="#795548" stroke-width="1.5" stroke-linecap="round"/>
+
+  <!-- Cheek blush -->
+  <ellipse cx="145" cy="240" rx="15" ry="10" fill="url(#blush)"/>
+  <ellipse cx="255" cy="240" rx="15" ry="10" fill="url(#blush)"/>
+
+  <!-- Left paw -->
+  <ellipse cx="145" cy="440" rx="30" ry="20" fill="url(#bodyGrad)"/>
+  <ellipse cx="140" cy="435" rx="12" ry="8" fill="#FFF9C4"/>
+  <ellipse cx="155" cy="435" rx="12" ry="8" fill="#FFF9C4"/>
+
+  <!-- Right paw -->
+  <ellipse cx="255" cy="440" rx="30" ry="20" fill="url(#bodyGrad)"/>
+  <ellipse cx="250" cy="435" rx="12" ry="8" fill="#FFF9C4"/>
+  <ellipse cx="265" cy="435" rx="12" ry="8" fill="#FFF9C4"/>
+
+  <!-- Cute collar -->
+  <path d="M 130 300 Q 200 320 270 300" fill="none" stroke="#E53935" stroke-width="6" stroke-linecap="round"/>
+  <!-- Collar bell -->
+  <circle cx="200" cy="310" r="10" fill="#FFD54F" stroke="#F9A825" stroke-width="2"/>
+  <line x1="200" y1="305" x2="200" y2="316" stroke="#F9A825" stroke-width="1.5"/>
+  <circle cx="200" cy="316" r="2" fill="#F9A825"/>
+
+  <!-- Sparkles / decorations -->
+  <text x="60" y="80" font-size="24" fill="#FFD54F">✨</text>
+  <text x="320" y="90" font-size="20" fill="#FFD54F">✨</text>
+  <text x="50" y="400" font-size="18" fill="#FFD54F">⭐</text>
+  <text x="340" y="350" font-size="22" fill="#FFD54F">⭐</text>
 </svg>

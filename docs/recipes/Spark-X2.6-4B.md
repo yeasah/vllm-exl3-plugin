@@ -29,6 +29,17 @@ tool_call_parser: spark25
 reasoning_parser: qwen3
 ```
 
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB|0.2 GiB|603K|1|2514 t/s|89 t/s|
+|RTX 3060|10.1 GiB|0.2 GiB|603K|4|7774 t/s|240 t/s|
+|RTX 5060 Ti|15.1 GiB|0.2 GiB|613K|1|5334 t/s|122 t/s|
+|RTX 5060 Ti|15.1 GiB|0.2 GiB|613K|4|15146 t/s|340 t/s|
+|RTX 5070 Ti|15.1 GiB|0.2 GiB|584K|1|6903 t/s|171 t/s|
+|RTX 5070 Ti|15.1 GiB|0.2 GiB|584K|4|29278 t/s|460 t/s|
+
 ## Cat!
+
+The following cat was produced by `UnstableLlama/Spark-X2.6-4B-exl3` at `4.00bpw` on a RTX 5060 Ti in 128.38 seconds, using 15056 tokens (including thoughts, if any)
 
 <img src="cats/Spark-X2.6-4B.svg" alt="meow">

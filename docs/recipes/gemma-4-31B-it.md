@@ -26,6 +26,13 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"model":"google/gemma-4-31B-it-assistant","num_speculative_tokens":4}'
 ```
 
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 5060 Ti x2|30.0 GiB|0.0 GiB|260K|1|1344 t/s|37 t/s|
+|RTX 5060 Ti x2|30.0 GiB|0.0 GiB|260K|4|4002 t/s|99 t/s|
+
 ## Cat!
+
+The following cat was produced by `turboderp/gemma-4-31B-it-exl3` at `4.00bpw_mul1` on a RTX 5060 Ti x2 in 25.71 seconds, using 955 tokens (including thoughts, if any)
 
 <img src="cats/gemma-4-31B-it.svg" alt="meow">

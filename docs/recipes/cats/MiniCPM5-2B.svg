@@ -1,25 +1,51 @@
 <svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <title>Cute Cat</title>
+  <!-- Background gradient for a soft feel -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f5f5f5"/>
+      <stop offset="100%" stop-color="#faf9f9"/>
+    </radialGradient>
+    <!-- Head gradient -->
+    <radialGradient id="head" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffe8a8"/>
+      <stop offset="100%" stop-color="#ffb347"/>
+    </radialGradient>
+    <!-- Body gradient -->
+    <radialGradient id="body" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#e0f7fa"/>
+      <stop offset="100%" stop-color="#ffb8d9"/>
+    </radialGradient>
+    <!-- Smile gradient -->
+    <radialGradient id="smile" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fff"/>
+      <stop offset="100%" stop-color="#ffebcc"/>
+    </radialGradient>
+  </defs>
+
   <!-- Background -->
-  <rect width="200" height="200" fill="#f7f9fb"/>
-  
-  <!-- Cat body (circle) -->
-  <circle cx="100" cy="100" r="60" fill="#ffe0b0"/>
-  
-  <!-- Cat ears (two triangles) -->
-  <polygon points="70,95 90,95 100,110" fill="#ffe0b0"/>
-  <polygon points="130,95 150,95 100,110" fill="#ffe0b0"/>
-  
-  <!-- Cat eyes -->
-  <circle cx="80" cy="95" r="10" fill="#ffd93d"/>
-  <circle cx="120" cy="95" r="10" fill="#ffd93d"/>
-  
-  <!-- Cat nose -->
-  <path d="M90,108 L100,116 L110,108" fill="#ffcc33" stroke="#d4af37" stroke-width="2"/>
-  
-  <!-- Cat paws (small circles) -->
-  <circle cx="75" cy="165" r="8" fill="#ffe0b0"/>
-  <circle cx="125" cy="165" r="8" fill="#ffe0b0"/>
-  
-  <!-- Cat tail (rounded shape) -->
-  <path d="M100,135 Q100,120 90,110" fill="#ffe0b0"/>
+  <rect x="0" y="0" width="200" height="200" fill="url(#bg)"/>
+
+  <!-- Cat silhouette (simple cartoon style) -->
+  <circle cx="80" cy="95" r="35" fill="url(#head)"/>
+  <ellipse cx="80" cy="95" rx="35" ry="28" fill="url(#body)"/>
+  <!-- Tail -->
+  <path d="M80,60 Q80,52 100,44 Q120,34 120,24 Q120,14 80,14 Z"
+        fill="none" stroke="#2e7d32" stroke-width="2"/>
+  <!-- Legs (two lines) -->
+  <line x1="80" y1="115" x2="80" y2="150" stroke="#2e7d32" stroke-width="2"/>
+  <line x1="80" y1="115" x2="80" y2="150" stroke="#2e7d32" stroke-width="2"/>
+  <!-- Ears -->
+  <path d="M60,95 Q60,85 56,82 Q60,78 66,82 Z" fill="#2e7d32"/>
+  <path d="M140,95 Q140,85 144,82 Q140,78 156,82 Z" fill="#2e7d32"/>
+  <!-- Eyes -->
+  <circle cx="80" cy="104" r="5" fill="#2e7d32"/>
+  <circle cx="80" cy="105" r="5" fill="#2e7d32"/>
+  <!-- Smile -->
+  <path d="M70,102 Q70,94 80,88 Q90,82 100,76 Q110,70 110,62 Q110,56 100,48 Q90,40 80,32 Q70,24 70,18 Z"
+        fill="url(#smile)" />
+  <!-- Some simple fur circles for a touch of fun -->
+  <circle cx="40" cy="90" r="4" fill="#2e7d32"/>
+  <circle cx="100" cy="90" r="4" fill="#2e7d32"/>
+  <circle cx="160" cy="90" r="4" fill="#2e7d32"/>
 </svg>

@@ -1,35 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
-  <!-- Background (optional, transparent by default) -->
-  <rect width="200" height="200" fill="none"/>
-
-  <!-- Body -->
-  <ellipse cx="100" cy="140" rx="50" ry="40" fill="#FFD700"/>
-
-  <!-- Head -->
-  <circle cx="100" cy="90" r="40" fill="#FFD700"/>
-
+<svg width="400" height="500" viewBox="0 0 400 500" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="400" height="500" fill="#f5e6d3" rx="100" ry="100"/>
+  
+  <!-- Cat Body -->
+  <ellipse cx="200" cy="350" rx="80" ry="100" fill="#ffe4b5"/>
+  
   <!-- Ears -->
-  <polygon points="65,55 75,35 85,55" fill="#FFA500"/>
-  <polygon points="135,55 125,35 115,55" fill="#FFA500"/>
-
+  <ellipse cx="140" cy="200" rx="40" ry="55" fill="#ffe0b3" transform="rotate(-30 140 200)"/>
+  <ellipse cx="140" cy="200" rx="35" ry="48" fill="#ffcc80" transform="rotate(-30 140 200)"/>
+  <ellipse cx="260" cy="200" rx="40" ry="55" fill="#ffeff0" transform="rotate(30 260 200)"/>
+  <ellipse cx="260" cy="200" rx="35" ry="48" fill="#ffcc80" transform="rotate(30 260 200)"/>
+  
+  <!-- Inner Ears -->
+  <ellipse cx="140" cy="200" rx="20" ry="30" fill="#ff6b95"/>
+  <ellipse cx="260" cy="200" rx="20" ry="30" fill="#ff6b95"/>
+  
+  <!-- Head -->
+  <ellipse cx="200" cy="250" rx="85" ry="75" fill="#ffe4b5"/>
+  
   <!-- Eyes -->
-  <circle cx="80" cy="85" r="8" fill="#333"/>
-  <circle cx="120" cy="85" r="8" fill="#333"/>
-  <circle cx="83" cy="82" r="3" fill="white"/>
-  <circle cx="123" cy="82" r="3" fill="white"/>
-
+  <circle cx="170" cy="230" r="12" fill="white"/>
+  <circle cx="170" cy="230" r="7" fill="black"/>
+  <circle cx="170" cy="228" r="3" fill="white"/>
+  <circle cx="230" cy="230" r="12" fill="white"/>
+  <circle cx="230" cy="230" r="7" fill="black"/>
+  <circle cx="230" cy="228" r="3" fill="white"/>
+  
   <!-- Nose -->
-  <polygon points="95,100 105,100 100,106" fill="#FF69B4"/>
-
+  <ellipse cx="200" cy="270" rx="10" ry="7" fill="#ff80a0"/>
+  
   <!-- Mouth -->
-  <path d="M95 108 Q100 112 105 108" stroke="#333" stroke-width="2" fill="none"/>
-
+  <path d="M 192 278 Q 200 285 208 278" stroke="#663333" stroke-width="2" fill="none"/>
+  <circle cx="200" cy="282" r="3" fill="#663333"/>
+  
   <!-- Whiskers -->
-  <line x1="60" y1="100" x2="40" y2="95" stroke="#333" stroke-width="1"/>
-  <line x1="60" y1="106" x2="40" y2="106" stroke="#333" stroke-width="1"/>
-  <line x1="140" y1="100" x2="160" y2="95" stroke="#333" stroke-width="1"/>
-  <line x1="140" y1="106" x2="160" y2="106" stroke="#333" stroke-width="1"/>
-
+  <line x1="140" y1="255" x2="100" y2="250" stroke="#663333" stroke-width="2"/>
+  <line x1="150" y1="255" x2="110" y2="252" stroke="#663333" stroke-width="2"/>
+  <line x1="140" y1="280" x2="100" y2="285" stroke="#663333" stroke-width="2"/>
+  <line x1="260" y1="255" x2="300" y2="250" stroke="#663333" stroke-width="2"/>
+  <line x1="250" y1="255" x2="290" y2="252" stroke="#663333" stroke-width="2"/>
+  <line x1="260" y1="280" x2="300" y2="285" stroke="#663333" stroke-width="2"/>
+  
+  <!-- Ears -->
+  <path d="M 140 180 L 170 150 L 175 190 L 150 195 L 125 175 Z" fill="#ffcc80"/>
+  <path d="M 260 180 L 230 150 L 235 190 L 255 195 L 280 175 Z" fill="#ffcc80"/>
+  
   <!-- Tail -->
-  <path d="M130 140 Q160 130 170 150" stroke="#FFA500" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <ellipse cx="320" cy="380" rx="25" ry="15" fill="#ffe4b5"/>
+  <ellipse cx="325" cy="390" rx="20" ry="12" fill="#efe0b5"/>
+  
+  <!-- Cute bow -->
+  <ellipse cx="260" cy="210" rx="15" ry="10" fill="#ff6b95"/>
+  <rect x="250" y="212" width="35" height="6" fill="#ff6b95"/>
+  
+  <!-- Blush -->
+  <ellipse cx="155" cy="255" rx="12" ry="6" fill="#ffb3b3" opacity="0.5"/>
+  <ellipse cx="245" cy="255" rx="12" ry="6" fill="#ffb3b3" opacity="0.5"/>
 </svg>

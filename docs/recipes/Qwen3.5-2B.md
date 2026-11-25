@@ -27,6 +27,17 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
 
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB|0.2 GiB|2334K|1|6056 t/s|156 t/s|
+|RTX 3060|10.1 GiB|0.2 GiB|2334K|4|17406 t/s|389 t/s|
+|RTX 5060 Ti|15.1 GiB|0.2 GiB|3614K|1|12477 t/s|210 t/s|
+|RTX 5060 Ti|15.1 GiB|0.2 GiB|3614K|4|36104 t/s|572 t/s|
+|RTX 5070 Ti|15.1 GiB|0.2 GiB|3566K|1|22910 t/s|274 t/s|
+|RTX 5070 Ti|15.1 GiB|0.2 GiB|3566K|4|67049 t/s|766 t/s|
+
 ## Cat!
+
+The following "cat" was produced by `yeasah/Qwen3.5-2B-exl3` at `4.00bpw` on a RTX 5060 Ti in 7.82 seconds, using 1632 tokens (including thoughts, if any)
 
 <img src="cats/Qwen3.5-2B.svg" alt="meow">

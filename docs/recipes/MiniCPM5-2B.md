@@ -17,19 +17,24 @@ max_model_len: auto
 max_num_seqs: 4
 enable_auto_tool_choice: yes
 tool_call_parser: minicpm5
+kv_cache_dtype: 'fp8'
 ```
 
 ## Benchmarks
 
-|Platform|VRAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
-|---|---|---|---|---|---|
-|GTX 1650|2.91 GiB|36K|1|70.30 t/s|7.62 t/s|
-|GTX 1650|2.91 GiB|36K|4|127.34 t/s|15.29 t/s|
-|RTX 3060|10.32 GiB|202K|1|3770.96 t/s|109.76 t/s|
-|RTX 3060|10.32 GiB|202K|4|5903.67 t/s|273.05 t/s|
-|RTX 5070 ti|15.2 GiB|340K|1|12354.34 t/s|179.95 t/s|
-|RTX 5070 ti|15.2 GiB|340K|4|17819.09 t/s|512.40 t/s|
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB|0.1 GiB|396K|1|4761 t/s|123 t/s|
+|RTX 3060|10.1 GiB|0.1 GiB|396K|4|12942 t/s|340 t/s|
+|RTX 5060 Ti|15.0 GiB|0.1 GiB|620K|1|9173 t/s|164 t/s|
+|RTX 5060 Ti|15.0 GiB|0.1 GiB|620K|4|24347 t/s|454 t/s|
+|RTX 5070 Ti|15.0 GiB|0.1 GiB|612K|1|16854 t/s|200 t/s|
+|RTX 5070 Ti|15.0 GiB|0.1 GiB|612K|4|45507 t/s|585 t/s|
+|RTX 3060|10.1 GiB|0.1 GiB|396K|1|4761 t/s|123 t/s|
+|RTX 3060|10.1 GiB|0.1 GiB|396K|4|12942 t/s|340 t/s|
 
 ## Cat!
+
+The following "cat" was produced by `yeasah/MiniCPM5-2B-exl3` at `4.00bpw` on a RTX 5060 Ti in 22.34 seconds, using 3608 tokens (including thoughts, if any)
 
 <img src="cats/MiniCPM5-2B.svg" alt="meow">

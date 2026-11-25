@@ -27,17 +27,18 @@ mm_processor_kwargs: '{"max_pixels": 1048576}'
 #speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
 
-## Benchmarks
-
-|Platform|VRAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
-|---|---|---|---|---|---|
-|RTX 3060|10.32 GiB|504K|1|1288.08 t/s|45.76 t/s|
-|RTX 3060|10.32 GiB|504K|4|3257.29 t/s|92.27 t/s|
-|RTX 5060 ti|15.2 GiB|975K|1|2379.11 t/s|64.08 t/s|
-|RTX 5060 ti|15.2 GiB|975K|4|6131.44 t/s|140.10 t/s|
-|RTX 5070 ti|15.2 GiB|986K|1|4385.20 t/s|101.39 t/s|
-|RTX 5070 ti|15.2 GiB|986K|4|11953.88 t/s|228.85 t/s|
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 3060|10.1 GiB|0.5 GiB|541K|1|1689 t/s|55 t/s|
+|RTX 3060|10.1 GiB|0.5 GiB|541K|4|4661 t/s|141 t/s|
+|RTX 5060 Ti|15.1 GiB|0.5 GiB|1017K|1|3136 t/s|73 t/s|
+|RTX 5060 Ti|15.1 GiB|0.5 GiB|1017K|4|8916 t/s|201 t/s|
+|RTX 5070 Ti|15.1 GiB|0.5 GiB|999K|1|6097 t/s|117 t/s|
+|RTX 5070 Ti|15.1 GiB|0.5 GiB|999K|4|17303 t/s|318 t/s|
 
 ## Cat!
+
+The following cat was produced by `yeasah/Ornith-1.5-9B-exl3` at `4.00bpw` on a RTX 5060 Ti in 78.73 seconds, using 5692 tokens (including thoughts, if any)
+
 
 <img src="cats/Ornith-1.5-9B.svg" alt="meow">

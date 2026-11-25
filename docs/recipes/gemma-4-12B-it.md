@@ -31,6 +31,15 @@ kv_cache_dtype: fp8
 #speculative_config: '{"model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":4}'
 ```
 
+|Platform|VRAM|Host RAM|KV|Concurrent Req.|Mean Prefill|Mean Output|
+|---|---|---|---|---|---|---|
+|RTX 5060 Ti|15.0 GiB|0.5 GiB|727K|1|2028 t/s|53 t/s|
+|RTX 5060 Ti|15.0 GiB|0.5 GiB|727K|4|5789 t/s|146 t/s|
+|RTX 5070 Ti|15.1 GiB|0.5 GiB|688K|1|3926 t/s|84 t/s|
+|RTX 5070 Ti|15.1 GiB|0.5 GiB|688K|4|11092 t/s|226 t/s|
+
 ## Cat!
+
+The following cat was produced by `yeasah/gemma-4-12B-it-exl3` at `4.00bpw` on a RTX 5060 Ti in 15.28 seconds, using 799 tokens (including thoughts, if any)
 
 <img src="cats/gemma-4-12B-it.svg" alt="meow">
