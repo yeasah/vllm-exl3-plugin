@@ -427,11 +427,21 @@ def _offloads_experts(config) -> bool:
     return uva.cpu_offload_gb > 0 and (not params or any("expert" in p for p in params))
 
 
+def _multi_token_decode(config) -> bool:
+    """Whether decode batches are wide by the configuration: ``--performance-mode throughput``, or speculative
+    decoding, whose verify steps carry 1 + drafts tokens a sequence (MTP with 2 drafts at 4 streams: 12 tokens a step,
+    past the per-row kernel's UVA cliff at 5; with the grouped path Qwen3.6-35B-A3B 4.00bpw went 101 -> 118 t/s)."""
+    if getattr(config, "performance_mode", None) == "throughput":
+        return True
+    spec = getattr(config, "speculative_config", None)
+    return spec is not None and (getattr(spec, "num_speculative_tokens", 0) or 0) > 0
+
+
 def throughput_offload_expected(config) -> bool:
-    """At config time: ``--performance-mode throughput`` with experts offloaded, which takes the graph path that lets
-    decode batches over 4 tokens run grouped (`throughput_offload`)."""
+    """At config time: wide decode batches (`_multi_token_decode`) with experts offloaded, which takes the graph path
+    that lets decode batches over 4 tokens run grouped (`throughput_offload`)."""
     try:
-        return config.performance_mode == "throughput" and _offloads_experts(config)
+        return _multi_token_decode(config) and _offloads_experts(config)
     except Exception:
         return False
 
@@ -440,14 +450,14 @@ def decide_throughput_offload() -> None:
     """At the end of load, while the config is current: whether decode batches over 4 tokens on offloaded layers take
     the grouped path's routed staging (one copy of each routed expert into VRAM) rather than the per-row kernel, which
     reads host rows over UVA and falls off a cliff past ~40 assignments: QFN 2.05bpw all in RAM, 386 ms a step at 8
-    tokens against 172 grouped. Only under ``--performance-mode throughput``, with experts offloaded, and in a graph
-    path where the MoE op is an eager break: the eager break costs ~0.4 ms a token at batch 1, worth it only where
-    concurrency is the point."""
+    tokens against 172 grouped. Only where decode batches are wide by configuration (``--performance-mode
+    throughput``, or speculative decoding), with experts offloaded, and in a graph path where the MoE op is an eager
+    break: the eager break costs ~0.4 ms a token at batch 1, worth it only where batches are wide."""
     try:
         from vllm.config import get_current_vllm_config
 
         config = get_current_vllm_config()
-        _STATS["throughput_offload"] = (config.performance_mode == "throughput" and _STATS.get("expert_bytes", 0) > 0
+        _STATS["throughput_offload"] = (_multi_token_decode(config) and _STATS.get("expert_bytes", 0) > 0
                                         and _graph_path_ready())
     except Exception:
         _STATS["throughput_offload"] = False

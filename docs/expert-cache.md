@@ -1384,6 +1384,13 @@ RAM, 20% slots, the token budget pinned at 8192 in both modes, ms a step:
 Throughput mode also doubles vLLM's token budget (16384): with default (late) slots QFN serves at 32K with 5% of
 experts in VRAM, the activations taking the rest; with a fixed 20% it does not fit.
 
+**Speculative decoding takes the same path (2026-11-25).** Verify steps carry 1 + drafts tokens a sequence, so MTP
+with 2 drafts at 4 streams runs 12-token steps, past the cliff: user benches had MTP +38-55% single-stream and -6% to
++8% at 4 streams on three cards with good acceptance (70-76%). With speculative decoding configured and experts
+offloaded, the wide-batch path is on without `--performance-mode throughput` (which also doubles vLLM's token
+budget; this does not). Qwen3.6-35B-A3B 4.00bpw + MTP, 16 GiB host rows: 4 streams 101 -> 118 t/s, 1 stream unchanged
+(68.5), at ~60 MiB of VRAM (breakable PIECEWISE graphs instead of full decode graphs).
+
 **QFN's nondeterminism is vLLM's QSA (2026-11-23).** Localized by tracing a checksum of every decoder layer's
 sublayer outputs at every step over two runs: the first difference is layer 3 -- QFN's first QSA (sparse) attention
 layer -- at a mixed step, with identical inputs, an identical fused QKV projection (EXL3) and identical indexer

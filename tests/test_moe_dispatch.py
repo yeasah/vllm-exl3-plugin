@@ -190,3 +190,17 @@ def test_gelu_runs_grouped_only_as_the_kernels_tanh_approximation(paths):
     ops, run = paths
     assert run(4096, activation="gelu_tanh") == "grouped"
     assert run(4096, activation="gelu") == "per_row"
+
+
+def test_wide_decode_by_configuration():
+    """Speculative decoding makes every verify step 1 + drafts tokens a sequence, so it takes the wide-batch offload
+    path as --performance-mode throughput does; plain balanced decoding does not."""
+    import types
+
+    from vllm_exl3_plugin import cpu_offload
+
+    cfg = lambda mode="balanced", spec=None: types.SimpleNamespace(performance_mode=mode, speculative_config=spec)
+    assert not cpu_offload._multi_token_decode(cfg())
+    assert cpu_offload._multi_token_decode(cfg("throughput"))
+    assert cpu_offload._multi_token_decode(cfg(spec=types.SimpleNamespace(num_speculative_tokens=2)))
+    assert not cpu_offload._multi_token_decode(cfg(spec=types.SimpleNamespace(num_speculative_tokens=0)))
