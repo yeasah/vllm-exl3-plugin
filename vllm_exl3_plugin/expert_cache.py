@@ -1271,33 +1271,33 @@ def _build_late(layers: list, available: int, worker) -> int:
                  peak=int(getattr(worker, "peak_activation_memory", 0) or 0))
     kept = max(available - reserve, 0)
     if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
-        # auto: the KV cache takes what the target share's slots leave, and its length is fitted to that; the slots
-        # then take what is actually free once it is final, so a misjudged warmup lands on them, not on the KV cache
+        # auto: KV is satisfied first -- one request at the model's native length (x EXL3_KV_RESERVE) -- and every
+        # byte past that goes to slots; vLLM fits the length to the plan, and the slots take what is actually free once
+        # the KV cache is final, so a misjudged warmup lands on them. A residency target ("40% is enough") was right
+        # only for small experts: Qwen3.6-35B-A3B 4.00bpw on 16 GiB had KV for 3.1 native-length requests at 39% of
+        # experts in VRAM, and one request's worth at 57% decoded 11% (1 stream) and 27% (4) faster. Where VRAM cannot
+        # hold a native-length request, KV takes it all and vLLM fits the length, as it would without the cache.
         from . import cpu_offload
 
-        E = layers[0].exl3_num_experts
-        streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
+        native = _kv_needed(worker.vllm_config, worker.get_kv_cache_spec(),
+                            float(os.environ.get("EXL3_KV_RESERVE", "1.0")))
+        native_len = worker.vllm_config.model_config.max_model_len
+        kept = max(min(available - native, available - reserve), 0)
+        why = f"one {native_len}-token request ({native / (1 << 30):.2f} GiB)"
+        # With experts on disk every slot takes one off it (the rows it empties refill from disk), so the slots may take
+        # KV down to its floor until the disk is empty: a disk read costs far more than KV past the floor buys
         per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
-        in_vram = target_in_vram(E, streams)
-        cap = max(in_vram - (E - per_layer_max), 0)
-        why = f"{100 * in_vram / E:.0f}% of experts in VRAM for {streams:g} stream(s)"
-        # With experts on disk every slot past the target takes one off it (the rows it empties refill from disk), so
-        # the slots aim to empty the disk, as far as the KV floor allows: a disk read costs far more than KV past
-        # the floor buys at --max-model-len auto
         on_disk = max(max(len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
-        if on_disk:
-            empty = on_disk + cpu_offload._SPARE_ROWS
-            if empty > cap:
-                cap = min(empty, per_layer_max)
-                why = f"enough to empty the disk tier ({on_disk} experts a layer on disk)"
-        # What the extensible KV cache keeps free past the profile comes out of these bytes once warmup has run, so it
-        # is reserved too: without it the slots reached 21% against the 40% target (Qwen3.6-35B-A3B 2.00bpw, 16 GiB)
         withheld = _extensible_withholding(worker)
-        kept = min(kept, cap * slot_bytes * len(layers) + withheld)
+        if on_disk:
+            empty = min(on_disk + cpu_offload._SPARE_ROWS, per_layer_max) * slot_bytes * len(layers) + withheld
+            if empty > kept:
+                kept = max(min(empty, available - reserve), 0)
+                why = f"the floor, {how}, as far as emptying the disk tier ({on_disk} experts a layer on disk) needs"
         logger.info("expert cache: slots are placed after the KV cache is sized; --max-model-len auto plans KV at "
-                    "%.2f GiB, what %s leaves (at least %s), and %.2f GiB stay free for slots (%.2f GiB of them for "
-                    "what the extensible KV cache keeps after warmup)", (available - kept) / (1 << 30), why, how,
-                    kept / (1 << 30), withheld / (1 << 30))
+                    "%.2f GiB, for %s, and %.2f GiB stay free for slots (%.2f GiB of them for what the extensible KV "
+                    "cache keeps after warmup)", (available - kept) / (1 << 30), why, kept / (1 << 30),
+                    withheld / (1 << 30))
         return kept
     logger.info("expert cache: slots are placed after the KV cache is sized; KV is planned at its reserve, %.2f GiB "
                 "(%s), and %.2f GiB stay free for slots", reserve / (1 << 30), how, kept / (1 << 30))
@@ -1357,13 +1357,10 @@ def grow_late(worker, extensible: bool) -> None:
         n -= grown
     E = cache.E
     in_vram = int(numpy.mean([len(v) for v in cache.views]))
-    streams = 2 ** ((in_vram / E - 0.4) / 0.1) if in_vram / E >= 0.4 else 0
     logger.info(
         "expert cache: %d slots per layer over %d layers placed after the KV cache (%.0f MiB), %.0f%% of experts in "
-        "VRAM; %s, %.2f GiB free after. Measured on gemma-4-26B, that holds decode within ~10%% of resident for %s "
-        "concurrent streams.", in_vram - (E - max(len(b.rows) + len(b.disk) for b in cache.layers[0].exl3_host_blocks.values())),
-        _LATE["layers"], added / (1 << 20), 100 * in_vram / E, how, (free - added) / (1 << 30),
-        "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1 else "fewer than 1 (single-stream decode will be slower)")
+        "VRAM; %s, %.2f GiB free after.", in_vram - (E - max(len(b.rows) + len(b.disk) for b in cache.layers[0].exl3_host_blocks.values())),
+        _LATE["layers"], added / (1 << 20), 100 * in_vram / E, how, (free - added) / (1 << 30))
     cache.report_tiers()
 
 
@@ -1451,16 +1448,9 @@ def build(layers: list, available: int, worker) -> int:
     CACHE = cache
     _patch_runners()
     in_vram = (E - per_layer_max + slots) / E
-    streams = 2 ** ((in_vram - 0.4) / 0.1) if in_vram >= 0.4 else 0
     logger.info(
-        "expert cache: %d slots per layer over %d layers (%.0f MiB), %.0f%% of experts in "
-        "VRAM; KV keeps %.2f GiB (reserve: %s). Measured on gemma-4-26B, that holds "
-        "decode within ~10%% of resident for %s concurrent streams.",
-        slots, len(layers), used / (1 << 20), 100 * in_vram,
-        (available - used) / (1 << 30), how,
-        "more than 16" if streams > 16 else f"~{streams:.0f}" if streams >= 1
-        else "fewer than 1 (single-stream decode will be slower)",
-    )
+        "expert cache: %d slots per layer over %d layers (%.0f MiB), %.0f%% of experts in VRAM; KV keeps %.2f GiB "
+        "(reserve: %s).", slots, len(layers), used / (1 << 20), 100 * in_vram, (available - used) / (1 << 30), how)
     if hasattr(cache, "report_tiers"):
         cache.report_tiers()
     return used - given_back

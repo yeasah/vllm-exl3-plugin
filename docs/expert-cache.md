@@ -1490,6 +1490,23 @@ with 8 GiB of host rows and the rest on disk. The length is short because the on
 VRAM, is most of the card here; that split is the policy question left. *(Since: the floor is 32K tokens,
 `EXL3_AUTO_LEN_TOKENS`.)*
 
+**Auto length: KV for one request, then slots (2026-11-24).** The auto-length rule had been "slots up to the residency
+target, KV takes the rest", i.e. anything past 40% of experts in VRAM was wasted. That held for the low-bpw models it
+was measured on (2.00-2.54bpw). At 4.00bpw an expert is ~1.55 MB, and every miss crosses the link: Qwen3.6-35B-A3B
+4.00bpw on 16 GiB with 16 GiB of host rows decoded at 55 / 122 t/s (1 / 4 streams) against 94 / 184 resident, with
+KV for 3.1 native-length requests and 39% of experts in VRAM. Now KV is satisfied first -- one request at the model's
+native length, x `EXL3_KV_RESERVE` -- and every byte past it goes to slots; while experts spill, slots may still take
+KV down to the 32K floor until the disk is empty. Where VRAM cannot hold a native-length request, KV takes it all and
+vLLM fits the length. A user who wants more KV sets `--max-model-len` or `EXL3_KV_RESERVE`.
+
+| decode t/s, 1 / 4 streams, 262,144 tokens of context | before | now | experts in VRAM |
+|---|---|---|---|
+| Qwen3.6 4.00bpw, 16 GiB host rows | 55.0 / 121.6 | 61.6 / 157.5 | 39% -> 59% |
+| Qwen3.6 2.00bpw-H5, 2 GiB host rows | 59 / 110 | 94.6 / 161.2 | 71% -> 100% |
+
+What is left at 4.00bpw is the link: ~40% of routed experts at ~1.55 MB each is ~200 MB a token over PCIe. The slot
+log line no longer quotes the gemma-4 "within ~10% of resident" figure, which held only for small experts.
+
 **Auto length when experts spill (2026-11-24).** User bench, Qwen3.6-35B-A3B 2.00bpw-H5, 16 GiB, `--max-model-len auto`,
 utilization 1.0: with 2 and 4 GiB of host rows the slots stopped at 21% of experts in VRAM against the 40% target,
 and KV took 1.67M tokens. Two causes. The plan reserved the target's bytes (3.02 GiB) but not what the extensible
