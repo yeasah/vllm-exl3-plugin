@@ -1167,31 +1167,55 @@ def _patch_worker() -> None:
     cls._exl3_cache_sizing = True
 
 
-#: Torch's reservation growth over the profiled activation peak, which the extensible KV cache keeps free on top of
-#: the peak: 1.08x on gemma-4-26B, 1.33-1.36x on Qwen3.8-27B and Muse-Glimmer-30B (16 GiB cards, 2026-11-21)
-_EXTENSIBLE_GROWTH = 1.4
+#: Warmup's allocated peak over the profile's: 1.03-1.05x measured under late slots (2026-11-25). It was 1.4, from torch's
+#: reservation growth (1.08-1.36x on 2026-11-21), which the keep now covers separately at 1.1x its measurement.
+_EXTENSIBLE_GROWTH = 1.05
 
 
-def _extensible_withholding(worker) -> int:
-    """What an extensible KV cache keeps free beyond the profiled activation peak the estimate is built on.
-
-    The expert cache has to place its slots before warmup, since graphs capture their addresses, while an
-    extensible cache is sized after warmup: from free memory, less the larger of the allocated peak and torch's
-    reservation growth, less a margin of max(floor, 0.75 x that). Without this the slots took memory the cache then
-    kept back: gemma-4-26B at --max-model-len 32768 on 16 GiB placed 127 slots for a 4.12 GiB KV reserve and was left
-    1.77 GiB of KV, refusing to start, where v0.32 served it with 104. 0 when the cache is not extensible."""
+def _extensible_keep(worker) -> int | None:
+    """The extensible KV cache's keep, predicted from the profiled peak by its own formula; None when not extensible."""
     if not getattr(worker.vllm_config.cache_config, "enable_extensible_kv_cache", False):
-        return 0
+        return None
     try:
         from vllm.v1.worker import extensible_kv_cache as ext
     except ImportError:
-        return 0
-    peak = int(getattr(worker, "peak_activation_memory", 0) or 0)
-    transient = int(peak * _EXTENSIBLE_GROWTH)
+        return None
+    transient = int(int(getattr(worker, "peak_activation_memory", 0) or 0) * _EXTENSIBLE_GROWTH)
     floor_of = getattr(ext, "kv_cache_margin_floor_bytes", None)   # the fork scales it to the device
     floor = floor_of(worker.device) if floor_of is not None else ext.KV_CACHE_MARGIN_FLOOR_BYTES
-    margin = max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
-    return transient - peak + margin
+    keep_of = getattr(ext, "kv_cache_keep_bytes", None)
+    if keep_of is not None:
+        reserve_of = getattr(ext, "kv_cache_non_torch_reserve_bytes", None)
+        nt = reserve_of(worker.device) if reserve_of is not None else ext.KV_CACHE_NON_TORCH_RESERVE_BYTES
+        return keep_of(transient, transient, floor, ext.KV_CACHE_MARGIN_FRACTION, nt)
+    return transient + max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
+
+
+def _extensible_withholding(worker) -> int:
+    """What the extensible KV cache keeps free beyond the profiled peak the estimate is built on (up-front slots)."""
+    keep = _extensible_keep(worker)
+    return 0 if keep is None else max(keep - int(getattr(worker, "peak_activation_memory", 0) or 0), 0)
+
+
+def _late_slot_loss(worker, spill: bool = False) -> int:
+    """What the slot region planned at --max-model-len auto loses once warmup has run, so late slots plan around it.
+
+    The extensible KV cache keeps the larger of the allocated peak plus its margin and torch's reservation growth
+    (`kv_cache_keep_bytes`); measured, warmup's peak came within 3-5% of the profile's, and the peak branch decided.
+    On top of that the slot region gives up CUDA graph memory (~0.14 GiB on every 16 GiB run) and, when slots grow in
+    rounds -- rows refilling from disk between them -- allocator rounding on each round's chunks (~0.27 GiB). Under-
+    predicting it left ~10% of experts on disk (Qwen3.6-35B-A3B 2.00bpw: 1.29 GiB predicted, 2.02 lost); over-predicting
+    costs a little KV past the floor. 0 when the cache is not extensible."""
+    keep = _extensible_keep(worker)
+    if keep is None:
+        return 0
+    return keep + _GRAPH_ALLOWANCE + (_ROUNDS_ALLOWANCE if spill else 0)
+
+
+#: CUDA graph memory the slot region gives up after planning (0.13-0.14 GiB measured on 16 GiB cards)
+_GRAPH_ALLOWANCE = 160 << 20
+#: Allocator rounding when late slots grow in rounds, the rows refilling from disk between them (~0.27 GiB measured)
+_ROUNDS_ALLOWANCE = 320 << 20
 
 
 def _kv_reserve(worker) -> tuple[int, str]:
@@ -1325,7 +1349,7 @@ def _build_late(layers: list, available: int, worker) -> int:
         # KV down to its floor until the disk is empty: a disk read costs far more than KV past the floor buys
         per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
         on_disk = max(max(len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
-        withheld = _extensible_withholding(worker)
+        withheld = _late_slot_loss(worker, spill=bool(on_disk))
         if on_disk:
             empty = min(on_disk + cpu_offload._SPARE_ROWS, per_layer_max) * slot_bytes * len(layers) + withheld
             if empty > kept:

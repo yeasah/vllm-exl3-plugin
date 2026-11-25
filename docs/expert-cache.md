@@ -1562,7 +1562,12 @@ Same config, decode t/s at 1 / 4 streams:
 | 4 GiB | 44 / 77 | 56 / 106 | 45% / 46% / 10% |
 
 (fully resident: 98 / 143). The disk does not quite empty: the keep is predicted at 1.29 GiB and measured 1.61 --
-warmup with more VRAM free grows torch's reservation into it -- which leaves ~24 experts a layer on disk.
+warmup with more VRAM free grows torch's reservation into it -- which leaves ~24 experts a layer on disk. *(Fixed
+2026-11-25: the prediction now uses the fork's own keep formula on the profiled peak -- warmup's peak came within 3-5%
+of it -- plus CUDA graph memory (~0.14 GiB) and, when slots grow in rounds, allocator rounding on each round's chunks
+(~0.27 GiB): what the slot region actually lost, across every late-slot run logged. Qwen3.6-35B-A3B 4.00bpw with 7 GiB
+of host rows, the case where KV sits between its floor and one native request: KV 1.27 -> 0.45 GiB, 2% -> 0% on disk,
+decode 51.4 / 148.3 -> 61.6 / 172.1 t/s.)*
 
 **The residency target, re-measured (2026-11-22).** The 40% one-stream target was measured on the inclusive cache;
 re-swept on the exclusive cache of today, decode ms a token with everything offloaded but the slot share (8K length,
