@@ -428,13 +428,16 @@ def _offloads_experts(config) -> bool:
 
 
 def _multi_token_decode(config) -> bool:
-    """Whether decode batches are wide by the configuration: ``--performance-mode throughput``, or speculative
-    decoding, whose verify steps carry 1 + drafts tokens a sequence (MTP with 2 drafts at 4 streams: 12 tokens a step,
-    past the per-row kernel's UVA cliff at 5; with the grouped path Qwen3.6-35B-A3B 4.00bpw went 101 -> 118 t/s)."""
+    """Whether a decode step can carry more tokens than the per-row kernel handles well over host rows (4: its UVA cliff
+    is at 5, `ops._LEAN_MAX_TOKENS`): max_num_seqs x (1 + speculative drafts) tokens a step, or ``--performance-mode
+    throughput``. MTP with 2 drafts at 4 streams runs 12-token steps (Qwen3.6-35B-A3B 4.00bpw: 101 -> 118 t/s on the
+    grouped path); plain decoding past 4 sequences reaches the cliff on its own."""
     if getattr(config, "performance_mode", None) == "throughput":
         return True
     spec = getattr(config, "speculative_config", None)
-    return spec is not None and (getattr(spec, "num_speculative_tokens", 0) or 0) > 0
+    drafts = (getattr(spec, "num_speculative_tokens", 0) or 0) if spec is not None else 0
+    seqs = getattr(getattr(config, "scheduler_config", None), "max_num_seqs", 1) or 1
+    return seqs * (1 + drafts) > 4
 
 
 def throughput_offload_expected(config) -> bool:

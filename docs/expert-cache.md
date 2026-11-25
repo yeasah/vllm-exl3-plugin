@@ -1389,7 +1389,11 @@ with 2 drafts at 4 streams runs 12-token steps, past the cliff: user benches had
 +8% at 4 streams on three cards with good acceptance (70-76%). With speculative decoding configured and experts
 offloaded, the wide-batch path is on without `--performance-mode throughput` (which also doubles vLLM's token
 budget; this does not). Qwen3.6-35B-A3B 4.00bpw + MTP, 16 GiB host rows: 4 streams 101 -> 118 t/s, 1 stream unchanged
-(68.5), at ~60 MiB of VRAM (breakable PIECEWISE graphs instead of full decode graphs).
+(68.5), at ~60 MiB of VRAM (breakable PIECEWISE graphs instead of full decode graphs). User benches after: MTP at 4 streams +3% (5060 Ti) to +8% (3060) over
+no MTP, never worse. The rule is now general -- the path is on wherever a decode step can pass 4 tokens,
+max_num_seqs x (1 + drafts), so vLLM's default max_num_seqs turns it on too: QFN 2.05bpw all in RAM at max_num_seqs 8
+with no flags, 31.2 / 65.8 / 99.4 / 231.8 ms a step at 1 / 4 / 5 / 8 tokens (balanced before: 30.0 / 62.7 / 444 / 388).
+The cost is single-stream: nil on QFN, ~5% on gemma-4, where breakable capture gives up torch.compile.
 
 **QFN's nondeterminism is vLLM's QSA (2026-11-23).** Localized by tracing a checksum of every decoder layer's
 sublayer outputs at every step over two runs: the first difference is layer 3 -- QFN's first QSA (sparse) attention

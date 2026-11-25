@@ -193,14 +193,21 @@ def test_gelu_runs_grouped_only_as_the_kernels_tanh_approximation(paths):
 
 
 def test_wide_decode_by_configuration():
-    """Speculative decoding makes every verify step 1 + drafts tokens a sequence, so it takes the wide-batch offload
-    path as --performance-mode throughput does; plain balanced decoding does not."""
+    """The wide-batch offload path is on wherever a decode step can pass 4 tokens: max_num_seqs x (1 + drafts), or
+    --performance-mode throughput."""
     import types
 
     from vllm_exl3_plugin import cpu_offload
 
-    cfg = lambda mode="balanced", spec=None: types.SimpleNamespace(performance_mode=mode, speculative_config=spec)
-    assert not cpu_offload._multi_token_decode(cfg())
-    assert cpu_offload._multi_token_decode(cfg("throughput"))
-    assert cpu_offload._multi_token_decode(cfg(spec=types.SimpleNamespace(num_speculative_tokens=2)))
-    assert not cpu_offload._multi_token_decode(cfg(spec=types.SimpleNamespace(num_speculative_tokens=0)))
+    def cfg(seqs=4, drafts=None, mode="balanced"):
+        spec = None if drafts is None else types.SimpleNamespace(num_speculative_tokens=drafts)
+        return types.SimpleNamespace(performance_mode=mode, speculative_config=spec,
+                                     scheduler_config=types.SimpleNamespace(max_num_seqs=seqs))
+
+    assert not cpu_offload._multi_token_decode(cfg(4))
+    assert cpu_offload._multi_token_decode(cfg(5))
+    assert cpu_offload._multi_token_decode(cfg(256))
+    assert cpu_offload._multi_token_decode(cfg(4, drafts=2)), "MTP at 4 streams: 12-token verify steps"
+    assert not cpu_offload._multi_token_decode(cfg(1, drafts=2)), "one sequence, 3 tokens a step"
+    assert cpu_offload._multi_token_decode(cfg(1, drafts=4))
+    assert cpu_offload._multi_token_decode(cfg(1, mode="throughput"))
