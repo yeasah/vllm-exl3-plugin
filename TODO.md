@@ -134,8 +134,11 @@ throughput`: the per-row kernel over host rows falls off a cliff at 5 (QFN 444 m
 **Next:** (1) the staging reads: ~0.4 experts a layer, read synchronously at queue depth 1, ~0.8 ms each -- reads
 that cannot start before their layer's routing is known (next-layer prediction measured and parked: 65% recall at
 top-10, 82.5% at 20 on QFN; docs/expert-cache.md); (2) what is left of the fixed cost, a routing readback a
-layer. TP>1 works (2026-11-23): each rank reads whole experts and keeps its slice; exact-slice reads of down
-would trim the drive's traffic.
+layer. TP>1 works (2026-11-23): each rank reads whole experts and keeps its slice. TP=2 reads cost ~40% more than
+TP=1's (Qwen3.5-35B-A3B 2.00bpw, 46% on disk: +26.3 against +18.7 ms a token): both ranks read every expert whole, at
+once, from one drive. Exact reads of down's slice do not help (2026-11-25): an expert's span stores down first, so
+rank 1 could skip 16% in one read but rank 0 only a hole, and the ranks wait for each other at every layer. What would
+is one read shared by the ranks (one reads, both use it); worth it only if the disk tier at TP>1 becomes primary.
 `EXL3_DISK_TIER` alone now gives the graph path: the eager break, breakable capture and PIECEWISE decode graphs are its
 defaults (48 breaks cost ~0.4 ms a token on QFN), each overridable.
 
