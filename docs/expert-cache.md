@@ -410,7 +410,7 @@ TODO `cpu-offload`.
   3. points victims back at the host;
   4. issues copies on a side stream that waits for those writes.
 
-  Promotions are ranked most-wanted first, up to `EXL3_PROMOTE_PER_STEP` (32). Under async
+  Promotions are ranked most-wanted first, up to `EXL3_PROMOTE_PER_STEP` (8 since 2026-11-25; 32 before). Under async
   scheduling it reads routing one step older than intended, so the effective lag is 3. The
   replay puts that at 89.7% against 90.5% for lag 2.
 
@@ -1436,6 +1436,25 @@ A 9P mount -- WSL2's DrvFs under /mnt, and every bind mount on Docker Desktop's 
 so the cost is the bridge. The plugin warns at startup when experts spill from such a mount
 (`cpu_offload._filesystem_type`). The first prompt is the slowest in each row: decode admits disk experts into host
 rows as it reads them, so the RAM tier learns the working set (QFN here: 21.7 disk reads a token cold, 18.2 warm).
+
+**The promotion budget, swept (2026-11-25).** Every budget saturated -- 32 promotions a step, every step -- without
+moving the hit rate, so most were churn. Decode t/s, Qwen3.6-35B-A3B 4.00bpw at 59% in VRAM (16 GiB host rows), 1 / 4
+streams, prompts from other documents than the warm-up's; and ms a step for gemma-4-26B 4.10bpw at 10% slots:
+
+| promotions a step | Qwen3.6 | hit | gemma-4 | hit |
+|---|---|---|---|---|
+| 0 | 54.7 / 88.5 | 60% | | |
+| 2 | 59.2 / 159.5 | 88% | | |
+| 4 | 61.3 / 171.2 | 91-93% | 28.4 / 78.4 | 45-52% |
+| 8 | 62.4 / 169.9 | 91-94% | 30.3 / 80.6 | 44-50% |
+| 16 | 62.1 / 165.7 | 91-94% | | |
+| 32 | 61.5 / 156.8 | 91-94% | 35.9 / 92.5 | 39-43% |
+| 64 | 61.4 / 148.5 | 91-94% | | |
+| 128 | 61.4 / 145.6 | 91-94% | | |
+
+Past a few a step, promotions cost link time and, where residency is low, hit rate: they evict experts that are about
+to be reused. The default is 8 now, within a few percent of the best on every measure and with margin over 4 for
+working sets that move faster than these runs did.
 
 **Speculative next-layer reads: measured, parked (2026-11-23).** What the disk tier still adds on QFN 2.05bpw at a third
 on disk is ~3.7 ms of routing readback (48 syncs; inherent while the host must learn the routing before it reads) and

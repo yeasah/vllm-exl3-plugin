@@ -412,6 +412,13 @@ def _checksum(t: torch.Tensor) -> int:
 #: routed one, as tier_replay.py models it. Each admission is one more checkpoint read, at the next step's start.
 _ADMIT_BUDGET = int(os.environ.get("EXL3_DISK_ADMIT_PER_STEP", "0"))
 
+#: Promotions a step, across all layers (``EXL3_PROMOTE_PER_STEP``). Past a few, more only churn experts that are about
+#: equally hot, and their copies compete with decode's reads over the link: Qwen3.6-35B-A3B 4.00bpw at 59% in VRAM
+#: decoded 157 t/s at 4 streams with 32, 170 with 8, at the same hit rate; gemma-4-26B 4.10bpw at 10% of experts in
+#: slots lost hit rate to it (51% at 4, 43% at 32) and decoded 35.9 ms a token at 32 against 30.3 at 8. 0 leaves the
+#: placement's hit rate (60% there) and halves 4-stream decode; 8 is within a few percent of the best everywhere.
+_PROMOTE_PER_STEP = int(os.environ.get("EXL3_PROMOTE_PER_STEP", "8"))
+
 #: `row_of` for an expert with no host row: the disk tier's (cpu_offload.disk_tier), read from the checkpoint on use
 DISK = -2
 
@@ -1263,7 +1270,7 @@ def _build_late(layers: list, available: int, worker) -> int:
     is final. Returns the bytes kept from the KV cache's plan."""
     global CACHE
     reserve, how = _kv_reserve(worker)
-    cache = ExclusiveCache(layers, 0, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
+    cache = ExclusiveCache(layers, 0, _PROMOTE_PER_STEP)
     CACHE = cache
     _patch_runners()
     slot_bytes = slot_row_bytes(layers)
@@ -1424,7 +1431,7 @@ def build(layers: list, available: int, worker) -> int:
     if cls is not ExclusiveCache and any(b.disk for l in layers for b in l.exl3_host_blocks.values()):
         raise RuntimeError("EXL3_DISK_TIER: experts are on disk but the exclusive cache cannot run (hosting is "
                            "uneven across projections, or the slots would hold every expert); unset it")
-    cache = cls(layers, slots, int(os.environ.get("EXL3_PROMOTE_PER_STEP", "32")))
+    cache = cls(layers, slots, _PROMOTE_PER_STEP)
     used = sum(t.numel() * t.element_size() for d in cache.slot_tensors for t in d.values())
     if cache.holds_everything:
         # Every hosted expert has a slot for good: no controller, no routing, and prefill
