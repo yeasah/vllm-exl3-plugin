@@ -183,3 +183,10 @@ def test_throughput_mode_stages_offloaded_decode_past_the_uva_cliff(paths, monke
     assert run(ops._LEAN_MAX_TOKENS + 1, stage=-1) == "per_row", "resident layers have no cliff"
     monkeypatch.setitem(cpu_offload._STATS, "throughput_offload", False)
     assert run(ops._LEAN_MAX_TOKENS + 1, stage=0) == "per_row"
+
+
+def test_gelu_runs_grouped_only_as_the_kernels_tanh_approximation(paths):
+    """The fused kernel's GELU is the tanh approximation: gemma-4's `gelu_tanh` takes it, exact `gelu` stays per-row."""
+    ops, run = paths
+    assert run(4096, activation="gelu_tanh") == "grouped"
+    assert run(4096, activation="gelu") == "per_row"

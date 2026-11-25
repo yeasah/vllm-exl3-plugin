@@ -888,7 +888,11 @@ def _moe_per_row(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up
 
 
 #: exl3_moe's activation indices (exl3_moe_common.cuh); others take the per-row path
-_MOE_ACT = {"silu": 0, "gelu": 1}
+#: Both kernels' GELU is the tanh approximation (`_gelu` in activation_kernels.cuh, `act_gelu` in the cooperative
+#: kernel), which vLLM calls `gelu_tanh` -- gemma-4's (`gelu_pytorch_tanh`), and what exllamav3 runs it with. Mapped
+#: as `gelu` it left gemma-4 on the per-row kernel at every batch size (prefill 446 t/s against Qwen3.6's ~4800 on a
+#: 5060 Ti), while an exact-GELU MoE would have been given the approximation; `gelu` now stays per-row, exact.
+_MOE_ACT = {"silu": 0, "gelu_tanh": 1}
 _MOE_SCRATCH: dict = {}
 
 
@@ -917,7 +921,8 @@ def _moe_recon(gate_trellis, gate_suh, gate_svh, up_trellis, up_suh, up_svh, dow
     r.dims_g = r.dims_u = (hidden, intermediate, gate_bits)
     r.dims_d = (intermediate, hidden, down_bits)
     r.cb_g = r.cb_u = r.cb_d = (mcg, mul1)
-    r.act_call = mbr._ACT_CALLS_GATED[activation]
+    # exllamav3 calls its tanh-approximated GELU `gelu` (`ext.gelu_mul`); vLLM's `gelu` is exact and never gets here
+    r.act_call = mbr._ACT_CALLS_GATED[{"gelu_tanh": "gelu"}.get(activation, activation)]
     r.act_limit = 0.0
     r.device = device
     r.cap = mbr.batch_cap(r.dims_g, r.dims_u, r.dims_d)

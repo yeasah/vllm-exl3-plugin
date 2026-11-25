@@ -1193,7 +1193,7 @@ breaks cost too much.
 rest in the checkpoint as meta tensors, whose null addresses make an unstaged use fault rather than compute on stale
 bytes. Each disk expert has a staging-window position past the host rows; routed staging reads the routed ones
 through `expert_store` (8 reads deep, into pinned sources, one copy per run of positions). Every batch on a disk-tier
-layer stages by routing, the per-row path included (gemma-4's gelu_tanh has no grouped kernel), since the per-row
+layer stages by routing, the per-row path included (at the time gemma-4's gelu_tanh did not reach the grouped kernel; it does since 2026-11-24), since the per-row
 path's decode entries are null and `stage_all`'s window positions for disk experts are unwritten. So decode works,
 eagerly; graph capture is refused, as is TP > 1 (sliced experts are not read whole). `EXL3_CACHE_VERIFY` checks that
 no routed expert reaches the kernels through a null entry, and a test leaves a read out to see it fire.
@@ -1489,6 +1489,16 @@ misjudged warmup lands on the slots. The same config serves: 6,272 tokens, 180 s
 with 8 GiB of host rows and the rest on disk. The length is short because the one-stream target, 40% of experts in
 VRAM, is most of the card here; that split is the policy question left. *(Since: the floor is 32K tokens,
 `EXL3_AUTO_LEN_TOKENS`.)*
+
+**gemma-4's MoE prefill reaches the grouped kernel (2026-11-24).** Both exllamav3 kernels compute the tanh-approximated
+GELU, vLLM's `gelu_tanh` and gemma-4's activation, but the plugin mapped the name `gelu` (vLLM's exact GELU), so gemma-4
+ran its MoE per-row at every batch size, prefill included: 184 t/s prefill on gemma-4-26B 4.10bpw (8 GiB host rows,
+2048-token budget) against Qwen3.6's ~4800, and bench decode that barely moved with residency, its steps carrying
+per-row prefill chunks. Now `gelu_tanh` takes the kernel and exact `gelu` stays per-row: prefill 2995 t/s, decode at 1
+and 4 streams unchanged (those decode per-row either way). Grouped and per-row disagree end to end (79.5% argmax over
+1,500 tokens), which turned out to be gemma's chaos, not an error: 0.2% of noise on the per-row MoE output disagrees as
+much (82.5%), the two paths differ by ~0.2% a layer and sit equally close to a dense fp32 computation per layer, and
+against a run with every MoE call in dense fp32 both are equally far (|dlogprob| 0.746 per-row, 0.748 grouped).
 
 **Auto length: KV for one request, then slots (2026-11-24).** The auto-length rule had been "slots up to the residency
 target, KV takes the rest", i.e. anything past 40% of experts in VRAM was wasted. That held for the low-bpw models it
