@@ -253,6 +253,20 @@ def _pinned(shape, dtype) -> torch.Tensor:
 _PINNED: list[torch.Tensor] = []
 
 
+def free_pinned(t: torch.Tensor) -> int:
+    """Return one `_pinned` allocation to the driver; returns its bytes, 0 if `t` is not one. The caller must have
+    dropped every other tensor that addresses it, and nothing queued may still read it."""
+    for i, held in enumerate(_PINNED):
+        if held.data_ptr() == t.data_ptr():
+            nbytes = held.numel() * held.element_size()
+            del _PINNED[i]
+            rc = _libcuda().cuMemFreeHost(ctypes.c_void_p(t.data_ptr()))
+            if rc != 0:
+                raise RuntimeError(f"cpu-offload: cuMemFreeHost failed (CUresult {rc})")
+            return nbytes
+    return 0
+
+
 @functools.cache
 def _libcuda():
     # The driver library, which every CUDA host has under this name; the runtime's

@@ -170,13 +170,19 @@ scales with the token budget at all is unmeasured (docs/memory-accounting.md, "T
 
 ## `pinned-rows-return` — Give back host rows the expert cache empties
 
-**Outcome:** pinned host memory tracks what the host tier holds. Each projection's rows are one driver allocation
-(`cpu_offload._pinned`), sized at load and never freed; late slots then move experts out of them. With the disk tier
-spilling, backfill refills the freed rows; without it they stay pinned and idle: gemma-4-26B with every expert grown
-into VRAM keeps all 7.15 GiB pinned for nothing, and QFN 1.66bpw hosted in RAM keeps ~5 GiB idle behind 114 slots.
-**Candidate:** allocate rows in chunks, compact after late growth (a host-to-host copy and an entry flip, while
-nothing runs), free emptied chunks; or free the whole host tier when the slots hold every expert. The final
-`expert placement` log line reports the idle bytes (2026-11-22).
+**Done (2026-11-25) for a host tier that ends up empty:** when the slots hold every expert -- late growth or up-front --
+the rows are returned to the driver (gemma-4-26B 2.54bpw with a 64 GiB budget: 7.15 GiB). After capture only when no
+captured graph could copy out of them (sizes up to `STAGE_MIN_TOKENS`, 32); otherwise the log says why they stay.
+
+**Open: a partly idle host tier** (Qwen3.6-35B-A3B 4.00bpw: 2.87 GiB idle at 59% in VRAM). Each projection's rows are
+one driver allocation, freed only whole. The right row count is only known once late slots are placed, so a caller
+like the appliance cannot set `--cpu-offload-gb` exactly without a warmup run. Options, in order of preference: (1)
+remember the final placement per model, revision, configuration and GPU, and size rows from it on the next start (the
+first over-pins; a stale record only spills a little more, now that spill is the default); (2) late rows -- every
+offloaded expert starts on the disk tier and rows are allocated after the slots, exact on the first start, at the
+cost of a disk-backed warmup and the spill graph path for every offload; (3) chunked registration of one virtual
+range, reclaimed after growth -- registered memory read 8% (decode) / 31% (prefill) slower than driver-allocated in a
+long-running server (`cpu_offload._pinned`), so it needs huge pages.
 
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 

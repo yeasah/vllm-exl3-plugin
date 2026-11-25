@@ -734,6 +734,35 @@ class ExclusiveCache(ExpertCache):
             self._verify(range(len(self.layers)), full=True)
         return added
 
+    def release_host_tier(self, worker) -> int:
+        """When the slots hold every expert -- nothing in a host row, nothing on disk -- the host rows hold nothing and
+        are returned to the driver, prefill staging off with them. Each is one pinned allocation, so only all of it can
+        go (a partly idle host tier stays, reported by `report_tiers`). Not when a captured CUDA graph could copy out
+        of them: late growth runs after capture, and a graph over `STAGE_MIN_TOKENS` tokens captured `stage_all`'s
+        copies from the rows. Returns the bytes freed."""
+        from . import cpu_offload
+
+        if (self.row_of != -1).any():
+            return 0
+        config = worker.vllm_config
+        sizes = getattr(config.compilation_config, "cudagraph_capture_sizes", None) or []
+        if not config.model_config.enforce_eager and sizes and max(sizes) > cpu_offload.STAGE_MIN_TOKENS:
+            logger.info("expert cache: every expert is in VRAM, but the host rows stay: CUDA graphs up to %d tokens may "
+                        "copy out of them (prefill staging above %d)", max(sizes), cpu_offload.STAGE_MIN_TOKENS)
+            return 0
+        torch.cuda.synchronize(self.device)
+        freed = 0
+        for layer in self.layers:
+            layer.exl3_stage = None
+            for block in layer.exl3_host_blocks.values():
+                host = block.host
+                block.host = block.view = torch.empty((0, *host.shape[1:]), dtype=host.dtype)
+                freed += cpu_offload.free_pinned(host)
+                del host
+        if freed:
+            logger.info("expert cache: every expert is in VRAM; %.2f GiB of host rows returned", freed / (1 << 30))
+        return freed
+
     def report_tiers(self) -> None:
         """One line on where the experts ended up, once placement is final: VRAM (resident and slots), host rows, disk,
         each as bytes and share of all routed experts, and the pinned host memory behind the rows -- allocated once at
@@ -746,7 +775,8 @@ class ExclusiveCache(ExpertCache):
         for l, layer in enumerate(self.layers):
             blocks = layer.exl3_host_blocks
             rb = sum(cpu_offload._row_bytes(b) for b in blocks.values())
-            spare += min(len(self.free_rows[l]), cpu_offload._SPARE_ROWS) * rb
+            held_rows = next(iter(blocks.values())).host.shape[0] if blocks else 0
+            spare += min(len(self.free_rows[l]), cpu_offload._SPARE_ROWS, held_rows) * rb
             v, h, d = int((self.slot_of[l] >= 0).sum()), int((self.row_of[l] >= 0).sum()), int((self.row_of[l] == DISK).sum())
             n_vram, n_held, n_disk = n_vram + v, n_held + h, n_disk + d
             vram, held, disk = vram + v * rb, held + h * rb, disk + d * rb
@@ -1368,6 +1398,8 @@ def grow_late(worker, extensible: bool) -> None:
         "expert cache: %d slots per layer over %d layers placed after the KV cache (%.0f MiB), %.0f%% of experts in "
         "VRAM; %s, %.2f GiB free after.", in_vram - (E - max(len(b.rows) + len(b.disk) for b in cache.layers[0].exl3_host_blocks.values())),
         _LATE["layers"], added / (1 << 20), 100 * in_vram / E, how, (free - added) / (1 << 30))
+    if hasattr(cache, "release_host_tier"):
+        cache.release_host_tier(worker)
     cache.report_tiers()
 
 
@@ -1445,6 +1477,16 @@ def build(layers: list, available: int, worker) -> int:
         freed = sum(w.numel() for w in windows)
         del windows
         torch.cuda.empty_cache()  # back to the driver, so KV's allocation can use it
+        # and the host rows, which nothing reads now and no graph has captured yet
+        host_freed = 0
+        for layer in layers:
+            for block in layer.exl3_host_blocks.values():
+                host = block.host
+                block.host = block.view = torch.empty((0, *host.shape[1:]), dtype=host.dtype)
+                host_freed += cpu_offload.free_pinned(host)
+                del host
+        if host_freed:
+            logger.info("expert cache: %.2f GiB of host rows returned", host_freed / (1 << 30))
         logger.info(
             "expert cache: every offloaded expert fits in VRAM (%d slots per layer, %.0f MiB); "
             "they are served from there, KV keeps %.2f GiB, and the host copy goes unused. "
