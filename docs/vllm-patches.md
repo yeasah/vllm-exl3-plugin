@@ -56,7 +56,8 @@ under breakable capture"); with that fixed, vLLM's breakable default stands.
   measurement plus the non-torch share (`6b2557b4`). Qwen3.6-35B-A3B at 256K on 16 GiB: 3.69 GiB kept became 2.48.
   The measurements are in [memory-accounting.md](memory-accounting.md), "The extensible KV cache's margin".
 - Expandable segments on by default where torch carries the PyTorch #196258 fix (the stamp `tools/torch-c10cuda-fix.sh`
-  leaves) and there is no tensor parallelism (`f6f5443b`); an explicit setting stands. TP stays off because custom
+  leaves), there is no tensor parallelism (`f6f5443b`), and the host is not WSL (WDDM fails their mapping with
+  "device not ready" on some models: gemma-4-12B on a 3060 never loaded); an explicit setting stands. TP stays off because custom
   all-reduce cannot IPC-export expandable segments ([tensor-parallel.md](tensor-parallel.md)). Qwen3.6 at 256K then keeps 1.51 GiB.
 
 Not carried: backend workspace declarations (`82853c68e`, `abab1caed`). With the extensible KV cache on, the v0.34
