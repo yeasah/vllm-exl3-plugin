@@ -833,6 +833,10 @@ Over the table above it changes only rows where T decides: gemma to 1.32/1.29 (s
 moves), the 27B to 1.68, the 256K expandable config to 1.29. A 3.05 GiB peak (the throughput-mode offload case)
 gets back 0.76 GiB.
 
+`bench/run.py margin-check` now serves the tightest of these at the shipped keep with the hostile phases and
+fails before the margin runs out (an allocated peak past 80% of the allocator's room); worst as shipped is 69%
+([bench/README.md](../bench/README.md#the-kv-cache-margin)).
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

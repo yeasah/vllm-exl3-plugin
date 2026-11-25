@@ -9,6 +9,7 @@ bench/run.py bless [--tier fast]  record the current build as the baseline
 bench/run.py capture <entry> OUT  one entry, for hand inspection
 bench/run.py perf-check  --platform TAG   throughput vs this machine's baseline
 bench/run.py perf-bless  --platform TAG   record this machine's throughput
+bench/run.py margin-check [--entry E]     hostile serving against the KV cache's keep
 ```
 
 `check` reads *what* is served and is blind to how fast; `perf-check` is the
@@ -460,6 +461,44 @@ anchor is what says whether a regression is blockq's or everything's, besides
 holding `docs/kernels.md`'s numbers live — but the gate does not need to
 discriminate everything. It needs to get attention when something that matters
 moves.
+
+## The KV cache margin
+
+`margin-check` guards a safety property neither half above can see. The extensible KV cache sizes itself after
+warmup and keeps free a transient plus a margin (`kv_cache_keep_bytes` in the fork), and that margin was
+measured rather than derived: it is set just above the furthest serving was seen to allocate past the sizing
+step's peak ([docs/memory-accounting.md](../docs/memory-accounting.md)). An upstream change to a sampler, an
+attention backend or the allocator that reaches further passes every logit and throughput check, then OOMs a
+server on the first long prompt.
+
+Each entry ([margin.py](margin.py)) serves as it is served -- CUDA graphs on, `gpu_memory_utilization` unset,
+so the keep binds rather than an explicit budget -- and drives the hostile phases `tools/memory/margin_scan.py`
+scans with (the two share them): a prefill to `max_model_len`, 8-way sampling with every penalty and logprobs,
+prompt logprobs, n=4, JSON-guided decoding, prefix hits, images. It reads the cap the engine put on torch's
+allocator exactly, by wrapping `set_torch_memory_limit`, so it follows whatever the formula becomes instead of
+recomputing it. Per phase: the allocated peak as a share of the room (cap less what was allocated once the
+engine was up), reservation, allocator retries, OOMs, and growth outside torch against the share kept for it.
+
+**There is no baseline.** Each run is judged against its own engine's cap, so the check ports across cards and
+across changes to the formula. That is also why it gates where KV headroom (below) only reports: headroom has no
+reference point, so a tight entry could only fail as a cliff; here the share is graded, and the limit sits
+before the cliff. It fails on an OOM, on growth outside torch past its share, or on an allocated peak past
+**80%** of the room. Retries are printed, not judged: at the cap the allocator sheds its cache and retries
+rather than reserving, which costs time before it costs a request.
+
+**The limit was set by watching it fail** (2026-11-25, `BENCH_MARGIN_KEEP_SCALE` scales the keep the engine
+computes, as an eroding change would). On Qwen3.6-35B at a 16K budget:
+
+| keep | worst allocated share | outcome |
+|---|---|---|
+| as shipped | 68% | served, 1 retry |
+| x 0.75 | 90% | served, with retries |
+| x 0.5 | 83-89% | OOM in three phases |
+
+OOM arrives well short of 100% because fragmentation fills the cap first, which is why the limit is 80% and
+not 90% (the first choice, which the half-keep run showed would miss an OOM). As shipped the entries peak at
+40% (Qwen3-0.6B, default allocator), 68% (Qwen3.6-35B) and 69% (gemma-4-26B, long prefill), about 2 minutes
+each.
 
 ## Baselines must not depend on the calendar
 

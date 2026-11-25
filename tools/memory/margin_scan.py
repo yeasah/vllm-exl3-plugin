@@ -3,7 +3,7 @@
 usage: margin_scan.py MODEL [--revision R] [--engine-args JSON] [--phases a,b,...] [--out FILE]
 
 The extensible KV cache keeps free the larger of the sizing step's allocated transient and torch's reservation
-growth, plus a margin of max(floor, 0.75 x that) -- upstream measured up to 45% beyond the allocated peak on GB200
+growth, plus a margin (`kv_cache_keep_bytes` in the fork) -- upstream measured up to 45% beyond the allocated peak on GB200
 under adversarial workloads it did not name. This runs the engine in-process at a lowered gpu_memory_utilization
 (0.75 by default), so torch's cap leaves room and demand shows instead of being clipped, then drives hostile
 phases and reports, per phase, torch's reserved and allocated peaks and non-torch growth over the post-startup
@@ -15,6 +15,9 @@ import os
 import re
 import sys
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from bench.margin import hostile_phases  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("model")
@@ -32,9 +35,7 @@ def main():
     import logging
 
     import torch
-    from vllm import LLM, SamplingParams
-    from vllm.inputs import TokensPrompt
-    from vllm.sampling_params import StructuredOutputsParams
+    from vllm import LLM
 
     captured = []
     from vllm.v1.worker import extensible_kv_cache as ext
@@ -91,34 +92,8 @@ def main():
         print("PHASE", json.dumps(r), flush=True)
         return r
 
-    P = lambda n, at=0: TokensPrompt(prompt_token_ids=ids[at:at + n])
     long_n = min(mml - 300, a.max_model_len - 300)
-    phases = {
-        "long_prefill": lambda: llm.generate([P(long_n)], SamplingParams(max_tokens=16), use_tqdm=False),
-        "concurrent_sampling": lambda: llm.generate(
-            [P(4000, 977 * i) for i in range(8)],
-            SamplingParams(max_tokens=256, temperature=0.9, top_k=50, top_p=0.9, min_p=0.05, presence_penalty=0.5,
-                           frequency_penalty=0.5, repetition_penalty=1.1, logprobs=20, ignore_eos=True), use_tqdm=False),
-        "prompt_logprobs": lambda: llm.generate([P(min(8000, long_n))], SamplingParams(max_tokens=1, prompt_logprobs=20),
-                                                use_tqdm=False),
-        "n4": lambda: llm.generate([P(2000, 31)], SamplingParams(n=4, max_tokens=256, temperature=1.0, logprobs=5,
-                                                                 ignore_eos=True), use_tqdm=False),
-        "json": lambda: llm.generate([P(1000, 77 * i) for i in range(4)], SamplingParams(
-            max_tokens=200, structured_outputs=StructuredOutputsParams(json={"type": "object", "properties": {
-                "name": {"type": "string"}, "items": {"type": "array", "items": {"type": "integer"}}},
-                "required": ["name", "items"]})), use_tqdm=False),
-        "prefix_hits": lambda: llm.generate([TokensPrompt(prompt_token_ids=ids[:min(16000, long_n)] + ids[50000 + 100 * i:50000 + 100 * i + 200])
-                                             for i in range(8)], SamplingParams(max_tokens=64), use_tqdm=False),
-    }
-
-    def images():
-        from PIL import Image
-        imgs = [Image.new("RGB", (1024, 1024), (i * 30 % 255, 90, 200)) for i in range(4)]
-        msgs = [[{"role": "user", "content": [{"type": "image_pil", "image_pil": im}, {"type": "text", "text": "Describe."}]}]
-                for im in imgs]
-        llm.chat(msgs, SamplingParams(max_tokens=32), use_tqdm=False)
-
-    phases["images"] = images
+    phases = hostile_phases(llm, ids, long_n)
     start = baseline()
     torch.cuda.reset_peak_memory_stats()
     results = []

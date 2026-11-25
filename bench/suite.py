@@ -76,6 +76,11 @@ class Entry:
     tp_reference: str | None = None
     #: Overrides for that sibling comparison, as `tolerance` is for the baseline.
     tp_tolerance: dict = field(default_factory=dict)
+    #: Further `LLM(...)` arguments. Only the margin entries use it: they reproduce a served configuration
+    #: (batched-token budget, concurrency) because that is what decides how far serving reaches past the peak.
+    engine_args: dict = field(default_factory=dict)
+    #: The hostile phases a margin entry drives, from bench/margin.py.
+    margin_phases: tuple = ("long_prefill", "concurrent_sampling", "prompt_logprobs", "n4", "json", "prefix_hits")
 
     @property
     def name(self) -> str:
@@ -647,6 +652,53 @@ PERF_ENTRIES: list[Entry] = [
 ]
 
 
+#: Hostile serving against the extensible KV cache's keep (bench/margin.py). The margin on the allocated peak
+#: is a measured safety property (docs/memory-accounting.md), so these are the configurations it was tightest on,
+#: served as they are served: CUDA graphs on, utilization unset so the keep binds. No baseline: each run is
+#: judged against the cap its own engine set, which is what makes it portable across cards.
+MARGIN_ENTRIES: list[Entry] = [
+    Entry(
+        label="qwen3.6-35B-A3B 2.00bpw 16K-batch margin",
+        model="yeasah/Qwen3.6-35B-A3B-exl3",
+        revision="2.00bpw-H5",
+        enforce_eager=False,
+        max_model_len=65536,
+        kv_cache_dtype="nvfp4",
+        language_model_only=True,
+        engine_args={"max_num_batched_tokens": 16384, "max_num_seqs": 8},
+        exercises="the largest allocated peak scanned (1.70 GiB at a 16K budget), where the margin is a fraction "
+        "of T rather than the floor: the case lowering the fraction from 0.75 to 0.5 rests on",
+    ),
+    Entry(
+        label="gemma-4-26B-A4B 2.54bpw margin",
+        model="turboderp/gemma-4-26B-A4B-it-exl3",
+        revision="2.54bpw",
+        enforce_eager=False,
+        max_model_len=65536,
+        # bf16 KV for 64K does not fit beside the vision tower on 16 GiB (4.58 GiB needed, 3.84 left)
+        kv_cache_dtype="fp8",
+        engine_args={"max_num_seqs": 8},
+        margin_phases=("long_prefill", "concurrent_sampling", "prompt_logprobs", "n4", "json", "prefix_hits",
+                       "images"),
+        exercises="the tightest slack the 0.5 fraction left (1.29 GiB kept against 1.14 under expandable "
+        "segments), and the model whose long prefill allocates furthest past the peak (+18-24%); images too, "
+        "since an encoder batch is an input profiling only approximates",
+    ),
+    Entry(
+        label="qwen3-0.6B 3.0bpw default-allocator margin",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.0bpw",
+        enforce_eager=False,
+        max_model_len=32768,
+        env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False"},
+        engine_args={"max_num_batched_tokens": 8192, "max_num_seqs": 8},
+        exercises="the smallest slack of any scan (0.09 GiB), set by the growth branch rather than the margin: "
+        "a small peak with fragmentation on top under the default allocator, the configuration torch falls "
+        "back to without the #196258 fix, and the largest allocation excess measured (+30%)",
+    ),
+]
+
+
 def by_tier(tier: str | None) -> list[Entry]:
     if tier in (None, "all"):
         return list(ENTRIES)
@@ -671,3 +723,10 @@ def perf_by_name(name: str) -> Entry:
         if e.name == name:
             return e
     raise SystemExit(f"no such perf entry: {name!r}")
+
+
+def margin_by_name(name: str) -> Entry:
+    for e in MARGIN_ENTRIES:
+        if e.name == name:
+            return e
+    raise SystemExit(f"no such margin entry: {name!r}")

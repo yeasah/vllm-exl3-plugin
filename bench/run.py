@@ -627,6 +627,82 @@ def cmd_perf_check(args) -> int:
     return 1
 
 
+#: Share of the allocator's room past startup (cap less what was allocated once the engine was up) that serving's
+#: allocated peak may reach. Past it a shift upstream is eating the margin, even though nothing has OOMed yet.
+#: Fragmentation fills the cap first, so the OOM comes well before 100%: with the keep squeezed to half it came
+#: at 83% (Qwen3.6-35B, 2026-11-25). As shipped the worst entry reaches 69%.
+MARGIN_USE_LIMIT = 0.8
+
+
+def run_margin_entry(entry: suite.Entry, out_path: str, timeout: int) -> dict:
+    cmd = [sys.executable, os.path.join(HERE, "margin.py"), entry.name, "--out", out_path]
+    print(f"  -- {entry.label}", flush=True)
+    proc = subprocess.run(cmd, cwd=ROOT, env=_env_with_nvcc(), timeout=timeout,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if proc.returncode != 0 or "BENCH_MARGIN_OK" not in proc.stdout:
+        log_path = out_path + ".log"
+        with open(log_path, "w") as f:
+            f.write(proc.stdout)
+        detail = "\n".join(proc.stdout.strip().splitlines()[-15:])
+        raise SystemExit(f"margin run failed for {entry.name!r} (exit {proc.returncode}); "
+                         f"full log at {log_path}\n{detail}")
+    return json.load(open(out_path))
+
+
+def judge_margin(data: dict) -> list[str]:
+    """What serving did with the room the keep left. An OOM is the failure the margin exists to prevent; an
+    allocated peak near the cap is that failure arriving."""
+    gib = 1 << 30
+    start, cap = data["start"], data["cap"]
+    room = cap - start["allocated"]
+    problems = []
+    for r in data["phases"]:
+        used = r["allocated_peak"] - start["allocated"]
+        share = used / room if room > 0 else float("inf")
+        verdict = "ok"
+        if r["error"] or r["ooms"]:
+            verdict = "OOM" if r["ooms"] or "out of memory" in (r["error"] or "").lower() else "ERROR"
+            problems.append(f"{r['phase']}: {r['error'] or str(r['ooms']) + ' OOMs'}")
+        elif share > MARGIN_USE_LIMIT:
+            verdict = "THIN"
+            problems.append(f"{r['phase']}: allocated {used / gib:.2f} of {room / gib:.2f} GiB room "
+                            f"({share:.0%} > {MARGIN_USE_LIMIT:.0%})")
+        if r["nontorch_growth"] > data["nontorch_share"]:
+            verdict = "NON-TORCH"
+            problems.append(f"{r['phase']}: memory outside torch grew {r['nontorch_growth'] / gib:.2f} GiB, past "
+                            f"the {data['nontorch_share'] / gib:.2f} kept for it")
+        print(f"     {r['phase']:20} allocated {used / gib:5.2f} / {room / gib:5.2f} GiB ({share:4.0%})  "
+              f"held {(r['allocated_after'] - start['allocated']) / gib:5.2f}  "
+              f"reserved {(r['reserved_peak'] - start['reserved']) / gib:5.2f}  retries {r['alloc_retries']:3}  "
+              f"non-torch {r['nontorch_growth'] / gib:+.2f}  {verdict}")
+    return problems
+
+
+def cmd_margin_check(args) -> int:
+    import tempfile
+
+    entries = [e for e in suite.MARGIN_ENTRIES if args.entry in (None, e.name)]
+    if not entries:
+        raise SystemExit(f"no such margin entry: {args.entry!r}")
+    failed = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for e in entries:
+            data = run_margin_entry(e, os.path.join(args.keep or tmp, f"{e.name}.json"), args.timeout)
+            problems = judge_margin(data)
+            if problems:
+                failed[e.name] = problems
+    print()
+    if not failed:
+        print(f"PASS: {len(entries)} margin entries served every phase within {MARGIN_USE_LIMIT:.0%} of the room")
+        return 0
+    print(f"FAIL: {len(failed)}/{len(entries)} margin entries")
+    for name, problems in failed.items():
+        print(f"  {name}")
+        for p in problems:
+            print(f"    - {p}")
+    return 1
+
+
 def environment_drift() -> tuple[bool, list[str]]:
     """Compare the live environment against the blessed manifest.
 
@@ -1078,6 +1154,11 @@ def main() -> int:
                        help="bless even though a source tree has uncommitted "
                             "changes (ignored by perf-check)")
         p.set_defaults(func=fn)
+
+    p = sub.add_parser("margin-check")
+    p.add_argument("--entry", default=None, help="one margin entry by name; default all")
+    p.add_argument("--keep", default=None, help="directory to keep the per-entry JSON in")
+    p.set_defaults(func=cmd_margin_check)
 
     args = ap.parse_args()
     return args.func(args)
