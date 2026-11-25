@@ -806,8 +806,8 @@ worst phase was always the long prefill. So the margin belongs on T, and G needs
 
     keep = max(T + max(floor, 0.75 x T), 1.1 x G + non-torch share)
 
-That is the fork's `kv_cache_keep_bytes` (`6b2557b4`). Every row keeps at least 0.33 GiB over its worst serving
-growth. The serving config at 256K went from 3.69 GiB kept to 2.48, and from 105 to 126 expert-cache slots a layer
+That is the fork's `kv_cache_keep_bytes` (`6b2557b4`), with the fraction since lowered to 0.5 (below). The
+smallest slack over worst serving growth is Qwen3-0.6B's 0.09 GiB, where G sets the keep. The serving config at 256K went from 3.69 GiB kept to 2.48, and from 105 to 126 expert-cache slots a layer
 (late slots, [expert-cache.md](expert-cache.md)), all phases served, with a 262K-token prefill growing torch 1.98.
 
 **Expandable segments** take G down to about T (the table's expandable rows), which is why the fork now turns them on
@@ -815,6 +815,23 @@ by default where it is safe (`f6f5443b`): torch carries the #196258 fix and ther
 ([vllm-patches.md](vllm-patches.md)). The serving config then keeps 1.51 GiB and gets 144 slots, all phases served.
 Without the fix the default allocator is the conservative best effort, and the plugin refuses the one unsafe
 combination outright (`allocator_safety.py`).
+
+**The fraction on T: 0.75 to 0.5 (2026-11-25).** The 0.75 was upstream's, against an excess of up to 45%. Scanned
+again on Qwen3.6-35B-A3B 2.00bpw-H5 (resident, nvfp4 KV, 64K, 0.88) across batched-token budgets, so T itself
+grows:
+
+| max_num_batched_tokens | T | G | serving worst (reserved) | worst allocated | keep at 0.75 | keep at 0.5 |
+|---|---|---|---|---|---|---|
+| 2048 | 0.32 | 0.24 | 0.24 | 0.26 | 0.63 | 0.63 |
+| 8192 | 0.89 | 1.02 | 0.98 | 0.91 | 1.56 | 1.33 |
+| 16384 | 1.70 | 1.69 | 1.92 | 1.67 | 2.97 | 2.55 |
+
+Allocation stayed within 2% of T at every budget; the worst phase was again the long prefill, and its growth past
+T was reservation, which the G branch covers. The excess does not grow with the budget, so 0.75 x T kept the most
+where it was least needed. 0.5 sits above every allocation excess measured here (30% at most) and upstream's 45%.
+Over the table above it changes only rows where T decides: gemma to 1.32/1.29 (slack 0.29/0.15, the tightest it
+moves), the 27B to 1.68, the 256K expandable config to 1.29. A 3.05 GiB peak (the throughput-mode offload case)
+gets back 0.76 GiB.
 
 ## Open
 
