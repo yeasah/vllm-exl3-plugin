@@ -1134,16 +1134,14 @@ def _patch_worker() -> None:
 
     @wraps(original)
     def determine_available_memory(self):
-        # EXL3_MEM_SNAPSHOT=<file>: torch's allocator history across vLLM's profiling run, for tools/mem_peak_sites.py
+        # EXL3_MEM_SNAPSHOT=<base>: torch's allocator history across vLLM's profiling run and warmup, per rank, for tools/mem_peak_sites.py
         # (what the transient peak is made of; on HY4 Flash, vLLM's sparse-MLA profiling placeholder)
-        snap = os.environ.get("EXL3_MEM_SNAPSHOT")
+        snap = _snapshot_path(self, "profile")
         if snap:
             torch.cuda.memory._record_memory_history(max_entries=2_000_000, stacks="python")
         available = original(self)
         if snap:
-            torch.cuda.memory._dump_snapshot(snap)
-            torch.cuda.memory._record_memory_history(enabled=None)
-            logger.warning("EXL3_MEM_SNAPSHOT: profiling run's allocator history in %s", snap)
+            _dump_snapshot(snap, "profiling run")
         if not _PENDING:
             return available
         layers = list(_PENDING)
@@ -1157,7 +1155,12 @@ def _patch_worker() -> None:
 
     @wraps(warm)
     def compile_or_warm_up_model(self, *args, **kwargs):
+        snap = _snapshot_path(self, "warmup")
+        if snap:
+            torch.cuda.memory._record_memory_history(max_entries=2_000_000, stacks="python")
         result = warm(self, *args, **kwargs)
+        if snap:
+            _dump_snapshot(snap, "warmup")
         if _LATE and not getattr(self.cache_config, "enable_extensible_kv_cache", False):
             grow_late(self, extensible=False)
         return result
@@ -1241,6 +1244,20 @@ def _kv_reserve(worker) -> tuple[int, str]:
         return need, f"{mult:g} x {_AUTO_LEN_TOKENS} tokens (--max-model-len auto)"
     need = _kv_needed(config, _worker_kv_layers(worker), mult)
     return need, f"{mult:g} x --max-model-len {model.max_model_len}"
+
+
+def _snapshot_path(worker, phase: str) -> str | None:
+    """EXL3_MEM_SNAPSHOT=<base>: where this rank's allocator history for `phase` goes, `<base>.<phase>.rank<N>`."""
+    base = os.environ.get("EXL3_MEM_SNAPSHOT")
+    if not base:
+        return None
+    return f"{base}.{phase}.rank{getattr(worker, 'rank', 0)}"
+
+
+def _dump_snapshot(path: str, what: str) -> None:
+    torch.cuda.memory._dump_snapshot(path)
+    torch.cuda.memory._record_memory_history(enabled=None)
+    logger.warning("EXL3_MEM_SNAPSHOT: the %s's allocator history in %s", what, path)
 
 
 def _worker_kv_layers(worker) -> dict:
