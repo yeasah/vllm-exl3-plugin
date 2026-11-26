@@ -264,13 +264,49 @@ def _hy4_engram_unstack(weights, hc_mult: int):
             yield f"{head}engram_layer.{part.format(i=i)}", block
 
 
+_HY4_EXL3_EXPERT = None
+
+
+def _hy4_exl3_experts(model, weights, loaded: set):
+    """Load EXL3 routed-expert tensors the way HY4 Flash loads its own, and pass every other tensor on.
+
+    HY4 Flash's expert branch matches only unquantized and ModelOpt suffixes (`.weight`, `.weight_packed`, `_scale`,
+    `.input_scale`) and builds the target as `weight{suffix}`; an EXL3 expert tensor (`.trellis`, `.suh`, `.svh`,
+    `.mcg`, `.mul1`) fell through to "Unknown Flash checkpoint weight". Same mapping, same `weight_loader` call and the
+    same part record as that branch, with the EXL3 leaf as the parameter suffix (`EXL3MoEMethod` registers
+    `w13_<leaf>` / `w2_<leaf>`)."""
+    import re
+
+    global _HY4_EXL3_EXPERT
+    if _HY4_EXL3_EXPERT is None:
+        _HY4_EXL3_EXPERT = re.compile(r"(.*)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(trellis|suh|svh|mcg|mul1)")
+    mapping = {w: (p, e, s) for p, w, e, s in model.get_expert_mapping()}
+    parameters = dict(model.named_parameters())
+    for name, value in weights:
+        m = _HY4_EXL3_EXPERT.fullmatch(name)
+        if m is None:
+            yield name, value
+            continue
+        prefix, expert_id, projection, leaf = m.groups()
+        param_name, mapped_expert, shard = mapping[f"experts.{expert_id}.{projection}."]
+        target = f"{prefix}.{param_name}{leaf}"
+        if target not in parameters:
+            raise ValueError(f"EXL3 expert tensor {name} has no parameter {target}")
+        parameter = parameters[target]
+        if parameter.weight_loader(parameter, value, target, shard_id=shard, expert_id=mapped_expert,
+                                   return_success=True):
+            model._record_part(target, (mapped_expert, shard))
+            loaded.add(target)
+
+
 def _hy4_flash_engram_names(HYV4FlashModel) -> None:
-    """HY4 Flash loads exllamav3's Engram tensors under the names its loader takes.
+    """HY4 Flash loads an EXL3 checkpoint: exllamav3's Engram tensors and its routed experts.
 
     vLLM's `FlashEngram.load_weight` accepts the checkpoint's per-stream and per-head tensors and records each part
     it fills; exllamav3 stores them stacked (`_HY4_ENGRAM_STACKED`), which it refuses (`branch_scales`). Splitting
     happens in the weight stream, ahead of the model's own loop, so every part is recorded as from a reference
-    checkpoint. The n-gram table itself (`multi_head_embedding`, trellis-coded in an EXL3 checkpoint) is not this.
+    checkpoint. Routed-expert tensors go through `_hy4_exl3_experts`. The n-gram table itself
+    (`multi_head_embedding`, trellis-coded in an EXL3 checkpoint) is not this.
     """
     original_init = HYV4FlashModel.__init__
     if getattr(original_init, "_exl3_patched", False):
@@ -288,7 +324,11 @@ def _hy4_flash_engram_names(HYV4FlashModel) -> None:
     @functools.wraps(original_load)
     def load_weights(self, weights):
         hc = getattr(self, "_exl3_engram_hc", None)
-        return original_load(self, _hy4_engram_unstack(weights, hc) if hc else weights)
+        if not hc:
+            return original_load(self, weights)
+        loaded: set[str] = set()
+        rest = _hy4_exl3_experts(self, _hy4_engram_unstack(weights, hc), loaded)
+        return original_load(self, rest) | loaded
 
     __init__._exl3_patched = True
     HYV4FlashModel.__init__ = __init__
