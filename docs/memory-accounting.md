@@ -837,6 +837,45 @@ gets back 0.76 GiB.
 fails before the margin runs out (an allocated peak past 80% of the allocator's room); worst as shipped is 69%
 ([bench/README.md](../bench/README.md#the-kv-cache-margin)).
 
+## WSL: WDDM's budget and silent paging (2026-11-26)
+
+Under WSL, CUDA allocations go through WDDM, and its video memory manager gives each process a budget: dedicated
+VRAM less what everything else on the card holds, the Windows desktop included. Past it nothing fails.
+`cudaMemGetInfo` reads 0 free, allocations keep succeeding, and the overflow is demoted to system memory. While
+under it, `cudaMemGetInfo`'s free figure is exactly budget minus usage, so vLLM's startup sizing sees the desktop
+correctly; the hazard is the budget moving afterwards. It does that on its own (11.08 -> 10.83-10.97 GiB during one
+idle test, 11.08 -> 10.88 in five seconds under load), and any Windows app can claim VRAM at any time.
+
+Measured on godel (RTX 3060, 11.83 GiB dedicated), 512 MiB chunks allocated one at a time, each step timing a
+read+write sweep of everything held and a pinned 256 MiB host-to-device copy:
+
+| past budget | sweep | pinned H2D | CUDA free |
+|---|---|---|---|
+| -0.60 GiB | 323 GB/s | 24.4 GB/s | 0.60 |
+| -0.08 | 328 | 24.5 | 0.08 |
+| +0.46 | 282 | 24.2 | 0.00 |
+| +0.96 | 214 | 24.4 | 0.00 |
+| +1.96 | 98 | 24.1 | 0.00 |
+
+So what slows is demoted VRAM, not the copy path. That is the shape of a 2026-11-25 MoE+MTP bench "regression" on
+the same card: Qwen3.6-35B-A3B at 30% residency, 3x TTFT and S4 TPOT 58 -> 83 ms, per-row UVA decode unchanged, on a
+software stack identical to the good run. Its ~10.6 GiB footprint sat within ~0.3 GiB of a budget that moves by
+that much.
+
+**It is visible from inside.** WSL's DXCore (`/usr/lib/wsl/lib/libdxcore.so`, mounted into GPU containers too)
+answers `AdapterMemoryBudget` for the local segment group, and its `currentUsage` counts this process's CUDA
+allocations exactly (held plus ~0.37 GiB of context). `vllm_exl3_plugin/wddm_budget.py` polls it from the worker
+once a second, ctypes only, and logs `WDDM budget exceeded` on crossing, again when the overshoot grows by 0.25
+GiB or every 5 minutes while it lasts, and `WDDM budget recovered` with the duration and the worst overshoot.
+Watched firing on godel against real allocations. WSL gives CUDA and DXCore different LUIDs for the same card
+(`cuDeviceGetLuid` against DXCore's `InstanceLuid`), so the adapter is the one whose usage covers what torch holds;
+when none or several do, the monitor stays off and says so.
+
+**It reports and does not hold anything back.** Headroom against a second consumer is the operator's policy, and
+`gpu_memory_utilization` is the instrument for it. With the monitor, demand paging turns from a silent slowdown
+into a degraded mode that announces itself, where a bare-Linux box would OOM. A bench run that logs the warning
+is invalid rather than a regression.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

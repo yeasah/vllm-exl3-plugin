@@ -131,6 +131,9 @@ def _patch_offload_summary() -> None:
             from .allocator_safety import check
 
             check("after loading the model")
+            from .wddm_budget import start_monitor
+
+            start_monitor()
         report_once()
         return result
 
