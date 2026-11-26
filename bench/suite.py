@@ -91,7 +91,13 @@ class Entry:
         """The environment this entry's process runs under, set rather than inherited: the bench's own
         defaults (`controlled_defaults`), then the entry's `env` on top. The parent has already removed the
         operator's settings of these families (run.py `CONTROLLED_PREFIXES`), so nothing here is ambient."""
-        return {**controlled_defaults(self), **{k: str(v) for k, v in self.env.items()}}
+        env = {**controlled_defaults(self), **{k: str(v) for k, v in self.env.items()}}
+        # A name the operator kept on purpose (run.py PASS_ENV) wins over both: it is the experiment
+        import os
+        for k in (v.strip() for v in os.environ.get("BENCH_PASS_ENV", "").split(",")):
+            if k and k in os.environ:
+                env[k] = os.environ[k]
+        return env
 
 
 def controlled_defaults(entry: "Entry") -> dict:
