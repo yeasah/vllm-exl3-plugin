@@ -278,6 +278,23 @@ tensors per depth band, before committing to the full one. (2) Per-tensor or per
 `sc_optimize` instead of the pinned `-al 2.0`, tested on the 35B. The near-linear regime there (and
 under loud content on the 27B) is what the quadratic law misprices.
 
+## `hy4-flash-serve` — turboderp/Hy4-flash-exl3 served by vLLM on this box
+
+**Outcome:** a request served end to end from the sm120 draft branch (`~/git/vllm-stock`, upstream main after 0.34
+plus three HY4 commits, with the matching precompiled wheel), token ids checked against the exllamav3 probe (25.7
+tok/s greedy, `-gs 14.5,14.5 -mcs 240`), then against OpenRouter's `tencent/fp8`.
+
+**Unblocks:** the first model whose experts and Engram tables both have to come off this host's disk, so the first
+real read of how the disk tier and the 60 GiB table share 40 GiB of RAM.
+
+**Candidate:** what remains is memory accounting. Loading, Engram staging from disk (`hy4_engram`), profiling,
+FlashInfer autotune and piecewise graph capture all work. The expert cache's late slots are placed by the v0.34
+fork's extensible-KV rules, while main checks KV after warmup with its own. At `--max-model-len 8192` the reserve
+(0.15 GiB) comes up ~20 MiB short of main's requirement (0.17), possibly HY4's indexer pools; with
+`EXL3_KV_RESERVE=1.25` the slots (3.15 GiB) plus warmup's activations (3.88 GiB at peak) leave no KV blocks. Log
+both sides' per-layer KV, then place slots against main's post-warmup check (`late-slots`). Evidence: the commits
+from `a763285` to `eca9144`.
+
 ## `moe-affinity` — Upstream's affinity-weighted expert Hessians, before the MoE pipeline push
 
 **Outcome:** `convert --moe_affinity_eps` either adopted for the MoE pipeline at some eps, or
