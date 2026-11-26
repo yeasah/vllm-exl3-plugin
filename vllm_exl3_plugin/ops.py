@@ -1016,7 +1016,10 @@ def _moe_grouped(x, topk_ids, topk_weights, gate_trellis, gate_suh, gate_svh, up
         # layer's own readback until the next layer's copy landed (0.3% overlap on a 3060 under WSL)
         cpu_offload.prefetch_next(stage)
     inv_order = torch.empty_like(order).scatter_(0, order, torch.arange(order.numel(), device=dev))
-    scratch = torch.empty((max(n_slots, 1), H), dtype=torch.float, device=dev)
+    # Pooled: the slot count changes every layer and call, and a fresh (n_slots, H) fp32 each time (~200 MiB in a
+    # 2048-token batch at H 1536, top-16) made the caching allocator open a new segment for most of them, which then
+    # counted toward warmup's reservation peak (HY4 Flash, 2026-11-26). Only reached outside graph capture
+    scratch = _scratch("moe_grouped", (max(n_slots, 1), H), torch.float, dev)
     out = torch.zeros((M, H), dtype=torch.float, device=dev)
     act = _MOE_ACT[activation]
 
