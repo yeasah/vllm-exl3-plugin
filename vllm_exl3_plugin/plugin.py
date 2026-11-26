@@ -148,8 +148,23 @@ def _patch_offload_summary() -> None:
     def load_model_marked(self, vllm_config, model_config, *args, **kwargs):
         from .cpu_offload import drafting
 
-        with drafting(getattr(model_config, "runner_type", None) == "draft"):
-            return load_model(self, vllm_config, model_config, *args, **kwargs)
+        import os
+
+        import torch
+
+        # EXL3_MEM_SNAPSHOT: the load too (`<base>.load.rank<N>`), so buffers built at model init show by site
+        snap = os.environ.get("EXL3_MEM_SNAPSHOT")
+        if snap:
+            torch.cuda.memory._record_memory_history(max_entries=2_000_000, stacks="python")
+        try:
+            with drafting(getattr(model_config, "runner_type", None) == "draft"):
+                return load_model(self, vllm_config, model_config, *args, **kwargs)
+        finally:
+            if snap:
+                from .expert_cache import _dump_snapshot
+
+                rank = getattr(vllm_config.parallel_config, "rank", 0)
+                _dump_snapshot(f"{snap}.load.rank{rank}", "model load")
 
     base_loader.BaseModelLoader.load_model = load_model_marked
 
