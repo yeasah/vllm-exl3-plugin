@@ -583,6 +583,28 @@ the vocabulary, so it costs QFN more. Policy for now: recommend `--max-logprobs 
 prompt-logprob speed for the reservation; gating it on whether prompt logprobs are ever requested is the harder
 upstream argument.
 
+**`main`'s extensible-KV margin is our fork's before the rework.** `main` keeps `max(1 GiB, 0.75 x peak) +
+max(peak, growth)` after warmup; the fork keeps `max(peak + max(floor, 0.5 x peak), 1.1 x growth + non-torch)`,
+with the floor scaled to the device (2%, at least 256 MiB) (`781043181f`, `6b2557b45a`, `69d608635e`). They do not
+apply to `main` as they stand. Ported by hand into vllm-stock as a throwaway ([the diff](data/vllm-stock-fork-keep.diff)),
+the keep went 2.02 -> 1.27 GiB a rank on HY4 Flash at TP=2, as the formula predicts. These are the commits to offer
+upstream, rebased; the 16 GiB measurements behind them are in memory-accounting.md.
+
+**Where HY4 Flash's decode came from (TP=2, batch 1, 256 greedy tokens):**
+
+| change | keep a rank | expert slots a layer | KV tokens | tok/s |
+|---|---|---|---|---|
+| TP=1, one card (for scale) | -- | 39 (8%) | 27K | 11.3 |
+| TP=2 | 4.14 GiB | 104 (20%) | 107K | 14.2 |
+| pooled MoE scratch, fp16 head through the gather | 3.38 | 121 (24%) | 105K | 15.9 |
+| `--max-logprobs 0` | 2.02 | 162 (32%) | 105K | 19.9 |
+| the fork's keep (throwaway) | 1.27 | 166 (32%) | 171K | 20.4 |
+| `--max-model-len 32768` (and the reserve sized right, `d8aabfa`) | 1.27 | 232 (45%) | 33K | 27.4 |
+
+exllamav3, two cards: 25.7 tok/s with 53% of experts in VRAM. Under `--max-model-len auto` the freed memory went to
+KV, not slots. The plugin's auto policy gives KV one native-length request before slots, and HY4's native 1M can
+never fit, so KV takes all vLLM offers. That is a policy question for 1M-native models: context or decode speed.
+
 **Handled in the plugin, each likely to move with the release:**
 - **Engram tensor names.** exllamav3 stores the Engram block's per-stream and per-head tensors stacked
   (`branch_scales`, `key_proj`, `norm_key`, `norm_query`, `head_norm`); `stock_compat` splits them in the weight stream.

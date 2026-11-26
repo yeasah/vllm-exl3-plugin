@@ -281,18 +281,16 @@ under loud content on the 27B) is what the quadratic law misprices.
 ## `hy4-flash-serve` — turboderp/Hy4-flash-exl3 served by vLLM on this box
 
 **Outcome:** HY4 Flash served at a length and concurrency that use the card, from the sm120 draft branch
-(`~/git/vllm-stock`), with its output checked against the exllamav3 probe and OpenRouter's `tencent/fp8`.
+(`~/git/vllm-stock`, two throwaway vLLM edits), with its output checked against the exllamav3 probe and OpenRouter's
+`tencent/fp8`.
 
-**Unblocks:** the first model whose experts and Engram tables both have to come off this host's disk, so the first
-real read of how the disk tier and the 60 GiB table share 40 GiB of RAM.
+**Unblocks:** the first model whose experts and Engram tables both have to come off this host's disk.
 
-**Candidate:** it serves (2026-11-26), with a throwaway vLLM edit capping sparse MLA's profiling placeholder.
-Prefill agrees with exllamav3's argmax at all 59 positions of the probe's continuation. What remains is memory:
-the expert cache plans KV at its 0.34 GiB floor (27K tokens) and places 15 slots a layer (1 GiB), and the
-extensible keep (4.07 GiB, 2.33 GiB of it torch reservation growth) leaves 4.08 GiB free. Find what the reservation
-growth is (`EXL3_MEM_SNAPSHOT` covers profiling, not warmup), then let KV or slots have the rest (`late-slots`).
-The ~20 MiB KV reserve shortfall seen at 8192 before the cap may be gone with it; recheck. Evidence:
-docs/upstream.md "HY4 Flash on `main`".
+**Candidate:** it serves at TP=2, 27.4 tok/s at `--max-model-len 32768 --max-logprobs 0` (exllamav3: 25.7), with prefill
+top-1 equal to exllamav3's at all 59 probe positions. Left: (1) the auto-length policy for a model whose native length
+cannot fit (1M), where KV currently takes everything before slots; (2) the fork's keep offered upstream, rebased; (3)
+OpenRouter's fp8 as an output check; (4) the uneven ranks seen once (rank 0 holding 1.8 GiB more after warmup), which
+has not recurred in five runs. Evidence: docs/upstream.md "HY4 Flash on `main`".
 
 ## `moe-affinity` — Upstream's affinity-weighted expert Hessians, before the MoE pipeline push
 

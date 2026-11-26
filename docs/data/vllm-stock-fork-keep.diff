@@ -1,0 +1,63 @@
+diff --git a/vllm/v1/worker/extensible_kv_cache.py b/vllm/v1/worker/extensible_kv_cache.py
+index 079fffb171..6642b644e8 100644
+--- a/vllm/v1/worker/extensible_kv_cache.py
++++ b/vllm/v1/worker/extensible_kv_cache.py
+@@ -74,6 +74,33 @@ KV_CACHE_NON_TORCH_RESERVE_BYTES = (2 if current_platform.is_rocm() else 1) << 2
+ KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
+ 
+ 
++# THROWAWAY (vllm-exl3-plugin): the fork's keep (781043181f, 6b2557b45a, 69d608635e), to measure what it buys here
++KV_CACHE_MARGIN_FLOOR_SHARE = 0.02
++KV_CACHE_GROWTH_HEADROOM = 1.1
++KV_CACHE_MARGIN_FLOOR_MIN_BYTES = 1 << 28
++KV_CACHE_FORK_MARGIN_FRACTION = 0.5
++
++
++def kv_cache_margin_floor_bytes(device) -> int:
++    if current_platform.is_rocm():
++        return KV_CACHE_MARGIN_FLOOR_BYTES
++    _, total = device_memory_info(device)
++    return min(KV_CACHE_MARGIN_FLOOR_BYTES, max(KV_CACHE_MARGIN_FLOOR_MIN_BYTES, int(total * KV_CACHE_MARGIN_FLOOR_SHARE)))
++
++
++def kv_cache_non_torch_reserve_bytes(device) -> int:
++    if current_platform.is_rocm():
++        return KV_CACHE_NON_TORCH_RESERVE_BYTES
++    return min(KV_CACHE_NON_TORCH_RESERVE_BYTES, kv_cache_margin_floor_bytes(device) // 2)
++
++
++def kv_cache_keep_bytes(transient_peak_bytes, torch_reserve_growth_bytes, margin_floor_bytes=KV_CACHE_MARGIN_FLOOR_BYTES,
++                        margin_fraction=KV_CACHE_FORK_MARGIN_FRACTION, non_torch_reserve_bytes=KV_CACHE_NON_TORCH_RESERVE_BYTES):
++    on_peak = transient_peak_bytes + max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
++    on_growth = int(torch_reserve_growth_bytes * KV_CACHE_GROWTH_HEADROOM) + non_torch_reserve_bytes
++    return max(on_peak, on_growth)
++
++
+ class ExtensibleKVCache:
+     """Growable backing allocation for the KV cache.
+ 
+@@ -619,9 +646,12 @@ def measure_kv_cache_bytes(
+     """
+     non_kv_used = init_free_memory - free_memory - committed_bytes
+     headroom = free_memory + committed_bytes
+-    margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
+-    available = min(requested_memory - non_kv_used, headroom - margin)
+-    available -= max(transient_peak_bytes, torch_reserve_growth_bytes)
++    # THROWAWAY: the fork's keep, its floor scaled to the device
++    device = torch.device("cuda", torch.cuda.current_device())
++    keep = kv_cache_keep_bytes(transient_peak_bytes, torch_reserve_growth_bytes, kv_cache_margin_floor_bytes(device),
++                               KV_CACHE_FORK_MARGIN_FRACTION, kv_cache_non_torch_reserve_bytes(device))
++    available = min(requested_memory - non_kv_used - max(transient_peak_bytes, torch_reserve_growth_bytes),
++                    headroom - keep)
+     return max(available, 0)
+ 
+ 
+@@ -693,7 +723,7 @@ def measure_kv_cache_blocks(
+         free_memory
+         - (kv_cache.physical_bytes_for(num_blocks) - kv_cache.physical_bytes)
+         - (available - kv_cache_bytes)
+-        - KV_CACHE_NON_TORCH_RESERVE_BYTES
++        - kv_cache_non_torch_reserve_bytes(device)   # THROWAWAY: the fork's, scaled with its floor
+     )
+     torch_memory_limit = torch.accelerator.memory_reserved(device) + max(left_free, 0)
+     kv_cache.set_torch_memory_limit(torch_memory_limit)
