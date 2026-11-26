@@ -348,8 +348,12 @@ class EXL3LinearMethod(LinearMethodBase):
         dimension can be any width EXL3 stored, including one that is not a
         multiple of 128 (exllamav3 pads storage, the model dim need not).
         """
-        from vllm.model_executor.layers.linear import RowParallelLinear
+        from vllm.model_executor.layers.linear import ReplicatedLinear, RowParallelLinear
 
+        # A replicated layer splits nothing, but keeps the world's tp_size (its disable_tp "takes no effect"): HY4
+        # Flash's 576-wide kv_a_proj_with_mqa was refused at TP=2 as if it were one rank's half of 1152
+        if isinstance(layer, ReplicatedLinear):
+            return
         tp_size = layer.tp_size
         if isinstance(layer, RowParallelLinear):
             format.check_tp_split(
@@ -487,7 +491,7 @@ class EXL3LinearMethod(LinearMethodBase):
         expected_out = format.pad_dim(out_size)
         if stored_in != expected_in or stored_out != expected_out:
             raise format.EXL3FormatError(
-                f"shard {index}: checkpoint stores a {stored_in}x{stored_out} "
+                f"{getattr(layer, 'prefix', None) or getattr(layer, 'exl3_prefix', '?')} shard {index}: checkpoint stores a {stored_in}x{stored_out} "
                 f"EXL3 tensor, but vLLM's layer wants {layer.exl3_input_size}x"
                 f"{out_size} (padded to {expected_in}x{expected_out})"
             )

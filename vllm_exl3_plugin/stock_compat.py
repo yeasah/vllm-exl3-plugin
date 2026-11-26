@@ -142,7 +142,7 @@ def _replicated_linear_loading(ReplicatedLinear) -> None:
     `ReplicatedLinear` is the only linear layer with no `weight_loader_v2` branch: its v1 loader shape-checks and
     copies into preallocated data, which an EXL3 parameter does not have (it records what it is handed). Any quantized
     model reaching one -- the Transformers backend builds them -- failed to load. A replicated layer partitions
-    nothing, so the tensor goes to `load_row_parallel_weight` whole, where the EXL3 parameter applies its own policy.
+    nothing, so the tensor is stored whole on every rank.
     """
     from .quantization.linear import EXL3Parameter
 
@@ -155,7 +155,10 @@ def _replicated_linear_loading(ReplicatedLinear) -> None:
         if isinstance(param, EXL3Parameter):
             if loaded_weight.dim() == 0:   # a scalar off disk, as AutoFP8 stores scales
                 loaded_weight = loaded_weight.reshape(1)
-            param.load_row_parallel_weight(loaded_weight=loaded_weight)
+            # Whole on every rank. Not through load_row_parallel_weight: the parameter takes tp_size from the TP group
+            # whatever its layer does, so at TP=2 rank 1 sliced rows [k, 2k) of a k-row tensor and stored nothing
+            # (HY4 Flash's q_a_proj); at TP=1 the two are the same call
+            param.store(loaded_weight)
             return
         return original(self, param, loaded_weight)
 
