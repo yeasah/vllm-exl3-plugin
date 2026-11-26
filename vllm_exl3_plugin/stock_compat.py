@@ -41,6 +41,11 @@ def apply() -> None:
         HYV4FlashModel = None
     if HYV4FlashModel is not None:
         _hy4_flash_engram_names(HYV4FlashModel)
+        from vllm.models.hy_v4_flash.nvidia import engram as hy4_engram_module
+
+        from . import hy4_engram
+
+        hy4_engram.patch(hy4_engram_module)
 
 
 def _is_exl3(quant_config) -> bool:
@@ -320,6 +325,10 @@ def _hy4_flash_engram_names(HYV4FlashModel) -> None:
             vllm_config.model_config.hf_text_config.hc_mult
             if vllm_config is not None and _is_exl3(getattr(vllm_config, "quant_config", None)) else None
         )
+        if self._exl3_engram_hc:
+            from . import hy4_engram
+
+            hy4_engram.attach(self, vllm_config)
 
     @functools.wraps(original_load)
     def load_weights(self, weights):
@@ -327,6 +336,14 @@ def _hy4_flash_engram_names(HYV4FlashModel) -> None:
         if not hc:
             return original_load(self, weights)
         loaded: set[str] = set()
+        # The tables stay on disk (hy4_engram): their parts are filled by staging, not by a checkpoint tensor.
+        # Once per model: vLLM calls load_weights again for later shards, and a second record is a duplicate
+        if not getattr(self, "_exl3_tables_recorded", False):
+            for table in getattr(getattr(self, "engram_hash", None), "exl3_tables", None) or ():
+                name = f"layers.{table.layer_id - 1}.engram_layer.multi_head_embedding.embedding.weight"
+                self._record_part(name, None)
+                loaded.add(name)
+            self._exl3_tables_recorded = True
         rest = _hy4_exl3_experts(self, _hy4_engram_unstack(weights, hc), loaded)
         return original_load(self, rest) | loaded
 
