@@ -551,7 +551,7 @@ _LEAN_MAX_TOKENS = int(os.environ.get("EXL3_DISK_LEAN_MAX", "4"))  # crossover o
 #: used on the main stream; freed inside the next forward's CUDA-graph capture, torch's host allocator records their
 #: release event on the capturing stream, and the next capture's `_host_emptyCache()` fails on it
 #: (`cudaErrorInvalidValue`). That was "breakable capture fails for EXL3 with GDN layers" (docs/upstream.md).
-_FORWARD_STREAM: list = [None, None]
+_FORWARD_STREAM: list = [None, None, None]   # forward context, stream, and under EXL3_STREAM_DEBUG the launch's stack
 
 
 def _one_stream(x: torch.Tensor) -> None:
@@ -572,17 +572,29 @@ def _one_stream(x: torch.Tensor) -> None:
         return
     ctx = get_forward_context()
     stream = torch._C._cuda_getCurrentRawStream(x.device.index)
-    last_ref, last_stream = _FORWARD_STREAM
+    last_ref, last_stream = _FORWARD_STREAM[0], _FORWARD_STREAM[1]
+    debug = os.environ.get("EXL3_STREAM_DEBUG") == "1"
     if last_ref is not None and last_ref() is ctx and last_stream != stream:
+        where = ""
+        if debug:
+            import traceback
+
+            where = ("\n  this launch, stream %#x:\n%s\n  the previous one, stream %#x:\n%s" % (
+                stream, "".join(traceback.format_stack(limit=14)[:-2]), last_stream, _FORWARD_STREAM[2] or "?"))
         raise RuntimeError(
             "exllamav3 kernels were launched on two CUDA streams within one forward pass. They "
             "spin-wait across blocks and deadlock when they overlap (GPU at 100%, no progress), so "
             "vLLM features that run model compute on a side stream cannot be used with EXL3. The "
             "plugin disables the ones it knows (shared-expert overlap, microbatching); this one is "
-            "new. See docs/moe.md, \"Overlapped kernels deadlock\".")
+            "new. See docs/moe.md, \"Overlapped kernels deadlock\". EXL3_STREAM_DEBUG=1 names both "
+            "launches." + where)
     if last_ref is None or last_ref() is not ctx:
         _FORWARD_STREAM[0] = weakref.ref(ctx)
     _FORWARD_STREAM[1] = stream
+    if debug:
+        import traceback
+
+        _FORWARD_STREAM[2] = "".join(traceback.format_stack(limit=14)[:-2])
 
 
 def _exl3_mm(
