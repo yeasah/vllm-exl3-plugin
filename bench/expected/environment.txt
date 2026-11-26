@@ -35,6 +35,7 @@ cuda-toolkit==13.0.3.0
 curlify==3.0.0
 cycler==0.12.1
 datasets==5.0.1
+dateparser==1.5.1
 depyf==0.20.0
 detect-installer==0.2.1
 dill==0.4.1
@@ -44,6 +45,7 @@ docstring_parser==0.18.0
 einops==0.8.2
 email-validator==2.3.0
 exllamav3==1.4.9
+exllamav3==1.6.4
 fastapi-cli==0.0.32
 fastapi-cloud-cli==0.26.0
 fastapi==0.136.3
@@ -187,6 +189,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 python-json-logger==4.2.0
 python-multipart==0.0.32
+pytz==2026.6
 pyyaml==6.0.3
 pyzmq==27.2.0
 qrcode==8.2
@@ -216,6 +219,7 @@ starlette==1.6.0
 supervisor==4.3.0
 sympy==1.14.0
 tabulate==0.10.0
+tblib==3.2.2
 termcolor==3.3.0
 tiktoken==0.14.0
 tilelang==0.1.12
@@ -234,12 +238,14 @@ truststore==0.10.4
 typer==0.27.2
 typing-inspection==0.4.4
 typing_extensions==4.16.0
+tzlocal==5.4.5
 urllib3==2.7.0
 uvicorn==0.52.4
 uvloop==0.22.1
 vastai==1.8.3
 vcs-versioning==2.4.0
 vllm-exl3-plugin==0.0.1
+vllm-spark2_5-plugin==0.1.0
 vllm==0.34.1.dev12+g68c13ab5f.precompiled
 watchfiles==1.2.0
 websockets==17.1

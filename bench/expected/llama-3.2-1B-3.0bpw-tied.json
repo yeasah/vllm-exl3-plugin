@@ -16,20 +16,20 @@
   "gpu_count": 2,
   "capability": "12.0",
   "vllm_reported": "0.34.1.dev12+g68c13ab5f",
-  "pkg.digest": "0d5149e17ca7",
-  "pkg.count": 251,
+  "pkg.digest": "356107998fc8",
+  "pkg.count": 257,
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "309288f",
-   "head": "309288fadc",
+   "describe": "e5f7f3d",
+   "head": "e5f7f3de71",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
   },
   "src.vllm": {
-   "describe": "v0.34.0-12-g68c13ab5fe",
-   "head": "68c13ab5fe",
+   "describe": "v0.34.0-16-g69d608635e",
+   "head": "69d608635e",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -41,53 +41,55 @@
    "diff_sha": null,
    "untracked": 0
   },
-  "driver": "610.57.04"
+  "driver": "610.57.04",
+  "alloc_conf": "expandable_segments:True",
+  "compile_cache_off": "1"
  },
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmpbo7_v0sv/caches/exllamav3_autotune",
+   "path": "/tmp/tmph0r9e6by/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 9872,
-   "mtime": 1795332620
+   "mtime": 1795655710
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmpbo7_v0sv/caches/vllm",
+   "path": "/tmp/tmph0r9e6by/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 4,
    "bytes": 1177028,
-   "mtime": 1795332629
+   "mtime": 1795655721
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmpbo7_v0sv/caches/triton",
+   "path": "/tmp/tmph0r9e6by/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 321,
    "bytes": 12466527,
-   "mtime": 1795332642
+   "mtime": 1795655735
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmpbo7_v0sv/caches/flashinfer",
+   "path": "/tmp/tmph0r9e6by/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
-   "bytes": 6368845,
-   "mtime": 1795332662
+   "bytes": 6369817,
+   "mtime": 1795655756
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "49",
+    "temperature.gpu": "47",
     "clocks.sm": "2595 MHz",
     "clocks.mem": "14001 MHz",
-    "power.draw": "24.80 W",
+    "power.draw": "24.68 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P0",
@@ -96,10 +98,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "34",
+    "temperature.gpu": "30",
     "clocks.sm": "180 MHz",
     "clocks.mem": "405 MHz",
-    "power.draw": "10.01 W",
+    "power.draw": "9.49 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P8",
@@ -3177,7 +3179,7 @@
   }
  ],
  "tune_drift": null,
- "weight_gib": 0.55,
+ "weight_gib": 0.54,
  "attn_backend": "FLASH_ATTN",
- "kv_cache_gib": 11.7
+ "kv_cache_gib": 11.68
 }
