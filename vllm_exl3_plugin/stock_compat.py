@@ -35,6 +35,12 @@ def apply() -> None:
         Spark2_5ForCausalLM = None
     if Spark2_5ForCausalLM is not None:
         _spark_exl3_names(Spark2_5ForCausalLM)
+    try:   # HY4 Flash (upstream main after 0.34)
+        from vllm.models.hy_v4_flash.nvidia.model import HYV4FlashModel
+    except Exception:
+        HYV4FlashModel = None
+    if HYV4FlashModel is not None:
+        _hy4_flash_engram_names(HYV4FlashModel)
 
 
 def _is_exl3(quant_config) -> bool:
@@ -224,3 +230,66 @@ def _spark_exl3_names(Spark2_5ForCausalLM) -> None:
     __init__._exl3_patched = True
     Spark2_5ForCausalLM.__init__ = __init__
 
+
+
+#: exllamav3's Engram tensors that stack what HY4 Flash's checkpoint keeps per hyper-connection stream or hash head
+#: (`exllamav3/modules/ple.py`: alt keys concatenated, `branch_scales` stacked, all in index order), and the
+#: per-part name each row block goes back to. Verified against tencent/Hy4-flash on layer 1: every block equals its
+#: source tensor after the bf16 -> fp16 cast exllamav3 stores it in.
+_HY4_ENGRAM_STACKED = {
+    "branch_scales": "unified_per_hc_scales.{i}",
+    "key_proj.weight": "key_projs.{i}.weight",
+    "key_proj.bias": "key_projs.{i}.bias",
+    "norm_key.weight": "norm_key.{i}.weight",
+    "norm_query.weight": "norm_query.{i}.weight",
+    "head_norm.weight": "lookup_per_head_norms.{i}.weight",
+}
+
+
+def _hy4_engram_unstack(weights, hc_mult: int):
+    """The weight stream with each stacked Engram tensor replaced by its parts, under their checkpoint names."""
+    for name, value in weights:
+        head, sep, leaf = name.partition("engram_layer.")
+        part = _HY4_ENGRAM_STACKED.get(leaf) if sep else None
+        if part is None:
+            yield name, value
+            continue
+        # head_norm stacks one row per hash head; the rest one row block per stream
+        n = value.shape[0] if leaf == "head_norm.weight" else hc_mult
+        if value.shape[0] % n:
+            raise ValueError(f"EXL3 Engram tensor {name} of shape {tuple(value.shape)} does not split into {n}")
+        for i, block in enumerate(value.reshape(n, value.shape[0] // n, *value.shape[1:]).unbind(0)):
+            if leaf in ("branch_scales", "norm_key.weight", "norm_query.weight", "head_norm.weight"):
+                block = block.reshape(value.shape[1:])
+            yield f"{head}engram_layer.{part.format(i=i)}", block
+
+
+def _hy4_flash_engram_names(HYV4FlashModel) -> None:
+    """HY4 Flash loads exllamav3's Engram tensors under the names its loader takes.
+
+    vLLM's `FlashEngram.load_weight` accepts the checkpoint's per-stream and per-head tensors and records each part
+    it fills; exllamav3 stores them stacked (`_HY4_ENGRAM_STACKED`), which it refuses (`branch_scales`). Splitting
+    happens in the weight stream, ahead of the model's own loop, so every part is recorded as from a reference
+    checkpoint. The n-gram table itself (`multi_head_embedding`, trellis-coded in an EXL3 checkpoint) is not this.
+    """
+    original_init = HYV4FlashModel.__init__
+    if getattr(original_init, "_exl3_patched", False):
+        return
+    original_load = HYV4FlashModel.load_weights
+
+    @functools.wraps(original_init)
+    def __init__(self, *args, vllm_config=None, **kwargs):
+        original_init(self, *args, vllm_config=vllm_config, **kwargs)
+        self._exl3_engram_hc = (
+            vllm_config.model_config.hf_text_config.hc_mult
+            if vllm_config is not None and _is_exl3(getattr(vllm_config, "quant_config", None)) else None
+        )
+
+    @functools.wraps(original_load)
+    def load_weights(self, weights):
+        hc = getattr(self, "_exl3_engram_hc", None)
+        return original_load(self, _hy4_engram_unstack(weights, hc) if hc else weights)
+
+    __init__._exl3_patched = True
+    HYV4FlashModel.__init__ = __init__
+    HYV4FlashModel.load_weights = load_weights
