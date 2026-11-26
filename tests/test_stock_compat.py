@@ -92,7 +92,8 @@ def test_replicated_linear_hands_an_exl3_parameter_the_whole_tensor(monkeypatch)
 
     stock_compat._replicated_linear_loading(Replicated)
     seen = []
-    monkeypatch.setattr(EXL3Parameter, "load_row_parallel_weight", lambda self, loaded_weight: seen.append(loaded_weight))
+    # stored whole: not through load_row_parallel_weight, which slices by tp_rank (test_validate_tp.py, rank 1)
+    monkeypatch.setattr(EXL3Parameter, "store", lambda self, loaded_weight, shard_id=0: seen.append(loaded_weight))
     r = Replicated()
     r.weight_loader(_param(), torch.tensor(3.0))
     assert seen[0].shape == (1,), "a scalar off disk is given a dimension"

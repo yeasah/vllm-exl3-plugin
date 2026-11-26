@@ -14,6 +14,42 @@ from functools import wraps
 _REGISTERED = False
 
 
+#: RoPE caches below this go unlogged: ordinary contexts cost tens of MiB
+_ROPE_LOG_MIN_BYTES = 64 << 20
+
+
+def _log_rope_caches(model, model_config) -> None:
+    """Say what vLLM's RoPE cos/sin caches cost, and for how many positions they were built.
+
+    They are built at model init for the model's maximum position -- usually the config's, whatever --max-model-len
+    says, and under --max-model-len auto before the length is settled -- so at a 1M native context they are memory
+    nobody can account for from the flags: 640 MiB of Spark-X2.6-4B's 2.63 GiB, 1 GiB of HY4 Flash's (docs/upstream.md,
+    "RoPE caches at the native length"). A line, not a fix: nothing here changes the caches."""
+    try:
+        import torch
+
+        from .log import init_logger
+
+        logger = init_logger(__name__)
+        seen, rows, total = set(), [], 0
+        for module in model.modules():
+            cache = getattr(module, "cos_sin_cache", None)
+            if not isinstance(cache, torch.Tensor) or not cache.is_cuda or cache.data_ptr() in seen:
+                continue
+            seen.add(cache.data_ptr())
+            nbytes = cache.numel() * cache.element_size()
+            total += nbytes
+            rows.append((cache.shape[0], nbytes))
+        if total < _ROPE_LOG_MIN_BYTES:
+            return
+        auto = getattr(model_config, "original_max_model_len", None) == -1
+        length = "auto: the final length is set after warmup" if auto else f"--max-model-len {model_config.max_model_len}"
+        logger.info("RoPE cos/sin caches: %.0f MiB in %d tensor(s), built for %s positions (%s)", total / (1 << 20),
+                    len(rows), "/".join(sorted({f"{r:,}" for r, _ in rows})), length)
+    except Exception:   # a diagnostic: never fail a load over it
+        pass
+
+
 def register() -> None:
     """Register the out-of-tree EXL3 quantization backend."""
     global _REGISTERED
@@ -158,7 +194,9 @@ def _patch_offload_summary() -> None:
             torch.cuda.memory._record_memory_history(max_entries=2_000_000, stacks="python")
         try:
             with drafting(getattr(model_config, "runner_type", None) == "draft"):
-                return load_model(self, vllm_config, model_config, *args, **kwargs)
+                model = load_model(self, vllm_config, model_config, *args, **kwargs)
+            _log_rope_caches(model, model_config)
+            return model
         finally:
             if snap:
                 from .expert_cache import _dump_snapshot

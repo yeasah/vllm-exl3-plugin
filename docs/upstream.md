@@ -605,6 +605,26 @@ exllamav3, two cards: 25.7 tok/s with 53% of experts in VRAM. Under `--max-model
 KV, not slots. The plugin's auto policy gives KV one native-length request before slots, and HY4's native 1M can
 never fit, so KV takes all vLLM offers. That is a policy question for 1M-native models: context or decode speed.
 
+**RoPE caches at the native length.** vLLM's `get_rope` builds the cos/sin cache at model init for `max_position`
+positions, `max_position x rotary_dim` (bf16), one per distinct RoPE configuration. Most models pass the config's
+`max_position_embeddings`, so the cache is native-length whatever `--max-model-len` says. HY4 Flash passes
+`model_config.max_model_len`, which under `--max-model-len auto` is still the native 1M at init, because auto-fit
+settles the length only after warmup and capture. Ordinary contexts cost tens of MiB; a 1M native context with wide
+rotary dims does not:
+
+| model | RoPE caches | of its load | shrinks with an explicit `--max-model-len`? |
+|---|---|---|---|
+| Spark-X2.6-4B 4.00bpw (1M; full 64 + sliding 256 rotary dims) | 640 MiB | 2.63 GiB | no: config length |
+| HY4 Flash, a TP=2 rank (1M) | 1 GiB | 5.59 GiB | yes: 32 MiB at 32K |
+
+HY4 Flash under auto keeps 204 slots a layer where a fixed 32K keeps 232; that is this cache. Positions past
+`max_model_len` never occur, so a plain-RoPE cache capped at an explicit `max_model_len` serves identical values. That
+would be a fork optimization, with a prefix-equality test, and it must leave scaled variants (YaRN, dynamic NTK, some
+mRoPE setups) alone, since they use `max_position` in their scaling. It cannot reach auto, whose length is settled
+after capture; that needs vLLM to size the cache at the auto-fit length or lazily. Documented only, for now. The plugin
+logs the caches' size, the positions they were built for, and the length in effect whenever they pass 64 MiB, so the
+memory is visible when someone does want 1M.
+
 **Handled in the plugin, each likely to move with the release:**
 - **Engram tensor names.** exllamav3 stores the Engram block's per-stream and per-head tensors stacked
   (`branch_scales`, `key_proj`, `norm_key`, `norm_query`, `head_norm`); `stock_compat` splits them in the weight stream.

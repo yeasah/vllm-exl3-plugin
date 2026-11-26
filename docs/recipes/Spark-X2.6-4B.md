@@ -13,6 +13,10 @@ The `vllm-exl3-serve` docker image has this plugin pre-installed as of version 0
 
 The KV cache requires 40KiB/token unquantized, and at the maximum model length (1M) this will require 36.4GiB unquantized, 18.2GiB for a `kv_cache_dtype` of `fp8`, or 10.7GiB for `turboquant_4bit_nc` or `nvfp4`
 
+vLLM builds this model's RoPE caches for the full 1M positions whatever `--max-model-len` is set to: 640 MiB of
+VRAM, about a quarter of what the 4.00bpw quant loads. The plugin logs it at startup (`RoPE cos/sin caches`). Today a
+shorter `--max-model-len` does not reduce it ([upstream.md](../upstream.md), "RoPE caches at the native length").
+
 Available EXL3 quants include [UnstableLlama/Spark-X2.6-4B-exl3](https://hf.co/UnstableLlama/Spark-X2.6-4B-exl3)
 
 ## 4GiB+
