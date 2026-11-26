@@ -360,25 +360,54 @@ def _hy4_flash_engram_names(HYV4FlashModel) -> None:
 
 
 def _exl3_head_dtype(LogitsProcessor) -> None:
-    """An EXL3 head honours a `head_dtype` other than the activations' by casting its logits.
+    """An EXL3 head honours a `head_dtype` other than the activations' with exllamav3's fp16 logits, cast late.
 
     vLLM refuses a head_dtype different from the model dtype for any quantized head, and HY4 Flash's config sets one
-    (`enable_lm_head_fp32` surfaces as head_dtype float32). The EXL3 kernel accumulates in fp32 and writes fp16; cast
-    to the head dtype, those are the logits exllamav3 serves the same checkpoint with (its HY4 Flash head is an fp16
-    `Linear`). Every other head goes to vLLM's own path, check included.
+    (`enable_lm_head_fp32` surfaces as head_dtype float32). The EXL3 kernel accumulates in fp32 and writes fp16, and
+    exllamav3 serves those (its HY4 Flash head is an fp16 `Linear` fed fp16). Fed the bf16 activations, `exl3_mm` casts
+    its output to bf16 and three mantissa bits go before any cast to fp32, so the head is fed fp16 here. Through
+    `_get_logits` the logits also cross the TP gather in fp16 and are cast once, after it: gathered in fp32 they were
+    2 x 472 MiB of warmup's reservation peak on HY4 Flash at TP=2 (2026-11-26). Every other head goes to vLLM's own
+    path, check included; `_apply_head`'s other callers still get head_dtype.
     """
-    original = LogitsProcessor._apply_head
-    if getattr(original, "_exl3_patched", False):
+    original_apply = LogitsProcessor._apply_head
+    if getattr(original_apply, "_exl3_patched", False):
         return
+    original_get = LogitsProcessor._get_logits
     from .quantization.lm_head import EXL3LMHeadMethod
 
-    @functools.wraps(original)
-    def _apply_head(self, lm_head, hidden_states, embedding_bias):
+    def exl3_cast(self, lm_head, hidden_states):
         head_dtype = getattr(self, "head_dtype", None)
         if (isinstance(getattr(lm_head, "quant_method", None), EXL3LMHeadMethod)
                 and head_dtype is not None and head_dtype != hidden_states.dtype):
-            return lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias).to(head_dtype)
-        return original(self, lm_head, hidden_states, embedding_bias)
+            return head_dtype
+        return None
+
+    def fp16_logits(lm_head, hidden_states, embedding_bias):
+        bias = embedding_bias.half() if embedding_bias is not None else None
+        return lm_head.quant_method.apply(lm_head, hidden_states.half(), bias=bias)
+
+    @functools.wraps(original_apply)
+    def _apply_head(self, lm_head, hidden_states, embedding_bias):
+        head_dtype = exl3_cast(self, lm_head, hidden_states)
+        if head_dtype is None:
+            return original_apply(self, lm_head, hidden_states, embedding_bias)
+        return fp16_logits(lm_head, hidden_states, embedding_bias).to(head_dtype)
+
+    @functools.wraps(original_get)
+    def _get_logits(self, hidden_states, lm_head, embedding_bias, skip_gather=False):
+        head_dtype = exl3_cast(self, lm_head, hidden_states)
+        if head_dtype is None:
+            return original_get(self, hidden_states, lm_head, embedding_bias, skip_gather)
+        logits = fp16_logits(lm_head, hidden_states, embedding_bias)
+        if skip_gather:
+            return logits.to(head_dtype)
+        if lm_head.tp_size > 1:
+            logits = self._gather_logits(logits)
+        if logits is None:
+            return None
+        return logits[..., : self.org_vocab_size].to(head_dtype)
 
     _apply_head._exl3_patched = True
     LogitsProcessor._apply_head = _apply_head
+    LogitsProcessor._get_logits = _get_logits
