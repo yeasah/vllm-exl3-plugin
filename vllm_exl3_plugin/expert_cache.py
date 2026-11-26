@@ -33,9 +33,9 @@ after the memory profile and before KV and graph capture: KV keeps
 take the rest: a length the user set is what their application needs, so it comes
 first. ``EXL3_KV_RESERVE`` is also the concurrency the cache sizes for. With
 ``--max-model-len auto`` the user has left the trade to us: the reserve is a floor of
-4096 tokens, slots stop at the share of experts in VRAM that measured within ~10% of
-resident decode for that concurrency (`target_share`), and the rest goes to context,
-which vLLM fits the length to. ``--cpu-offload-gb`` caps what is hosted
+``EXL3_AUTO_LEN_TOKENS`` (32K) tokens, slots take everything past it up to every offloaded
+expert resident, and the rest goes to context, which vLLM fits the length to (2026-11-26;
+see `_build_late`). ``--cpu-offload-gb`` caps what is hosted
 (`cpu_offload._host_quota`). See `size_slots`. ``EXL3_PROMOTE_PER_STEP`` (32) bounds
 promotions per step across all layers, whatever the batch: growing it with decode rows
 thrashed, measured at 2-16 streams (docs/expert-cache.md, 4b). ``EXL3_CACHE_STATS``
@@ -1379,29 +1379,21 @@ def _build_late(layers: list, available: int, worker) -> int:
                  peak=int(getattr(worker, "peak_activation_memory", 0) or 0))
     kept = max(available - reserve, 0)
     if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
-        # auto: KV is satisfied first -- one request at the model's native length (x EXL3_KV_RESERVE) -- and every
-        # byte past that goes to slots; vLLM fits the length to the plan, and the slots take what is actually free once
-        # the KV cache is final, so a misjudged warmup lands on them. A residency target ("40% is enough") was right
-        # only for small experts: Qwen3.6-35B-A3B 4.00bpw on 16 GiB had KV for 3.1 native-length requests at 39% of
-        # experts in VRAM, and one request's worth at 57% decoded 11% (1 stream) and 27% (4) faster. Where VRAM cannot
-        # hold a native-length request, KV takes it all and vLLM fits the length, as it would without the cache.
-        from . import cpu_offload
-
-        native = _kv_needed(worker.vllm_config, _worker_kv_layers(worker),
-                            float(os.environ.get("EXL3_KV_RESERVE", "1.0")))
-        native_len = worker.vllm_config.model_config.max_model_len
-        kept = max(min(available - native, available - reserve), 0)
-        why = f"one {native_len}-token request ({native / (1 << 30):.2f} GiB)"
-        # With experts on disk every slot takes one off it (the rows it empties refill from disk), so the slots may take
-        # KV down to its floor until the disk is empty: a disk read costs far more than KV past the floor buys
+        # auto: slots first, KV kept at its floor (1 x EXL3_AUTO_LEN_TOKENS x EXL3_KV_RESERVE, 32K tokens): a user who
+        # needs more context says so with --max-model-len. Every offloaded expert resident is as far as slots can use,
+        # so past that KV takes the rest and vLLM fits the length to it. Until 2026-11-26 auto gave KV one request at
+        # the model's native length first and slots only what was past it (or, while experts spilled to disk, enough
+        # to empty the disk tier): HY4 Flash, whose 1M native never fits, kept 166 slots a layer and 171K tokens of KV
+        # at 20.4 tok/s against 232 slots and 27.4 at 32K. Experts read from host RAM cross the link every miss.
+        # Earlier still, a 40% residency target, right only for small experts. A loss target estimated per model
+        # could pull the slots back from "all" the way that one meant to; there is none yet
         per_layer_max = max(max(len(b.rows) + len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
         on_disk = max(max(len(b.disk) for b in l.exl3_host_blocks.values()) for l in layers)
         withheld = _late_slot_loss(worker, spill=bool(on_disk))
-        if on_disk:
-            empty = min(on_disk + cpu_offload._SPARE_ROWS, per_layer_max) * slot_bytes * len(layers) + withheld
-            if empty > kept:
-                kept = max(min(empty, available - reserve), 0)
-                why = f"the floor, {how}, as far as emptying the disk tier ({on_disk} experts a layer on disk) needs"
+        every = per_layer_max * slot_bytes * len(layers) + withheld
+        kept = max(min(every, available - reserve), 0)
+        why = (f"every offloaded expert resident ({per_layer_max} a layer)" if kept == every
+               else f"the floor, {how}")
         logger.info("expert cache: slots are placed after the KV cache is sized; --max-model-len auto plans KV at "
                     "%.2f GiB, for %s, and %.2f GiB stay free for slots (%.2f GiB of them for what the extensible KV "
                     "cache keeps after warmup)", (available - kept) / (1 << 30), why, kept / (1 << 30),
@@ -1509,12 +1501,7 @@ def build(layers: list, available: int, worker) -> int:
     else:
         reserve, how = _kv_reserve(worker)
         cap = None
-        if getattr(worker.vllm_config.model_config, "original_max_model_len", None) == -1:
-            # auto: slots up to the target share, counting the experts that stayed resident
-            streams = float(os.environ.get("EXL3_KV_RESERVE", "1.0"))
-            in_vram = target_in_vram(E, streams)
-            cap = max(in_vram - (E - per_layer_max), 0)
-            how += f"; slots stop at {100 * in_vram / E:.0f}% of experts for {streams:g} stream(s)"
+        # auto: no cap past the KV floor -- slots first, as in _build_late (the residency target it had is gone)
         slots = size_slots(available, reserve, hosted, slot_bytes, len(layers), per_layer_max, cap)
         extra = cpu_offload.prefetch_window_bytes()
         if extra:

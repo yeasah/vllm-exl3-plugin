@@ -719,9 +719,9 @@ def gpu_utilization(cache_config) -> float:
 
 def _exclusive_need(experts: int, loader) -> int | None:
     """Experts per layer worth hosting under the exclusive cache, when that is known at load: with
-    `--max-model-len auto` the cache stops at `target_share` in VRAM, so it needs host rows only for the
-    rest plus a few spare to swap through. More would buy nothing and cost KV, since the staging windows
-    are sized to the rows. None when it is not known (a fixed length leaves the slots to KV sizing), or
+    `--max-model-len auto`, `target_share` of the experts can load resident, so host rows are needed only for the
+    rest plus a few spare to swap through; the late slots then grow over those rows as far as VRAM allows
+    (`expert_cache._build_late`: slots first, since 2026-11-26). The staging windows are sized to the rows. None when it is not known (a fixed length leaves the slots to KV sizing), or
     when selectors may host projections unevenly, which falls back to the inclusive cache."""
     from . import expert_cache
 
