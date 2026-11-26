@@ -1134,7 +1134,16 @@ def _patch_worker() -> None:
 
     @wraps(original)
     def determine_available_memory(self):
+        # EXL3_MEM_SNAPSHOT=<file>: torch's allocator history across vLLM's profiling run, for tools/mem_peak_sites.py
+        # (what the transient peak is made of; on HY4 Flash, vLLM's sparse-MLA profiling placeholder)
+        snap = os.environ.get("EXL3_MEM_SNAPSHOT")
+        if snap:
+            torch.cuda.memory._record_memory_history(max_entries=2_000_000, stacks="python")
         available = original(self)
+        if snap:
+            torch.cuda.memory._dump_snapshot(snap)
+            torch.cuda.memory._record_memory_history(enabled=None)
+            logger.warning("EXL3_MEM_SNAPSHOT: profiling run's allocator history in %s", snap)
         if not _PENDING:
             return available
         layers = list(_PENDING)

@@ -549,6 +549,53 @@ the same on v0.32. Perf at parity; the MoE perf baseline predated the grouped Mo
 `_C_stable_libtorch` now, so the ROCm probe's "No module named 'vllm._C'" warning is noise. Bench fixtures moved
 by `BENCH_FIXTURES` when /home filled; a build now prunes older generations.
 
+### HY4 Flash on `main`: what the sm120 draft branch showed (2026-11-26)
+
+`turboderp/Hy4-flash-exl3@sc_2.00bpw` served from `~/git/vllm-stock`: upstream `main` at `f1268288fd` plus atakann's
+three `hy4-flash-sm120` commits, with that commit's precompiled wheel (the v0.34 wheel under this Python was a
+mismatched pair: 87 compiled-source files and the op registrations moved). One 5060 Ti, `--cpu-offload-params experts
+--cpu-offload-gb 24 --max-model-len auto --max-num-seqs 4 --language-model-only`. It starts and answers. Whatever HY4
+Flash ships in (0.35 or later), recheck each item below against that release before carrying anything forward.
+
+**Still in vLLM, and worth reporting: sparse MLA's profiling placeholder.** While profiling (`attn_metadata is None`),
+`MLAAttention.forward_impl` allocates `chunked_prefill_workspace_size x num_heads x (qk_nope + v)` to stand in for
+`kv_b_proj(kv_c_normed)` in dense MLA's `_compute_prefill_context`. It does this for sparse impls too. A sparse impl
+reaches that decompression only on the `DENSE_MHA` route, where every prefill fits the top-k, unless masked MHA is
+available. Here it never is: `_MASKED_MHA_THRESHOLDS` names only `FLASHINFER_MLA_SPARSE` and `FLASHMLA_SPARSE`, and
+`_is_masked_mha_available` wants capability family 100 and an unquantized KV cache. So the context that can be
+decompressed is bounded by `max_num_seqs x index_topk` (8192 here), against a 64K-row workspace. The allocator trace
+of the profiling run (`EXL3_MEM_SNAPSHOT`, `tools/mem_peak_sites.py`) put 3.5 GiB of the 3.88 GiB transient peak in this one tensor. The formula gives 1.75 GiB at
+65536 x 32 x 448 bf16; the 2x is not explained. Capping the rows there (a throwaway edit in vllm-stock,
+`mla_attention.py`, marked THROWAWAY; [the diff](data/vllm-stock-sparse-mla-placeholder.diff)) made the placeholder 0.22 GiB, the peak 0.80 GiB, and the available KV memory
+5.37 GiB instead of 2.29. Before that, `--max-model-len auto` found no room for one KV block. Recheck on the release:
+whether the placeholder is still unconditional, and whether sm120 has gained masked-MHA thresholds (if it has, the
+cap is wrong and the full workspace is real). Any sparse-MLA model (DeepSeek V3.2) on such a backend pays the same.
+
+**Handled in the plugin, each likely to move with the release:**
+- **Engram tensor names.** exllamav3 stores the Engram block's per-stream and per-head tensors stacked
+  (`branch_scales`, `key_proj`, `norm_key`, `norm_query`, `head_norm`); `stock_compat` splits them in the weight stream.
+- **Routed-expert suffixes.** HY4's loader matches only unquantized and ModelOpt suffixes; `stock_compat` routes
+  `.trellis/.suh/.svh/.mcg/.mul1` through the model's own mapping.
+- **The trellis n-gram table.** `ngram_embedding.safetensors` is outside the index, so vLLM never reads it, and
+  `FlashEmbedding` would need about 127 GB pinned. `hy4_engram` stages rows from disk under the hashing eager break
+  and rewrites the buckets in place. Recheck that hashing is still an eager break and `gated_update` still tests only
+  the buckets' sign.
+- **The first `current_stream()` call.** It installs vLLM's compute stream on first use; HY4's first caller (the
+  index group) was mid-forward and tripped the two-stream guard. `hy4_engram.attach` makes the call at model init.
+- **`head_dtype` with a quantized head.** HY4 sets float32 and vLLM refuses any quantized head; `stock_compat` casts
+  the EXL3 head's fp16 logits, which is what exllamav3 serves.
+- **The KV layout API.** `get_kv_cache_spec` became `get_kv_cache_layer_configs` (`43c1db8c9f`), and
+  `SlidingWindowSpec` is gone; `expert_cache` takes either.
+
+**First request.** "What is the capital of France?", greedy, 64 tokens: coherent, the same think-then-answer shape
+as exllamav3's. The greedy continuation diverges at generated token 17. Teacher-forced through vLLM, exllamav3's 59
+tokens are vLLM's top-1 at every position, and position 17 is a near-tie (top-1 logprob -1.03). Prefill agrees with
+exllamav3 and decode, through the fp8 MLA cache, tips the tie the other way.
+
+**Left, in TODO `hy4-flash-serve`.** Memory is now under-used: the expert cache plans KV at its 0.34 GiB floor (27K
+tokens), places 15 slots a layer (1 GiB), and the extensible keep leaves 4.08 GiB free. The 2.33 GiB of torch
+reservation growth in that keep is the next thing to look at.
+
 ### The 0.34 bump: what running on `main` already showed (2026-11-10)
 
 Not a survey: a throwaway venv at upstream `main` `960f5c1bb1` (torch 2.14.0, precompiled kernels, our

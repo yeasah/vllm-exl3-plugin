@@ -1,0 +1,30 @@
+diff --git a/vllm/model_executor/layers/attention/mla_attention.py b/vllm/model_executor/layers/attention/mla_attention.py
+index 5c332fd145..bc35e0e614 100644
+--- a/vllm/model_executor/layers/attention/mla_attention.py
++++ b/vllm/model_executor/layers/attention/mla_attention.py
+@@ -1101,9 +1101,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
+             # During the profile run try to simulate to worse case output size
+             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
+             # since this can be large
++            # THROWAWAY (vllm-exl3-plugin, docs/upstream.md "Sparse MLA's profiling placeholder"): a sparse impl
++            # without masked MHA decompresses context only on the DENSE_MHA route, every prefill within the top-k
++            rows = self.chunked_prefill_workspace_size
++            if self.impl.is_sparse and not getattr(self.impl, "masked_mha_available", False):
++                topk = getattr(self._vllm_config.model_config.hf_text_config, "index_topk", None)
++                if topk:
++                    rows = min(rows, self._vllm_config.scheduler_config.max_num_seqs * topk)
++            if not getattr(MLAAttention, "_exl3_placeholder_logged", False):
++                MLAAttention._exl3_placeholder_logged = True
++                logger.warning(
++                    "THROWAWAY profile placeholder: %d rows (workspace %d) x %d heads x %d, %s: %.2f GiB",
++                    rows, self.chunked_prefill_workspace_size, self.num_heads,
++                    self.qk_nope_head_dim + self.v_head_dim, k_c_normed.dtype,
++                    rows * self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)
++                    * k_c_normed.element_size() / 2**30)
+             _ = torch.empty(
+                 (
+-                    self.chunked_prefill_workspace_size,
++                    rows,
+                     self.num_heads,
+                     self.qk_nope_head_dim + self.v_head_dim,
+                 ),
