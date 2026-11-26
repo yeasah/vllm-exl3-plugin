@@ -134,6 +134,14 @@ class DiskTable:
 
 def attach(model, vllm_config) -> None:
     """Give an EXL3 HYV4FlashModel's Engram layers disk tables: called from its `__init__` (stock_compat)."""
+    # vLLM's current_stream() installs a dedicated compute stream on its first call in a process (the default stream
+    # cannot hold a graph capture). On HY4 Flash that first call is the sparse-MLA index group's, inside
+    # _indexer_and_attn, so the switch landed mid-forward and the plugin's two-stream guard caught EXL3 kernels on
+    # both sides of it. The switch is ordered (the new stream waits on the old) and permanent; making it here, before
+    # any forward, keeps every forward on one stream.
+    from vllm.utils.torch_utils import current_stream
+
+    current_stream()
     state = getattr(model, "engram_hash", None)
     if state is None:
         return

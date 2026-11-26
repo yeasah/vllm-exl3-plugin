@@ -1226,12 +1226,20 @@ def _kv_reserve(worker) -> tuple[int, str]:
     if getattr(model, "original_max_model_len", None) == -1:
         saved, model.max_model_len = model.max_model_len, _AUTO_LEN_TOKENS
         try:
-            need = _kv_needed(config, worker.get_kv_cache_spec(), mult)
+            need = _kv_needed(config, _worker_kv_layers(worker), mult)
         finally:
             model.max_model_len = saved
         return need, f"{mult:g} x {_AUTO_LEN_TOKENS} tokens (--max-model-len auto)"
-    need = _kv_needed(config, worker.get_kv_cache_spec(), mult)
+    need = _kv_needed(config, _worker_kv_layers(worker), mult)
     return need, f"{mult:g} x --max-model-len {model.max_model_len}"
+
+
+def _worker_kv_layers(worker) -> dict:
+    """The worker's per-layer KV description: specs on v0.34 (`get_kv_cache_spec`), layer configs (a spec plus its
+    manager's policy) on upstream main after it (`get_kv_cache_layer_configs`, 43c1db8c9f). `_kv_needed` takes either."""
+    if hasattr(worker, "get_kv_cache_spec"):
+        return worker.get_kv_cache_spec()
+    return worker.get_kv_cache_layer_configs()
 
 
 def _kv_needed(config, specs: dict, mult: float) -> int:
@@ -1248,7 +1256,13 @@ def _kv_needed(config, specs: dict, mult: float) -> int:
         from vllm.v1.core import kv_cache_planning as kv
     except ImportError:
         from vllm.v1.core import kv_cache_utils as kv
-    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+    if specs and hasattr(next(iter(specs.values())), "manager_config"):
+        # Layer configs (main after v0.34): its `check_enough_kv_cache_memory`, exactly -- the per-layer sum for one
+        # request against what is left after the null block, both from the layer configs
+        groups = [g for g in kv.get_kv_cache_groups(config, dict(specs)) if not g.host_resident]
+        return (int(mult * kv.max_memory_usage_bytes(config, specs.values()))
+                + (kv._pool_bytes_per_block(config, groups) if groups else 0))
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec   # specs only; gone from main with them
 
     try:
         merged = dict(specs)
@@ -1340,7 +1354,7 @@ def _build_late(layers: list, available: int, worker) -> int:
         # hold a native-length request, KV takes it all and vLLM fits the length, as it would without the cache.
         from . import cpu_offload
 
-        native = _kv_needed(worker.vllm_config, worker.get_kv_cache_spec(),
+        native = _kv_needed(worker.vllm_config, _worker_kv_layers(worker),
                             float(os.environ.get("EXL3_KV_RESERVE", "1.0")))
         native_len = worker.vllm_config.model_config.max_model_len
         kept = max(min(available - native, available - reserve), 0)

@@ -35,6 +35,10 @@ def apply() -> None:
         Spark2_5ForCausalLM = None
     if Spark2_5ForCausalLM is not None:
         _spark_exl3_names(Spark2_5ForCausalLM)
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+    if hasattr(LogitsProcessor, "_apply_head"):   # vLLM after 0.34: head_dtype honoured in one place
+        _exl3_head_dtype(LogitsProcessor)
     try:   # HY4 Flash (upstream main after 0.34)
         from vllm.models.hy_v4_flash.nvidia.model import HYV4FlashModel
     except Exception:
@@ -350,3 +354,28 @@ def _hy4_flash_engram_names(HYV4FlashModel) -> None:
     __init__._exl3_patched = True
     HYV4FlashModel.__init__ = __init__
     HYV4FlashModel.load_weights = load_weights
+
+
+def _exl3_head_dtype(LogitsProcessor) -> None:
+    """An EXL3 head honours a `head_dtype` other than the activations' by casting its logits.
+
+    vLLM refuses a head_dtype different from the model dtype for any quantized head, and HY4 Flash's config sets one
+    (`enable_lm_head_fp32` surfaces as head_dtype float32). The EXL3 kernel accumulates in fp32 and writes fp16; cast
+    to the head dtype, those are the logits exllamav3 serves the same checkpoint with (its HY4 Flash head is an fp16
+    `Linear`). Every other head goes to vLLM's own path, check included.
+    """
+    original = LogitsProcessor._apply_head
+    if getattr(original, "_exl3_patched", False):
+        return
+    from .quantization.lm_head import EXL3LMHeadMethod
+
+    @functools.wraps(original)
+    def _apply_head(self, lm_head, hidden_states, embedding_bias):
+        head_dtype = getattr(self, "head_dtype", None)
+        if (isinstance(getattr(lm_head, "quant_method", None), EXL3LMHeadMethod)
+                and head_dtype is not None and head_dtype != hidden_states.dtype):
+            return lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias).to(head_dtype)
+        return original(self, lm_head, hidden_states, embedding_bias)
+
+    _apply_head._exl3_patched = True
+    LogitsProcessor._apply_head = _apply_head
