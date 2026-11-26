@@ -65,5 +65,6 @@ cpu_offload_params:
  - visual
  - experts
 mm_processor_kwargs: '{"max_pixels": 1048576}'
+mm_processor_cache_gb: 1
 speculative_config: '{"method":"mtp","num_speculative_tokens":2,"revision":"4.00bpw"}'
 ```
