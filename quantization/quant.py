@@ -3049,7 +3049,7 @@ def build_generator(job, args, path, env, echo=True):
         print(f"=== calibration generator: uncalibrated 8bpw -> {job.generator} ===")
     ok = run_until(os.path.join(job.generator, "quantization_config.json"),
                    [ "python3", os.path.join(args.exllamav3dir, "convert.py"),
-                     "-b", "8", "-hb", "8", "-vb", "16", "--uncalibrated",
+                     "-b", "8", "-hb", "8", "-vb", "16", "--uncalibrated", *SCALED_HESSIAN_ARGS,
                      "-i", path, "-w", work, "-o", job.generator, "-d", "0" ],
                    job.log("traces-gen"), args.retries + 1, env=env,
                    cleanup=lambda: shutil.rmtree(work, ignore_errors=True), echo=echo)   # uncalibrated jobs cannot resume
@@ -3158,7 +3158,7 @@ def do_baseline(job, args):
                 print(f"=== BASELINE {rev} (uncalibrated) ===")
             ok = run_until(os.path.join(out, "quantization_config.json"),
                            [ "python3", os.path.join(args.exllamav3dir, "convert.py"), "--uncalibrated",
-                             "-hq", "-b", bits, "-hb", headbits, "-vb", "16", "--out_scales", OUT_SCALES,
+                             "-hq", "-b", bits, "-hb", headbits, "-vb", "16", "--out_scales", OUT_SCALES, *SCALED_HESSIAN_ARGS,
                              "-eb", str(embed_bits_for(bits, args.embed_bits)),
                              *([] if HALF_STEPS else ["--no_half_steps"]),
                              "-i", path, "-w", work, "-o", out, "-d", "0" ],
@@ -3205,6 +3205,9 @@ RECIPE_TIES = "k_proj+v_proj,gate_proj+up_proj"   # sc_optimize -tie (upstream a
 EMBED_BITS_AT_5 = 5, 5.0     # convert.py --embed_bits: a trellis embedding at this depth from this body rate up,
 EMBED_BITS_BASE = 4          # and at this one below it; the 9B's table costs excess KL 1.26x at 5.00 at K=4, 1.03x at K=5
 OUT_SCALES = "always"        # convert.py --out_scales (upstream: auto, off for some gate/up projections)
+SCALED_HESSIAN = False       # convert.py --scaled_hessian: upstream turned it on by default after 1.6.7 (and the LDLQ
+                             # diagonal floor, b3356e85, only acts under it); pinned off until measured as its own arm
+SCALED_HESSIAN_ARGS = [] if SCALED_HESSIAN else ["--no-scaled_hessian"]
 HALF_STEPS = True            # convert.py's 1.5/2.5/3.5 steps below 4 bpw, as upstream: -b 3.5 is a native 3.5,
                              # so the half-rung baselines are what a plain conversion now gives; False passes
                              # --no_half_steps, the pre-1.6.4 whole-bit mix. Integer rungs unchanged (-b 3 -hq
@@ -4066,7 +4069,7 @@ def do_quantize(job, args):
                     with open(os.path.join(workdir, INTENT_FILE), "w") as f:
                         json.dump(intent, f, indent=1)
                     run_logged([ "python3", script,
-                                 "-vb", "16", "--out_scales", OUT_SCALES,
+                                 "-vb", "16", "--out_scales", OUT_SCALES, *SCALED_HESSIAN_ARGS,
                                  "-eb", str(embed_bits_for(bits, args.embed_bits)),
                                  "-i", path,
                                  "-w", workdir,
