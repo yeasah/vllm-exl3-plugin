@@ -87,9 +87,8 @@ def main() -> None:
     entry = suite.margin_by_name(args.entry)
     # In-process, so this process's torch is the worker's and its allocator statistics are the ones that matter.
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
-    for key, value in entry.env.items():
-        os.environ[key] = str(value)
+    for key, value in entry.child_env().items():
+        os.environ[key] = value
 
     import torch
     from vllm import LLM

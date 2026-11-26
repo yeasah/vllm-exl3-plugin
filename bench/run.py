@@ -116,9 +116,46 @@ KVMEM_RE = re.compile(r"Available KV cache memory: ([-\d.]+) GiB")
 _CUDA_BIN_CANDIDATES = ("/usr/local/cuda/bin", "/opt/cuda/bin")
 
 
+#: Variable families that change what an entry computes or how its memory reads, removed from the inherited
+#: environment so a run is a fact about the code and the entry rather than about the operator's shell. The bench
+#: sets its own values (suite.controlled_defaults, then each entry's `env`). Found 2026-11-25: the dev shell's
+#: VLLM_DISABLE_COMPILE_CACHE reached every child, and an unset PYTORCH_CUDA_ALLOC_CONF let the fork's
+#: host-dependent allocator default move `weight_gib`. Credentials, paths and device selection pass through.
+CONTROLLED_PREFIXES = ("VLLM_", "EXL3_", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF", "TORCHINDUCTOR_",
+                       "TORCH_COMPILE_", "TRITON_")
+#: The deliberate exception: comma-separated names to keep from the shell anyway (an experiment, a workaround
+#: a host needs). Reported on every run, since a kept variable is an input no baseline was measured under.
+PASS_ENV = "BENCH_PASS_ENV"
+
+
+def _controlled_inherited_env() -> dict:
+    keep = {v.strip() for v in os.environ.get(PASS_ENV, "").split(",") if v.strip()}
+    env, dropped = {}, []
+    # The cache stores are the bench's to point (cache_env); in ambient mode they stay the operator's
+    caches = {var for var, _d, _k in core.CACHE_STORES.values()}
+    for k, v in os.environ.items():
+        if k.startswith(CONTROLLED_PREFIXES) and k not in keep and k not in caches:
+            dropped.append(k)
+        else:
+            env[k] = v
+    global _ENV_REPORTED
+    if not _ENV_REPORTED:
+        _ENV_REPORTED = True
+        if dropped:
+            print(f"bench: not inheriting {', '.join(sorted(dropped))} (set per entry; {PASS_ENV} to keep)")
+        passed = sorted(k for k in keep if k in os.environ)
+        if passed:
+            print(f"bench: ! keeping {', '.join(passed)} from the shell ({PASS_ENV}); no baseline was "
+                  "measured under them")
+    return env
+
+
+_ENV_REPORTED = False
+
+
 def _env_with_nvcc() -> dict:
     """Child environment, with `nvcc` made discoverable if it is installed."""
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = dict(_controlled_inherited_env(), PYTHONUNBUFFERED="1")
     if shutil.which("nvcc") is not None:
         return env
     for cand in _CUDA_BIN_CANDIDATES:

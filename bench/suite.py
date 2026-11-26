@@ -87,6 +87,29 @@ class Entry:
         """Filesystem-safe identity, and the baseline filename."""
         return self.label.replace(" ", "-").replace("/", "-").replace(",", "")
 
+    def child_env(self) -> dict:
+        """The environment this entry's process runs under, set rather than inherited: the bench's own
+        defaults (`controlled_defaults`), then the entry's `env` on top. The parent has already removed the
+        operator's settings of these families (run.py `CONTROLLED_PREFIXES`), so nothing here is ambient."""
+        return {**controlled_defaults(self), **{k: str(v) for k, v in self.env.items()}}
+
+
+def controlled_defaults(entry: "Entry") -> dict:
+    """What every entry runs under unless its `env` says otherwise.
+
+    The allocator is the configuration vLLM ships for the entry's TP degree on a host with the #196258 fix
+    outside WSL: expandable segments on at TP=1, off under TP (the fork's `maybe_default_expandable_segments`).
+    Set explicitly rather than left to that default, because the default reads the host (the fix probe, WSL)
+    and `weight_gib` moves with the allocator: expandable segments report ~0.01 GiB less for the same weights
+    (measured 2026-11-25 on qwen3-0.6B, 0.28 -> 0.27). `qwen3-0.6B 3.0bpw eager default-allocator` keeps the
+    other configuration gated. The compile cache stays off, as every baseline has been measured; the
+    persistent-cache machinery in run.py covers the caches the bench owns."""
+    return {
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:" + ("True" if entry.tensor_parallel_size == 1 else "False"),
+        "VLLM_DISABLE_COMPILE_CACHE": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+    }
+
 
 #: Both execution modes for one checkpoint, because an eager-only result says
 #: nothing about the CUDA-graph path -- capture and replay is where a change to
@@ -98,6 +121,16 @@ ENTRIES: list[Entry] = [
         revision="3.0bpw",
         exercises="uniform K=3, the simplest possible target; the baseline "
         "against which the other Qwen3-0.6B entries isolate one variable each",
+    ),
+    Entry(
+        label="qwen3-0.6B 3.0bpw eager default-allocator",
+        model="turboderp/Qwen3-0.6B-exl3",
+        revision="3.0bpw",
+        env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False"},
+        exercises="the eager entry under torch's default allocator, the configuration vLLM keeps where it "
+        "does not turn expandable segments on (WSL, torch without the #196258 fix) and a valid choice "
+        "anywhere. Every other TP=1 entry runs with expandable segments, so this is the one that gates "
+        "the plugin under the other allocator; its weight line reads ~0.01 GiB above the eager entry's",
     ),
     Entry(
         label="qwen3-0.6B 3.0bpw graphs",

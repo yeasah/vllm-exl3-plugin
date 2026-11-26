@@ -270,6 +270,11 @@ def environment() -> dict:
         ).stdout.strip().splitlines()[0]
     except Exception:  # pragma: no cover
         env["driver"] = None
+    # Set by the bench rather than inherited (suite.controlled_defaults), recorded so that a change of either is a
+    # named difference: the allocator moves weight_gib, the compile cache what a graph entry runs
+    import os
+    env["alloc_conf"] = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+    env["compile_cache_off"] = os.environ.get("VLLM_DISABLE_COMPILE_CACHE")
     return env
 
 

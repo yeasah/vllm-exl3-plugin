@@ -52,12 +52,11 @@ def main() -> None:
         model_arg, revision_arg = entry.model, entry.revision
 
     # Set before vLLM starts its engine core.
-    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    # The autotune/compile caches are keyed on things a version bump changes; a
-    # gate that reads a stale cache is measuring the cache, not the build.
-    os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
-    for key, value in entry.env.items():
-        os.environ[key] = str(value)
+    # Set, not inherited (suite.controlled_defaults): among them the compile cache, keyed on
+    # things a version bump changes -- a gate that reads a stale cache is measuring the cache,
+    # not the build.
+    for key, value in entry.child_env().items():
+        os.environ[key] = value
 
     from vllm import LLM
 

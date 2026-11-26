@@ -79,10 +79,8 @@ def main() -> None:
     else:
         model_arg, revision_arg = entry.model, entry.revision
 
-    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
-    for key, value in entry.env.items():
-        os.environ[key] = str(value)
+    for key, value in entry.child_env().items():
+        os.environ[key] = value
 
     from vllm import LLM, SamplingParams
 
