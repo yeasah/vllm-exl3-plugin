@@ -49,7 +49,7 @@ Never reuse a retired slug for different work.
 -->
 
 **Now:** the rest of `cpu-offload` (prefill cost, startup headroom). **Next:** the MoE pipeline questions it makes pressing (`recipe-value`, `exl3-1.6.4-defaults`,
-`moe-tp`), and the `engram-ple` survey. Lower-priority and speculative items live in [FUTURE.md](FUTURE.md).
+`moe-affinity`, `moe-tp`), and the `engram-ple` survey. Lower-priority and speculative items live in [FUTURE.md](FUTURE.md).
 
 ## `kv-budget-margin` — Make `gpu_memory_utilization` mean what it says
 
@@ -275,6 +275,59 @@ this changes:
 tensors per depth band, before committing to the full one. (2) Per-tensor or per-family exponents in
 `sc_optimize` instead of the pinned `-al 2.0`, tested on the 35B. The near-linear regime there (and
 under loud content on the 27B) is what the quadratic law misprices.
+
+## `exl3-dev-bump` — The fork onto upstream `dev`, not a release
+
+**Outcome:** `yeasah/exllamav3` `master` merged up to turboderp's `dev` (2d79ab55 as of
+2026-11-25), the plugin and pipeline revalidated on it, and the submodule pin moved. The fork
+is still based on 1.6.4 (merge-base `da68d57d`): 171 upstream commits, 143 of them up to 1.6.7.
+Upstream is active on `dev` and has just stopped cutting releases, so we stop waiting for 1.6.8.
+
+**Unblocks:** the four commits from 11-22 on, which are what we want from this bump. The rest
+comes along. It also stops the merge growing while we wait.
+- `3e9ead26` + `8b55acdc`, HYV4-Flash (text, DFly2 MTP, vision): conversion and qbench in
+  exllamav3. Serving it is a separate question. vLLM's model (#68296, `b067b6f6`, 11-18) is
+  after 0.34 and in no release, so it needs a fork backport or 0.35. `3e9ead26` also changes
+  `ple.py`, `ngram_embedding.py`, `mla_attn.py` and the row-length quantize kernel (160-only
+  becomes any even length; the 256 tile path is unchanged). Recheck engram-PLE's staged rows
+  against exllamav3's reference decode bit for bit, and rerun `tests/kernels/quant`.
+- `b3356e85`, LDLQ diagonal floor: applied only inside `scaled_ldl`, so it does nothing
+  unless `--scaled_hessian` is on (below). It belongs with that measurement.
+- `2d79ab55`, disk-cache accounting leak: generator only, so qbench/eval-side. Check that
+  its new test passes.
+
+**Candidate:** the same shape as the 1.6.4 merge (docs/upstream.md "What the 1.6.4 merge
+cost"). A trial merge conflicts in 7 files: qbench `qbench.py`/`engines.py`/`qbench_prompts.py`
+(20 hunks; `token_embd` accounting stays ours), `convert_model.py`, `linear.py`,
+`exl3_lib/quantize.py` and `sc_optimize.py`. Survey changed defaults before merging. The one
+found so far is `convert --scaled_hessian`, which goes from opt-in to **on by default**. That
+would flip every `quant.py` conversion silently, so pin it off in `quant.py` and leave adopting
+it to a measurement (as with `exl3-1.6.4-defaults`). In `linear.py`, port calW's row
+weighting (`capture_row_weight`) onto a weighted copy, as upstream's `H_aff` does.
+Upstream's packed capture (`c60b33be`) dropped the float copy that our in-place `x.mul_`
+relies on, so a direct port would scale the expert's forward input, and with it down's
+Hessian, silently. Also rebuild the in-tree ext after the
+merge: the .cu files moved.
+
+## `moe-affinity` — Upstream's affinity-weighted expert Hessians, before the MoE pipeline push
+
+**Outcome:** `convert --moe_affinity_eps` either adopted for the MoE pipeline at some eps, or
+rejected on a measurement, before the MoE quants are rebuilt.
+
+**Unblocks:** closes the expert-calibration question that calW left without a satisfying answer.
+Upstream's weighting is the variant we did not test: the router's weight on the experts it
+actually selects, plus an eps floor over every token. Its per-expert gate/up Hessians come from
+sampled rows (`conversion/moe_affinity.py`).
+
+**Candidate:** an eps sweep on Qwen3.6-35B-A3B at 4.00, scored on wild against C, the
+all-expert default. Wild is the slice where a redraw moves nothing measurable, so one draw per
+arm is enough. The floor's share of each expert's Hessian mass is about eps / (1 + eps):
+upstream's "typical" 0.01 is ~1% global, close to R (routed tokens only, wild 0.958 against
+C's 0.813). Run eps 0.3, 1 and 3, plus a large eps that should reproduce C (the control that
+shows the path is wired correctly). Our reading (diet-leaning costs on its own) predicts the
+result gets worse as eps falls. A win at any eps would contradict that reading, so check it
+on swe kept-reasoning draws before adopting. Needs `exl3-dev-bump`. Evidence:
+docs/calibration.md "Calibrating a MoE's experts".
 
 ## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
 
