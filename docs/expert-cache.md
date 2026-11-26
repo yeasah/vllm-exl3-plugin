@@ -845,7 +845,8 @@ still means everything. The bullets below describe the first version where they 
 
 - **Placement.** Every expert matching the selectors goes to the host. If host RAM is short, each
   layer gets the same share (`MemAvailable` less the larger of 4 GiB and 10% of RAM, split
-  across local ranks). Hosted experts do not spend vLLM's budget. With no selector, dense EXL3
+  across local ranks; since 2026-11-26 a measured 3 GiB plus the host memory vLLM's config names,
+  [memory-accounting.md](memory-accounting.md#the-host-margin-2026-11-26)). Hosted experts do not spend vLLM's budget. With no selector, dense EXL3
   tensors stay on the device.
 - **Sizing, at vLLM's `determine_available_memory`.** This is after the memory profile, before
   KV and graph capture:

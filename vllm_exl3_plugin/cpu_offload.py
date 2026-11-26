@@ -505,7 +505,7 @@ def spill_expected(config) -> bool:
             return False
         ranks = max(config.parallel_config.tensor_parallel_size, 1)
         want = census["experts"] / ranks
-        free = (_mem_available() - max(_HOST_MARGIN, _mem_total() // 10)) / ranks
+        free = (_mem_available() - _host_margin(config)) / ranks
         room = min(free, uva.cpu_offload_gb * (1 << 30))
         return want > 0.8 * room
     except Exception:
@@ -578,8 +578,36 @@ def _plan_block(param, t: torch.Tensor, label: str) -> HostBlock | None:
 
 _UNPLANNED = object()
 
-#: Host RAM left free when sizing the expert cache's host copy, at least.
-_HOST_MARGIN = 4 << 30
+#: Host RAM left free when sizing the expert cache's host copy, before what the config names (`_host_margin`).
+#: Measured as the engine's host growth after the quota is decided, beyond the hosted bytes: Qwen3.6-35B-A3B
+#: 4.00bpw, 12 GiB hosted, graphs on, 4 sequences, through the margin gate's hostile phases -- 2.05 GiB, 2.45 with
+#: MTP (2 drafts), almost all of it by the end of startup (2026-11-26). 3 GiB is that and a fifth. It was a round
+#: 4 GiB, or a tenth of host RAM if larger, which measured nothing and kept 1.5 GiB too many from a 20 GiB WSL VM.
+_HOST_MARGIN = 3 << 30
+
+
+def _host_margin(config=None) -> int:
+    """The host margin: the measured base, plus host memory vLLM's configuration names and allocates after the
+    quota is decided -- the multimodal processor cache (one copy per API process and engine core with the default
+    "lru" type, one shared with "shm"; none when the model serves text only) and the CPU KV offloading buffer."""
+    margin = _HOST_MARGIN
+    if config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            config = get_current_vllm_config()
+        except Exception:
+            return margin
+    mm = getattr(getattr(config, "model_config", None), "multimodal_config", None)
+    if mm is not None and not getattr(mm, "language_model_only", False) and getattr(mm, "mm_processor_cache_gb", 0):
+        pc = config.parallel_config
+        copies = 1 if getattr(mm, "mm_processor_cache_type", "lru") == "shm" else (
+            getattr(pc, "_api_process_count", 1) + getattr(pc, "data_parallel_size_local", 1))
+        margin += int(mm.mm_processor_cache_gb * copies * (1 << 30))
+    kv = getattr(getattr(config, "cache_config", None), "kv_offloading_size", None)
+    if kv:
+        margin += int(kv * (1 << 30))   # the total across TP ranks, as the flag documents
+    return margin
 
 
 #: Host rows the exclusive cache keeps free to swap through, beyond those it must hold. 17 per layer kept a
@@ -790,7 +818,7 @@ def _host_quota(experts: int, nbytes: int) -> int:
         want = _rank_expert_bytes() or layers * experts * 3 * nbytes
         # The margin protects the host, so it is taken once, not once per rank: per rank it reserved 8 GiB of a
         # 40 GiB host at TP=2 and left Qwen4Exp's 3.05bpw body short of host rows (2026-11-17)
-        free = (_mem_available() - max(_HOST_MARGIN, _mem_total() // 10)) // _local_ranks()
+        free = (_mem_available() - _host_margin()) // _local_ranks()
         loader = _uva_loader()
         budget = (max(loader.cpu_offload_max_bytes - loader.cpu_offload_bytes, 0)
                   if loader is not None else want)
@@ -846,10 +874,6 @@ def _meminfo(key: str) -> int:
 
 def _mem_available() -> int:
     return _meminfo("MemAvailable")
-
-
-def _mem_total() -> int:
-    return _meminfo("MemTotal")
 
 
 def _local_ranks() -> int:

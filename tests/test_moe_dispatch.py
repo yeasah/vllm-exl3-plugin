@@ -149,7 +149,6 @@ def test_spill_is_predicted_from_expert_bytes_against_host_room(monkeypatch):
     gib = 1 << 30
     monkeypatch.delenv("EXL3_DISK_TIER", raising=False)
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 36 * gib)
-    monkeypatch.setattr(cpu_offload, "_mem_total", lambda: 40 * gib)
     experts = {"experts": 20 * gib}
     monkeypatch.setattr(cpu_offload, "_checkpoint_census", lambda *a: experts)
 

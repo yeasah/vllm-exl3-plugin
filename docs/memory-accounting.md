@@ -888,6 +888,28 @@ hosted rows with O_DIRECT instead was tried and does not help: the loader has al
 plugin sees them, so it only adds a second read. Keeping them out of the cache entirely would mean keeping vLLM's
 iterator from reading them, which is a larger change than the problem now needs.
 
+## The host margin (2026-11-26)
+
+The expert host quota leaves a margin of host RAM free, for what the engine allocates after the quota is decided.
+It was the larger of 4 GiB and a tenth of RAM, a round number that measured nothing, and on a 20 GiB WSL VM it kept
+a 14 GiB host tier from fitting. Measured instead: `MemAvailable` sampled every 0.25 s from the quota decision
+through startup and the margin gate's hostile phases, Qwen3.6-35B-A3B 4.00bpw, 12 GiB hosted, graphs on, 4
+sequences, nvfp4 KV, 32K context. Growth beyond the hosted bytes:
+
+| | at ready | worst serving |
+|---|---|---|
+| no MTP | 1.97 GiB | 2.05 |
+| MTP, 2 drafts | 2.38 | 2.45 |
+
+Almost all of it lands by the end of startup; serving adds under 0.1 GiB across a 32K prefill, prompt logprobs, n=4
+and JSON. The run was in-process, so a server's API process adds its own request state on top.
+
+The margin is now 3 GiB (that and a fifth) plus the host memory vLLM's configuration names and allocates later:
+the multimodal processor cache (`mm_processor_cache_gb` per API process and engine core with the default `lru`
+type, once with `shm`, nothing under `--language-model-only`) and the CPU KV offloading buffer
+(`kv_offloading_size`). A ratio of host RAM is gone: the growth is bytes and does not scale with the host. Shrinking
+the 2 GiB itself (compile workers, the drafter's load) was left for later.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

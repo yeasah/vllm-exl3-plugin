@@ -575,7 +575,6 @@ def test_cache_mode_towers_spend_the_budget_first(offload, monkeypatch):
 def test_cache_mode_spreads_what_host_ram_allows(offload, monkeypatch):
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setattr(cpu_offload, "_HOST_MARGIN", 0)
-    monkeypatch.setattr(cpu_offload, "_mem_total", lambda: 0)
     # 2 layers x 8 experts x 3 projections x 512 bytes = 24 KiB wanted; half fits
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: 12 << 10)
     offload(_Loader({"experts"}))
@@ -1002,7 +1001,6 @@ def _spill_layer(offload, monkeypatch, tier, budget_experts, mem=1 << 40):
     monkeypatch.setenv("EXL3_EXPERT_SLOTS", "auto")
     monkeypatch.setenv("EXL3_DISK_TIER", tier)
     monkeypatch.setattr(cpu_offload, "_mem_available", lambda: mem)
-    monkeypatch.setattr(cpu_offload, "_mem_total", lambda: 8 << 30)   # so the margin is the 4 GiB floor
     offload(_Loader({"experts"}, max_bytes=budget_experts * 3 * 512))
     cpu_offload.declare_moe_layer("m.layers.3.mlp.experts")
     param = _Collector()
@@ -1270,3 +1268,27 @@ def test_checkpoint_cache_released_under_wsl_by_default(monkeypatch, mode, wsl, 
     monkeypatch.setattr("vllm.config.get_current_vllm_config", lambda: config)
     cpu_offload.release_checkpoint_cache()
     assert calls == ([("m", "r", None)] if drops else [])
+
+
+def _margin_config(mm=None, kv=None, api=1, dp=1):
+    return types.SimpleNamespace(
+        model_config=types.SimpleNamespace(multimodal_config=mm),
+        parallel_config=types.SimpleNamespace(_api_process_count=api, data_parallel_size_local=dp),
+        cache_config=types.SimpleNamespace(kv_offloading_size=kv))
+
+
+def _mm(gb=4, kind="lru", text_only=False):
+    return types.SimpleNamespace(mm_processor_cache_gb=gb, mm_processor_cache_type=kind, language_model_only=text_only)
+
+
+@pytest.mark.parametrize(("config", "gib"), [
+    (_margin_config(), 3),                                   # the measured base, no ratio of host RAM
+    (_margin_config(mm=_mm()), 3 + 4 * 2),                   # lru: one copy in the API process, one in the engine
+    (_margin_config(mm=_mm(), api=2), 3 + 4 * 3),
+    (_margin_config(mm=_mm(kind="shm")), 3 + 4),             # shm: one shared copy
+    (_margin_config(mm=_mm(text_only=True)), 3),             # --language-model-only processes no images
+    (_margin_config(mm=_mm(gb=0)), 3),                       # cache disabled
+    (_margin_config(kv=10), 3 + 10),                         # CPU KV offloading, the total across ranks
+])
+def test_host_margin_counts_what_the_config_names(config, gib):
+    assert cpu_offload._host_margin(config) == gib << 30
