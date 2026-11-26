@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import types
 
 import pytest
 
@@ -1251,3 +1252,21 @@ def test_filesystem_type_finds_the_longest_mount(monkeypatch, tmp_path):
     assert cpu_offload._filesystem_type("/mnt/cache") == "ext4", "a prefix of the name is not a parent directory"
     assert cpu_offload._filesystem_type("/root/.cache/huggingface/hub") == "fuse"
     assert {"9p", "drvfs", "fuse"} <= cpu_offload._SLOW_FILESYSTEMS
+
+
+@pytest.mark.parametrize(("mode", "wsl", "drops"), [
+    ("auto", True, True), ("auto", False, False), ("1", False, True), ("0", True, False),
+])
+def test_checkpoint_cache_released_under_wsl_by_default(monkeypatch, mode, wsl, drops):
+    from vllm.model_executor.model_loader import weight_utils
+    from vllm.platforms import interface
+
+    calls = []
+    monkeypatch.setenv("EXL3_DROP_CHECKPOINT_CACHE", mode)
+    monkeypatch.setattr(interface, "in_wsl", lambda: wsl)
+    monkeypatch.setattr(weight_utils, "drop_checkpoint_cache", lambda *a: calls.append(a))
+    config = types.SimpleNamespace(model_config=types.SimpleNamespace(model="m", revision="r"),
+                                   load_config=types.SimpleNamespace(download_dir=None))
+    monkeypatch.setattr("vllm.config.get_current_vllm_config", lambda: config)
+    cpu_offload.release_checkpoint_cache()
+    assert calls == ([("m", "r", None)] if drops else [])

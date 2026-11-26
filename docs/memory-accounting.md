@@ -876,6 +876,18 @@ when none or several do, the monitor stays off and says so.
 into a degraded mode that announces itself, where a bare-Linux box would OOM. A bench run that logs the warning
 is invalid rather than a regression.
 
+**Host RAM has the same blind spot (2026-11-26).** A WSL VM's memory is one Windows process, and the guest's page
+cache is part of it: the guest counts its cache as available, Windows sees it as the VM's working set and can only
+compress or page it. vLLM's lazy loader reads every tensor through the page cache (safetensors' `get_tensor` copies
+out of its mapping: 200 untouched trellises, 100 MiB, left 161 MiB resident), so a loaded checkpoint stays cached at
+about its size -- 18.7 GiB of Qwen3.6-35B-A3B 4.00bpw beside its 11.8 GiB of pinned host rows. On godel, with the VM
+given 24 GiB against 22.5 free on the host, that alone overcommitted Windows. The plugin now releases the
+checkpoint's page cache after loading under WSL (`EXL3_DROP_CHECKPOINT_CACHE`, vLLM's own `drop_checkpoint_cache`):
+18.70 GiB cached -> 0.00, load time and logprobs unchanged; WSL's free page reporting then returns the pages. Reading
+hosted rows with O_DIRECT instead was tried and does not help: the loader has already read them by the time the
+plugin sees them, so it only adds a second read. Keeping them out of the cache entirely would mean keeping vLLM's
+iterator from reading them, which is a larger change than the problem now needs.
+
 ## Open
 
 - **Whether FlashInfer's two workspaces are both necessary**, or whether the

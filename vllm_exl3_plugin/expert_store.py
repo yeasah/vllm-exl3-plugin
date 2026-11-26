@@ -13,6 +13,7 @@ buffered instead.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import mmap
 import os
@@ -129,7 +130,12 @@ class ExpertStore:
             dst = out.get(label) if out else None
             if dst is None:
                 dst = torch.empty(src.shape, dtype=src.dtype)
-            dst.copy_(src)
+            if (dst.device.type == "cpu" and src.is_contiguous() and dst.is_contiguous() and src.dtype == dst.dtype
+                    and src.numel() == dst.numel()):
+                # not torch's copy_: its OpenMP pool spin-waits between copies (cpu_offload._host_copy)
+                ctypes.memmove(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size())
+            else:
+                dst.copy_(src)
             result[label] = dst
         with self._lock:
             self.reads += 1

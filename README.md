@@ -193,6 +193,7 @@ Defaults suit serving; most of these exist for measurement or to isolate a probl
 | `EXL3_EMBED_STATIC_MAX` | 512 | largest batch the capture-safe embedding gather handles; must cover vLLM's CUDA-graph sizes |
 | `EXL3_WDDM_MONITOR` | 1 | under WSL, warn when Windows starts paging this process's VRAM (usage past WDDM's budget) and when it recovers; 0 turns it off. See [docs/memory-accounting.md](docs/memory-accounting.md#wsl-wddms-budget-and-silent-paging-2026-11-26) |
 | `EXL3_WDDM_MONITOR_INTERVAL` | 1.0 | seconds between that monitor's polls |
+| `EXL3_DROP_CHECKPOINT_CACHE` | auto | release the checkpoint's page cache after loading: `auto` under WSL only (Windows cannot reclaim a VM's cache, so it pages), `1` everywhere, `0` never |
 | `EXL3_DEQUANTIZE` | 0 | dequantize every weight at load: a correctness oracle with no memory saving |
 | `VLLM_DISABLE_COMPILE_CACHE` | 0 | set to 1 while editing the plugin: vLLM's compile cache cannot see plugin code |
 

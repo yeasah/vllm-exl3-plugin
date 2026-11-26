@@ -170,6 +170,9 @@ def _patch_offload_summary() -> None:
             from .wddm_budget import start_monitor
 
             start_monitor()
+            from .cpu_offload import release_checkpoint_cache
+
+            release_checkpoint_cache()
         report_once()
         return result
 

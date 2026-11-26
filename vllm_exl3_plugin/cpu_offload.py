@@ -1269,6 +1269,33 @@ def _model_root() -> str:
     return _checkpoint_root(mc.model, mc.revision, getattr(config.load_config, "download_dir", None))
 
 
+#: ``EXL3_DROP_CHECKPOINT_CACHE``: "auto" (default) releases the checkpoint's page cache once the weights are
+#: loaded under WSL only; "1" everywhere, "0" never. vLLM's lazy loader reads every tensor through the page cache
+#: (safetensors' get_tensor copies out of its mapping), so a loaded checkpoint stays cached at about its size. On
+#: bare Linux that cache is free and makes the next start warm. Under WSL it is not: the guest counts its cache as
+#: available while Windows sees the VM's whole working set, and a VM sized near the host's free memory pages
+#: (godel, 24 GiB VM on 22.5 GiB free, 13 GiB of a 19 GiB checkpoint cached after load). Released, the pages are
+#: free in the guest, and WSL's free page reporting returns them to Windows.
+def release_checkpoint_cache() -> None:
+    mode = os.environ.get("EXL3_DROP_CHECKPOINT_CACHE", "auto").strip().lower()
+    if mode == "0":
+        return
+    if mode != "1":
+        from vllm.platforms.interface import in_wsl
+
+        if not in_wsl():
+            return
+    try:
+        from vllm.config import get_current_vllm_config
+        from vllm.model_executor.model_loader.weight_utils import drop_checkpoint_cache
+
+        config = get_current_vllm_config()
+        mc = config.model_config
+        drop_checkpoint_cache(mc.model, mc.revision, getattr(config.load_config, "download_dir", None))
+    except Exception as exc:   # an older vLLM, or no local checkpoint: the cache stays, as it always did
+        logger.info("checkpoint page cache kept: %s", exc)
+
+
 def _open_disk_tier(layers) -> None:
     """The reader for experts left on disk, each layer's window positions for them, and one pinned source per
     projection sized for the layer with the most. A read is one span per expert (expert_store); under TP each rank
