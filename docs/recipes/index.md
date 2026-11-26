@@ -20,3 +20,7 @@ This is not an inclusive list of supported models; rather these are example conf
 |[Qwen3.5-2B](Qwen3.5-2B.md)|Dense|2|2|✅|12|256K|4 GiB+|
 |[MiniCPM5-2B](MiniCPM5-2B.md)|Dense|2|2|❌|42|128K|4 GiB+|
 |[LFM3-1.7B](LFM3-1.7B.md)|Dense|1.7|1.7|❌|12|256K|any|
+
+## Host memory with vision enabled
+
+Configurations with vision set `mm_processor_cache_gb: 1`. vLLM's default is a 4 GiB cache of preprocessed images, kept once in the API server and once in the engine (8 GiB of host RAM in a single-server setup), to skip repeat preprocessing when the same image comes back, as it does across turns of a chat. On a small host, or one giving most of its RAM to offloaded experts, that is RAM taken from the experts for a CPU-side speedup to the encoder path, which these configurations already deprioritize. 1 GiB still holds dozens of images at the `max_pixels` used here. The plugin counts this cache against host RAM when it sizes the expert host tier, so raising it leaves less room for experts. `--language-model-only` configurations need nothing: no images are processed.

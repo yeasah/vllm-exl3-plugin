@@ -23,6 +23,7 @@ kv_cache_dtype: fp8
 cpu_offload_gb: 1
 cpu_offload_params: visual
 mm_processor_kwargs: '{"max_pixels": 1048576}' 
+mm_processor_cache_gb: 1
 #speculative_config: '{"model":"google/gemma-4-31B-it-assistant","num_speculative_tokens":4}'
 ```
 

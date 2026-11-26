@@ -28,6 +28,7 @@ enable_auto_tool_choice: yes
 tool_call_parser: gemma4
 reasoning_parser: gemma4
 kv_cache_dtype: fp8
+mm_processor_cache_gb: 1
 #speculative_config: '{"model":"google/gemma-4-12B-it-assistant","num_speculative_tokens":4}'
 ```
 

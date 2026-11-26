@@ -23,6 +23,7 @@ cpu_offload_params:
  - visual
  - experts
 mm_processor_kwargs: '{"max_pixels": 1048576}' 
+mm_processor_cache_gb: 1
 #speculative_config: '{"model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":4}'
 ```
 

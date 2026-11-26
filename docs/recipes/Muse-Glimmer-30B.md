@@ -50,6 +50,7 @@ reasoning_parser: muse_glimmer
 kv_cache_dtype: nvfp4
 cpu_offload_gb: 4
 cpu_offload_params: visual
+mm_processor_cache_gb: 1
 #speculative-config '{"method": "dflash", "model": "turboderp/Muse-Glimmer-30B-assistant-exl3", "revision": "4.00bpw", "num_speculative_tokens": 15}'
 ```
 
