@@ -770,6 +770,54 @@ and it is only worth raising if there is appetite. Evidence in
 bar is higher: changes we make for ourselves do not need offering, only ones that are
 right for everyone.*
 
+### What the dev merge cost (2026-11-25)
+
+Upstream `dev` at `2d79ab55` (171 commits past the fork's 1.6.4 base, 28 past 1.6.7) merged into the fork's
+`master` (`1d810e6c`), not a release: upstream kept committing to `dev` after 1.6.7 and cut no 1.6.8. Wanted
+for HYV4-Flash (`3e9ead26`, `8b55acdc`), the LDLQ diagonal floor (`b3356e85`) and the disk-cache accounting
+fix (`2d79ab55`). Conflicts in 7 files:
+- **qbench**: our `ranges`/offset `run()` interface was kept over upstream's `lengths`, which it covers. Each of
+  upstream's four `engines.py` commits was ported onto ours: `model_class` behind our `trust_remote_code` gate,
+  per-device noise generators with our per-row seeding, `_text_parts`, MLX tensors, and the w4a4 report.
+- **`sc_optimize.py`**: upstream's rate ladder is the same half-step rule as ours. Ours `--floor`/`--floor_fit` kept.
+- **`quantize.py`**: upstream's `refit_scales` taken. It is its own fix for the large-vocab head OOM ours fixed.
+- **`linear.py` and `convert_model.py`**: below.
+
+**Two hazards to content-weighted expert calibration (calW), neither of them a conflict:**
+- *In-place weighting.* Upstream's packed Hessian capture (`c60b33be`) drops the fp32 copy of the layer input
+  that our `x.mul_(rw)` was scaling. Ported as written, it would scale the expert's forward input, and with it
+  down's Hessian. The weighting now runs on its own copy.
+- *The fast path.* Upstream's all-expert `capture_only` fast path in `block_sparse_mlp.py` merged without a
+  conflict and applies no per-token weights. calW would have produced unweighted Hessians with no error. It now
+  steps aside when weights are loaded, and asserts if it is reached with them.
+
+`tests/conversion/test_capture_row_weights.py` covers both. Each test was seen to fail with its fix removed.
+
+**Changed defaults:** `convert --scaled_hessian` is on by default upstream. `quant.py` pins it off
+(`SCALED_HESSIAN`). A job started through the pin stores `False`, and one started without it stores `True`. The
+LDLQ floor acts only under scaled Hessians, so adopting either is one measurement.
+
+**Validation:**
+- **Fork tests.** Of 6,999 self-contained tests, 9 failures. 6 also fail on the old `master`. 3 are upstream's
+  own stale tests (stubs without `sparse_head`; they fail identically on a pure `upstream/dev`).
+  `tests/kernels/tp/test_tp_context.py` segfaults about 65% of the time on both sides; this is not traced.
+- **Plugin tests.** 467 passed.
+- **bench.** Every entry exact except the MiniCPM5-1B blockq prompt-0 near-tie
+  (`suite.MINICPM_BLOCKQ_P0_NEAR_TIE`), which flipped back to its 10-24 to 11-16 continuation. `perf-check` is
+  within ±4%.
+- **Engram gather.** The one Engram change is the gather's I/O (`ngram.cu`): an inline `RWF_NOWAIT` read for
+  decode-sized gathers, with misses handed to the pool. Its cold-cache fallback had no coverage, and now has
+  `test_ngram_gather_cold_inline`.
+
+The control run first (2026-11-25, before the pin moved) showed three days of plugin and vLLM-fork work serving
+identically. The only change was the allocator's `weight_gib` reading. Since then the bench sets each entry's
+environment instead of inheriting the shell's (bench/README.md).
+
+**HYV4-Flash** converts and runs in exllamav3. Serving it needs vLLM's model (#68296, after 0.34). A third-party
+quant (OpensourceWTF) made with a patched converter stores its Engram tables as fp8 rows with fp32 row scales.
+Upstream's loader would read them as E8M0 exponents, which leaves Engram's contribution at about zero with no
+error. Use upstream's own `turboderp/Hy4-flash-exl3` (trellis tables).
+
 ### What the 1.6.4 merge cost (2026-10-23)
 
 v1.6.4 (460 commits) merged into the fork's `master`, wanted for upstream's MoE target grouping in

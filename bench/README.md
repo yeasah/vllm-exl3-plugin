@@ -32,6 +32,25 @@ means somebody edited a submodule without committing, which is the drift that
 pinning them was meant to end. It used to be the reverse — a dirty vLLM was
 normal, back when the patches lived in its working tree as unstaged edits.
 
+## The environment is set, not inherited
+
+Every entry's process gets its environment from the bench, not from the shell that started it. `run.py` drops
+the `VLLM_*`, `EXL3_*`, allocator-config, `TORCHINDUCTOR_*`, `TORCH_COMPILE_*` and `TRITON_*` families it
+inherits (`CONTROLLED_PREFIXES`). Credentials, paths, device selection and the cache stores the bench points
+itself pass through unchanged. Each child then applies `suite.controlled_defaults` and, on top of that, the
+entry's own `env`:
+- **Expandable segments** are on at TP=1 and off under TP, which is what vLLM ships on a patched host outside
+  WSL. `qwen3-0.6B 3.0bpw eager default-allocator` gates the other setting.
+- **The compile cache** is off.
+
+Both settings are recorded in the environment (`alloc_conf`, `compile_cache_off`). An experiment that needs a
+shell variable names it in `BENCH_PASS_ENV`. The named variable wins over the bench's defaults, and every run
+reports it, since no baseline was measured under it.
+
+This dates from 2026-11-25. That day the dev shell's `VLLM_DISABLE_COMPILE_CACHE` turned out to have reached
+every child, and the allocator default, which depends on the host, moved `weight_gib` by up to 0.15 GiB with
+no change in what was served. The weight line is a torch allocator delta, not a count of bytes on disk.
+
 ## Why it captures what it captures
 
 This exists because two silent defects got through everything else we had (see

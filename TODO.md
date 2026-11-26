@@ -278,39 +278,6 @@ tensors per depth band, before committing to the full one. (2) Per-tensor or per
 `sc_optimize` instead of the pinned `-al 2.0`, tested on the 35B. The near-linear regime there (and
 under loud content on the 27B) is what the quadratic law misprices.
 
-## `exl3-dev-bump` — The fork onto upstream `dev`, not a release
-
-**Outcome:** `yeasah/exllamav3` `master` merged up to turboderp's `dev` (2d79ab55 as of
-2026-11-25), the plugin and pipeline revalidated on it, and the submodule pin moved. The fork
-is still based on 1.6.4 (merge-base `da68d57d`): 171 upstream commits, 143 of them up to 1.6.7.
-Upstream is active on `dev` and has just stopped cutting releases, so we stop waiting for 1.6.8.
-
-**Unblocks:** the four commits from 11-22 on, which are what we want from this bump. The rest
-comes along. It also stops the merge growing while we wait.
-- `3e9ead26` + `8b55acdc`, HYV4-Flash (text, DFly2 MTP, vision): conversion and qbench in
-  exllamav3. Serving it is a separate question. vLLM's model (#68296, `b067b6f6`, 11-18) is
-  after 0.34 and in no release, so it needs a fork backport or 0.35. `3e9ead26` also changes
-  `ple.py`, `ngram_embedding.py`, `mla_attn.py` and the row-length quantize kernel (160-only
-  becomes any even length; the 256 tile path is unchanged). Recheck engram-PLE's staged rows
-  against exllamav3's reference decode bit for bit, and rerun `tests/kernels/quant`.
-- `b3356e85`, LDLQ diagonal floor: applied only inside `scaled_ldl`, so it does nothing
-  unless `--scaled_hessian` is on (below). It belongs with that measurement.
-- `2d79ab55`, disk-cache accounting leak: generator only, so qbench/eval-side. Check that
-  its new test passes.
-
-**Candidate:** the same shape as the 1.6.4 merge (docs/upstream.md "What the 1.6.4 merge
-cost"). A trial merge conflicts in 7 files: qbench `qbench.py`/`engines.py`/`qbench_prompts.py`
-(20 hunks; `token_embd` accounting stays ours), `convert_model.py`, `linear.py`,
-`exl3_lib/quantize.py` and `sc_optimize.py`. Survey changed defaults before merging. The one
-found so far is `convert --scaled_hessian`, which goes from opt-in to **on by default**. That
-would flip every `quant.py` conversion silently, so pin it off in `quant.py` and leave adopting
-it to a measurement (as with `exl3-1.6.4-defaults`). In `linear.py`, port calW's row
-weighting (`capture_row_weight`) onto a weighted copy, as upstream's `H_aff` does.
-Upstream's packed capture (`c60b33be`) dropped the float copy that our in-place `x.mul_`
-relies on, so a direct port would scale the expert's forward input, and with it down's
-Hessian, silently. Also rebuild the in-tree ext after the
-merge: the .cu files moved.
-
 ## `moe-affinity` — Upstream's affinity-weighted expert Hessians, before the MoE pipeline push
 
 **Outcome:** `convert --moe_affinity_eps` either adopted for the MoE pipeline at some eps, or
@@ -328,7 +295,7 @@ upstream's "typical" 0.01 is ~1% global, close to R (routed tokens only, wild 0.
 C's 0.813). Run eps 0.3, 1 and 3, plus a large eps that should reproduce C (the control that
 shows the path is wired correctly). Our reading (diet-leaning costs on its own) predicts the
 result gets worse as eps falls. A win at any eps would contradict that reading, so check it
-on swe kept-reasoning draws before adopting. Needs `exl3-dev-bump`. Evidence:
+on swe kept-reasoning draws before adopting. Evidence:
 docs/calibration.md "Calibrating a MoE's experts".
 
 ## `exl3-1.6.4-defaults` — Three upstream defaults the 1.6.4 bump pinned instead of adopting
@@ -352,6 +319,8 @@ allocation, and per-type sensitivity differences are what a recipe exploits -- s
 quick rule-in/out arm together (`-g all` only changes keys if the ties change with it), not a
 study.
 
+
+**Since the dev merge (2026-11-25), a fourth:** `convert --scaled_hessian` (upstream: on by default), pinned off in `quant.py` (`SCALED_HESSIAN`), together with the LDLQ diagonal floor (`b3356e85`) that only acts under it -- one uniform-bits qbench arm on the 0.6B and the 9B, like `out_scales` (docs/upstream.md, "What the dev merge cost").
 ## `yaqa-probe` — Decide YAQA per model before paying for its Hessians
 
 **Outcome:** a cheap pipeline step that says whether a model is YAQA-friendly. Two-sided rounding against an
@@ -568,6 +537,8 @@ moves the old `eval_swe.json` aside: eval-traces reuses a trace that exists.
 ## Recently closed
 
 *One line each, newest first. Prune to ~10 when appending; the cut of 2026-11-05 exceeds that for one window, so stale references still land.*
+
+- `exl3-dev-bump` — closed 2026-11-25: the fork carries upstream dev (2d79ab55); bench exact but the known near-tie, plugin tests green, scaled_hessian pinned off and moved to `exl3-1.6.4-defaults`; see [docs/upstream.md](docs/upstream.md) "What the dev merge cost".
 
 - `multi-draw` — closed 2026-11-15: a draw's swe rank does not transfer across disjoint session sets (winners land at the other trace's mean), so there is no draw to select; `quantize --draws` and `probe.py` remain for yardsticks and the YAQA/recipe gate; reopen only with a much larger kept-reasoning selection trace; see [docs/calibration.md](docs/calibration.md) "A draw's swe rank does not transfer".
 - `blockq-on-load` — closed 2026-11-05: on-load blockq is the default with an LRU-capped cache, and the pipeline emits trellis embeddings (`-eb`); see [docs/embeddings.md](docs/embeddings.md).
