@@ -157,6 +157,13 @@ Which is to say, on this configuration, `throughput` gives a significant boost t
 
 Prefix caching is of fundamental importance: without this, a session of any length will have its prefill latency increase dramatically as the session grows. This is enabled by default, and should in almost every case be left enabled.
 
+Unless a client needs logprobs, serve with `--max-logprobs 0`. vLLM sizes its memory at startup for the worst
+request it might receive, and with logprobs allowed (the default is 20) that includes a 1,024-token chunk of
+prompt logprobs over the full vocabulary. That memory is set aside and never goes to KV cache or expert slots.
+On HY4 Flash at TP=2 on two 16 GiB cards it held 1.36 GiB per card: with `--max-logprobs 0` the expert cache kept
+32% of experts in VRAM instead of 24%, and decode went from 15.9 to 19.9 tok/s. The larger the vocabulary, the
+more it holds. The cost is that requests asking for logprobs, sampled or prompt, are refused.
+
 It is possible to extend context beyond the normal trained max model length on some models, which usually provide instructions on their model card. I do not generally recommend this -- it consumes a lot of VRAM, and model performance with context substantially greater than the training size is generally quite uneven.
 
 

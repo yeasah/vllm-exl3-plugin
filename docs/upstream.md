@@ -571,6 +571,18 @@ of the profiling run (`EXL3_MEM_SNAPSHOT`, `tools/mem_peak_sites.py`) put 3.5 Gi
 whether the placeholder is still unconditional, and whether sm120 has gained masked-MHA thresholds (if it has, the
 cap is wrong and the full workspace is real). Any sparse-MLA model (DeepSeek V3.2) on such a backend pays the same.
 
+**Also in vLLM, on our 0.34 fork as well: the KV-sizing warmup reserves a prompt-logprobs chunk.** Whenever
+`max_logprobs != 0` (default 20), `run_kv_cache_sizing_warmup` runs a step requesting prompt logprobs, and
+`compute_prompt_logprobs_with_chunking` builds full-vocabulary logits `CHUNK_SIZE` = 1024 rows at a time (hard-coded
+in `prompt_logprob.py`). That transient is kept out of the KV cache and the expert slots. The allocator trace named
+it: 1,024 x 60,416 fp32 logits a rank, plus the TP gather. On HY4 Flash at TP=2 the keep went 3.38 -> 2.02 GiB a
+rank with `--max-logprobs 0`, slots 121 -> 162 a layer (24% -> 32% of experts), decode 15.9 -> 19.9 tok/s. It is
+the reservation working as designed: a request for prompt logprobs would otherwise OOM mid-serve. It scales with
+the vocabulary, so it costs QFN more. Policy for now: recommend `--max-logprobs 0` unless logprobs are needed
+(usage-notes.md). If that is not enough, a smaller `CHUNK_SIZE` (fork optimization, or an upstream knob) trades
+prompt-logprob speed for the reservation; gating it on whether prompt logprobs are ever requested is the harder
+upstream argument.
+
 **Handled in the plugin, each likely to move with the release:**
 - **Engram tensor names.** exllamav3 stores the Engram block's per-stream and per-head tensors stacked
   (`branch_scales`, `key_proj`, `norm_key`, `norm_query`, `head_norm`); `stock_compat` splits them in the weight stream.
