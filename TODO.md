@@ -85,7 +85,9 @@ run to every digit), only their 24-token greedy continuation does;
 entry (2026-11-09) needed 8 new records, but the from-empty freeze re-timed all 254 and 41 changed kernel,
 which forced a re-bless of every entry; a full freeze stays the way to prune unused shapes; (4) flashinfer's autotune,
 the one cache class not frozen, shown to matter or not; (5) TP=4/8 tiers on a rental, with a hub prefetch
-before it starts. Evidence: [bench/README.md](bench/README.md).
+before it starts; (6) the decode-time margin at each greedy step (top-2 logprob gap), so a changed continuation
+reports whether it flipped at a near-tie or a decided token: today a near-tie is known only by its history
+(`suite.MINICPM_BLOCKQ_P0_NEAR_TIE`, six flips at bumps). Evidence: [bench/README.md](bench/README.md).
 
 ## `tq-decode-slowdown` — TurboQuant decode at long context: upstream's cost or our slabbing?
 

@@ -28,6 +28,17 @@ from dataclasses import dataclass, field
 #: failing on chance.
 RUN_TO_RUN_FLIPS = {"argmax_disagreements": 3}
 
+#: MiniCPM5-1B under the blockq fixture, prompt 0: generated token 21 of 24 sits on a near-tie between
+#: "question. \n\nThe" and "question. The answer is", and nearly any numeric change in the stack tips it. The
+#: committed baselines show it: blockq graphs flipped at six blesses between 2026-08-24 and 2026-11-25
+#: (vLLM 0.32, the exllamav3 1.6.4 merge, vLLM 0.34, the exllamav3 dev merge, ...), its TP siblings with it,
+#: and blockq eager once (2026-09-10). The prompt's 15 scored positions stayed bit-identical through the
+#: latest flip; only the continuation moved, on the three entries together, and back to the text it held
+#: for most of its history. Read the diff's scored positions: identical there plus this flip is the bump's
+#: usual footprint, not a blockq regression.
+MINICPM_BLOCKQ_P0_NEAR_TIE = {0: "token 21 near-tie, '\\n\\nThe' vs ' The answer is', flips at bumps "
+                                 "(suite.MINICPM_BLOCKQ_P0_NEAR_TIE has the history)"}
+
 
 @dataclass(frozen=True)
 class Entry:
@@ -68,6 +79,10 @@ class Entry:
     #: failure instead of failing the gate. Clearing this field is how the fix
     #: gets verified.
     known_broken: str | None = None
+    #: Prompts whose greedy continuation sits on a known near-tie, by prompt index: why, and its history.
+    #: Never a tolerance -- a changed continuation still fails -- but `check` prints the note beside the
+    #: failure, so the history is read before anyone chases it again.
+    near_ties: dict = field(default_factory=dict)
     #: The TP=1 entry this one shards. Its committed baseline is a second
     #: reference: `bless` refuses and `check` fails when this capture leaves it
     #: by more than the sibling tolerance in run.py. A TP entry's own baseline
@@ -194,6 +209,7 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="minicpm5-1B 3.0bpw blockq eager",
+        near_ties=MINICPM_BLOCKQ_P0_NEAR_TIE,
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
         fixture="blockq",
@@ -212,6 +228,7 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="minicpm5-1B 3.0bpw blockq graphs",
+        near_ties=MINICPM_BLOCKQ_P0_NEAR_TIE,
         tolerance=RUN_TO_RUN_FLIPS,
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
@@ -545,6 +562,7 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="minicpm5-1B 3.0bpw blockq graphs tp2",
+        near_ties=MINICPM_BLOCKQ_P0_NEAR_TIE,
         tolerance=RUN_TO_RUN_FLIPS,
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
@@ -570,6 +588,7 @@ ENTRIES: list[Entry] = [
     ),
     Entry(
         label="minicpm5-1B 3.0bpw blockq tp2",
+        near_ties=MINICPM_BLOCKQ_P0_NEAR_TIE,
         model="turboderp/MiniCPM5-1B-exl3",
         revision="3.00bpw",
         fixture="blockq",

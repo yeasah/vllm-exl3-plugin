@@ -434,7 +434,9 @@ def check_entry(entry: suite.Entry, fresh: dict, base: dict) -> list[str]:
                 f"prompt {i}: {m['argmax_disagreements']}/{m['positions']} "
                 f"argmax disagreements")
         if not m["generated_match"]:
-            failures.append(f"prompt {i}: greedy continuation changed")
+            note = entry.near_ties.get(i)
+            failures.append(f"prompt {i}: greedy continuation changed"
+                            + (f" -- known near-tie: {note}" if note else ""))
         if m["dlogprob_max"] > tol["dlogprob_max"]:
             failures.append(
                 f"prompt {i}: |dlogprob| max {m['dlogprob_max']:.3e} "
