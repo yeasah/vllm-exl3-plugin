@@ -1283,11 +1283,18 @@ def _kv_needed(config, specs: dict, mult: float) -> int:
     except ImportError:
         from vllm.v1.core import kv_cache_utils as kv
     if specs and hasattr(next(iter(specs.values())), "manager_config"):
-        # Layer configs (main after v0.34): its `check_enough_kv_cache_memory`, exactly -- the per-layer sum for one
-        # request against what is left after the null block, both from the layer configs
-        groups = [g for g in kv.get_kv_cache_groups(config, dict(specs)) if not g.host_resident]
-        return (int(mult * kv.max_memory_usage_bytes(config, specs.values()))
-                + (kv._pool_bytes_per_block(config, groups) if groups else 0))
+        # Layer configs (main after v0.34): the admission check the engine core runs (`get_kv_cache_configs`), the
+        # builder's groups at their per-group block counts plus the null block. Not `check_enough_kv_cache_memory`'s
+        # per-layer sum, which came out ~13% short on HY4 Flash (MLA, sliding-window MLA and indexer pools padded to
+        # uniform groups): 0.34 GiB planned for 32K tokens against the 0.39 the engine core then required
+        layers = dict(specs)
+        builder = kv.get_kv_cache_config_builder(config)
+        groups = kv._project_kv_cache_groups_to_worker(kv.get_global_kv_cache_groups(config, [layers]), layers)
+        groups = [g for g in groups if not g.host_resident]
+        if not groups:
+            return 0
+        block = kv._pool_bytes_per_block_from_builder(builder, config, groups)
+        return int(mult * kv._max_memory_usage_bytes_from_groups(builder, config, groups)) + block
     from vllm.v1.kv_cache_interface import SlidingWindowSpec   # specs only; gone from main with them
 
     try:
