@@ -880,9 +880,14 @@ Output matches resident, or phase 2's greedy on the 3060, in every row. With war
 
 **On WSL, `--gpu-memory-utilization` must leave room for the Windows desktop.** The same
 autosized 3060 configuration decoded at 25.3 t/s while the desktop held 1.2 GiB, and at 33.7 with
-0.57 GiB. At 0.90 of 12 GiB, 1.2 GiB more overcommits the card and WDDM pages. Autosizing does not
-add to this: vLLM always fills to the utilization, with KV or with slots. But it is the first
-thing to check when a WSL number looks low.
+0.57 GiB. At 0.90 of 12 GiB, 1.2 GiB more overcommits the card and WDDM pages. It is the first
+thing to check when a WSL number looks low, and the plugin now reports it as it happens
+(`WDDM budget exceeded`, [memory-accounting.md](memory-accounting.md)).
+
+Autosizing was supposed not to add to this, and until 2026-11-26 it did: with the extensible KV cache,
+late slots grew into free memory less its keep and ignored an explicit utilization. On the 3060 at
+0.833 (10 GiB) they took 4.62 GiB where the budget left 3.99, and the process peaked at 10.73 GiB
+against a WDDM budget of 10.66. Slots now stay inside the requested budget as the fork's own KV does.
 
 **Gate:** pass. The 3060 lands 5% above the hand-tuned best, and `cuda` matches resident when
 everything fits.
@@ -1487,6 +1492,8 @@ So at a fixed `--max-model-len`, with the exclusive cache, the slots are placed 
   with the extensible cache, exactly what it measured it needs (the larger of the allocated transient and torch's
   reservation growth, plus its margin) -- its torch memory cap was set from free memory, so slots allocated through
   torch come out of that allowance and leave it the rest; without it, utilization slack plus the profiled peak.
+  An explicit utilization bounds them in both cases: requested less what was consumed since the startup snapshot
+  and the transient, as the fork bounds its KV. Unset, that resolves to the whole card and the device decides.
 
 Graph-safe because decode reaches every expert through the pointer table's contents, whose address is what graphs
 capture; a grown slot is a new entry value, like a promotion. Identity: gemma-4-26B 2.54bpw, late-grown slots

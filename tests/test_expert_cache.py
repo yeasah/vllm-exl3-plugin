@@ -272,3 +272,58 @@ def test_detector_fires_on_a_late_slot_filled_from_the_wrong_row(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "copy_", shifted)
     with pytest.raises(RuntimeError, match="wrong bytes"):
         cache.grow(2)
+
+
+class _GrowRecorder:
+    """Stands in for an ExclusiveCache in grow_late: records how many slots it was asked for."""
+
+    def __init__(self):
+        self.asked = []
+        self.E = 256
+        self.views = [[0] * 100]
+        block = types.SimpleNamespace(rows=[0] * 236, disk=[])
+        self.layers = [types.SimpleNamespace(exl3_host_blocks={"w": block})]
+        self.device = "cuda:0"
+
+    def grow(self, n):
+        self.asked.append(n)
+        return 0
+
+    def report_tiers(self):
+        pass
+
+
+def _grow_late_slots(monkeypatch, requested, init_free, free=5 << 30):
+    from vllm_exl3_plugin import expert_cache as ec
+
+    from vllm.v1.worker import extensible_kv_cache as ext
+
+    gib = 1 << 30
+    cache = _GrowRecorder()
+    monkeypatch.setattr(ext, "kv_cache_margin_floor_bytes", lambda device: 3 * gib // 10)
+    monkeypatch.setattr(ext, "kv_cache_non_torch_reserve_bytes", lambda device: gib // 8)
+    monkeypatch.setattr(ec.torch.cuda, "synchronize", lambda *a: None)
+    monkeypatch.setattr(ec.torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(ec.torch.cuda, "mem_get_info", lambda *a: (free, 12 * gib))
+    ec._LATE.update(cache=cache, slot_bytes=gib // 100, layers=1, peak=0)
+    kv = types.SimpleNamespace(reserved_headroom_bytes=gib // 4, torch_reserve_growth_bytes=gib // 4)
+    worker = types.SimpleNamespace(model_runner=types.SimpleNamespace(extensible_kv_cache=kv),
+                                   requested_memory=requested, init_snapshot=types.SimpleNamespace(free_memory=init_free))
+    ec.grow_late(worker, extensible=True)
+    return cache.asked[0] if cache.asked else 0
+
+
+def test_late_slots_stay_inside_an_explicit_utilization(monkeypatch):
+    gib = 1 << 30
+    # 10 GiB requested, 6 consumed since the snapshot (11 free then, 5 now), 0.25 transient: 3.75 GiB for slots,
+    # where free less the extensible keep would allow more
+    assert _grow_late_slots(monkeypatch, requested=10 * gib, init_free=11 * gib) == 375
+
+
+def test_late_slots_unbounded_utilization_keeps_the_device_bound(monkeypatch):
+    gib = 1 << 30
+    from vllm.v1.worker import extensible_kv_cache as ext
+
+    # unset utilization resolves to the whole card: the requested bound (5.75 GiB) is looser than free less the keep
+    keep = ext.kv_cache_keep_bytes(gib // 4, gib // 4, 3 * gib // 10, ext.KV_CACHE_MARGIN_FRACTION, gib // 8)
+    assert _grow_late_slots(monkeypatch, requested=12 * gib, init_free=11 * gib) == ((5 << 30) - keep) // (gib // 100)

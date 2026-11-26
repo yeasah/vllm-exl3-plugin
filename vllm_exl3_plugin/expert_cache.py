@@ -1413,6 +1413,17 @@ def grow_late(worker, extensible: bool) -> None:
             transient = max(peak, growth)
             keep = transient + max(floor, int(transient * ext.KV_CACHE_MARGIN_FRACTION))
         how = f"the extensible KV cache keeps {keep / (1 << 30):.2f} GiB (transient and margin)"
+        # An explicit gpu_memory_utilization bounds the slots as the fork bounds its own KV: the requested budget less
+        # what was consumed since the startup snapshot and the transient. Free memory alone reaches past it into what
+        # the operator left for others (on WSL, the desktop's VRAM, which then pages: 0.63 GiB over 10 GiB on a 3060)
+        requested = getattr(worker, "requested_memory", None)
+        snapshot = getattr(worker, "init_snapshot", None)
+        if requested and snapshot is not None:
+            within = int(requested) - (snapshot.free_memory - free) - max(peak, growth)
+            if within < free - keep:
+                keep = free - max(within, 0)
+                how = (f"the requested {requested / (1 << 30):.2f} GiB (gpu_memory_utilization) bounds them, less "
+                       f"the {max(peak, growth) / (1 << 30):.2f} GiB transient")
     else:
         util = cpu_offload.gpu_utilization(worker.cache_config)
         keep = int(total * (1 - util)) + _LATE["peak"]
