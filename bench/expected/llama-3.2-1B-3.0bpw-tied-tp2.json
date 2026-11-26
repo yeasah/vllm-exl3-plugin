@@ -21,8 +21,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "e5f7f3d",
-   "head": "e5f7f3de71",
+   "describe": "a804dda",
+   "head": "a804dda1ca",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -35,8 +35,8 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-114-g7de59a59",
-   "head": "7de59a590c",
+   "describe": "v1.6.7-144-gf70aa7b9",
+   "head": "f70aa7b969",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -48,48 +48,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmph0r9e6by/caches/exllamav3_autotune",
+   "path": "/tmp/tmp5ohmpb2x/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 9872,
-   "mtime": 1795657315
+   "mtime": 1795661605
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmph0r9e6by/caches/vllm",
+   "path": "/tmp/tmp5ohmpb2x/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 22,
    "bytes": 6854129,
-   "mtime": 1795657263
+   "mtime": 1795661553
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmph0r9e6by/caches/triton",
+   "path": "/tmp/tmp5ohmpb2x/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 1497,
-   "bytes": 56345343,
-   "mtime": 1795657263
+   "bytes": 56203437,
+   "mtime": 1795661553
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmph0r9e6by/caches/flashinfer",
+   "path": "/tmp/tmp5ohmpb2x/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6386813,
-   "mtime": 1795657369
+   "mtime": 1795661659
   }
  },
  "hardware": {
   "gpu": [
    {
     "temperature.gpu": "43",
-    "clocks.sm": "435 MHz",
+    "clocks.sm": "570 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "15.65 W",
+    "power.draw": "17.81 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -98,10 +98,10 @@
     "fan.speed": "0 %"
    },
    {
-    "temperature.gpu": "38",
-    "clocks.sm": "517 MHz",
+    "temperature.gpu": "37",
+    "clocks.sm": "382 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "20.92 W",
+    "power.draw": "14.28 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",

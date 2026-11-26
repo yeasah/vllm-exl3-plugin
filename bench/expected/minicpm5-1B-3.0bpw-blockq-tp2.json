@@ -25,8 +25,8 @@
   "pkg.transformers": "5.19.0",
   "pkg.compressed-tensors": "0.17.0",
   "src.plugin": {
-   "describe": "e5f7f3d",
-   "head": "e5f7f3de71",
+   "describe": "a804dda",
+   "head": "a804dda1ca",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -39,8 +39,8 @@
    "untracked": 0
   },
   "src.exllamav3": {
-   "describe": "v1.6.4-114-g7de59a59",
-   "head": "7de59a590c",
+   "describe": "v1.6.7-144-gf70aa7b9",
+   "head": "f70aa7b969",
    "dirty_files": 0,
    "diff_sha": null,
    "untracked": 0
@@ -52,48 +52,48 @@
  "caches": {
   "exllamav3_autotune": {
    "kind": "selection",
-   "path": "/tmp/tmph0r9e6by/caches/exllamav3_autotune",
+   "path": "/tmp/tmp5ohmpb2x/caches/exllamav3_autotune",
    "from_env": true,
    "exists": true,
    "files": 1,
    "bytes": 9872,
-   "mtime": 1795657378
+   "mtime": 1795661668
   },
   "vllm": {
    "kind": "compilation+selection",
-   "path": "/tmp/tmph0r9e6by/caches/vllm",
+   "path": "/tmp/tmp5ohmpb2x/caches/vllm",
    "from_env": true,
    "exists": true,
    "files": 22,
    "bytes": 6854129,
-   "mtime": 1795657263
+   "mtime": 1795661553
   },
   "triton": {
    "kind": "compilation",
-   "path": "/tmp/tmph0r9e6by/caches/triton",
+   "path": "/tmp/tmp5ohmpb2x/caches/triton",
    "from_env": true,
    "exists": true,
    "files": 1497,
-   "bytes": 56345343,
-   "mtime": 1795657263
+   "bytes": 56203437,
+   "mtime": 1795661553
   },
   "flashinfer": {
    "kind": "compilation",
-   "path": "/tmp/tmph0r9e6by/caches/flashinfer",
+   "path": "/tmp/tmp5ohmpb2x/caches/flashinfer",
    "from_env": true,
    "exists": true,
    "files": 9,
    "bytes": 6387685,
-   "mtime": 1795657428
+   "mtime": 1795661717
   }
  },
  "hardware": {
   "gpu": [
    {
-    "temperature.gpu": "44",
-    "clocks.sm": "495 MHz",
+    "temperature.gpu": "43",
+    "clocks.sm": "517 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "13.30 W",
+    "power.draw": "14.11 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -103,9 +103,9 @@
    },
    {
     "temperature.gpu": "38",
-    "clocks.sm": "517 MHz",
+    "clocks.sm": "480 MHz",
     "clocks.mem": "7001 MHz",
-    "power.draw": "19.00 W",
+    "power.draw": "18.49 W",
     "utilization.gpu": "0 %",
     "memory.used": "4 MiB",
     "pstate": "P3",
@@ -497,11 +497,11 @@
     41172,
     2744,
     35,
-    1974,
-    220,
-    608
+    416,
+    4219,
+    357
    ],
-   "generated_text": "<think>\nHmm, the user is asking about the capital of France. This is a straightforward factual question. \n\nThe"
+   "generated_text": "<think>\nHmm, the user is asking about the capital of France. This is a straightforward factual question. The answer is"
   },
   {
    "ids": [
