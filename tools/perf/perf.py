@@ -74,6 +74,7 @@ def run_test(args, test, mysterious_bullshit):
     results_dir = f'results/{base_model}/{tag}'
     done = os.path.isfile(f'{results_dir}/done')
 
+    test['vllm_args'] = { "kv_cache_dtype": args.default_kv_dtype } | test.get('vllm_args', {})
     info = { "devname": devname,
              "prompts": test.get("prompts", _PROMPTS),
              "config": test,
@@ -98,10 +99,9 @@ def run_test(args, test, mysterious_bullshit):
         model_path = snapshot_download(repo_id=test['model'], revision=test['revision'])
         print()
 
-        vllm_args = { "kv_cache_dtype": args.default_kv_dtype } | test.get('vllm_args', {})
         vllm_env = { "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True" } | test.get('env', {})
         vargs = []
-        for k,v in vllm_args.items():
+        for k,v in test['vllm_args'].items():
             vargs.append(f'--{k.replace("_","-")}')
             if v is not None:
                 if isinstance(v, dict):
@@ -149,6 +149,7 @@ def run_test(args, test, mysterious_bullshit):
             with open(f"{results_dir}/test.json", "w") as f:
                 json.dump(info, f)
             print(f"*** VLLM STARTED ***")
+            info['vllm'] = vllm
             for seqs in seqs_list:
                 run_bench(args, results_dir, model_path, seqs, info)
             if args.cat:
@@ -253,6 +254,7 @@ def parse_results(j, seqs):
              "accept": accept,
              "concur": mean_concurrency,
              "trimmed": bool(trimmed) and seqs > 1,
+             "raw": j,
              "seqs": seqs }
 
 def parse_log(logfile, test):
@@ -284,10 +286,18 @@ def parse_log(logfile, test):
                 info['expert_host_pct'] += float(m.group(4)) / test['num_gpus']
                 info['expert_disk'] += float(m.group(8))
                 info['expert_disk_pct'] += float(m.group(9)) / test['num_gpus']
+            m = re.search(r"max_seq_len=([0-9]+)", logline)
+            if m and 'max_model_len' not in info:
+                # the engine's final length; with --max-model-len auto vLLM re-fits it after warmup, so the last wins
+                info['max_model_len'] = int(m.group(1))
+            m = re.search(r"Auto-fit max_model_len: using max_model_len=([0-9]+)", logline)
+            if m:
+                info['max_model_len'] = int(m.group(1))
+            m = re.search(r"Extended KV cache to [0-9]+ blocks \(([0-9.]+) GiB\)", logline)
+            if m:
+                info['kv_cache_gb'] = float(m.group(1))
             m = re.search(r"GPU KV cache size: ([0-9,]+) tokens", logline)
             if m:
-                if 'kv_cache' not in info:
-                    info['kv_cache'] = 0
                 info['kv_cache'] = int(m.group(1).replace(',' , ''))
             m = re.search(r"on host: ([0-9.]+) GiB pinned", logline)
             if m:
@@ -319,6 +329,12 @@ def parse_log(logfile, test):
                 info['vram_used'] += float(m.group(4)) + float(m.group(5)) + float(m.group(6)) + float(m.group(7))
                 info['vram_target'] += float(m.group(3))
     return info
+
+def format_notes(test, res_random, res_sharegpt):
+    #date = res_sharegpt['date'].strftime("%-m/%-d/%y %-H:%M")
+    date = res_sharegpt['date'].strftime("%-m/%-d/%y")
+    out_len = res_sharegpt['raw']['total_output_tokens'] / res_sharegpt['raw']['completed']
+    return f"{res_sharegpt['raw']['num_prompts']} x {out_len:.0f} ({date})"
 
 def build_results(model, testdir, results):
     with open(f'{testdir}/test.json', "r") as f:
@@ -358,34 +374,35 @@ def build_results(model, testdir, results):
             with open(results_file, 'r') as f:
                 j = json.load(f)
                 res_random = parse_results(j, seqs)
+            long_note = ""
+            long_file = f'{testdir}/bench_S{seqs}_long.json'
+            if os.path.isfile(long_file):
+                with open(long_file, 'r') as f:
+                    j = json.load(f)
+                    res_long = parse_results(j, seqs)
+                    long_frac = res_long['gen_tps'] / res_sharegpt['gen_tps']
+                    long_note = f" ({long_frac*100:.0f}% at {res_long['raw']['total_input_tokens'] / 1000:.0f}K)"
 
             host_ram = vllm.get("dense_offload", 0) + vllm.get("exl3_offload", 0)
             res_name = info['config']['revision']
             if 'suffix' in info['config']:
                 res_name = f"{res_name} ({info['config']['suffix']})"
+            vals = [ devname, res_name ]
             if res_type == "disk" or res_type == "disk_spec":
-                vals = [ devname,
-                        res_name,
-                        res_sharegpt['date'].strftime("%F"),
-                        f"{vllm.get('vram_used'):.1f} GiB ({vllm['expert_vram_pct']:.1f}%)",
+                vals += [ f"{vllm.get('vram_used'):.1f} GiB ({vllm['expert_vram_pct']:.1f}%)",
                         f"{host_ram - vllm['expert_host_idle']:.1f} GiB ({vllm['expert_host_pct']:.1f}%)",
-                        f"{vllm['expert_disk']:.1f} GiB ({vllm['expert_disk_pct']:.1f}%)",
-                        f"{vllm['kv_cache'] / 1024:.0f}K",
-                        f"{seqs}",
-                        f"{res_random['prefill_tps']:.0f} t/s",
-                        f"{res_sharegpt['gen_tps']:.0f} t/s" ]
+                        f"{vllm['expert_disk']:.1f} GiB ({vllm['expert_disk_pct']:.1f}%)" ]
             else:
-                vals = [ devname,
-                        res_name,
-                        res_sharegpt['date'].strftime("%F"),
-                        f"{vllm.get('vram_used'):.1f} GiB",
-                        f"{host_ram:.1f} GiB",
-                        f"{vllm['kv_cache'] / 1024:.0f}K",
-                        f"{seqs}",
-                        f"{res_random['prefill_tps']:.0f} t/s",
-                        f"{res_sharegpt['gen_tps']:.0f} t/s" ]
+                vals = [ f"{vllm.get('vram_used'):.1f} GiB",
+                        f"{host_ram:.1f} GiB" ]
+            vals += [ f"{vllm['kv_cache'] / 1024:.0f}K  ({vllm['kv_cache_gb']:.1f} GiB {info['config']['vllm_args']['kv_cache_dtype']})",
+                    f"{seqs}",
+                    f"{res_random['prefill_tps']:.0f} t/s",
+                    f"{res_sharegpt['gen_tps']:.0f} t/s{long_note}" ]
+
             if res_type == "spec" or res_type == "disk_spec":
                 vals.append(f"{spec} tok ({res_sharegpt['accept']:.1f}%)")
+            vals.append(format_notes(info, res_random, res_sharegpt))
             results[res_type].append(vals)
 
         svgs = info.get('prompts', {"cat": "Draw a picture of a cute cat using SVG"} )
@@ -417,20 +434,35 @@ def display_result(model, tests):
         try:
             build_results(model, testdir, results)
         except Exception as e:
-            print("SKIPPING TEST {testdir}: {e}")
+            print(f"SKIPPING TEST {testdir}: {e}")
     for res_type, res_list in results.items():
         if res_list and res_type != "svgs":
             res_str += "\n"
             if res_type == "disk" or res_type == "disk_spec":
-                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "Host Disk", "KV", "Concurrent Req.", "Prefill (per req.)", "Output (total)" ]
+                hdr = [ "Platform", "Type", "VRAM", "Host RAM", "Host Disk", "KV", "Req.", "Prefill", "Output" ]
             else:
-                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "KV", "Concurrent Req.", "Prefill (per req.)", "Output (total)" ]
+                hdr = [ "Platform", "Type", "VRAM", "Host RAM", "KV", "Req.", "Prefill", "Output" ]
             if res_type == "disk_spec" or res_type == "spec":
                 hdr += [ "Draft" ]
+            hdr += [ "Notes" ]
             res_str += "|" + "|".join(hdr) + "|\n"
             res_str += ("|---" * len(hdr)) + "|\n"
             for res in res_list:                            
                 res_str += "|" + "|".join(res) + "|\n"
+
+    res_str += """
+- **Platform**: The GPU(s) that generated the benchmark.
+- **Type**: The configuration type: quantization, etc.
+- **VRAM**: Actual consumed VRAM. For MoEs, the expert residency is shown as a percent.
+- **Host RAM**: Actual consumed host RAM for offload. For MoEs, the expert residency is shown as a percent.
+- **Host Disk**: For MoEs which serve some experts from disk, the size and percent of this amount.
+- **KV**: Maximum context length as served, and the KV data type.
+- **Req**: Number of concurrent requests.
+- **Prefill**: The average prefill rate for each request, not including concurrency.
+- **Output**: The total output rate, including concurrency.
+- **Draft**: Details of draft model configuration and measured acceptance rate.
+- **Notes**: n x m -> n is the number of prompts used to measure output rate, m is the average prompt length in tokens.
+"""
 
     if results["svgs"]:
         res_str += "\n## SVGs\n"
@@ -508,11 +540,34 @@ def random_output_len(args, results_dir, results_file, seqs):
           f"prefill at {tpot_ms:.1f} ms/token ({how}) ***")
     return output_len
 
+def truncated_dataset(path, model_path, prompt_len, out_path):
+    """A copy of a custom dataset whose prompts are cut to `prompt_len` tokens of this model's tokenizer, from the end
+    (the instruction leads the prompt). vllm bench cannot do it: its --input-len maps only to --random-input-len, and
+    the custom dataset sends each prompt as stored, tokenizing it only to count."""
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model_path)
+    with open(path) as f, open(out_path, "w") as out:
+        for line in f:
+            item = json.loads(line)
+            ids = tok(item["prompt"], add_special_tokens=False)["input_ids"]
+            cut = prompt_len
+            text = tok.decode(ids[:cut])
+            # decoding and re-encoding can merge or split tokens at the cut; trim until it fits
+            while cut > 0 and len(tok(text, add_special_tokens=False)["input_ids"]) > prompt_len:
+                cut -= 16
+                text = tok.decode(ids[:cut])
+            out.write(json.dumps(item | {"prompt": text}) + "\n")
+    print(f"*** LONG PROMPT: cut to {prompt_len} tokens of {len(ids)} ***")
+    return out_path
+
 def run_bench(args, results_dir, model_path, seqs, info):
     num_prompts = args.num_prompts * seqs
     results_file = f'{results_dir}/bench_S{seqs}'
 
-    for bench in "sharegpt", "random":
+    for bench in "long", "sharegpt", "random":
+        if bench == "long" and (seqs > 1 or not args.long_prompt or 'kv_cache' not in info['vllm']):
+            continue
         outfile = f"{results_file}_{bench}.json"
         if not os.path.isfile(outfile):
             print(f"*** RUNNING BENCH FOR {bench} x{seqs} ***")
@@ -524,24 +579,37 @@ def run_bench(args, results_dir, model_path, seqs, info):
                                 "--host", "localhost",
                                 "--port", str(args.port),
                                 "--seed", str(args.seed),
-                                # One warm-up request, the run's own first prompt: the random dataset's shared prefix
-                                # is drawn after the per-request lengths, so it differs between invocations and only a
-                                # request from this run's sample caches it; it also warms JIT paths and the expert cache
-                                "--num-warmups", str(args.warmups),
                                 "--save-result", "--save-detailed", "--result-filename", outfile ]
+                if bench == "long":
+                    # only one long prompt without warmup, sized to fit KV, the context length and templating
+                    room = min(info['vllm']['kv_cache'], info['vllm'].get('max_model_len', info['vllm']['kv_cache']))
+                    prompt_len = min(room, args.long_prompt) - args.sharegpt_output_tokens - 128
+                    bench_args += [ "--backend", "openai-chat",
+                                    "--num-prompts", "1",
+                                    "--endpoint", "/v1/chat/completions",
+                                    "--dataset-name", "custom",
+                                    "--custom-output-len", str(args.sharegpt_output_tokens),
+                                    "--dataset-path", truncated_dataset(args.long_dataset, model_path, prompt_len,
+                                                                        f"{results_file}_long.prompt.jsonl") ]
                 if bench == "sharegpt":
                     bench_args += [ "--backend", "openai-chat",
                                     "--num-prompts", str(num_prompts * 2),
                                     "--endpoint", "/v1/chat/completions",
                                     "--dataset-name", "sharegpt",
+                                    # One warm-up request: warms JIT paths and the expert cache
+                                    "--num-warmups", str(args.warmups),
                                     # every request the same budget, ending at this model's own EOS: by default each
                                     # is capped at the length of the dataset's recorded GPT answer, as short as 8 tokens
                                     "--sharegpt-output-len", str(args.sharegpt_output_tokens),
-                                    "--dataset-path", "ShareGPT_V3_unfiltered_cleaned_split.json" ]
+                                    "--dataset-path", args.sharegpt_dataset ]
                 if bench == "random":
                     output_len = random_output_len(args, results_dir, results_file, seqs)
                     bench_args += [ "--random-prefix-len", str(args.prefix),
                                     "--random-range-ratio", f'{{"input": {args.rand}, "output": {args.rand}}}',
+                                    # One warm-up request, the run's own first prompt: the random dataset's shared prefix
+                                    # is drawn after the per-request lengths, so it differs between invocations and only a
+                                    # request from this run's sample caches it; it also warms JIT paths and the expert cache
+                                    "--num-warmups", str(args.warmups),
                                     "--num-prompts", str(num_prompts),
                                     "--output-len", str(output_len),
                                     "--input-len", str(args.input_tokens) ]
@@ -563,6 +631,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--testfile", help="testfile to run. if not specified, just regenerates results")
     parser.add_argument("--tests", help="restrict tests to matching pattern")
+    parser.add_argument("--long-dataset", default="datasets/Little_Brother.jsonl")
+    parser.add_argument("--long-prompt", type=int, default=65536)
     parser.add_argument("--port", default=13373)
     parser.add_argument("--rand", type=float, default=0.5)
     parser.add_argument("--prefix", type=int, default=4096)
@@ -577,6 +647,7 @@ def main():
                              "what 1024 tokens gave before")
     parser.add_argument("--max-output-tokens", type=int, default=8192,
                         help="ceiling on the scaled output length")
+    parser.add_argument("--sharegpt-dataset", default="datasets/ShareGPT_V3_unfiltered_cleaned_split.json")
     parser.add_argument("--sharegpt-output-tokens", type=int, default=512,
                         help="sharegpt requests' output budget; each ends at the model's EOS or here, instead of at the "
                              "length of the dataset's recorded answer")
