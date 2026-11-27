@@ -6,7 +6,8 @@ only re-renders.
 
 Under concurrency, a request's TTFT depends on what it is concurrent with. Two controls keep that comparable across
 configs: at concurrency > 1 the random run's output length holds each request's decode time at a fixed multiple of its prefill time
-(`--decode-ratio`: prefill from the config's 1x random run, decode from its sharegpt TPOT at that concurrency), so a
+(`--decode-ratio`: prefill and decode rate from the config's 1x random run, the decode rate scaled by how sharegpt's
+slows at that concurrency), so a
 config that decodes faster, or prefills slower, does not see more overlapping prefills; and the first wave of requests, which always starts as simultaneous prefills, is
 left out of the per-request means (`--save-detailed` results). Each bench run also sends one warm-up request from
 its own sample first (`--warmups`): the random dataset's shared prefix differs between invocations, so only that
@@ -469,7 +470,7 @@ def random_output_len(args, results_dir, results_file, seqs):
     decodes twice as fast, or prefills half as fast, sees far more overlapping prefills at a fixed output length. So
     at seqs > 1 the output length targets a fixed ratio of decode time to prefill time per request,
     `--decode-ratio`: prefill time from this config's own 1x random run (realistic prompts, nothing overlapping),
-    decode time from its sharegpt TPOT at this concurrency, the run just before. The 1x run itself keeps
+    decode time from the 1x random run's TPOT scaled by how sharegpt's slows at this concurrency. The 1x run itself keeps
     --output-tokens: with nothing concurrent it can decode at whatever rate it has. Recorded next to the result."""
     if seqs <= 1 or not args.decode_ratio:
         return args.output_tokens
@@ -482,14 +483,27 @@ def random_output_len(args, results_dir, results_file, seqs):
     # seconds of prefill per input token, unloaded
     prefill_s_per_tok = (j1["mean_ttft_ms"] / 1000.0) / (j1["total_input_tokens"] / j1["completed"])
     prefill_s = prefill_s_per_tok * (args.prefix + args.input_tokens)
+    # The decode rate the random run will see: random content decodes unlike real text (degenerate output, other
+    # routing and draft acceptance), so the 1x random run's TPOT, scaled by how this config's decode slows at this
+    # concurrency on real text (sharegpt here against sharegpt at 1x). Neither alone will do: sharegpt has the wrong
+    # content, and the 1x random rate would scale each config by its unloaded speed, which concurrency changes
+    # unevenly (MTP gains far more at 1 stream than at 4).
     with open(f"{results_file}_sharegpt.json") as f:
-        tpot_ms = json.load(f)["mean_tpot_ms"]
+        sharegpt_tpot_ms = json.load(f)["mean_tpot_ms"]
+    s1_sharegpt = f"{results_dir}/bench_S1_sharegpt.json"
+    tpot_ms, how = sharegpt_tpot_ms, "sharegpt"
+    if j1.get("mean_tpot_ms") and os.path.isfile(s1_sharegpt):
+        with open(s1_sharegpt) as f:
+            s1_sharegpt_tpot_ms = json.load(f)["mean_tpot_ms"]
+        if s1_sharegpt_tpot_ms:
+            tpot_ms = j1["mean_tpot_ms"] * sharegpt_tpot_ms / s1_sharegpt_tpot_ms
+            how = f"1x random {j1['mean_tpot_ms']:.1f} x sharegpt {sharegpt_tpot_ms:.1f}/{s1_sharegpt_tpot_ms:.1f}"
     output_len = max(64, min(args.max_output_tokens, round(args.decode_ratio * prefill_s * 1000 / tpot_ms)))
     with open(f"{results_file}_random.scale.json", "w") as f:
-        json.dump({"decode_ratio": args.decode_ratio, "s1_prefill_s": prefill_s, "sharegpt_tpot_ms": tpot_ms,
-                   "output_len": output_len}, f)
+        json.dump({"decode_ratio": args.decode_ratio, "s1_prefill_s": prefill_s, "tpot_ms": tpot_ms,
+                   "tpot_from": how, "output_len": output_len}, f)
     print(f"*** RANDOM x{seqs}: {output_len} output tokens, {args.decode_ratio:g}x the {prefill_s:.2f} s unloaded "
-          f"prefill at {tpot_ms:.1f} ms/token ***")
+          f"prefill at {tpot_ms:.1f} ms/token ({how}) ***")
     return output_len
 
 def run_bench(args, results_dir, model_path, seqs, info):
@@ -553,8 +567,9 @@ def main():
                         help="random dataset output length at concurrency 1, and at higher concurrency with --decode-ratio 0")
     parser.add_argument("--decode-ratio", type=float, default=12.0,
                         help="at concurrency > 1, scale the random dataset's output length so each request decodes for "
-                             "this many times its prefill time (from the 1x random run and the same concurrency's "
-                             "sharegpt TPOT); 0 keeps --output-tokens. 12 is about what 1024 tokens gave before")
+                             "this many times its prefill time (prefill time and decode rate from the 1x random run, the "
+                             "decode rate scaled to this concurrency by sharegpt's); 0 keeps --output-tokens. 12 is about "
+                             "what 1024 tokens gave before")
     parser.add_argument("--max-output-tokens", type=int, default=8192,
                         help="ceiling on the scaled output length")
     parser.add_argument("--warmups", type=int, default=1,
