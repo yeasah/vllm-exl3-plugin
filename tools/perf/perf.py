@@ -5,9 +5,9 @@ working directory (results/ and the ShareGPT file live there): `perf.py --testfi
 only re-renders.
 
 Under concurrency, a request's TTFT depends on what it is concurrent with. Two controls keep that comparable across
-configs: at concurrency > 1 the random run's output length gives each request the same decode wall time
-(`--decode-seconds`, from the same config's sharegpt TPOT at that concurrency), so a config that decodes faster does
-not see more overlapping prefills; and the first wave of requests, which always starts as simultaneous prefills, is
+configs: at concurrency > 1 the random run's output length holds each request's decode time at a fixed multiple of its prefill time
+(`--decode-ratio`: prefill from the config's 1x random run, decode from its sharegpt TPOT at that concurrency), so a
+config that decodes faster, or prefills slower, does not see more overlapping prefills; and the first wave of requests, which always starts as simultaneous prefills, is
 left out of the per-request means (`--save-detailed` results). Results saved without per-request data render as
 before.
 """
@@ -443,20 +443,33 @@ def display_results():
         except Exception as e:
             print("SKIPPING MODEL {model}: {e}")
         
-def random_output_len(args, results_file, seqs):
+def random_output_len(args, results_dir, results_file, seqs):
     """The random run's mean output length. Under concurrency, a request's TTFT depends on how many other prompts are
-    prefilling beside it, which depends on how long the others spend decoding: a config that decodes twice as fast
-    sees far more overlapping prefills at a fixed output length. So at seqs > 1 the output length is set to give
-    every config the same decode wall time per request, `--decode-seconds`, from its own decode speed at this
-    concurrency -- the sharegpt run just before, at the same seqs. Recorded next to the result."""
-    if seqs <= 1 or not args.decode_seconds:
+    prefilling beside it, which depends on how long the others spend decoding relative to prefilling: a config that
+    decodes twice as fast, or prefills half as fast, sees far more overlapping prefills at a fixed output length. So
+    at seqs > 1 the output length targets a fixed ratio of decode time to prefill time per request,
+    `--decode-ratio`: prefill time from this config's own 1x random run (realistic prompts, nothing overlapping),
+    decode time from its sharegpt TPOT at this concurrency, the run just before. The 1x run itself keeps
+    --output-tokens: with nothing concurrent it can decode at whatever rate it has. Recorded next to the result."""
+    if seqs <= 1 or not args.decode_ratio:
         return args.output_tokens
+    s1 = f"{results_dir}/bench_S1_random.json"
+    if not os.path.isfile(s1):
+        print(f"*** RANDOM x{seqs}: no 1x random run to scale against; keeping {args.output_tokens} output tokens ***")
+        return args.output_tokens
+    with open(s1) as f:
+        j1 = json.load(f)
+    # seconds of prefill per input token, unloaded
+    prefill_s_per_tok = (j1["mean_ttft_ms"] / 1000.0) / (j1["total_input_tokens"] / j1["completed"])
+    prefill_s = prefill_s_per_tok * (args.prefix + args.input_tokens)
     with open(f"{results_file}_sharegpt.json") as f:
         tpot_ms = json.load(f)["mean_tpot_ms"]
-    output_len = max(64, min(args.max_output_tokens, round(args.decode_seconds * 1000 / tpot_ms)))
+    output_len = max(64, min(args.max_output_tokens, round(args.decode_ratio * prefill_s * 1000 / tpot_ms)))
     with open(f"{results_file}_random.scale.json", "w") as f:
-        json.dump({"decode_seconds": args.decode_seconds, "sharegpt_tpot_ms": tpot_ms, "output_len": output_len}, f)
-    print(f"*** RANDOM x{seqs}: {output_len} output tokens, {args.decode_seconds} s of decode at {tpot_ms:.1f} ms/token ***")
+        json.dump({"decode_ratio": args.decode_ratio, "s1_prefill_s": prefill_s, "sharegpt_tpot_ms": tpot_ms,
+                   "output_len": output_len}, f)
+    print(f"*** RANDOM x{seqs}: {output_len} output tokens, {args.decode_ratio:g}x the {prefill_s:.2f} s unloaded "
+          f"prefill at {tpot_ms:.1f} ms/token ***")
     return output_len
 
 def run_bench(args, results_dir, model_path, seqs, info):
@@ -484,7 +497,7 @@ def run_bench(args, results_dir, model_path, seqs, info):
                                     "--dataset-name", "sharegpt",
                                     "--dataset-path", "ShareGPT_V3_unfiltered_cleaned_split.json" ]
                 if bench == "random":
-                    output_len = random_output_len(args, results_file, seqs)
+                    output_len = random_output_len(args, results_dir, results_file, seqs)
                     bench_args += [ "--random-prefix-len", str(args.prefix),
                                     "--random-range-ratio", f'{{"input": {args.rand}, "output": {args.rand}}}',
                                     "--num-prompts", str(num_prompts),
@@ -514,10 +527,11 @@ def main():
     parser.add_argument("--num-prompts", type=int, default=4)
     parser.add_argument("--input-tokens", type=int, default=4096)
     parser.add_argument("--output-tokens", type=int, default=1024,
-                        help="random dataset output length at concurrency 1, and at higher concurrency with --decode-seconds 0")
-    parser.add_argument("--decode-seconds", type=float, default=60.0,
+                        help="random dataset output length at concurrency 1, and at higher concurrency with --decode-ratio 0")
+    parser.add_argument("--decode-ratio", type=float, default=12.0,
                         help="at concurrency > 1, scale the random dataset's output length so each request decodes for "
-                             "this long, from the same config's sharegpt TPOT; 0 keeps --output-tokens")
+                             "this many times its prefill time (from the 1x random run and the same concurrency's "
+                             "sharegpt TPOT); 0 keeps --output-tokens. 12 is about what 1024 tokens gave before")
     parser.add_argument("--max-output-tokens", type=int, default=8192,
                         help="ceiling on the scaled output length")
     parser.add_argument("--random-ignore-eos", default=True, action=argparse.BooleanOptionalAction,
