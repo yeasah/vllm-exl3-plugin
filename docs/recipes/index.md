@@ -4,6 +4,7 @@ This is not an inclusive list of supported models; rather these are example conf
 
 |Model Name|Type|Total Parameters|Active Parameters|Vision|KV KiB/t|Max Context|Fits Card|
 |---|---|---|---|---|---|---|---|
+|[Hy4-flash](Hy4-flash.md)|MoE|220|12|✅|53|1M|16 GiB+|
 |[Qwen3.8-Flash-Next](Qwen3.8-Flash-Next.md)|MoE|125|6|✅|24|256K|16 GiB+|
 |[gemma-4-31B-it](gemma-4-31B-it.md)|Dense|31|31|✅|96|256K|24 GiB+|
 |[Muse-Glimmer-30B](Muse-Glimmer-30B.md)|Dense|30|30|✅|15|128K|24 GiB+|
