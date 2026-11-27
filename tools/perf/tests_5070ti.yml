@@ -73,9 +73,11 @@ tests:
     kv_cache_dtype: fp8
   vram: 15.5
 
+# 1M default context doesn't fit
 - model: UnstableLlama/Spark-X2.6-4B-exl3
   revision: 4.00bpw
   vllm_args:
+    max_model_len: 262144
     kv_cache_dtype: fp8
   vram: 15.5
 
