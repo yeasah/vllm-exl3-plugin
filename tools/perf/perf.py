@@ -183,22 +183,24 @@ def run_cat(args, cat_name, prompt, results_dir, info):
                             cat.write(svg[-1])
 
 def _trimmed_means(j, seqs):
-    """Per-request means without the first wave, from --save-detailed results: (mean input tokens, mean output
-    tokens, mean TTFT s, mean TPOT s), or None without per-request data or at concurrency 1. The first `seqs`
-    requests by start time always begin as simultaneous prefills, whatever the config, so they say more about
-    vllm bench than about the server; the rest arrive one at a time as seats free up."""
+    """Per-request means from --save-detailed results: (mean input tokens, mean output tokens, mean TTFT s, TPOT s),
+    or None without per-request data. Above concurrency 1 the first `seqs` requests by start time are left out: they
+    always begin as simultaneous prefills, whatever the config, so they say more about vllm bench than about the
+    server; the rest arrive one at a time as seats free up. TPOT is weighted by tokens -- total decode time over total
+    decode tokens -- not vLLM's per-request mean, in which an 8-token answer, all start-up and an MTP drafter that
+    has not settled, counts as much as an 800-token one."""
     starts, ttfts, lats = j.get("start_times"), j.get("ttfts"), j.get("latencies")
     ins, outs = j.get("input_lens"), j.get("output_lens")
-    if seqs <= 1 or not (starts and ttfts and lats and ins and outs):
+    if not (starts and ttfts and lats and ins and outs):
         return None
-    keep = sorted(range(len(starts)), key=lambda i: starts[i])[seqs:]
+    keep = sorted(range(len(starts)), key=lambda i: starts[i])[seqs if seqs > 1 else 0:]
     keep = [i for i in keep if outs[i] and outs[i] > 1 and ttfts[i] is not None]
     if not keep:
         return None
     n = len(keep)
-    tpots = [(lats[i] - ttfts[i]) / (outs[i] - 1) for i in keep]
+    tpot = sum(lats[i] - ttfts[i] for i in keep) / sum(outs[i] - 1 for i in keep)
     return (sum(ins[i] for i in keep) / n, sum(outs[i] for i in keep) / n,
-            sum(ttfts[i] for i in keep) / n, sum(tpots) / n)
+            sum(ttfts[i] for i in keep) / n, tpot)
 
 
 def parse_results(j, seqs):
@@ -217,7 +219,7 @@ def parse_results(j, seqs):
 
     trimmed = _trimmed_means(j, seqs)
     if trimmed:
-        # the first wave dropped; the pacing (req_total_s) still spans the whole run
+        # the first wave dropped above concurrency 1; the pacing (req_total_s) still spans the whole run
         mean_in, mean_out, req_prefill_s, req_tpot_s = trimmed
         in_tok, out_tok = mean_in * total_reqs, mean_out * total_reqs
     else:
@@ -250,7 +252,7 @@ def parse_results(j, seqs):
              "date": datetime.datetime.strptime(j['date'], '%Y%m%d-%H%M%S'),
              "accept": accept,
              "concur": mean_concurrency,
-             "trimmed": bool(trimmed),
+             "trimmed": bool(trimmed) and seqs > 1,
              "seqs": seqs }
 
 def parse_log(logfile, test):
@@ -532,6 +534,9 @@ def run_bench(args, results_dir, model_path, seqs, info):
                                     "--num-prompts", str(num_prompts * 2),
                                     "--endpoint", "/v1/chat/completions",
                                     "--dataset-name", "sharegpt",
+                                    # every request the same budget, ending at this model's own EOS: by default each
+                                    # is capped at the length of the dataset's recorded GPT answer, as short as 8 tokens
+                                    "--sharegpt-output-len", str(args.sharegpt_output_tokens),
                                     "--dataset-path", "ShareGPT_V3_unfiltered_cleaned_split.json" ]
                 if bench == "random":
                     output_len = random_output_len(args, results_dir, results_file, seqs)
@@ -572,6 +577,9 @@ def main():
                              "what 1024 tokens gave before")
     parser.add_argument("--max-output-tokens", type=int, default=8192,
                         help="ceiling on the scaled output length")
+    parser.add_argument("--sharegpt-output-tokens", type=int, default=512,
+                        help="sharegpt requests' output budget; each ends at the model's EOS or here, instead of at the "
+                             "length of the dataset's recorded answer")
     parser.add_argument("--warmups", type=int, default=1,
                         help="warm-up requests per bench run, from the run's own first prompt (vllm bench --num-warmups)")
     parser.add_argument("--random-ignore-eos", default=True, action=argparse.BooleanOptionalAction,
