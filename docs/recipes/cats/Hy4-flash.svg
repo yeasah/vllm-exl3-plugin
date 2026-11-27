@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!-- Background -->
+  <rect width="200" height="200" fill="#E0F7FA" rx="20" />
+
+  <!-- Tail (drawn first so it sits behind the body) -->
+  <path d="M 135 160 C 190 160, 190 100, 140 100" fill="none" stroke="#FFDAB9" stroke-width="14" stroke-linecap="round" />
+
+  <!-- Body -->
+  <ellipse cx="100" cy="145" rx="45" ry="35" fill="#FFDAB9" />
+  
+  <!-- Front paws -->
+  <ellipse cx="85" cy="170" rx="13" ry="9" fill="#FFFACD" />
+  <ellipse cx="115" cy="170" rx="13" ry="9" fill="#FFFACD" />
+  
+  <!-- Tiny paw toes -->
+  <path d="M 80 168 L 80 172 M 85 168 L 85 174 M 90 168 L 90 172" stroke="#FFDAB9" stroke-width="1.5" stroke-linecap="round" />
+  <path d="M 110 168 L 110 172 M 115 168 L 115 174 M 120 168 L 120 172" stroke="#FFDAB9" stroke-width="1.5" stroke-linecap="round" />
+
+  <!-- Outer Ears -->
+  <polygon points="55,70 65,20 90,55" fill="#FFDAB9" />
+  <polygon points="145,70 135,20 110,55" fill="#FFDAB9" />
+  
+  <!-- Inner Ears -->
+  <polygon points="60,63 67,30 83,56" fill="#FFB6C1" />
+  <polygon points="140,63 133,30 117,56" fill="#FFB6C1" />
+
+  <!-- Head (drawn over the ears so they blend seamlessly) -->
+  <circle cx="100" cy="80" r="45" fill="#FFDAB9" />
+
+  <!-- Cheeks (Blush) -->
+  <circle cx="72" cy="95" r="10" fill="#FFB6C1" opacity="0.7" />
+  <circle cx="128" cy="95" r="10" fill="#FFB6C1" opacity="0.7" />
+
+  <!-- Eyes -->
+  <circle cx="82" cy="75" r="12" fill="#3E2723" />
+  <circle cx="118" cy="75" r="12" fill="#3E2723" />
+  
+  <!-- Eye Highlights (to make them sparkle) -->
+  <circle cx="86" cy="70" r="4.5" fill="#FFFFFF" />
+  <circle cx="122" cy="70" r="4.5" fill="#FFFFFF" />
+  <circle cx="79" cy="79" r="2.5" fill="#FFFFFF" />
+  <circle cx="115" cy="79" r="2.5" fill="#FFFFFF" />
+
+  <!-- Nose -->
+  <polygon points="96,88 104,88 100,94" fill="#F06292" />
+
+  <!-- Cute "w" shaped mouth -->
+  <path d="M 100 94 Q 90 104 85 99 M 100 94 Q 110 104 115 99" fill="none" stroke="#3E2723" stroke-width="2" stroke-linecap="round" />
+
+  <!-- Whiskers -->
+  <path d="M 65 90 L 30 85 M 65 95 L 25 95 M 65 100 L 30 105" fill="none" stroke="#8D6E63" stroke-width="1.5" stroke-linecap="round" />
+  <path d="M 135 90 L 170 85 M 135 95 L 175 95 M 135 100 L 170 105" fill="none" stroke="#8D6E63" stroke-width="1.5" stroke-linecap="round" />
+</svg>
