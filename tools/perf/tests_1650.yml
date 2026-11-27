@@ -1,0 +1,27 @@
+# Bench for a desktop-shared 4GiB GTX 1650 on linux. The absolute worst.
+# No kv quantization of any sort possible.
+
+# the difference (in MiB) between the total space reported by nvml and what vllm reports at startup (and scales utilization against)
+mysterious_bullshit: 369
+
+tests:
+- model: Trisert/LFM3-1.7B-exl3
+  revision: 4.0bpw-sc
+  vllm_args:
+    kv_cache_dtype: auto
+    max_model_len: auto
+  vram: 3.2
+
+- model: yeasah/MiniCPM5-2B-exl3
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: auto
+    max_model_len: auto
+  vram: 3.2
+
+- model: yeasah/Qwen3.5-2B-exl3
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: auto
+    max_model_len: auto
+  vram: 3.2

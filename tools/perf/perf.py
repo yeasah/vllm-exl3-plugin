@@ -16,6 +16,7 @@ import glob
 import subprocess
 import argparse
 import json
+import yaml
 import os
 import sys
 import re
@@ -29,7 +30,7 @@ _PROMPTS = { "cat": "Draw a picture of a cute cat using SVG" }
 
 def run_tests(args):
     with open(args.testfile, "r") as f:
-        tests = json.load(f)
+        tests = yaml.safe_load(f)
         mysterious_bullshit = tests.get("mysterious_bullshit", 0.0)
         for test in tests["tests"]:
             if not args.tests or re.search(args.tests, test["model"]):

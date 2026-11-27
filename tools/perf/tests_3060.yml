@@ -1,0 +1,86 @@
+# Bench for a desktop-shared 12GiB RTX 3060 on WSL2 with enough RAM to support 14GiB offload
+# Disable expandable segments for the gemma runs: they otherwise fail on WSL2
+# fp8 KV is not an option on ampere, so use unquantized KV where needed
+
+# the difference (in MiB) between the total space reported by nvml and what vllm reports at startup (and scales utilization against)
+mysterious_bullshit: 0.0
+
+tests:
+
+######################### MoE models
+
+- model: turboderp/gemma-4-26B-A4B-it-exl3
+  env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+  host_ram: 8
+  revision: 4.10bpw
+  vllm_args:
+    kv_cache_dtype: auto
+    max_model_len: 32768
+  vram: 10
+
+- model: turboderp/Laguna-XS-2.1-exl3
+  host_ram: 14
+  revision: 4.00bpw
+  vram: 10
+
+- model: yeasah/Ornith-1.5-35B-A3B-exl3
+  host_ram: 14
+  revision: 4.00bpw
+  vram: 10
+
+- model: yeasah/Qwen3.6-35B-A3B-exl3
+  host_ram: 14
+  revision: 4.00bpw
+  vram: 10
+
+- model: yeasah/Qwen3.6-35B-A3B-exl3
+  host_ram: 14
+  revision: 4.00bpw
+  suffix: MTP
+  vllm_args:
+    speculative_config:
+      method: mtp
+      num_speculative_tokens: 2
+      revision: 4.00bpw
+  vram: 10
+
+######################### Dense models
+
+- model: Trisert/LFM3-1.7B-exl3
+  revision: 4.0bpw-sc
+  vram: 10
+
+- model: yeasah/MiniCPM5-2B-exl3
+  revision: 4.00bpw
+  vram: 10
+
+- model: yeasah/Qwen3.5-2B-exl3
+  revision: 4.00bpw
+  vram: 10
+
+- model: UnstableLlama/Spark-X2.6-4B-exl3
+  revision: 4.00bpw
+  vram: 10
+
+- model: yeasah/Ornith-1.5-9B-exl3
+  revision: 4.00bpw
+  vram: 10
+
+- model: turboderp/Qwen3.5-9B-exl3
+  revision: 4.00bpw
+  vram: 10
+
+- model: yeasah/gemma-4-12B-it-exl3
+  env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: auto
+  vram: 10
+
+- model: yeasah/Qwen3.8-27B-exl3
+  revision: 2.50bpw-H5
+  vllm_args:
+    max_model_len: 32768
+  vram: 10

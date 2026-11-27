@@ -1,0 +1,141 @@
+# Bench for a 2x 16GiB 5060ti system with enough RAM to support 24GiB offload
+
+# the difference (in MiB) between the total space reported by nvml and what vllm reports at startup (and scales utilization against)
+mysterious_bullshit: 418.52
+
+tests:
+
+######################### MoE models
+
+- model: turboderp/gemma-4-26B-A4B-it-exl3
+  host_ram: 8
+  revision: 4.10bpw
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: turboderp/Laguna-XS-2.1-exl3
+  host_ram: 16
+  revision: 4.00bpw
+  vram: 15.5
+
+- model: yeasah/Ornith-1.5-35B-A3B-exl3
+  host_ram: 16
+  revision: 4.00bpw
+  vram: 15.5
+
+- model: yeasah/Qwen3.6-35B-A3B-exl3
+  host_ram: 16
+  revision: 4.00bpw
+  vram: 15.5
+
+- model: yeasah/Qwen3.6-35B-A3B-exl3
+  host_ram: 16
+  revision: 4.00bpw
+  suffix: MTP
+  vllm_args:
+    speculative_config:
+      method: mtp
+      num_speculative_tokens: 2
+      revision: 4.00bpw
+  vram: 15.5
+
+- model: turboderp/Qwen3.8-Flash-Next-exl3
+  env:
+    EXL3_NGRAM_REVISION: 2.18bpw_h6_ng8
+  host_ram: 24
+  revision: 1.66bpw_h4_ng3
+  suffix: v15-h24
+  vllm_args:
+    attention_config:
+      indexer_kv_dtype: fp8
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: turboderp/Qwen3.8-Flash-Next-exl3
+  host_ram: 24
+  revision: 2.18bpw_h6_ng8
+  suffix: v30-h24
+  vllm_args:
+    attention_config:
+      indexer_kv_dtype: fp8
+    kv_cache_dtype: fp8
+  vram: 31
+
+# Hy4-flash still in progress
+#
+#- model: turboderp/Hy4-flash-exl3
+#  host_ram: 24
+#  revision: sc_2.00bpw
+#  vllm_args:
+#    kv_cache_dtype: fp8
+#    max_model_len: 32768
+#  vram: 15.5
+#
+#- model: turboderp/Hy4-flash-exl3
+#  host_ram: 24
+#  revision: sc_2.00bpw
+#  vllm_args:
+#    kv_cache_dtype: fp8
+#    max_model_len: 131072
+#  vram: 31
+
+######################### Dense models
+
+- model: Trisert/LFM3-1.7B-exl3
+  revision: 4.0bpw-sc
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: yeasah/MiniCPM5-2B-exl3
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: yeasah/Qwen3.5-2B-exl3
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: UnstableLlama/Spark-X2.6-4B-exl3
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: yeasah/Ornith-1.5-9B-exl3
+  revision: 4.00bpw
+  vram: 15.5
+
+- model: turboderp/Qwen3.5-9B-exl3
+  revision: 4.00bpw
+  vram: 15.5
+
+- model: yeasah/gemma-4-12B-it-exl3
+  revision: 4.00bpw
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 15.5
+
+- model: yeasah/Qwen3.8-27B-exl3
+  revision: 3.50bpw-H5
+  vllm_args:
+    max_model_len: auto
+  vram: 15.5
+
+- model: yeasah/Qwen3.8-27B-exl3
+  revision: 4.00bpw
+  vram: 31
+
+- model: yeasah/Muse-Glimmer-30B-exl3
+  revision: 3.00bpw-H5
+  vram: 15.5
+
+- model: turboderp/gemma-4-31B-it-exl3
+  revision: 4.00bpw_mul1
+  vllm_args:
+    kv_cache_dtype: fp8
+  vram: 31
