@@ -21,6 +21,7 @@ import os
 import sys
 import re
 import shlex
+import threading
 import traceback
 import pynvml
 import datetime
@@ -113,37 +114,43 @@ def run_test(args, test, mysterious_bullshit):
                                bufsize=0,
                                text=True,
                                env=os.environ.copy() | vllm_env)
-        with open(f"{results_dir}/serve.log", "w") as serve_log:
-            try:
-                while not srv.poll():
-                    logline = srv.stdout.readline()
-                    serve_log.write(logline)
+        # The server's output is drained for the whole run, not only until startup: once nobody reads the pipe, the
+        # server blocks in write() as soon as its log fills the pipe buffer (64 KiB, about 20 minutes of periodic
+        # stats lines) and every request stalls with the GPU idle. Two 2026-11-27 runs hung that way at S4 random.
+        started = threading.Event()
 
+        def pump():
+            with open(f"{results_dir}/serve.log", "w") as serve_log:
+                for logline in srv.stdout:
+                    serve_log.write(logline)
+                    serve_log.flush()
                     if "Application startup complete." in logline:
-                        vllm = parse_log(f'{results_dir}/serve.log', info)
-                        if vllm.get('max_host_ram', 0) < test.get("host_ram", 0):
-                            raise Exception(f"vLLM found insufficient host RAM {vllm.get('max_host_ram', 0):.1f} / {test.get("host_ram", 0):.1f} GiB")
-                        with open(f"{results_dir}/test.json", "w") as f:
-                            json.dump(info, f)
-                        print(f"*** VLLM STARTED ***")
-                        for seqs in seqs_list:
-                            run_bench(args, results_dir, model_path, seqs, info)
-                        if args.cat:
-                            for cat_name,prompt in info["prompts"].items():
-                                print(f"*** GENERATING {cat_name} SVG ***")
-                                run_cat(args, cat_name, prompt, results_dir, info)
-                        print("*** TERMINATING VLLM ***")
-                        srv.terminate()
-                        srv.wait()
-                        break
-                if srv.returncode is not None and srv.returncode != 0:
-                    raise Exception(f"vLLM exited with return code {srv.returncode}, see log")
-            except:
-                raise
-            finally:
-                srv.terminate()
-                serve_log.write(srv.stdout.read())
-                srv.wait()
+                        started.set()
+            started.set()   # EOF: the server exited
+
+        pumper = threading.Thread(target=pump, name="serve-log", daemon=True)
+        pumper.start()
+        try:
+            started.wait()
+            if srv.poll() is not None:
+                raise Exception(f"vLLM exited with return code {srv.returncode} before startup completed, see log")
+            vllm = parse_log(f'{results_dir}/serve.log', info)
+            if vllm.get('max_host_ram', 0) < test.get("host_ram", 0):
+                raise Exception(f"vLLM found insufficient host RAM {vllm.get('max_host_ram', 0):.1f} / {test.get("host_ram", 0):.1f} GiB")
+            with open(f"{results_dir}/test.json", "w") as f:
+                json.dump(info, f)
+            print(f"*** VLLM STARTED ***")
+            for seqs in seqs_list:
+                run_bench(args, results_dir, model_path, seqs, info)
+            if args.cat:
+                for cat_name,prompt in info["prompts"].items():
+                    print(f"*** GENERATING {cat_name} SVG ***")
+                    run_cat(args, cat_name, prompt, results_dir, info)
+            print("*** TERMINATING VLLM ***")
+        finally:
+            srv.terminate()
+            srv.wait()
+            pumper.join(timeout=60)
 
     with open(f"{results_dir}/done", "w") as f:
         f.close()
