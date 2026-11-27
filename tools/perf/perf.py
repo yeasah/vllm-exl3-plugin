@@ -8,8 +8,9 @@ Under concurrency, a request's TTFT depends on what it is concurrent with. Two c
 configs: at concurrency > 1 the random run's output length holds each request's decode time at a fixed multiple of its prefill time
 (`--decode-ratio`: prefill from the config's 1x random run, decode from its sharegpt TPOT at that concurrency), so a
 config that decodes faster, or prefills slower, does not see more overlapping prefills; and the first wave of requests, which always starts as simultaneous prefills, is
-left out of the per-request means (`--save-detailed` results). Results saved without per-request data render as
-before.
+left out of the per-request means (`--save-detailed` results). Each bench run also sends one warm-up request from
+its own sample first (`--warmups`): the random dataset's shared prefix differs between invocations, so only that
+caches it, and it warms the expert cache and JIT paths. Results saved without per-request data render as before.
 """
 
 import glob
@@ -21,6 +22,7 @@ import os
 import sys
 import re
 import shlex
+import socket
 import threading
 import traceback
 import pynvml
@@ -84,6 +86,12 @@ def run_test(args, test, mysterious_bullshit):
         seqs_list = test.get("seqs", [ 1, 4 ])
 
         os.makedirs(results_dir, exist_ok=True)
+        # A server already on the port (another suite, a leftover) would answer every bench request: ours would fail
+        # to bind and the bench would quietly measure that one instead (2026-11-27: a test run's requests reached a
+        # live suite's server as 404s)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if probe.connect_ex(("127.0.0.1", int(args.port))) == 0:
+                raise Exception(f"port {args.port} is already in use; stop that server or pass --port")
         print(f"*** STARTING VLLM FOR {test['model']}@{test['revision']} ACROSS {num_gpus} GPUS AT UTILIZATION {utilization:.2f} FOR {vram} GiB VRAM ***")
         #model_path = os.path.dirname(hf_hub_download(repo_id=test['model'], revision=test['revision'], filename="tokenizer.json"))
         model_path = snapshot_download(repo_id=test['model'], revision=test['revision'])
@@ -500,7 +508,10 @@ def run_bench(args, results_dir, model_path, seqs, info):
                                 "--host", "localhost",
                                 "--port", str(args.port),
                                 "--seed", str(args.seed),
-                                "--num-warmups", "0",
+                                # One warm-up request, the run's own first prompt: the random dataset's shared prefix
+                                # is drawn after the per-request lengths, so it differs between invocations and only a
+                                # request from this run's sample caches it; it also warms JIT paths and the expert cache
+                                "--num-warmups", str(args.warmups),
                                 "--save-result", "--save-detailed", "--result-filename", outfile ]
                 if bench == "sharegpt":
                     bench_args += [ "--backend", "openai-chat",
@@ -546,6 +557,8 @@ def main():
                              "sharegpt TPOT); 0 keeps --output-tokens. 12 is about what 1024 tokens gave before")
     parser.add_argument("--max-output-tokens", type=int, default=8192,
                         help="ceiling on the scaled output length")
+    parser.add_argument("--warmups", type=int, default=1,
+                        help="warm-up requests per bench run, from the run's own first prompt (vllm bench --num-warmups)")
     parser.add_argument("--random-ignore-eos", default=True, action=argparse.BooleanOptionalAction,
                         help="random dataset requests always decode their full output length (they have so far "
                              "anyway; this guarantees it)")
