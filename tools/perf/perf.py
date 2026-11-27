@@ -395,7 +395,7 @@ def build_results(model, testdir, results):
             else:
                 vals = [ f"{vllm.get('vram_used'):.1f} GiB",
                         f"{host_ram:.1f} GiB" ]
-            vals += [ f"{vllm['kv_cache'] / 1024:.0f}K  ({vllm['kv_cache_gb']:.1f} GiB {info['config']['vllm_args']['kv_cache_dtype']})",
+            vals += [ f"{vllm['kv_cache'] / 1024:.0f}K ({vllm['kv_cache_gb']:.1f} GiB {info['config']['vllm_args']['kv_cache_dtype']})",
                     f"{seqs}",
                     f"{res_random['prefill_tps']:.0f} t/s",
                     f"{res_sharegpt['gen_tps']:.0f} t/s{long_note}" ]
@@ -453,15 +453,15 @@ def display_result(model, tests):
     res_str += """
 - **Platform**: The GPU(s) that generated the benchmark.
 - **Type**: The configuration type: quantization, etc.
-- **VRAM**: Actual consumed VRAM. For MoEs, the expert residency is shown as a percent.
-- **Host RAM**: Actual consumed host RAM for offload. For MoEs, the expert residency is shown as a percent.
+- **VRAM**: Total VRAM used per vLLM's accounting. For MoEs, the share of experts resident in VRAM is shown in percent.
+- **Host RAM**: Total host RAM used for offload. For MoEs, the share of experts resident in host RAM is shown in percent.
 - **Host Disk**: For MoEs which serve some experts from disk, the size and percent of this amount.
-- **KV**: Maximum context length as served, and the KV data type.
+- **KV**: KV size in tokens as served, the data type, and the total VRAM used.
 - **Req**: Number of concurrent requests.
 - **Prefill**: The average prefill rate for each request, not including concurrency.
-- **Output**: The total output rate, including concurrency.
+- **Output**: The total output rate, including concurrency. Output rate at longer context is shown as a percent.
 - **Draft**: Details of draft model configuration and measured acceptance rate.
-- **Notes**: n x m -> n is the number of prompts used to measure output rate, m is the average prompt length in tokens.
+- **Notes**: n x m -> n is the number of prompts used to measure output rate, m is the average output length in tokens.
 """
 
     if results["svgs"]:
