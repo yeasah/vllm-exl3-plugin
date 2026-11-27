@@ -278,19 +278,21 @@ tensors per depth band, before committing to the full one. (2) Per-tensor or per
 `sc_optimize` instead of the pinned `-al 2.0`, tested on the 35B. The near-linear regime there (and
 under loud content on the 27B) is what the quadratic law misprices.
 
-## `hy4-flash-serve` — turboderp/Hy4-flash-exl3 served by vLLM on this box
+## `hy4-flash-serve` — HY4 Flash on the vLLM release that ships it (parked until then)
 
-**Outcome:** HY4 Flash served at a length and concurrency that use the card, from the sm120 draft branch
-(`~/git/vllm-stock`, two throwaway vLLM edits), with its output checked against the exllamav3 probe and OpenRouter's
-`tencent/fp8`.
+**Outcome:** turboderp/Hy4-flash-exl3 served from a released vLLM (0.35 or later) through our fork, without the
+draft branch's throwaway edits.
 
-**Unblocks:** the first model whose experts and Engram tables both have to come off this host's disk.
+**Unblocks:** a supported recipe (docs/recipes/Hy4-flash.md is provisional: verified e2e on the sm120 draft branch,
+vision, thinking and tool use, TP=2 for text only since the vision tower does not split).
 
-**Candidate:** it serves at TP=2, 27.4 tok/s at `--max-model-len 32768 --max-logprobs 0` (exllamav3: 25.7), with prefill
-top-1 equal to exllamav3's at all 59 probe positions. Left: (1) the auto-length policy for a model whose native length
-cannot fit (1M), where KV currently takes everything before slots; (2) the fork's keep offered upstream, rebased; (3)
-OpenRouter's fp8 as an output check; (4) the uneven ranks seen once (rank 0 holding 1.8 GiB more after warmup), which
-has not recurred in five runs. Evidence: docs/upstream.md "HY4 Flash on `main`".
+**Candidate:** rebase onto the release and recheck each item docs/upstream.md "HY4 Flash on `main`" lists. Two are
+vLLM edits carried only in `~/git/vllm-stock` (diffs in docs/data/): the sparse-MLA profiling placeholder cap, and the
+fork's extensible-KV keep. They decide whether the fork carries them or upstream fixed them. Then the plugin-side
+items: Engram names, expert suffixes, the disk n-gram tables, the early compute stream, head_dtype, and the KV layout
+API. Measured on the draft branch, TP=2, `--max-logprobs 0`: 27.4 tok/s at 32K, 232 slots a layer (exllamav3: 25.7).
+Also open: RoPE caches sized at the native 1M ("RoPE caches at the native length"), and OpenRouter's fp8 as an output
+check.
 
 ## `moe-affinity` — Upstream's affinity-weighted expert Hessians, before the MoE pipeline push
 
