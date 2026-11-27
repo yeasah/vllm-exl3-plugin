@@ -184,6 +184,18 @@ cost of a disk-backed warmup and the spill graph path for every offload; (3) chu
 range, reclaimed after growth -- registered memory read 8% (decode) / 31% (prefill) slower than driver-allocated in a
 long-running server (`cpu_offload._pinned`), so it needs huge pages.
 
+## `staging-window-size` — Size prefill staging windows to what is staged, not to the host block
+
+The two prefill staging windows are laid out by host row (`cpu_offload.build_staging`): a layer's region spans its
+whole host block, rows plus disk positions, because a row's window position is its row index. Prefill's grouped path
+copies only the experts not in VRAM (`_wanted_rows`), so bandwidth tracks the misses, but the windows are sized for
+every hosted expert. When the slots hold most of them that is mostly empty VRAM: Qwen3.6-35B-A3B 4.00bpw on a 5060 Ti
+hosting all 256 experts a layer took 2 x 384 MiB of windows with 162 slots a layer, so about 94 experts a layer ever
+pass through them (~2 x 141 MiB) -- about 0.47 GiB, ~3 points of residency, and most of why that card fell from 66% to
+63% in VRAM against an older run hosting 169 (2 x 254 MiB) (2026-11-27). Fixing it means window positions
+independent of rows (compacted per stage, tables rebuilt per call as the grouped path already does), sized from the
+predicted post-slot residency, since the windows and their captured tables exist before the late slots do.
+
 ## `tied-quantized-head` — A tied EXL3 head/embedding under vLLM's `tie_weights`
 
 **Outcome:** checkpoints whose model ties `lm_head` to the embedding load. LFM2.5-8B-A1B (our pipeline's 4.00 probe

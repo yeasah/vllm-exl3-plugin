@@ -228,7 +228,11 @@ def parse_results(j, seqs):
     # approx request concurrency
     mean_concurrency = req_s / req_total_s
     gen_tps = out_tok / (total_s * gen_share)
-    prefill_tps = in_tok / (total_s * prefill_share)
+    # Prefill is reported per request: the rate one prompt is ingested at under this load, mean input over mean
+    # TTFT. The share model's aggregate (in_tok / (total_s * prefill_share)) reduces to concurrency x this, which
+    # credits every stream with prefilling at once when the others are mostly decoding -- a property of the request
+    # pattern, not a rate the server can sustain. Decode stays aggregate: the streams do decode concurrently.
+    prefill_tps = (in_tok / total_reqs) / req_prefill_s
     
     accept = j.get('spec_decode_acceptance_rate', 0.0)
 
@@ -407,9 +411,9 @@ def display_result(model, tests):
         if res_list and res_type != "svgs":
             res_str += "\n"
             if res_type == "disk" or res_type == "disk_spec":
-                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "Host Disk", "KV", "Concurrent Req.", "Mean Prefill", "Mean Output" ]
+                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "Host Disk", "KV", "Concurrent Req.", "Prefill (per req.)", "Output (total)" ]
             else:
-                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "KV", "Concurrent Req.", "Mean Prefill", "Mean Output" ]
+                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "KV", "Concurrent Req.", "Prefill (per req.)", "Output (total)" ]
             if res_type == "disk_spec" or res_type == "spec":
                 hdr += [ "Draft" ]
             res_str += "|" + "|".join(hdr) + "|\n"
