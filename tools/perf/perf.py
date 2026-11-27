@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""Serving benchmark for the recipe tables: starts `vllm serve` per test config, runs `vllm bench serve` against it at
+each concurrency (sharegpt for decode, random for prefill), and renders results/<model>/results.md. Run it from its
+working directory (results/ and the ShareGPT file live there): `perf.py --testfile tests.json`; with no testfile it
+only re-renders.
+
+Under concurrency, a request's TTFT depends on what it is concurrent with. Two controls keep that comparable across
+configs: at concurrency > 1 the random run's output length gives each request the same decode wall time
+(`--decode-seconds`, from the same config's sharegpt TPOT at that concurrency), so a config that decodes faster does
+not see more overlapping prefills; and the first wave of requests, which always starts as simultaneous prefills, is
+left out of the per-request means (`--save-detailed` results). Results saved without per-request data render as
+before.
+"""
+
+import glob
+import subprocess
+import argparse
+import json
+import os
+import sys
+import re
+import shlex
+import traceback
+import pynvml
+import datetime
+from huggingface_hub import hf_hub_download, snapshot_download
+
+_PROMPTS = { "cat": "Draw a picture of a cute cat using SVG" }
+
+def run_tests(args):
+    with open(args.testfile, "r") as f:
+        tests = json.load(f)
+        mysterious_bullshit = tests.get("mysterious_bullshit", 0.0)
+        for test in tests["tests"]:
+            if not args.tests or re.search(args.tests, test["model"]):
+                model = f"{test['model']}@{test['revision']}"
+                try:
+                    run_test(args, test, mysterious_bullshit)
+                except Exception as e:
+                    print(f"*** TEST FAILED: {e} ***")
+                    traceback.print_exc()
+
+def run_test(args, test, mysterious_bullshit):
+    # get GPU info, count and target utilization
+    vram = test.get("vram", 15)
+    count = pynvml.nvmlDeviceGetCount()
+    num_gpus = 0
+    total_vram = 0
+    avail_vram = 0
+    devname = None
+    for i in range(count):
+        num_gpus += 1
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        devname = pynvml.nvmlDeviceGetName(handle)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total_vram += mem.total / 1024**3
+        avail_vram += mem.free / 1024**3
+        if avail_vram > vram:
+            break
+    if avail_vram < vram:
+        raise Exception(f"Total VRAM available {avail_vram} GiB is insufficient for test, {vram} GiB needed")
+    total_vram -= mysterious_bullshit / 1024
+    utilization = vram / total_vram
+
+    base_model = test["model"].split("/")[-1]
+    tag = f'{test["revision"]}_{devname.replace(' ', '-')}x{num_gpus}_{vram}G'
+    if "suffix" in test:
+        tag += f"_{test['suffix']}"
+    results_dir = f'results/{base_model}/{tag}'
+    done = os.path.isfile(f'{results_dir}/done')
+
+    info = { "devname": devname,
+             "prompts": test.get("prompts", _PROMPTS),
+             "config": test,
+             "tag": tag,
+             "num_gpus": num_gpus,
+             "avail_vram": avail_vram,
+             "total_vram": total_vram,
+             "utilization": utilization }
+        
+    if not done:
+        seqs_list = test.get("seqs", [ 1, 4 ])
+
+        os.makedirs(results_dir, exist_ok=True)
+        print(f"*** STARTING VLLM FOR {test['model']}@{test['revision']} ACROSS {num_gpus} GPUS AT UTILIZATION {utilization:.2f} FOR {vram} GiB VRAM ***")
+        #model_path = os.path.dirname(hf_hub_download(repo_id=test['model'], revision=test['revision'], filename="tokenizer.json"))
+        model_path = snapshot_download(repo_id=test['model'], revision=test['revision'])
+        print()
+
+        vllm_args = { "kv_cache_dtype": args.default_kv_dtype } | test.get('vllm_args', {})
+        vllm_env = { "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True" } | test.get('env', {})
+        vargs = []
+        for k,v in vllm_args.items():
+            vargs.append(f'--{k.replace("_","-")}')
+            if v is not None:
+                if isinstance(v, dict):
+                    vargs.append(json.dumps(v))
+                else:
+                    vargs.append(str(v))
+        srv = subprocess.Popen(["vllm", "serve",
+                                test["model"],
+                                "--gpu-memory-utilization", str(utilization),
+                                "--tensor-parallel-size", str(num_gpus),
+                                "--revision", test["revision"],
+                                "--cpu-offload-gb", str(test.get("host_ram", 0) / num_gpus),
+                                "--cpu-offload-params", "experts",
+                                "--port", str(args.port),
+                                "--language-model-only",
+                                "--max-num-seqs", str(max(seqs_list))] + vargs,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT,
+                               bufsize=0,
+                               text=True,
+                               env=os.environ.copy() | vllm_env)
+        with open(f"{results_dir}/serve.log", "w") as serve_log:
+            try:
+                while not srv.poll():
+                    logline = srv.stdout.readline()
+                    serve_log.write(logline)
+
+                    if "Application startup complete." in logline:
+                        vllm = parse_log(f'{results_dir}/serve.log', info)
+                        if vllm.get('max_host_ram', 0) < test.get("host_ram", 0):
+                            raise Exception(f"vLLM found insufficient host RAM {vllm.get('max_host_ram', 0):.1f} / {test.get("host_ram", 0):.1f} GiB")
+                        with open(f"{results_dir}/test.json", "w") as f:
+                            json.dump(info, f)
+                        print(f"*** VLLM STARTED ***")
+                        for seqs in seqs_list:
+                            run_bench(args, results_dir, model_path, seqs, info)
+                        if args.cat:
+                            for cat_name,prompt in info["prompts"].items():
+                                print(f"*** GENERATING {cat_name} SVG ***")
+                                run_cat(args, cat_name, prompt, results_dir, info)
+                        print("*** TERMINATING VLLM ***")
+                        srv.terminate()
+                        srv.wait()
+                        break
+                if srv.returncode is not None and srv.returncode != 0:
+                    raise Exception(f"vLLM exited with return code {srv.returncode}, see log")
+            except:
+                raise
+            finally:
+                srv.terminate()
+                serve_log.write(srv.stdout.read())
+                srv.wait()
+
+    with open(f"{results_dir}/done", "w") as f:
+        f.close()
+    
+def run_cat(args, cat_name, prompt, results_dir, info):
+    cat_file = f'{results_dir}/{cat_name}.svg'
+    if not os.path.isfile(cat_file):
+        with open(f"{cat_file}.log", "w") as cat:
+            res = subprocess.run(["vllm", "chat",
+                                "--stats",
+                                "--url", f"http://localhost:{args.port}/v1",
+                                "-q", prompt],
+                                stdout=cat)
+            if res.returncode == 0:
+                cat_data = res.stdout
+                with open(f"{cat_file}.log", "r") as cat:
+                    cat_data = cat.read()
+                    svg = re.findall(r"<svg[^`]*</svg>", cat_data)
+                    if svg:               
+                        with open(cat_file, "w") as cat:
+                            cat.write(svg[-1])
+
+def _trimmed_means(j, seqs):
+    """Per-request means without the first wave, from --save-detailed results: (mean input tokens, mean output
+    tokens, mean TTFT s, mean TPOT s), or None without per-request data or at concurrency 1. The first `seqs`
+    requests by start time always begin as simultaneous prefills, whatever the config, so they say more about
+    vllm bench than about the server; the rest arrive one at a time as seats free up."""
+    starts, ttfts, lats = j.get("start_times"), j.get("ttfts"), j.get("latencies")
+    ins, outs = j.get("input_lens"), j.get("output_lens")
+    if seqs <= 1 or not (starts and ttfts and lats and ins and outs):
+        return None
+    keep = sorted(range(len(starts)), key=lambda i: starts[i])[seqs:]
+    keep = [i for i in keep if outs[i] and outs[i] > 1 and ttfts[i] is not None]
+    if not keep:
+        return None
+    n = len(keep)
+    tpots = [(lats[i] - ttfts[i]) / (outs[i] - 1) for i in keep]
+    return (sum(ins[i] for i in keep) / n, sum(outs[i] for i in keep) / n,
+            sum(ttfts[i] for i in keep) / n, sum(tpots) / n)
+
+
+def parse_results(j, seqs):
+    # guard: make sure concurrency was at least reached
+    if j["max_concurrent_requests"] < seqs:
+        raise Exception(f"ERROR: configured concurrency {seqs} not reached: max concurrent {j['max_concurrent_requests']}")
+
+    # guard: make sure every request completed
+    if j["failed"]:
+        raise Exception(f"ERROR: {j['failed']} requests failed")
+
+    # wall clock time per request
+    total_reqs = j["completed"]
+    total_s = j['duration']
+    req_total_s = total_s / total_reqs
+
+    trimmed = _trimmed_means(j, seqs)
+    if trimmed:
+        # the first wave dropped; the pacing (req_total_s) still spans the whole run
+        mean_in, mean_out, req_prefill_s, req_tpot_s = trimmed
+        in_tok, out_tok = mean_in * total_reqs, mean_out * total_reqs
+    else:
+        out_tok = j['total_output_tokens']
+        in_tok = j['total_input_tokens']
+        req_tpot_s = j['mean_tpot_ms'] / 1000.0
+        req_prefill_s = j['mean_ttft_ms'] / 1000.0
+
+    # request-level decode stats
+    req_gen_s = req_tpot_s * (out_tok / total_reqs - 1)
+    
+    # generation and prefill share of request time
+    req_s = req_gen_s + req_prefill_s
+    gen_share = req_gen_s / req_s
+    prefill_share = req_prefill_s / req_s
+    
+    # approx request concurrency
+    mean_concurrency = req_s / req_total_s
+    gen_tps = out_tok / (total_s * gen_share)
+    prefill_tps = in_tok / (total_s * prefill_share)
+    
+    accept = j.get('spec_decode_acceptance_rate', 0.0)
+
+    return { "prefill_tps": prefill_tps,
+             "gen_tps": gen_tps,
+             "date": datetime.datetime.strptime(j['date'], '%Y%m%d-%H%M%S'),
+             "accept": accept,
+             "concur": mean_concurrency,
+             "trimmed": bool(trimmed),
+             "seqs": seqs }
+
+def parse_log(logfile, test):
+    info = {}
+    with open(logfile, "r") as log:
+        for logline in log.readlines():
+            if "WDDM budget exceeded" in logline:
+                raise Exception(logline)
+            m = re.search(r"non-default args: (.*)", logline)
+            if m:
+                info['vllm_args'] = m.group(1)
+            m = re.search(r" Available RAM: ([0-9.]+) GiB", logline)
+            if m and 'max_host_ram' not in info:
+                info['max_host_ram'] = float(m.group(1)) - 3
+            m = re.search(r"expert placement: VRAM ([0-9.]+) GiB \(([0-9.]+)%\), host RAM ([0-9.]+) GiB \(([0-9.]+)%\) in ([0-9.]+) GiB pinned \(([0-9.]+) GiB of spare rows to swap through, ([0-9.]+) GiB idle\), disk ([0-9.]+) GiB \(([0-9.]+)%\)", logline)
+            if m:
+                if 'expert_vram' not in info:
+                    info |= { "expert_vram": 0, 
+                              "expert_vram_pct": 0,
+                              "expert_host": 0,
+                              "expert_host_idle": 0,
+                              "expert_host_pct": 0,
+                              "expert_disk": 0,
+                              "expert_disk_pct": 0 }
+                info['expert_vram'] += float(m.group(1))
+                info['expert_vram_pct'] += float(m.group(2)) / test['num_gpus']
+                info['expert_host'] += float(m.group(5)) - float(m.group(7))
+                info['expert_host_idle'] += float(m.group(7))
+                info['expert_host_pct'] += float(m.group(4)) / test['num_gpus']
+                info['expert_disk'] += float(m.group(8))
+                info['expert_disk_pct'] += float(m.group(9)) / test['num_gpus']
+            m = re.search(r"GPU KV cache size: ([0-9,]+) tokens", logline)
+            if m:
+                if 'kv_cache' not in info:
+                    info['kv_cache'] = 0
+                info['kv_cache'] = int(m.group(1).replace(',' , ''))
+            m = re.search(r"on host: ([0-9.]+) GiB pinned", logline)
+            if m:
+                # technically could be blockq too
+                if 'exl3_offload' not in info:
+                    info['exl3_offload'] = 0
+                info['exl3_offload'] += float(m.group(1))
+            m = re.search(r"cpu-offload: ([0-9.]+) GiB of EXL3 weights", logline)
+            if m:
+                if 'exl3_offload' not in info:
+                    info['exl3_offload'] = 0
+                info['exl3_offload'] += float(m.group(1))
+            m = re.search(r"Total CPU offloaded parameters: ([0-9.]+)", logline)
+            if m:
+                if 'dense_offload' not in info:
+                    info['dense_offload'] = 0
+                info['dense_offload'] += float(m.group(1))
+            m = re.search(r"Model loading took ([0-9.]+) GiB memory", logline)
+            if m:
+                if 'weights_vram' not in info:
+                    info['weights_vram'] = 0
+                info['weights_vram'] += float(m.group(1))
+            m = re.search(r"Free memory on device \(([0-9.]+)/([0-9.]+) GiB\) on startup. Desired GPU memory utilization is \([0-9.]+, ([0-9.]+) GiB\). Actual usage is ([0-9.]+) GiB for consumed memory \(weights \+ non-torch\), ([0-9.]+) GiB for peak activation, and ([0-9.]+) GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=[0-9.]+` \([0-9.]+ GiB\) to fit into requested memory, or `--kv-cache-memory=[0-9.]+` \([0-9.]+ GiB\) to fully utilize gpu memory. Current kv cache memory in use is ([0-9.]+) GiB.", logline)
+            if m:
+                if 'startup_vram_free' not in info:
+                    info |= { "startup_vram_free": 0, "startup_vram_avail": 0, "vram_used": 0, "vram_target": 0 }
+                info['startup_vram_free'] += float(m.group(1))
+                info['startup_vram_avail'] += float(m.group(2))
+                info['vram_used'] += float(m.group(4)) + float(m.group(5)) + float(m.group(6)) + float(m.group(7))
+                info['vram_target'] += float(m.group(3))
+    return info
+
+def build_results(model, testdir, results):
+    with open(f'{testdir}/test.json', "r") as f:
+        info = json.load(f)
+        vllm = parse_log(f'{testdir}/serve.log', info)
+        desired_host_ram = info['config'].get("host_ram", 0)
+        avail_host_ram = vllm.get('max_host_ram', 0)
+        if avail_host_ram < desired_host_ram:
+            raise Exception(f"{info['tag']}: VLLM FOUND INSUFFICIENT HOST RAM {avail_host_ram:.1f} / {desired_host_ram:.1f} GiB")
+        devname = info['devname']
+        if info['num_gpus'] > 1:
+            devname += f' x{info["num_gpus"]}'
+        devname = devname.replace("NVIDIA ", "")
+        devname = devname.replace("GeForce ", "")
+
+        spec = None
+        if "speculative_config" in info["config"].get("vllm_args", {}):
+            spec = info["config"]["vllm_args"]["speculative_config"].get("num_speculative_tokens", 0)
+
+        res_type = "normal"
+        if "expert_vram" in vllm:
+            if spec:
+                res_type = "disk_spec"
+            else:
+                res_type = "disk"
+        elif spec:
+            res_type = "spec"
+
+        for seqs in info['config'].get('seqs', [1,4]):
+            res_sharegpt = {}
+            results_file = f'{testdir}/bench_S{seqs}_sharegpt.json'
+            with open(results_file, 'r') as f:
+                j = json.load(f)
+                res_sharegpt = parse_results(j, seqs)
+            res_random = {}
+            results_file = f'{testdir}/bench_S{seqs}_random.json'
+            with open(results_file, 'r') as f:
+                j = json.load(f)
+                res_random = parse_results(j, seqs)
+
+            host_ram = vllm.get("dense_offload", 0) + vllm.get("exl3_offload", 0)
+            res_name = info['config']['revision']
+            if 'suffix' in info['config']:
+                res_name = f"{res_name} ({info['config']['suffix']})"
+            if res_type == "disk" or res_type == "disk_spec":
+                vals = [ devname,
+                        res_name,
+                        res_sharegpt['date'].strftime("%F"),
+                        f"{vllm.get('vram_used'):.1f} GiB ({vllm['expert_vram_pct']:.1f}%)",
+                        f"{host_ram - vllm['expert_host_idle']:.1f} GiB ({vllm['expert_host_pct']:.1f}%)",
+                        f"{vllm['expert_disk']:.1f} GiB ({vllm['expert_disk_pct']:.1f}%)",
+                        f"{vllm['kv_cache'] / 1024:.0f}K",
+                        f"{seqs}",
+                        f"{res_random['prefill_tps']:.0f} t/s",
+                        f"{res_sharegpt['gen_tps']:.0f} t/s" ]
+            else:
+                vals = [ devname,
+                        res_name,
+                        res_sharegpt['date'].strftime("%F"),
+                        f"{vllm.get('vram_used'):.1f} GiB",
+                        f"{host_ram:.1f} GiB",
+                        f"{vllm['kv_cache'] / 1024:.0f}K",
+                        f"{seqs}",
+                        f"{res_random['prefill_tps']:.0f} t/s",
+                        f"{res_sharegpt['gen_tps']:.0f} t/s" ]
+            if res_type == "spec" or res_type == "disk_spec":
+                vals.append(f"{spec} tok ({res_sharegpt['accept']:.1f}%)")
+            results[res_type].append(vals)
+
+        svgs = info.get('prompts', {"cat": "Draw a picture of a cute cat using SVG"} )
+        for svg_name, svg_prompt in svgs.items():
+            catfile = f"{testdir}/{svg_name}.svg.log"
+            if os.path.isfile(catfile):
+                catdir = os.path.basename(testdir)
+                with open(catfile, "r") as cat:
+                    for line in cat:
+                        m = re.search(r"\(([0-9]+) tokens in ([0-9.]+)s\)", line)
+                        if m:
+                            tokens = m.group(1)
+                            seconds = m.group(2)
+                            results["svgs"].append(f"""
+The following {svg_name} was produced by `{info['config']['model']}` at `{info['config']['revision']}` on a {devname} in {seconds} seconds, using {tokens} tokens (including thoughts, if any)
+
+<img src="{catdir}/{svg_name}.svg" alt="{svg_prompt}">
+""")
+
+def display_result(model, tests):
+
+    results = { "normal": [],
+                "disk": [],
+                "spec": [],
+                "disk_spec": [],
+                "svgs": [] }
+    res_str = f"## Benchmarks for {model}\n"
+    for testdir in tests:
+        try:
+            build_results(model, testdir, results)
+        except Exception as e:
+            print("SKIPPING TEST {testdir}: {e}")
+    for res_type, res_list in results.items():
+        if res_list and res_type != "svgs":
+            res_str += "\n"
+            if res_type == "disk" or res_type == "disk_spec":
+                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "Host Disk", "KV", "Concurrent Req.", "Mean Prefill", "Mean Output" ]
+            else:
+                hdr = [ "Platform", "Type", "Date", "VRAM", "Host RAM", "KV", "Concurrent Req.", "Mean Prefill", "Mean Output" ]
+            if res_type == "disk_spec" or res_type == "spec":
+                hdr += [ "Draft" ]
+            res_str += "|" + "|".join(hdr) + "|\n"
+            res_str += ("|---" * len(hdr)) + "|\n"
+            for res in res_list:                            
+                res_str += "|" + "|".join(res) + "|\n"
+
+    if results["svgs"]:
+        res_str += "\n## SVGs\n"
+        for svg in results["svgs"]:
+            res_str += svg
+    return res_str
+
+def display_results():
+    done = {}
+    for dir in sorted(glob.glob("results/*/*")):
+        if os.path.isdir(dir):
+            donefile=f"{dir}/done"
+            if os.path.isfile(donefile):
+                try:
+                    testdir = os.path.dirname(donefile)
+                    with open(f'{testdir}/test.json', "r") as f:
+                        info = json.load(f)
+                        base_model = info["config"]["model"].split("/")[-1]
+                        if base_model not in done:
+                            done[base_model] = []
+                        done[base_model].append(testdir)
+                except Exception as e:
+                    print(e)
+                    traceback.print_exc()
+            else:
+                print(f"SKIPPING INCOMPLETE {dir}")
+
+    for model,tests in done.items():
+        print(f"PROCESSING MODEL {model}")
+        try:
+            with open(f'results/{model}/results.md', "w") as out:
+                out.write(display_result(model, tests))        
+        except Exception as e:
+            print("SKIPPING MODEL {model}: {e}")
+        
+def random_output_len(args, results_file, seqs):
+    """The random run's mean output length. Under concurrency, a request's TTFT depends on how many other prompts are
+    prefilling beside it, which depends on how long the others spend decoding: a config that decodes twice as fast
+    sees far more overlapping prefills at a fixed output length. So at seqs > 1 the output length is set to give
+    every config the same decode wall time per request, `--decode-seconds`, from its own decode speed at this
+    concurrency -- the sharegpt run just before, at the same seqs. Recorded next to the result."""
+    if seqs <= 1 or not args.decode_seconds:
+        return args.output_tokens
+    with open(f"{results_file}_sharegpt.json") as f:
+        tpot_ms = json.load(f)["mean_tpot_ms"]
+    output_len = max(64, min(args.max_output_tokens, round(args.decode_seconds * 1000 / tpot_ms)))
+    with open(f"{results_file}_random.scale.json", "w") as f:
+        json.dump({"decode_seconds": args.decode_seconds, "sharegpt_tpot_ms": tpot_ms, "output_len": output_len}, f)
+    print(f"*** RANDOM x{seqs}: {output_len} output tokens, {args.decode_seconds} s of decode at {tpot_ms:.1f} ms/token ***")
+    return output_len
+
+def run_bench(args, results_dir, model_path, seqs, info):
+    num_prompts = args.num_prompts * seqs
+    results_file = f'{results_dir}/bench_S{seqs}'
+
+    for bench in "sharegpt", "random":
+        outfile = f"{results_file}_{bench}.json"
+        if not os.path.isfile(outfile):
+            print(f"*** RUNNING BENCH FOR {bench} x{seqs} ***")
+            with open(f"{results_file}_{bench}.log", "w") as log:
+                bench_args = ["vllm", "bench", "serve",
+                                "--model", info["config"]["model"],
+                                "--max-concurrency", str(seqs),
+                                "--tokenizer", model_path,
+                                "--host", "localhost",
+                                "--port", str(args.port),
+                                "--seed", str(args.seed),
+                                "--num-warmups", "0",
+                                "--save-result", "--save-detailed", "--result-filename", outfile ]
+                if bench == "sharegpt":
+                    bench_args += [ "--backend", "openai-chat",
+                                    "--num-prompts", str(num_prompts * 2),
+                                    "--endpoint", "/v1/chat/completions",
+                                    "--dataset-name", "sharegpt",
+                                    "--dataset-path", "ShareGPT_V3_unfiltered_cleaned_split.json" ]
+                if bench == "random":
+                    output_len = random_output_len(args, results_file, seqs)
+                    bench_args += [ "--random-prefix-len", str(args.prefix),
+                                    "--random-range-ratio", f'{{"input": {args.rand}, "output": {args.rand}}}',
+                                    "--num-prompts", str(num_prompts),
+                                    "--output-len", str(output_len),
+                                    "--input-len", str(args.input_tokens) ]
+                    if args.random_ignore_eos:
+                        # random-token prompts have so far decoded every requested token anyway (Qwen3.6-35B-A3B: 2497 of
+                        # 2497 at S1, 17199 of 17199 at S4); this makes the decode length a guarantee, not a property of
+                        # how rarely a model emits EOS after noise, since the scaling above relies on it
+                        bench_args += [ "--ignore-eos" ]
+                res = subprocess.run(bench_args,
+                                    stdout=log,
+                                    stderr=subprocess.STDOUT,
+                                    text=True)
+                if res.returncode != 0:
+                    raise Exception(f"vllm bench {bench} returned {res.returncode}")
+
+def main():
+    pynvml.nvmlInit()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--testfile", help="testfile to run. if not specified, just regenerates results")
+    parser.add_argument("--tests", help="restrict tests to matching pattern")
+    parser.add_argument("--port", default=13373)
+    parser.add_argument("--rand", type=float, default=0.5)
+    parser.add_argument("--prefix", type=int, default=4096)
+    parser.add_argument("--num-prompts", type=int, default=4)
+    parser.add_argument("--input-tokens", type=int, default=4096)
+    parser.add_argument("--output-tokens", type=int, default=1024,
+                        help="random dataset output length at concurrency 1, and at higher concurrency with --decode-seconds 0")
+    parser.add_argument("--decode-seconds", type=float, default=60.0,
+                        help="at concurrency > 1, scale the random dataset's output length so each request decodes for "
+                             "this long, from the same config's sharegpt TPOT; 0 keeps --output-tokens")
+    parser.add_argument("--max-output-tokens", type=int, default=8192,
+                        help="ceiling on the scaled output length")
+    parser.add_argument("--random-ignore-eos", default=True, action=argparse.BooleanOptionalAction,
+                        help="random dataset requests always decode their full output length (they have so far "
+                             "anyway; this guarantees it)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--default-kv-dtype", default="nvfp4")
+    parser.add_argument("--cat", default=True, action=argparse.BooleanOptionalAction)
+    args = parser.parse_args()
+
+    if args.testfile:
+        run_tests(args)
+    display_results()
+
+if __name__ == "__main__":
+    main()
