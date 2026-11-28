@@ -38,6 +38,8 @@ class Job:
         # Not a revision: a leading underscore keeps it out of revisions(), so never uploaded.
         self.traces = os.path.join(self.dir, "_traces")
         self.cal_data = os.path.join(self.traces, "cal.safetensors")
+        # A trace command generating through an API needs the base model's config and tokenizer, not its weights
+        self._snapshot_kw = {"allow_patterns": TOKENIZER_FILES} if getattr(args, "backend", None) == "openai" else {}
         # Uncalibrated sweep: card section 2's common baseline. Not in the model repo; `upload
         # --uncalibrated` puts it (and the generator) in a separate repo, `fetch --uncalibrated`
         # brings them back
@@ -92,7 +94,7 @@ class Job:
         return rev
 
     def base_snapshot(self, **kw):
-        return snapshot_download(repo_id=self.base_repo, revision=self.base_revision(), **kw)
+        return snapshot_download(repo_id=self.base_repo, revision=self.base_revision(), **(kw or self._snapshot_kw))
 
     def baseline_revisions(self):
         if not os.path.isdir(self.baseline):
@@ -220,9 +222,30 @@ def record_slice_stats(job):
     with open(rec, "w") as f:
         json.dump(stats, f, indent=1)
 HERE = os.path.dirname(os.path.abspath(__file__))
+# What a trace through an API needs of the generator's repo: its config, tokenizer and chat template
+TOKENIZER_FILES = ["*.json", "*.jinja", "*.txt", "*.model", "*.tiktoken"]
 EVAL_SELF_PROMPTS = os.path.join(HERE, "eval_self_prompts.json")       # held out of calibration
 CODE_DOCS = os.path.join(HERE, "..", "deps", "vllm", "vllm", "**", "*.py")   # code documents for ctx slices
 
+
+def eval_generator_api(job):
+    """How eval traces generated through an API (ctx_trace --backend openai) name their generator: the served model,
+    the endpoint's host, and each provider that wrote rows with the quantization it declares; None otherwise"""
+    served, gen = collections.Counter(), None
+    for sl in EVAL_SLICES:
+        path = job.eval_trace(sl)
+        if not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            gen = json.load(f).get("generator") or gen
+        if gen:
+            served.update({k[5:]: v for k, v in gen["stats"].items() if k.startswith("rows_")})
+    if not gen:
+        return None
+    declared = {e.get("provider_name"): e.get("quantization") for e in gen.get("endpoints") or []}
+    host = re.sub(r"^https?://", "", gen["base_url"]).split("/")[0]
+    provs = [f"{p} (declared {declared[p]})" if declared.get(p) else p for p, _ in served.most_common() if p != "endpoint"]
+    return f"{gen['model']} as served{' by ' + ', '.join(provs) if provs else ''} through {host}'s API"
 
 def eval_generator_named(job):
     """The repo that wrote the eval traces' answers, when it is not the base model itself (e.g. an
@@ -237,7 +260,13 @@ def eval_generator_named(job):
     return None if repo == job.base_repo else repo
 
 def generator_backend(args):
-    """The engine arguments every trace command passes to ctx_trace: vLLM with --vllm-args, or exllamav3's own"""
+    """The engine arguments every trace command passes to ctx_trace: vLLM with --vllm-args, an API endpoint with
+    --openai-args, or exllamav3's own"""
+    if args.backend == "openai":
+        o = json.loads(args.openai_args)
+        if not (o.get("base_url") and o.get("model")):
+            raise SystemExit("--backend openai needs base_url and model in --openai-args")
+        return ["--backend", "openai", "--openai", args.openai_args]
     return ["--backend", "vllm", "--vllm", args.vllm_args] if args.backend == "vllm" else []
 
 def trace_generator(job, args):
@@ -246,7 +275,8 @@ def trace_generator(job, args):
     calibration against another quant's sampled text (docs/calibration.md); the calibration's 8bpw stand-in is
     `cal-traces --uncalibrated`, not a --generator."""
     src = args.generator or job.base_repo
-    path = src if os.path.isdir(src) else snapshot_download(repo_id=src) if args.generator else job.base_snapshot()
+    path = (src if os.path.isdir(src) else snapshot_download(repo_id=src, **job._snapshot_kw) if args.generator
+            else job.base_snapshot())
     qc = json.load(open(os.path.join(path, "config.json"))).get("quantization_config") or {}
     if qc.get("quant_method") == "exl3" or os.path.isfile(os.path.join(path, "quantization_config.json")):
         raise SystemExit(f"--generator {src} is an EXL3 checkpoint; traces come from the base model or an FP8/bf16 release "
@@ -254,6 +284,10 @@ def trace_generator(job, args):
     return path, generator_backend(args)
 
 def generator_named(args):
+    if args.backend == "openai":
+        o = json.loads(args.openai_args)
+        pin = (o.get("body", {}).get("provider") or {}).get("only")
+        return f"{o['model']} at {o['base_url']}" + (f" (providers {', '.join(pin)})" if pin else "")
     return f"{args.generator}" if args.generator else "the base model (bf16)"
 
 def collect_metadata(job, qbench, gguf_kld=False):
@@ -267,6 +301,7 @@ def collect_metadata(job, qbench, gguf_kld=False):
     data['multimodal'] = base_sizes['encoder'] > 0
 
     data['eval_generator'] = eval_generator_named(job)
+    data['eval_generator_api'] = eval_generator_api(job)
     data['generation_config'] = published_generation_config(job)[1]
 
     floor = {sl: parse_qbench(res, 'Noise floor')['kld'] for sl, res in qbench.items()}
@@ -1622,7 +1657,7 @@ def do_card(job, args):
         f.write(env.get_template("technical.jinja").render(
             this_model=job.repo, base_model=job.base_repo, slices=slices, weights=weights, weight_note=note,
             weight_spec=weight_spec, calibration=calib, reference=meta['reference'], recall=meta['recall'], **{k: meta[k] for k in
-            ('traces_published', 'eval_generator', 'multimodal', 'thresholds', 'embed_quantized', 'scored') if k in meta}))
+            ('traces_published', 'eval_generator', 'eval_generator_api', 'multimodal', 'thresholds', 'embed_quantized', 'scored') if k in meta}))
 
 def fetch_uncalibrated(job, args):
     """Populate a working job dir with the uncalibrated conversions published in <repo>-uncalibrated
@@ -2849,10 +2884,10 @@ def do_eval_traces(job, args):
     # bf16 may need every visible GPU; a layer split on stock torch <= 2.14.1 is exposed to
     # pytorch#196258 (docs/upstream.md "PyTorch"), which the local library rebuild fixes
     check = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "torch-c10cuda-fix.sh")
-    if subprocess.call([check, "--check"]):
+    if args.backend != "openai" and subprocess.call([check, "--check"]):
         print("!! torch is not patched for pytorch#196258; a multi-GPU bf16 run may fault (fork free_mem() covers load)")
     eval_path, eval_backend = trace_generator(job, args)
-    eval_desc = generator_named(args) + (" via vLLM" if eval_backend else "")
+    eval_desc = generator_named(args) + (" via vLLM" if args.backend == "vllm" else "")
     for sl, (n, _) in EVAL_SLICES.items():
         print(f"=== eval trace ({sl}, {n} conversations, {eval_desc}) -> {job.eval_trace(sl)} ===")
         if not run_until(job.eval_trace(sl),
@@ -2898,6 +2933,8 @@ def do_cal_traces(job, args):
         print(f"=== no eval swe trace at {job.eval_trace('swe')}: run `eval-traces` first (the calibration "
               f"keeps out its repositories) ==="); return False
     ctx_trace = os.path.join(args.exllamav3dir, "ctx_trace.py")
+    if args.uncalibrated and args.backend == "openai":
+        print("=== --uncalibrated generates with a local 8bpw stand-in; it does not take --backend openai ==="); return False
     if not args.uncalibrated:
         gen, cal_backend = trace_generator(job, args)
         env = generator_env(args)
@@ -4218,8 +4255,15 @@ def main():
                        help='repo or path that writes the trace (default: the base model, bf16). Where bf16 does not '
                             'fit, the FP8 release with --backend vllm. Never an EXL3 checkpoint')
         # vLLM: substantially faster on TP>1 and never measurably slower
-        p.add_argument('--backend', default='vllm', choices=['exllamav3', 'vllm'],
-                       help='engine (default vllm: one engine per ctx_trace process, with --vllm-args)')
+        p.add_argument('--backend', default='vllm', choices=['exllamav3', 'vllm', 'openai'],
+                       help='engine (default vllm: one engine per ctx_trace process, with --vllm-args); openai: an '
+                            'OpenAI-compatible completions endpoint, with --openai-args, which needs only the '
+                            "generator's config and tokenizer here")
+        p.add_argument('--openai-args', default='{}',
+                       help='openai backend, JSON: base_url and model (required), api_key_env (default OPENAI_API_KEY), '
+                            'body (merged into every request), concurrency, attempts, timeout. OpenRouter pinned to '
+                            'one provider: \'{"base_url": "https://openrouter.ai/api/v1", "model": "qwen/qwen3.8-27b", '
+                            '"api_key_env": "OPENROUTER_API_KEY", "body": {"provider": {"only": ["mancer/fp8"]}}}\'')
         p.add_argument('--vllm-args', default='{}',
                        help='vLLM engine arguments, JSON. Qwen3.8-27B-FP8 on 2x16 GB: '
                             '\'{"max_num_batched_tokens": 1024, "enforce_eager": true, "gpu_memory_utilization": 0.968}\'')

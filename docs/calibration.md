@@ -213,6 +213,69 @@ the same spread makes noise. No sign of a penalty; one under ~15-20% could hide 
 is far larger than Qwen3-0.6B's (2-3%). The FP8 generator's own KLD against bf16 is about twice the noise floor
 on Qwen3.6-35B-A3B (0.0073 against 0.0033, two rows).
 
+## An API endpoint as the generator (2026-11-27)
+
+Trace generation is the step that needs the generator resident and decoding: offload is slowest exactly there,
+and reference scoring and conversion are prefill-shaped. `ctx_trace.py --backend openai` hands generation to an
+OpenAI-compatible `/v1/completions` endpoint — a rented vLLM server, or a router such as OpenRouter — and keeps
+everything else local: conversations, template rendering, row shape. `-m` needs only config and tokenizer, and
+`quant.py` trace commands with `--backend openai --openai-args '{...}'` download only those
+(`TOKENIZER_FILES`). Prompts go as token ids where the endpoint takes them (vLLM, `return_token_ids`), else as
+text that must decode and re-encode to the same ids here, with the answer retokenized. The trace header records
+the endpoint, its `/models` entry, OpenRouter's per-provider endpoint listing (declared quantization, supported
+parameters), the screening, and per-provider row counts and cost; each row names its provider. The card names
+the served model, provider and declared quantization instead of a repo.
+
+**An endpoint's claims are not evidence; two checks replace them.** Surveyed on OpenRouter's 23 endpoints for
+`qwen/qwen3.8-27b`, each pinned with `provider.only`:
+
+- *Per response: is it a raw completion of this prompt?* 18 of 23 wrap a `/completions` prompt in their own
+  chat template (prompt count 74 for 23 sent; the answer arrives as `reasoning`, to the rendered template
+  quoted as a user turn). Only chutes, mancer, parasail, coreweave (fp8) and nebius (fp4) complete raw, and keep
+  thinking in `text`. Every response is refused unless the endpoint's prompt token count matches, no reasoning
+  is split out, and its completion count matches the returned text (retokenized + stop token, within 2%).
+  OpenRouter refuses token-id prompts outright.
+- *Per provider, before generating: does it honour each sampling parameter the run sets non-neutral?* Each
+  truncation at its extreme (`top_k` 1, `top_p` 0.001, `min_p` 1.0) must collapse six seeds that otherwise
+  disagree (6 answers in 6) to at most two answers or a shared 6-token prefix — greedy itself is not
+  reproducible on a batched fp8 server: Chutes gave 2 answers in 6 under `top_k` 1 in one screen and 1 in the
+  next, while an ignored truncation leaves all 6 distinct from the first token. Each penalty at 2.0 must change a
+  greedy list within the prefix two greedy baselines agree on (under 8 tokens of agreement is inconclusive). On
+  the five raw endpoints, all six parameters, over three screens:
+
+  | provider | ignores |
+  |---|---|
+  | Mancer (fp8) | nothing |
+  | Parasail (fp8) | `min_p` |
+  | Chutes (fp8) | `min_p` |
+  | CoreWeave (fp8) | `min_p`; all three penalties in 2 of 3 screens — the two whose greedy baselines agreed for only 12 tokens, against 64 in the third: apparently two serving stacks behind one tag |
+  | Nebius (fp4) | `min_p`, `top_k`, `presence_penalty`, `repetition_penalty` |
+
+  `min_p` is ignored exactly where `supported_parameters` leaves it out, but CoreWeave lists all three
+  penalties and Nebius lists `top_k` and `presence_penalty`: the listing is a routing hint, not a guarantee
+  (`require_parameters` routes on it and would have passed both). Qwen3.8-27B's profile sets `top_k`, `top_p`
+  and `presence_penalty` (its `min_p` 0 and `repetition_penalty` 1 are neutral and go untested), so Mancer,
+  Parasail and Chutes can generate its traces, CoreWeave sometimes, Nebius not. A screen is one sample of a
+  provider: CoreWeave shows a tag can pass and later ignore, which a run's own screening only narrows.
+
+`quantization/screen_endpoints.py -t <repo> -m <endpoint model> [--sampling-profile ...]` screens every
+provider OpenRouter lists for a model (or `--providers`), each pinned alone, in parallel, and prints the
+`--openai-args` that pins the ones that passed; `-o` keeps every verdict with the endpoint listing.
+
+Rows from a provider that was not screened are refused like any bad response, so an unpinned router choosing a
+different provider mid-run cannot slip rows in; with several in `provider.only`, each is screened alone. A
+request that keeps failing (6 attempts, backoff) fails the run rather than dropping its row; good responses are
+journaled (`<output>_api.jsonl`) and a rerun pays only for the rest.
+
+Checked against a local `vllm serve Qwen/Qwen3-0.6B`: token-id mode passes screening; through a proxy that drops
+`top_k`, drops `presence_penalty`, or wraps text prompts in a template, screening refuses each; at 30% injected
+5xx/429 all rows complete through retries; with rows exhausting their attempts the run fails, and the rerun takes
+5 of 8 from the journal. Against in-process vLLM with the same seeds, 3 of 8 rows are token-identical and the rest
+diverge after 74-217 tokens — as two API runs do with each other (3 of 8 diverge): server batching is not
+bitwise reproducible, so seeds are provenance there, not a reproducibility guarantee. Still open: a card's
+traces from a hosted fp8 provider scored against the local bf16 reference — the same question the FP8-release
+section answered for a release we could inspect, now for one we cannot.
+
 ## An uncalibrated reference (2026-09-29)
 
 `convert.py --uncalibrated` (fork) quantizes every layer through the identity-Hessian
