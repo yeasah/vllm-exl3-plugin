@@ -79,10 +79,11 @@ tests:
   revision: 4.00bpw
   vllm_args:
     kv_cache_dtype: auto
+    max_model_len: auto
   vram: 10
 
 - model: yeasah/Qwen3.8-27B-exl3
   revision: 2.50bpw-H5
   vllm_args:
-    max_model_len: 32768
+    max_model_len: auto
   vram: 10
