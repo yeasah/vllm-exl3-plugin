@@ -270,6 +270,7 @@ inexplicable turns up on hardware other than Blackwell.
 | [recall.md](docs/recall.md) | whether a quant keeps what the unquantized model knows: kept, confident errors, recall by confidence band, per-model slices, and why conversions differ more on facts than on KL |
 | [yaqa.md](docs/yaqa.md) | YAQA-quality rounding in the quantizer: what it buys, what it costs, why the converter's forward-only stream is the obstacle |
 | [transformers-backend.md](docs/transformers-backend.md) | serving architectures vLLM has no implementation for |
+| [lora.md](docs/lora.md) | serving PEFT LoRA adapters on EXL3 quants: the three setup lookups that failed, why a logprob-shift fit cannot gate it and the per-module check that does, and two sources of run-to-run variation (batch composition through the multiprocess engine, LoRA shrink atomics) |
 | [media-encoders.md](docs/media-encoders.md) | how many bytes a vision/audio tower is (up to 12.7% of a low-bpw exl3 checkpoint), why evicting one is nearly free, what vLLM 0.29.0 changed, and why the weights are not the cost that gates vision |
 | [turboquant-kv.md](docs/turboquant-kv.md) | TurboQuant's KV page geometry: the mispriced page that stopped a quantized cache coexisting with sliding-window layers, and what first/last-N boundary protection costs |
 | [memory-accounting.md](docs/memory-accounting.md) | where the VRAM goes: the backend workspaces vLLM's profiler cannot see, why `gpu_memory_utilization` stops being safe above ~0.85, and which consumer has to be engineered away rather than budgeted for |

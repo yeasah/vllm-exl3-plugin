@@ -10,8 +10,10 @@ plugins once per process, but `register()` may be reached more than once.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
+import sys
 
 import torch
 
@@ -39,6 +41,14 @@ def apply() -> None:
 
     if hasattr(LogitsProcessor, "_apply_head"):   # vLLM after 0.34: head_dtype honoured in one place
         _exl3_head_dtype(LogitsProcessor)
+    try:
+        from vllm.lora import model_manager as lora_model_manager
+        from vllm.lora.layers import utils as lora_layer_utils
+        from vllm.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWithLoRA
+    except ImportError:   # a vLLM laid out differently: LoRA on EXL3 stays unsupported, nothing else changes
+        lora_model_manager = None
+    if lora_model_manager is not None:
+        _lora_on_exl3(lora_layer_utils, VocabParallelEmbeddingWithLoRA, lora_model_manager)
     try:   # HY4 Flash (upstream main after 0.34)
         from vllm.models.hy_v4_flash.nvidia.model import HYV4FlashModel
     except Exception:
@@ -54,6 +64,90 @@ def apply() -> None:
 
 def _is_exl3(quant_config) -> bool:
     return quant_config is not None and getattr(quant_config, "get_name", lambda: None)() == "exl3"
+
+
+def _is_exl3_layer(layer) -> bool:
+    """`layer` computes through one of this plugin's quant methods (linear, head, embedding, experts)."""
+    method = getattr(layer, "quant_method", None)
+    return method is not None and type(method).__module__.partition(".")[0] == __name__.partition(".")[0]
+
+
+def _exl3_layer_device(layer) -> torch.device:
+    """Where an EXL3 layer computes: its first tensor off the CPU, else the current device (all of it offloaded)."""
+    for tensor in (*layer.parameters(), *layer.buffers()):
+        if tensor.device.type != "cpu":
+            return tensor.device
+    return torch.device("cuda", torch.cuda.current_device())
+
+
+def _lora_on_exl3(lora_layer_utils, VocabParallelEmbeddingWithLoRA, lora_model_manager) -> None:
+    """vLLM's LoRA wrappers build on an EXL3 layer: they find its device, and the head's dtype, without `.weight`.
+
+    The wrappers compute through the base layer's quant method and add the low-rank delta to its output, which
+    composes with EXL3 unchanged; what fails is setup. `_get_lora_device` recognises a layer by the name of its
+    weight (`weight`, `qweight`, `weight_packed`, ...) and raises on EXL3's `exl3_trellis_<n>`; the embedding wrapper,
+    built for `embed_tokens` whatever an adapter targets, and the head's logits wrapper read `base_layer.weight`
+    directly. For those two the layer carries an empty stand-in `weight` for the duration of the call only, so the
+    plugin's own "is this layer dense?" checks never see one. The head's dtype is the adapter dtype: the logits
+    wrapper stores it and reads it nowhere. Measured on Ornith-1.5-9B with a rank-64 adapter over all 200 dense
+    projections: the adapter's per-token logprob shift tracks bf16's (TP=2) at r=0.95 (6.00bpw) / 0.91 (4.00bpw) /
+    0.83 (3.00bpw-H5), eager and CUDA graphs alike (`tests/test_lora.py`). EXL3 routed experts are refused clearly:
+    vLLM's MoE LoRA needs a modular kernel and `exl3_mgemm` is not one.
+    """
+    original_device = lora_layer_utils._get_lora_device
+    if getattr(original_device, "_exl3_patched", False):
+        return
+
+    @functools.wraps(original_device)
+    def _get_lora_device(base_layer):
+        experts = getattr(base_layer, "routed_experts", None)
+        if experts is not None and _is_exl3_layer(experts):
+            raise NotImplementedError(
+                "LoRA on EXL3 routed experts is not supported: vLLM's MoE LoRA needs a modular expert kernel, and "
+                "exl3_mgemm is not one. LoRA works on dense EXL3 models.")
+        if experts is None and _is_exl3_layer(base_layer):
+            return _exl3_layer_device(base_layer)
+        return original_device(base_layer)
+
+    _get_lora_device._exl3_patched = True
+    # base_linear and fused_moe import it by name
+    for name, module in list(sys.modules.items()):
+        if name.startswith("vllm.lora") and getattr(module, "_get_lora_device", None) is original_device:
+            module._get_lora_device = _get_lora_device
+
+    def stand_in_weight(layer, dtype):
+        """Context: `layer.weight` is an empty tensor on the layer's device, unless it already has a weight."""
+        if not _is_exl3_layer(layer) or hasattr(layer, "weight"):
+            return contextlib.nullcontext()
+
+        @contextlib.contextmanager
+        def scope():
+            object.__setattr__(layer, "weight", torch.empty(0, dtype=dtype, device=_exl3_layer_device(layer)))
+            try:
+                yield
+            finally:
+                object.__delattr__(layer, "weight")
+
+        return scope()
+
+    original_create = VocabParallelEmbeddingWithLoRA.create_lora_weights
+
+    @functools.wraps(original_create)
+    def create_lora_weights(self, max_loras, lora_config, *args, **kwargs):
+        with stand_in_weight(self.base_layer, lora_config.lora_dtype):
+            return original_create(self, max_loras, lora_config, *args, **kwargs)
+
+    VocabParallelEmbeddingWithLoRA.create_lora_weights = create_lora_weights
+
+    original_logits = lora_model_manager.from_layer_logits_processor
+
+    @functools.wraps(original_logits)
+    def from_layer_logits_processor(layer, lm_head, max_loras, lora_config, *args, **kwargs):
+        with stand_in_weight(lm_head, lora_config.lora_dtype):
+            return original_logits(layer, lm_head, max_loras, lora_config, *args, **kwargs)
+
+    # model_manager imports it by name from vllm.lora.utils
+    lora_model_manager.from_layer_logits_processor = from_layer_logits_processor
 
 
 def _embedding_quant_config_default(VocabParallelEmbedding) -> None:

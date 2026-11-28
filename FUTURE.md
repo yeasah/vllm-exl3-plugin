@@ -63,7 +63,9 @@ the evidence lives in the note it links. When one becomes active, it moves to TO
   answer there: Ornith-1.5-9B's 2.50 kept 70% of recall facts and still didn't bring a 4 GiB card in reach, while 8 GiB
   runs its 3 bpw fine (2026-11-11). The right one is a smaller model at 3 bpw and up. Candidates include the new LFM3
   models, which need the exllamav3 fork bumped before they can be converted.
-- `vllm-lora` — Loading and serving existing LoRAs against EXL3 quants through vLLM's `--lora-modules`; then
-  quantized LoRA.
+- `vllm-lora` — Serving existing LoRAs against EXL3 quants works on dense models since 2026-11-27 (docs/lora.md).
+  Left: MoE, which needs `exl3_mgemm` behind vLLM's modular-kernel interface; and quantized LoRA, adapters trained
+  against the EXL3 base. The latter is better motivated than it looked: a small fine-tune (Swift-1.5 on
+  Ornith-1.5-9B) moves the model half as far as 4.00bpw's distance from bf16.
 - `vllm-omni` — EXL3 quantization through vllm-omni, starting with its Transformers-compatible components (often a
   Qwen-family text model); then uncalibrated EXL3 of non-text (diffusers) models.
