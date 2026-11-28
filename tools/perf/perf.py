@@ -336,7 +336,7 @@ def format_notes(test, res_random, res_sharegpt):
     out_len = res_sharegpt['raw']['total_output_tokens'] / res_sharegpt['raw']['completed']
     return f"{res_sharegpt['raw']['num_prompts']} x {out_len:.0f} ({date})"
 
-def build_results(model, testdir, results):
+def build_results(args, model, testdir, results):
     with open(f'{testdir}/test.json', "r") as f:
         info = json.load(f)
         vllm = parse_log(f'{testdir}/serve.log', info)
@@ -402,7 +402,8 @@ def build_results(model, testdir, results):
 
             if res_type == "spec" or res_type == "disk_spec":
                 vals.append(f"{spec} tok ({res_sharegpt['accept']:.1f}%)")
-            vals.append(format_notes(info, res_random, res_sharegpt))
+            if args.results_notes:
+                vals.append(format_notes(info, res_random, res_sharegpt))
             results[res_type].append(vals)
 
         svgs = info.get('prompts', {"cat": "Draw a picture of a cute cat using SVG"} )
@@ -422,7 +423,7 @@ The following {svg_name} was produced by `{info['config']['model']}` at `{info['
 <img src="{catdir}/{svg_name}.svg" alt="{svg_prompt}">
 """)
 
-def display_result(model, tests):
+def display_result(args, model, tests):
 
     results = { "normal": [],
                 "disk": [],
@@ -432,7 +433,7 @@ def display_result(model, tests):
     res_str = f"## Benchmarks for {model}\n"
     for testdir in tests:
         try:
-            build_results(model, testdir, results)
+            build_results(args, model, testdir, results)
         except Exception as e:
             print(f"SKIPPING TEST {testdir}: {e}")
     for res_type, res_list in results.items():
@@ -444,7 +445,8 @@ def display_result(model, tests):
                 hdr = [ "Platform", "Type", "VRAM", "Host RAM", "KV", "Req.", "Prefill", "Output" ]
             if res_type == "disk_spec" or res_type == "spec":
                 hdr += [ "Draft" ]
-            hdr += [ "Notes" ]
+            if args.results_notes:
+                hdr += [ "Notes" ]
             res_str += "|" + "|".join(hdr) + "|\n"
             res_str += ("|---" * len(hdr)) + "|\n"
             for res in res_list:                            
@@ -461,8 +463,10 @@ def display_result(model, tests):
 - **Prefill**: The average prefill rate for each request, not including concurrency.
 - **Output**: The total output rate, including concurrency. Output rate at longer context is shown as a percent.
 - **Draft**: Details of draft model configuration and measured acceptance rate.
-- **Notes**: n x m -> n is the number of prompts used to measure output rate, m is the average output length in tokens.
 """
+
+    if args.results_notes:
+        res_str += "**Notes**: n x m -> n is the number of prompts used to measure output rate, m is the average output length in tokens.\n"
 
     if results["svgs"]:
         res_str += "\n## SVGs\n"
@@ -470,7 +474,7 @@ def display_result(model, tests):
             res_str += svg
     return res_str
 
-def display_results():
+def display_results(args):
     done = {}
     for dir in sorted(glob.glob("results/*/*")):
         if os.path.isdir(dir):
@@ -494,7 +498,7 @@ def display_results():
         print(f"PROCESSING MODEL {model}")
         try:
             with open(f'results/{model}/results.md', "w") as out:
-                out.write(display_result(model, tests))        
+                out.write(display_result(args, model, tests))        
         except Exception as e:
             print("SKIPPING MODEL {model}: {e}")
         
@@ -631,6 +635,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--testfile", help="testfile to run. if not specified, just regenerates results")
     parser.add_argument("--tests", help="restrict tests to matching pattern")
+    parser.add_argument("--results-notes", action=argparse.BooleanOptionalAction, help="include extra notes in results")
     parser.add_argument("--long-dataset", default="datasets/Little_Brother.jsonl")
     parser.add_argument("--long-prompt", type=int, default=65536)
     parser.add_argument("--port", default=13373)
@@ -663,7 +668,7 @@ def main():
 
     if args.testfile:
         run_tests(args)
-    display_results()
+    display_results(args)
 
 if __name__ == "__main__":
     main()
