@@ -61,6 +61,8 @@ tests:
 
 - model: UnstableLlama/Spark-X2.6-4B-exl3
   revision: 4.00bpw
+  vllm_args:
+    max_model_len: 262144
   vram: 10
 
 - model: yeasah/Ornith-1.5-9B-exl3

@@ -92,6 +92,7 @@ def run_test(args, test, mysterious_bullshit):
         # to bind and the bench would quietly measure that one instead (2026-11-27: a test run's requests reached a
         # live suite's server as 404s)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(3)
             if probe.connect_ex(("127.0.0.1", int(args.port))) == 0:
                 raise Exception(f"port {args.port} is already in use; stop that server or pass --port")
         print(f"*** STARTING VLLM FOR {test['model']}@{test['revision']} ACROSS {num_gpus} GPUS AT UTILIZATION {utilization:.2f} FOR {vram} GiB VRAM ***")
@@ -393,7 +394,7 @@ def build_results(args, model, testdir, results):
                         f"{host_ram - vllm['expert_host_idle']:.1f} GiB ({vllm['expert_host_pct']:.1f}%)",
                         f"{vllm['expert_disk']:.1f} GiB ({vllm['expert_disk_pct']:.1f}%)" ]
             else:
-                vals = [ f"{vllm.get('vram_used'):.1f} GiB",
+                vals += [ f"{vllm.get('vram_used'):.1f} GiB",
                         f"{host_ram:.1f} GiB" ]
             vals += [ f"{vllm['kv_cache'] / 1024:.0f}K ({vllm['kv_cache_gb']:.1f} GiB {info['config']['vllm_args']['kv_cache_dtype']})",
                     f"{seqs}",
